@@ -1,0 +1,56 @@
+.container {
+  height: calc(100vh);
+  background-color: var(--top-background-color);
+  padding-bottom: 10px;
+
+  .content {
+    background-color: var(--background-color);
+    height: calc(100% - 30px);
+  }
+
+  .actBar {
+    display: flex;
+    position: absolute;
+    right: 0;
+    top: 6px;
+
+    button {
+      color: var(--hint-color);
+      border-right: 1px solid var(--nav-background-color);
+
+      span {
+
+        svg {
+          fill: var(--hint-color);
+        }
+      }
+
+      &:hover {
+        color: var(--primary-color);
+
+        span {
+          svg {
+            fill: var(--primary-color);
+          }
+        }
+      }
+    }
+  }
+
+  .act {
+    cursor: pointer;
+    text-align: center;
+    margin-left: 8px;
+    line-height: 25px;
+    font-size: 15px;
+
+    &:hover {
+      color: var(--primary-color);
+    }
+  }
+}
+
+.editor {
+  height: 100%;
+  width: 100%;
+}

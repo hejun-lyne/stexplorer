@@ -1,0 +1,22 @@
+.bar {
+  background-color: var(--inner-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+  // border-top: 1px solid var(--border-color);
+  box-sizing: border-box;
+  height: 40px;
+  width: 100%;
+
+  svg {
+    cursor: pointer;
+    fill: var(--svg-icon-color);
+    transition: all 0.2s;
+
+    &:hover {
+      border-radius: 5px;
+      fill: var(--main-text-color);
+      transform: scale(1.25);
+    }
+  }
+}

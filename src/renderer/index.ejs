@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#1890ff" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>STExplorer - 股票分析</title>
+</head>
+<script>
+  var cts = [];
+  window.addEventListener('scroll', (e) => {
+    if (cts.length) {
+      cts.forEach((t) => clearTimeout(t));
+      cts = [];
+    }
+    if (e.target.classList.contains("on-scrollbar") === false) {
+      e.target.classList.add("on-scrollbar");
+    }
+    cts.push(setTimeout(() => e.target.classList.remove("on-scrollbar"), 1000));
+  }, true);
+</script>
+
+<body style="overflow: hidden;">
+  <div id="root" style="height: 100%;"></div>
+</body>
+
+</html>

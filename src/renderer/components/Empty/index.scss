@@ -1,0 +1,18 @@
+.content {
+  height: 100%;
+  padding: 10px;
+}
+.text {
+  position: absolute;
+  text-align: center;
+  font-size: 1rem;
+  color: var(--main-text-color);
+  width: 100%;
+}
+.img {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%);
+  position: relative;
+  width:100%;
+}

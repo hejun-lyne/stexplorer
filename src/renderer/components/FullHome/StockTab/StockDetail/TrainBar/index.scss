@@ -1,0 +1,25 @@
+.container {
+  
+  padding: 5px;
+}
+.row {
+display: flex;
+  width: 100%;
+}
+.item {
+  margin-right: 15px;
+}
+.net {
+  font-weight: bold;
+}
+.btn {
+  color: var(--primary-text-color);
+  border: 0 !important;
+  padding: 0 !important;
+  span {
+    color: var(--primary-text-color);
+    svg {
+      margin-left: 5px;
+    }
+  }
+}

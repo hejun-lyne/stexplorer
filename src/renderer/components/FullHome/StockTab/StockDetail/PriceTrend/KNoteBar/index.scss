@@ -1,0 +1,17 @@
+.dot {
+  width: 90%;
+  height: 90%;
+  border-radius: 50%;
+  border-width: 2px;
+  border-color: var(--main-text-color);
+}
+.container {
+  height: 10px;
+  width: calc(76% + 12px);
+  position: absolute;
+  top: calc(55% - 2px);;
+  left: 2%;
+  margin-left: -6px;
+  display: flex;
+  flex-flow: row wrap;
+}

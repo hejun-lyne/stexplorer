@@ -1,0 +1,23 @@
+.container {
+  overflow-y: auto;
+  height: 100%;
+  background-color: var(--background-color);
+}
+
+.name {
+  color: var(--warn-color);
+}
+
+.description {
+  color: var(--cancel-text-color);
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+.add {
+  color: var(--hint-color) !important;
+
+  &:hover {
+    color: var(--main-text-color) !important;
+  }
+}

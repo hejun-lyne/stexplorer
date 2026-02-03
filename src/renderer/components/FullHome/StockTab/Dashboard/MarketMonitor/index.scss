@@ -1,0 +1,34 @@
+.content {
+  padding: var(--base-padding);
+  box-sizing: border-box;
+  padding: 5px;
+  height: calc(100% - 36px);
+  &:last-of-type {
+    margin-bottom: 0;
+  }
+}
+.name {
+  font-size: calc(10rem / var(--base-font-size));
+  font-weight: 500;
+}
+.toolbar {
+  padding-bottom: var(--base-padding);
+  padding: 4px;
+  display: flex;
+  justify-content: space-between;
+
+  svg {
+    // width: 15px;
+    // height: 15px;
+    // margin-left: 15px;
+    cursor: pointer;
+    fill: var(--main-text-color);
+
+    .on {
+      fill: var(--primary-color);
+    }
+  }
+}
+.echart {
+  height: 100%;
+}

@@ -1,0 +1,60 @@
+.row {
+    color: var(--main-text-color);
+    width: 100%;
+    padding: 3px 5px;
+    &:hover,
+    &.selected,
+    &.oncontext {
+      .value {
+        fill: brightness(115%);
+      }
+    }
+  }
+  
+  .zindexName {
+    color: var(--main-text-color);
+  }
+  .code {
+    margin-left: 5px;
+    color: var(--warn-color);
+  }
+  .rowBar {
+    display: flex;
+    align-items: center;
+  }
+  .value {
+    text-align: center;
+    transition: all 0.3s;
+    height: 140px;
+  }
+  .zx {
+    width: 100%;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .zd {
+    text-align: right;
+    position: relative;
+    display: flex;
+    justify-content: space-between;
+    line-height: 28px;
+    .time,
+    .zdd,
+    .act,
+    .zdf {
+      margin-left: 5px;
+    }
+    
+  }
+  .unselected {
+    border: 1px solid var(--main-text-color);
+  }
+
+  .act {
+    button {
+      color: var(--main-text-color) !important;
+    }
+  }
+  

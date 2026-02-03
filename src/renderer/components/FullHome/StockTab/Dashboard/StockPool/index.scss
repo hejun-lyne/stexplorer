@@ -1,0 +1,158 @@
+.container {
+  height: 100%;
+}
+
+.header {
+  padding: 5px 10px;
+}
+
+.actbar {
+  display: flex;
+  justify-content: space-between;
+}
+
+.rowheader {
+  font-weight: 600;
+  line-height: 2;
+  padding: 0 10px;
+  margin-right: 6px;
+}
+
+.tagbar {
+  padding: 0 10px;
+  width: 100%;
+}
+
+.table {
+  overflow-y: auto;
+  background-color: var(--background-color);
+  height: calc(100% - 70px);
+}
+
+.moreheader {
+  height: calc(100% - 150px) !important;
+}
+
+.ztmoreheader {
+  height: calc(100% - 200px) !important;
+}
+
+.qsmoreheader {
+  height: calc(100% - 240px) !important;
+}
+
+.row {
+  padding: 0 10px;
+  line-height: 2;
+}
+
+.loadmore {
+  cursor: pointer;
+  padding: 10px 0;
+  font-size: 12px;
+  text-align: center;
+  color: var(--textColor);
+}
+
+.hint {
+  padding: 10px;
+  color: var(--hint-color);
+  font-weight: bold;
+}
+
+.toggleK {
+  position: absolute !important;
+  right: 10px;
+  z-index: 1;
+  margin-top: 5px;
+
+  svg {
+    width: 15px;
+    height: 15px;
+    // margin-left: 15px;
+    cursor: pointer;
+    fill: var(--main-text-color);
+
+    .on {
+      fill: var(--primary-color);
+    }
+  }
+}
+
+.sortbtn {
+  .anticon {
+    top: 0;
+  }
+
+  svg {
+    width: 15px;
+    height: 15px;
+    // margin-left: 15px;
+    cursor: pointer;
+    fill: var(--main-text-color);
+
+    .on {
+      fill: var(--primary-color);
+    }
+  }
+}
+
+.content {
+  overflow-y: auto;
+  background-color: var(--background-color);
+  height: 100%;
+}
+.name {
+  font-size: calc(10rem / var(--base-font-size));
+}
+.autoSize {
+  height: auto;
+}
+.toolbar {
+  display: flex;
+  padding-bottom: var(--base-padding);
+  align-items: center;
+  padding: 10px;
+  justify-content: space-between;
+
+  svg {
+    width: 15px;
+    height: 15px;
+    // margin-left: 15px;
+    cursor: pointer;
+    fill: var(--main-text-color);
+
+    .on {
+      fill: var(--primary-color);
+    }
+  }
+}
+.actions {
+  color: var(--main-text-color);
+  .abtn {
+    padding: 2px 4px;
+    border: 1px solid var(--main-border-color);
+  }
+}
+.chartwrapper {
+  height: calc(100% - 66px);
+  display: flex;
+  // flex-direction: row-reverse;
+  border-top: 2px solid var(--top-background-color);
+}
+.chart {
+  width: 100%;
+  height: calc(100% - 68px);
+}
+.trades {
+  border-left: 2px solid var(--top-background-color);
+  height: 100%;
+  overflow-y: auto;
+}
+.tdate {
+  background-color: var(--top-background-color);
+  padding: 2px;
+}
+.trecord {
+  padding: 2px 10px;
+}

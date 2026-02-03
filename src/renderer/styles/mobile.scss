@@ -1,0 +1,177 @@
+/**
+ * Mobile responsive styles
+ * Optimizations for Android/iOS devices
+ */
+
+// Mobile breakpoints
+$mobile-sm: 320px;
+$mobile-md: 375px;
+$mobile-lg: 414px;
+$tablet: 768px;
+
+// Safe area insets for notched devices
+:root {
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+}
+
+// Mobile-specific adjustments
+.mobile-device {
+  // Prevent rubber-band scrolling on iOS
+  overscroll-behavior: none;
+  
+  // Smooth scrolling
+  -webkit-overflow-scrolling: touch;
+  
+  // Remove tap highlight
+  -webkit-tap-highlight-color: transparent;
+  
+  // Prevent text selection
+  user-select: none;
+  
+  input, textarea {
+    user-select: text;
+  }
+}
+
+// Adjust for status bar on mobile
+.status-bar-padding {
+  padding-top: var(--safe-area-top);
+}
+
+// Bottom navigation padding for gesture navigation
+.bottom-safe-padding {
+  padding-bottom: var(--safe-area-bottom);
+}
+
+// Mobile-friendly touch targets
+.touch-target {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+// Hide scrollbar on mobile for cleaner look
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+// Responsive font sizes
+@media (max-width: $tablet) {
+  html {
+    font-size: 14px;
+  }
+}
+
+@media (max-width: $mobile-lg) {
+  html {
+    font-size: 13px;
+  }
+}
+
+@media (max-width: $mobile-md) {
+  html {
+    font-size: 12px;
+  }
+}
+
+// Ant Design mobile overrides
+.mobile-device {
+  .ant-table {
+    font-size: 12px;
+    
+    .ant-table-cell {
+      padding: 8px 12px;
+    }
+  }
+  
+  .ant-btn {
+    height: 36px;
+    padding: 0 16px;
+    font-size: 14px;
+  }
+  
+  .ant-input {
+    height: 40px;
+    font-size: 16px; // Prevents zoom on iOS
+  }
+  
+  .ant-modal {
+    .ant-modal-content {
+      margin: 0 16px;
+    }
+  }
+  
+  .ant-drawer {
+    .ant-drawer-content-wrapper {
+      width: 100% !important;
+      max-width: 100%;
+    }
+  }
+}
+
+// Stock list optimizations for mobile
+@media (max-width: $tablet) {
+  .stock-list {
+    .stock-item {
+      padding: 12px;
+      
+      .stock-code {
+        font-size: 14px;
+      }
+      
+      .stock-name {
+        font-size: 12px;
+      }
+      
+      .stock-price {
+        font-size: 16px;
+      }
+    }
+  }
+}
+
+// Chart container adjustments
+.chart-container {
+  @media (max-width: $tablet) {
+    height: 250px;
+  }
+  
+  @media (max-width: $mobile-lg) {
+    height: 200px;
+  }
+}
+
+// Pull-to-refresh indicator
+.pull-to-refresh {
+  position: relative;
+  overflow: hidden;
+  
+  .ptr-indicator {
+    position: absolute;
+    top: -50px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: top 0.2s;
+    
+    &.active {
+      top: 10px;
+    }
+    
+    .anticon {
+      font-size: 24px;
+      color: #1890ff;
+    }
+  }
+}

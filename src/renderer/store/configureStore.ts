@@ -1,0 +1,8 @@
+import configureStoreDev from './configureStore.dev';
+import configureStoreProd from './configureStore.prod';
+
+const { production } = window.contextModules.process;
+const selectedConfigureStore = production ? configureStoreProd : configureStoreDev;
+
+const store = selectedConfigureStore.configureStore();
+export default store;

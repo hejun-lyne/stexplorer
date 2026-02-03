@@ -1,0 +1,156 @@
+@media (prefers-color-scheme: light) {
+  body {
+    --background-color: #f2f2f2;
+    --top-background-color: #fafafa;
+    --nav-background-color: #eaeaeb;
+    --tabbar-background-color: #ccc;
+    --selected-background-color: #DBDBDC;
+    --input-background-color: #fff;
+    --input-border-color: #333;
+    --inner-color: #f8f9fa;
+    --inner-text-color: #888;
+    --primary-color: #526FFF;
+    --primary-text-color: #616161;
+    --cancel-color: #dfdfdf;
+    --cancel-text-color: #454545;
+    --strong-increase-color: #8A0000;
+    --increase-color: #f44336;
+    --increase-bg-color: #fff1f0;
+    --reduce-color: #4caf50;
+    --strong-reduce-color: #008F28;
+    --second-increase-color: #d4a373;
+    --second-reduce-color: #ccd5ae;
+    --increase-color: #f44336;
+    --reduce-bg-color: #f6ffed;
+    --hint-color: #ff6d00;
+    --strong-color: #F88070;
+    --warn-color: #ff9800;
+    --main-text-color: #333;
+    --secondary-text-color: #888;
+    --main-line-color: #333;
+    --secondary-line-color: #ffc115;
+    --reverse-text-color: #9e9e9e;
+    --main-border-color: #D0D0D0;
+    --hint-border-color: #D3D4D5;
+    --border-color: #f3f4f5;
+    --alipay-color: #156dff;
+    --wechat-color: #1fa131;
+    --svg-icon-color: #333;
+    --blur-color: rgba(255, 255, 255, 0.72);
+    --hover-color: #e6f7ff;
+    --selected-color: #bae7ff;
+    --disabled-color: #ccc;
+    --tag-text-color: #fff;
+    --scrollbar-thumb-color: rgba(0, 0, 0, 0.15);
+    --scrollbar-border-color: rgba(0, 0, 0, 0.25);
+    --scrollbar-background-color: #242424;
+    --popover-background-color: #666565;
+    --popover-border-color: #333;
+
+    &.lowKey {
+      --inner-color: #eee;
+      --primary-color: #000;
+      --increase-color: #333;
+      --strong-increase-color: #222;
+      --reduce-color: #999;
+      --strong-reduce-color: #999;
+      --second-increase-color: #d4a373;
+      --second-reduce-color: #ccd5ae;
+      --warn-color: #222;
+      --main-text-color: #333;
+      --border-color: #dfdfdf;
+      --main-border-color: #666;
+      --hint-border-color: #ee8003;
+      --hover-color: #efefef;
+      --tag-text-color: #eee;
+      --hint-color: #eee;
+      --hint-border-color: #8f4603;
+    }
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    --background-color: #282C34;
+    --nav-background-color: #21252B;
+    --top-background-color: #333842;
+    --tabbar-background-color: #666;
+    --selected-background-color: #333842;
+    --input-background-color: #1B1D22;
+    --input-border-color: #666;
+    --inner-color: #333;
+    --strong-increase-color: #8A0000;
+    --strong-color: #F88070;
+    --inner-text-color: #888;
+    --hint-color: #E2C08C;
+    --primary-color: #528BFF;
+    --primary-text-color: #eee;
+    --cancel-color: #313131;
+    --cancel-text-color: #ccc;
+    --increase-color: #d32f2f;
+    --strong-increase-color: #8A0000;
+    --increase-bg-color: #2a1215;
+    --reduce-color: #388e3c;
+    --strong-reduce-color: #008F28;
+    --second-increase-color: #FBF2CF;
+    --second-reduce-color: #A1C298;
+    --reduce-bg-color: #162312;
+    --warn-color: #f57c00;
+    --main-text-color: #ddd;
+    --secondary-text-color: #888;
+    --main-line-color: #eee;
+    --secondary-line-color: #f8e809;
+    --reverse-text-color: #757575;
+    --border-color: #181818;
+    --main-border-color: #3e3e3e;
+    --alipay-color: #156dff;
+    --wechat-color: #1fa131;
+    --svg-icon-color: #ccc;
+    --blur-color: rgba(29, 29, 31, 0.72);
+    --hover-color: rgba(255, 255, 255, 0.15);
+    --selected-color: #112a45;
+    --disabled-color: rgba(255, 255, 255, 0.15);
+    --tag-text-color: #eee;
+    --scrollbar-thumb-color: rgba(255, 255, 255, 0.15);
+    --scrollbar-border-color: rgba(255, 255, 255, 0.25);
+    --scrollbar-background-color: #242424;
+    --popover-background-color: #2C2D31;
+    --popover-border-color: rgba(255, 255, 255, 0.25);
+
+    &.lowKey {
+      --background-color: #000;
+      --primary-color: #fafafa;
+      --primary-text-color: #333;
+      --cancel-text-color: #dfdfdf;
+      --increase-color: #ccc;
+      --strong-increase-color: #ddd;
+      --reduce-color: #666;
+      --strong-reduce-color: #555;
+      --second-increase-color: #FBF2CF;
+      --second-reduce-color: #A1C298;
+      --warn-color: #f57c00;
+      --main-text-color: #eee;
+      --tag-text-color: #111;
+      --hint-color: #eee;
+    }
+
+    // antd
+  }
+}
+
+body {
+  // antd
+  --primaryColor: var(--primary-color);
+  --componentBackground: var(--background-color);
+  --contrastBackground: var(--border-color);
+  --borderColor: var(--border-color);
+  --primaryHover: var(--hover-color);
+  --itemHoverBackground: var(--hover-color);
+  --textColor: var(--main-text-color);
+}
+
+body {
+  --base-font-size: 11;
+  --base-padding: 0px;
+  --base-radius: 0px;
+}

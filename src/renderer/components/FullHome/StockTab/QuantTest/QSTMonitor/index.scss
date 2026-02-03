@@ -1,0 +1,22 @@
+.header {
+  margin-top: 10px;
+}
+
+.btn {
+  color: var(--primary-text-color);
+  border: 0 !important;
+  padding: 0 !important;
+
+  span {
+    color: var(--primary-text-color);
+
+    svg {
+      margin-left: 5px;
+    }
+  }
+}
+
+.content {
+  height: calc(100% - 30px);
+  overflow-y: auto;
+}

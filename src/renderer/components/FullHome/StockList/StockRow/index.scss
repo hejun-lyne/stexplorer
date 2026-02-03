@@ -1,0 +1,67 @@
+.row {
+  color: var(--secondary-text-color);
+  z-index: 2;
+  cursor: pointer;
+  padding-left: 15px;
+  padding-bottom: 5px;
+  padding-right: 5px;
+  &:hover,
+  &.selected,
+  &.oncontext {
+    .value {
+      fill: brightness(115%);
+    }
+  }
+}
+
+.zindexName {
+  font-size: calc(10rem / var(--base-font-size));
+  line-height: 1.5em;
+}
+.code {
+  font-size: calc(8rem / var(--base-font-size));
+  line-height: 1.5em;
+}
+.hybk {
+  color: var(--hint-color);
+  font-size: calc(6rem / var(--base-font-size));
+  line-height: 2.5em;
+}
+.rowBar {
+  font-size: calc(8rem / var(--base-font-size));
+  display: flex;
+  align-items: center;
+}
+.value {
+  text-align: center;
+  transition: all 0.3s;
+}
+.zx {
+  width: 120%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.zx {
+  width: 100%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.zd {
+  text-align: right;
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  .time,
+  .zdd,
+  .act,
+  .zdf {
+    font-size: calc(9rem / var(--base-font-size));
+    line-height: 1.5em;
+    margin-left: 5px;
+  }
+  
+}

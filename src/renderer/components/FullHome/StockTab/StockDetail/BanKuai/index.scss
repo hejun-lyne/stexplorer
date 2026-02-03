@@ -1,0 +1,15 @@
+.content {
+  display: block;
+  color: var(--inner-text-color);
+  padding: 10px;
+  max-height: 150px;
+  overflow-y: scroll;
+  border-bottom: 5px solid var(--top-background-color);
+  label {
+    word-break: keep-all;
+  }
+  div {
+    display: flex;
+    justify-content: space-between;
+  }
+}

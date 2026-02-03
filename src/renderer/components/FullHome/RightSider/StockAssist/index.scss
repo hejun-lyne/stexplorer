@@ -1,0 +1,32 @@
+.container {
+  background-color: var(--background-color);
+  overflow-y: auto;
+  height: calc(100vh - 100px);
+}
+.title {
+  display: flex;
+  padding: 2px 10px;
+  div {
+    margin-right: 5px;
+  }
+}
+.status {
+  padding-left: 10px;
+  padding-top: 5px;
+  padding-bottom: 10px;
+}
+.actions {
+  .header {
+    padding: 2px 10px;
+    background-color: var(--top-background-color);
+    color: var(--hint-color);
+  }
+  .btns {
+    padding-top: 10px;
+    padding-left: 10px;
+    padding-right: 5px;
+  }
+}
+.hists {
+  margin-top: 10px;
+}

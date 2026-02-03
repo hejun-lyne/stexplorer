@@ -1,0 +1,25 @@
+.content {
+    display: block;
+    color: var(--inner-text-color);
+    padding-left: 10px;
+    padding-top: 10px;
+    height: calc(100% - 275px);
+    overflow-y: scroll;
+    border-bottom: 5px solid var(--top-background-color);
+    label {
+      word-break: keep-all;
+    }
+    div {
+      span {
+        margin-right: 4px;
+      }
+    }
+  }
+  .loadmore {
+    cursor: pointer;
+    padding: 5 10px;
+    font-size: 12px;
+    text-align: center;
+    color: var(--textColor);
+  }
+  

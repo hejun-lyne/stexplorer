@@ -1,0 +1,28 @@
+.container {
+  background-color: var(--background-color);
+}
+.header {
+  background-color: var(--top-background-color);
+  color: var(--hint-color);
+  padding: 5px 10px;
+}
+.row {
+  color: var(--main-text-color);
+  font-size: calc(9rem / var(--base-font-size));
+}
+.rowHeader {
+  padding-bottom: 5px;
+  padding-left: 10px;
+  color: var(--hint-color);
+  border-bottom: 2px solid var(--top-background-color);
+  display: flex;
+}
+.rowContent {
+  padding-left: 10px;
+}
+.leader {
+  color: var(--secondary-text-color);
+}
+.explain {
+  color: var(--secondary-text-color);
+}

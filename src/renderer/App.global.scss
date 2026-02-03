@@ -1,0 +1,85 @@
+/*
+ * @NOTE: Prepend a `~` to css file paths that are in your node_modules
+ *        See https://github.com/webpack-contrib/sass-loader#imports
+ @import '~@fortawesome/fontawesome-free/css/all.css';
+ */
+
+ @import './styles/antd.scss';
+ @import './styles/collapse.scss';
+ @import './styles/swiper.scss';
+ @import './styles/button.scss';
+ @import './styles/color.scss';
+ @import './styles/varible.scss';
+ @import './styles/common.scss';
+ @import './styles/grid.scss';
+ @import './styles/braft.editor.css';
+
+ body {
+   position: relative;
+   margin: 0;
+   color: var(--main-text-color);
+   background-color: var(--background-color);
+   cursor: default;
+   user-select: none;
+   width: 100% !important;
+ }
+
+ body::-webkit-scrollbar {
+   width: 0;
+ }
+
+ h2 {
+   margin: 0;
+   font-size: 2.25rem;
+   font-weight: bold;
+   letter-spacing: -0.025em;
+   color: #fff;
+ }
+
+ h3 {
+   font-size: calc(14rem / var(--base-font-size));
+   margin: 0;
+   line-height: 24px;
+ }
+
+ p {
+   font-size: 24px;
+ }
+
+ li {
+   list-style: none;
+ }
+
+ a {
+   /* color: white;
+   opacity: 0.75;
+   text-decoration: none; */
+   color: var(--primary-color);
+ }
+
+ a:hover {
+   opacity: 1;
+   text-decoration: none;
+   cursor: pointer;
+ }
+
+ .clickable {
+   cursor: pointer;
+   transition: opacity 0.2s;
+
+   &:hover {
+     filter: brightness(105%);
+   }
+ }
+
+ .img {
+   border-radius: 5px;
+   width: 100%;
+   display: block;
+   height: auto;
+   object-fit: cover;
+ }
+
+ .red {
+   color: red;
+ }

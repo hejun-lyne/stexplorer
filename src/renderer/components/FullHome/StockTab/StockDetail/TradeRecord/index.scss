@@ -1,0 +1,44 @@
+.container {
+  height: calc(100vh - 370px);
+  overflow-y: scroll;
+}
+.seperator {
+  height: 5px;
+  background-color: var(--top-background-color);
+}
+.sells {
+  padding: 10px;
+}
+.buys {
+  padding: 10px;
+}
+.seats {
+  display: flex;
+  align-items: center;
+}
+.a {
+  flex: 1 1 33.33%;
+  text-align: left;
+}
+.b {
+  text-align: left;
+  flex: 1 1 33.33%;
+}
+.c {
+  text-align: right;
+  flex: 1 1 33.33%;
+}
+.trades {
+  margin-top: 10px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.loadmore {
+  padding: 5 10px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--textColor);
+}

@@ -1,0 +1,52 @@
+.container {
+    height: calc(100%);
+    overflow-y: scroll;
+    padding-top: 5px;
+    background-color: var(--background-color);
+  }
+  
+  .row {
+    padding: 5px 10px;
+    width: 100%;
+    border-bottom: 1px solid var(--main-border-color);
+    font-size: 1.1em;
+    .title {
+      line-height: 1.5em;
+      color: var(--secondary-text-color);
+      cursor: pointer;
+      font-weight: 500;
+    }
+  
+    .abstract {
+      line-height: 1.5em;
+    //   color: var(--secondary-text-color);
+    }
+
+    .replies {
+        padding-left: 1em;
+        margin-top: 5px;
+        line-height: 1.5em;
+        // color: var(--secondary-text-color);
+
+        .reply_leading {
+            color: var(--secondary-text-color);
+        }
+    }
+
+  }
+
+  .age {
+    background-color: var(--tabbar-background-color);
+    font-size: 0.9em;
+    padding: 1px 4px;
+    border-radius: 4px;
+    color: var(--secondary-text-color);
+  }
+  
+  .loadmore {
+    padding: 5 10px;
+    font-size: 12px;
+    text-align: center;
+    color: var(--textColor);
+    cursor: pointer;
+  }

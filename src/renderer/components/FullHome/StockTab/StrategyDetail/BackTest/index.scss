@@ -1,0 +1,34 @@
+.subcontainer {
+  padding: 0;
+  height: 100%;
+}
+
+.listContainer {
+  height: calc(100% - 40px);
+  overflow-y: auto;
+  background-color: var(--background-color);
+}
+
+.header {
+  margin: 5px;
+  display: flex;
+}
+
+.btn {
+  color: var(--primary-color);
+  border: 0 !important;
+  padding: 0 !important;
+
+  span {
+    color: var(--primary-color);
+
+    svg {
+      margin-left: 5px;
+    }
+  }
+}
+
+.echart {
+  height: 100%;
+  width: 100%;
+}

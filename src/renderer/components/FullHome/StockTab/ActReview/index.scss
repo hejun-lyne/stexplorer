@@ -1,0 +1,21 @@
+.chart {
+  height: 200px;
+  width: '100%';
+  padding: 0 10px;
+}
+.table {
+    margin-bottom: 15px;
+    height: calc(100vh - 330px);
+    overflow-y: auto;
+  }
+  .rowheader {
+    line-height: 2.5;
+    color: var(--hint-color);
+    background-color: var(--top-background-color);
+    padding: 0 15px;
+  }
+  .row {
+    line-height: 2;
+    padding: 0 15px;
+    border-bottom: 1px solid var(--main-border-color);
+  }

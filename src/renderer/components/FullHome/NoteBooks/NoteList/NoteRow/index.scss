@@ -1,0 +1,59 @@
+.row {
+  width: 100%;
+  padding: 2px 8px;
+  box-sizing: border-box;
+  border-bottom: 2px solid var(--top-background-color);
+  color: var(--main-text-color);
+  cursor: pointer;
+
+  &:hover {
+    .value {
+      fill: brightness(115%);
+    }
+  }
+
+  &.selected,
+  &.oncontext {
+    background-color: var(--selected-background-color);
+  }
+}
+
+.time {
+  color: var(--hint-color);
+  font-size: calc(8rem / var(--base-font-size));
+  border-bottom: 1px dashed var(--inner-text-color);
+  padding-bottom: 2px;
+}
+
+.referUrl {
+  color: var(--inner-text-color);
+  font-size: calc(8rem / var(--base-font-size));
+  // background-color: var(--top-background-color);
+  // padding: 2px 4px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.referText {
+  // background-color: var(--top-background-color);
+  font-size: calc(8rem / var(--base-font-size));
+  color: var(--inner-text-color);
+
+  // padding: 2px 4px;
+}
+.commentText {
+  color: var(--main-text-color);
+  font-size: calc(10rem / var(--base-font-size));
+}
+
+.title {
+  color: var(--main-text-color);
+  font-size: calc(10rem / var(--base-font-size));
+}
+.firstLine {
+  color: var(--secondary-text-color);
+  font-size: calc(10rem / var(--base-font-size));
+}
+.nonefirstLine {
+  color: var(--warn-color);
+  font-size: calc(10rem / var(--base-font-size));
+}

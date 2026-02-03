@@ -1,0 +1,33 @@
+.content {
+  background-color: var(--background-color);
+  height: 100%;
+  padding: var(--base-padding);
+  box-sizing: border-box;
+  margin-bottom: var(--base-padding);
+
+  &:last-of-type {
+    margin-bottom: 0;
+  }
+}
+.autoSize {
+  height: auto;
+}
+.toolbar {
+  display: flex;
+  padding-bottom: var(--base-padding);
+  justify-content: flex-end;
+  align-items: center;
+  padding: 10px;
+
+  svg {
+    width: 15px;
+    height: 15px;
+    // margin-left: 15px;
+    cursor: pointer;
+    fill: var(--main-text-color);
+
+    .on {
+      fill: var(--primary-color);
+    }
+  }
+}

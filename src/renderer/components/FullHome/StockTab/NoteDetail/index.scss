@@ -1,0 +1,11 @@
+.container {
+  padding-top: 5px;
+  height: calc(100vh);
+  background-color: var(--top-background-color);
+    padding-bottom: 10px;
+
+  .content {
+    background-color: var(--background-color);
+    height: 100%;
+  }
+}

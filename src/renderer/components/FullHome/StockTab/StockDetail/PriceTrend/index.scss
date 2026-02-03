@@ -1,0 +1,52 @@
+.content {
+  width: 100%;
+  z-index: 2;
+  height: calc(100% - 80px);
+  min-height: 100px;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.echart {
+  height: 100%;
+}
+.indicators {
+  padding: 0 10px;
+  // border-top: 2px solid var(--top-background-color);
+}
+.btn {
+  color: var(--primary-text-color);
+  border: 0 !important;
+  padding: 0 !important;
+  span {
+    color: var(--primary-text-color);
+    svg {
+      margin-left: 5px;
+    }
+  }
+}
+.chartBar {
+  display: flex;
+  justify-content: space-between;
+}
+.choumawrapper {
+  position: absolute;
+  // top: 76%;
+  right: 0;
+  width: 21%;
+  font-size: calc(8.5rem / var(--base-font-size));
+  .row {
+    display: flex;
+    justify-content: space-between;
+  }
+}
+.markBar {
+  height: 20px;
+  width: 76%;
+  position: absolute;
+  background-color: rgba($color: #fefefe, $alpha: .25);
+  top: 52%;
+  left: 2%;
+  div {
+    height: 100%;
+  }
+}

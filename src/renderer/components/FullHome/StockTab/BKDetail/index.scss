@@ -1,0 +1,23 @@
+.container {
+  padding-top: 5px;
+  background-color: var(--top-background-color);
+  height: calc(100% - 60px);
+
+  .left {
+    background-color: var(--background-color);
+    border-right: 5px solid var(--top-background-color);
+    height: calc(100vh);
+  }
+
+  .right {
+    background-color: var(--inner-color);
+    height: calc(100vh);
+
+    .rightTab {
+      height: 100%;
+      width: 100%;
+      margin: 0;
+      background-color: var(--nav-background-color);
+    }
+  }
+}

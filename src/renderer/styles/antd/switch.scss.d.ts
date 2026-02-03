@@ -1,0 +1,1 @@
+export const antSwitchChecked: string;

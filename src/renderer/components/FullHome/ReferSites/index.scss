@@ -1,0 +1,38 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  height: 100%;
+}
+.row {
+  color: var(--secondary-text-color);
+  z-index: 2;
+  cursor: pointer;
+  padding-left: 25px;
+  padding-bottom: 5px;
+  &:hover,
+  &.selected,
+  &.oncontext {
+    .value {
+      fill: brightness(115%);
+    }
+  }
+
+  &:hover {
+    .value {
+      fill: brightness(115%);
+    }
+  }
+
+  &.selected,
+  &.oncontext {
+    background-color: var(--selected-background-color);
+  }
+
+  .name {
+    font-size: calc(10rem / var(--base-font-size));
+  }
+  .description {
+    color: var(--secondary-main-text-color);
+  }
+}

@@ -1,0 +1,167 @@
+# =========================
+# Node.js
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+.pnp.*
+.pnp.js
+
+# =========================
+# Build outputs
+# =========================
+dist/
+build/release/
+build/app/
+*.tsbuildinfo
+
+# =========================
+# Electron
+# =========================
+# Electron-builder output
+/dist_electron
+/dist_electron_arm64
+/dist
+/release
+
+# =========================
+# Testing
+# =========================
+coverage/
+.nyc_output/
+*.lcov
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# =========================
+# IDE / Editors
+# =========================
+# VSCode
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains (WebStorm, IntelliJ, etc)
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+transient/
+
+# =========================
+# OS Generated Files
+# =========================
+# macOS
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.nfs*
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# Cache
+# =========================
+.eslintcache
+.stylelintcache
+.parcel-cache
+.cache/
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.tmp
+*.temp
+*.pid
+*.seed
+*.pid.lock
+
+# =========================
+# Project specific
+# =========================
+# Electron webpack DLL build
+dll/
+
+# Webpack bundle analysis
+stats.json
+
+# Capacitor (iOS - 如果有的话)
+/ios/App/Pods
+/ios/App/Podfile.lock
+/ios/App/App/public
+/ios/App/App/capacitor.config.json
+/ios/App/App/capacitor.plugins.json
+/ios/App/App/config.xml
+
+# Android-specific (主要在 android/.gitignore 中处理)
+# 这里只添加需要在根目录忽略的内容
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
+/android/captures/
+/android/.externalNativeBuild/
+/android/.cxx/
+/android/*.keystore
+/android/*.jks
+/android/key.properties
+
+# 构建生成的 web 资源（会被 capacitor sync 复制到原生项目）
+# 通常这些在 dist/ 中已经包含了
