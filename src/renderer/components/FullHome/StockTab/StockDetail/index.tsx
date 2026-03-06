@@ -177,7 +177,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
           >
             <div className={styles.left}>
               <RealTime stock={nDetails} />
-              <BanKuai secid={nDetails.secid} active={active} openBankuai={onOpenStock} />
+              <BanKuai secid={(nDetails.secid} active={active} openBankuai={onOpenStock} />
               <TradeRecord showSeats={true} stock={nDetails} active={active} />
             </div>
             <div className={styles.right} ref={rightRef}>

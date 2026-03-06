@@ -10,7 +10,7 @@
     "dist": "yarn compile && electron-builder",
     "dist:dir": "yarn dist --dir -c.compression=store -c.mac.identity=null",
     "build": "concurrently \"yarn build:main\" \"yarn build:renderer\"",
-    "build:preload": "yarn tsc ./src/main/preload.ts --resolveJsonModule --skipLibCheck",
+    "build:preload": "yarn tsc ./src/main/preload.ts --resolveJsonModule",
     "build:main": "cross-env NODE_ENV=production webpack --config ./.erb/configs/webpack.config.main.prod.babel.js",
     "build:renderer": "cross-env NODE_ENV=production --max-old-space-size=4076 webpack --config ./.erb/configs/webpack.config.renderer.prod.babel.js",
     "rebuild": "electron-rebuild --parallel --types prod,dev,optional --module-dir src",
@@ -21,21 +21,11 @@
     "package-win": "rm -rf build/release && yarn build && electron-builder build --win --x64 -p never",
     "package-all": "rm -rf build/release && yarn build && electron-builder build -mwl -p never",
     "release-all": "rm -rf build/release && yarn build && electron-builder build -mwl -p always",
-    "postinstall": "electron-builder install-app-deps",
-    "postinstall:full": "node -r @babel/register .erb/scripts/check-native-dep.js && electron-builder install-app-deps && cross-env NODE_ENV=development webpack --config ./.erb/configs/webpack.config.renderer.dev.dll.babel.js",
+    "postinstall": "node -r @babel/register .erb/scripts/check-native-dep.js && electron-builder install-app-deps && yarn cross-env NODE_ENV=development webpack --config ./.erb/configs/webpack.config.renderer.dev.dll.babel.js && opencollective-postinstall && yarn-deduplicate yarn.lock",
     "start": "yarn build:preload && yarn start:renderer",
     "start:main": "cross-env NODE_ENV=production && electron -r ts-node/register ./src/main/main.ts",
     "start:renderer": "cross-env NODE_ENV=development webpack serve --config ./.erb/configs/webpack.config.renderer.dev.babel.js",
-    "test": "jest",
-    "install:fast": "yarn install --prefer-offline --silent",
-    "install:frozen": "yarn install --frozen-lockfile --prefer-offline",
-    "build:web": "cross-env NODE_ENV=production TARGET=web webpack --config ./.erb/configs/webpack.config.web.babel.js",
-    "build:web:dev": "cross-env NODE_ENV=development TARGET=web webpack serve --config ./.erb/configs/webpack.config.web.babel.js",
-    "android:init": "npx cap add android",
-    "android:sync": "npx cap sync",
-    "android:open": "npx cap open android",
-    "android:build": "yarn build:web && npx cap sync",
-    "android:run": "yarn build:web && npx cap run android"
+    "test": "jest"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [
@@ -70,7 +60,7 @@
       },
       "target": [
         {
-          "target": "pkg",
+          "target": "dmg",
           "arch": [
             "x64",
             "arm64"
@@ -148,8 +138,6 @@
   "devDependencies": {
     "@babel/core": "^7.14.0",
     "@babel/preset-env": "^7.14.4",
-    "@babel/preset-react": "^7.28.5",
-    "@babel/preset-typescript": "^7.28.5",
     "@babel/register": "^7.13.16",
     "@pmmmwh/react-refresh-webpack-plugin": "0.5.0-rc.5",
     "@svgr/webpack": "^5.5.0",
@@ -161,10 +149,9 @@
     "@types/enzyme-adapter-react-16": "^1.0.6",
     "@types/history": "^4.7.8",
     "@types/jest": "^27.0.1",
-    "@types/minimatch": "6.0.0",
     "@types/node": "16.7.6",
-    "@types/react": "^17.0.0",
-    "@types/react-dom": "^17.0.0",
+    "@types/react": "^16.0.0",
+    "@types/react-dom": "^17.0.3",
     "@types/react-grid-layout": "^1.3.0",
     "@types/react-infinite-scroller": "^1.2.2",
     "@types/react-router": "^5.1.14",
@@ -187,7 +174,7 @@
     "css-minimizer-webpack-plugin": "^3.0.1",
     "detect-port": "^1.3.0",
     "electron": "^13.0.0",
-    "electron-builder": "^22.11.1",
+    "electron-builder": "^23.6.0",
     "electron-devtools-installer": "^3.2.0",
     "electron-notarize": "^1.0.0",
     "electron-rebuild": "^3.1.1",
@@ -242,13 +229,6 @@
   },
   "dependencies": {
     "@ant-design/icons": "^4.7.0",
-    "@capacitor/android": "8.0.2",
-    "@capacitor/cli": "8.0.2",
-    "@capacitor/core": "8.0.2",
-    "@capacitor/filesystem": "8.1.0",
-    "@capacitor/preferences": "8.0.0",
-    "@capacitor/share": "8.0.0",
-    "@capacitor/status-bar": "8.0.0",
     "@monaco-editor/react": "^3.6.2",
     "ahooks": "^2.10.5",
     "antd": "^4.11.2",
@@ -273,6 +253,7 @@
     "electron-updater": "^4.3.8",
     "electron-window-state": "^5.0.3",
     "form-data": "^4.0.0",
+    "fs": "^0.0.1-security",
     "fs-slice": "^2.0.0",
     "got": "^11.8.1",
     "history": "^4.10.0",
@@ -308,14 +289,12 @@
     "trading-signals": "^5.0.4",
     "url-parse": "^1.5.3"
   },
-  "browserslist": {
-    "production": [
-      "last 2 electron versions"
-    ],
-    "development": [
-      "last 1 electron version"
-    ]
+  "devEngines": {
+    "node": ">=10.x",
+    "npm": ">=6.x",
+    "yarn": ">=1.21.3"
   },
+  "browserslist": [],
   "renovate": {
     "extends": [
       "bliss"

@@ -14,7 +14,7 @@ export function createMainWindow(stateKeeper: windowStateKeeper.State, showDev:b
     minWidth: 800,
     webPreferences: {
       contextIsolation: true,
-      devTools: showDev && !app.isPackaged,
+      devTools: true,  // 允许在 release 版本中使用开发者工具
       webviewTag: true,
       preload: path.join(__dirname, 'preload.js'),
       nativeWindowOpen: true,
@@ -37,7 +37,7 @@ export function creatWorkerWindow(showDev:boolean) {
       contextIsolation: true,
       nodeIntegration: true,
       preload: path.join(__dirname, 'preload.js'),
-      devTools: showDev &&!app.isPackaged,
+      devTools: true,  // 允许在 release 版本中使用开发者工具
     },
   });
   workerWindow.loadURL(resolveHtmlPath('worker.html'));

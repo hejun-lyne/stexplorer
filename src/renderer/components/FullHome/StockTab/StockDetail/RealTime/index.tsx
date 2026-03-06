@@ -14,9 +14,6 @@ export interface RealTimeProps {
 const RealTime: React.FC<RealTimeProps> = React.memo(({ stock }) => {
   const stocks = useSelector((store: StoreState) => store.stock.stocksMapping[stock.secid]);
   const data = stock || stocks?.detail || {};
-  if (!data.secid) {
-    console.log('RealTime组件缺少secid', stock, stocks);
-  }
   return (
     <PureCard>
       <div className={styles.container}>

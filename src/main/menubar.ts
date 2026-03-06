@@ -21,7 +21,7 @@ export function createMenubar({ tray }: { tray: Tray }) {
       maxWidth: 600,
       webPreferences: {
         contextIsolation: true,
-        devTools: !app.isPackaged,
+        devTools: true,  // 允许在 release 版本中使用开发者工具
         webviewTag: true,
         preload: path.join(__dirname, 'preload.js'),
       },

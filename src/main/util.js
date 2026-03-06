@@ -51,24 +51,7 @@ if (process.env.NODE_ENV === 'development') {
 }
 else {
     exports.resolveHtmlPath = function (htmlFileName) {
-        var fs = require('fs');
-        // 尝试多个可能的路径
-        var possiblePaths = [
-            // 1. 从构建目录运行的标准路径
-            path.resolve(__dirname, '../renderer/', htmlFileName),
-            // 2. 从源码运行时的路径（项目根目录）
-            path.join(electron_1.app.getAppPath(), 'build/app/dist/renderer', htmlFileName),
-            // 3. 相对于 cwd 的路径
-            path.join(process.cwd(), 'build/app/dist/renderer', htmlFileName),
-        ];
-        for (var _i = 0, possiblePaths_1 = possiblePaths; _i < possiblePaths_1.length; _i++) {
-            var tryPath = possiblePaths_1[_i];
-            if (fs.existsSync(tryPath)) {
-                return "file://".concat(tryPath);
-            }
-        }
-        // 默认返回第一个路径（即使文件不存在，让 Electron 报告错误）
-        return "file://".concat(possiblePaths[0]);
+        return "file://".concat(path.resolve(__dirname, '../renderer/', htmlFileName));
     };
 }
 function getAssetPath(resourceFilename) {

@@ -10,6 +10,18 @@ import * as Helpers from '../helpers';
 import * as Enums from '@/utils/enums';
 
 const { got } = window.contextModules;
+// Helper to log request errors with URL
+function logRequestError(error: any, url: string, extraInfo?: string) {
+  if (error?.message?.includes('socket hang up') || error?.message?.includes('ECONNRESET')) {
+    console.error(`[网络错误] URL: ${url}`, error);
+  } else if (extraInfo) {
+    console.log(extraInfo, error);
+  } else {
+    console.error(error);
+  }
+}
+
+
 
 const defaultCompany: Stock.Company = {
   gsjs: '',
@@ -27,17 +39,7 @@ export function RandomEastmoneyUrl() {
 
 export function RandomEastmoneyHistUrl() {
   const rnd = Math.floor(Math.random() * (99 - 1)) + 1;
-  return 'https://' + rnd + '.push2his.eastmoney.com/';
-}
-
-function parseJSONP<T = any>(jsonp: string): T {
-  // 临时挂一个全局回调，名字跟 JSONP 一致
-  const cbName = jsonp.slice(0, jsonp.indexOf('('));
-  return new Function(
-    'window',
-    `${cbName} = function(o){ return o; };` +
-    `return ${jsonp}`
-  )(window);
+  return 'https://push2his.eastmoney.com/';
 }
 
 export async function SearchFromEastmoney2(keyword: string) {
@@ -52,7 +54,7 @@ export async function SearchFromEastmoney2(keyword: string) {
     });
     const rawStr = body.substring(jquery.length + 1, body.length - 1);
     const json = JSON.parse(rawStr);
-    const typeMappings: Record<string, StockMarketType> = {
+    const typeMappings = {
       'AB股': StockMarketType.AB,
       '指数': StockMarketType.Zindex,
       '板块': StockMarketType.Quotation,
@@ -69,7 +71,7 @@ export async function SearchFromEastmoney2(keyword: string) {
       json.result.codetableLabelWeb.labelList.forEach((item: any) => {
         if (item.quoteList.length > 0) {
           const data = {
-            Type: typeMappings[item.name as string], // 7,
+            Type: typeMappings[item.name], // 7,
             Name: item.name, // "三板",
             Count: item.quoteList.length, // 3;
             Datas: [] as any[],
@@ -94,7 +96,7 @@ export async function SearchFromEastmoney2(keyword: string) {
     console.log('搜索结果：', result);
     return result;
   } catch (error) {
-    console.log('搜索股票失败', error);
+    logRequestError(error, 'https://search-api-web.eastmoney.com/search/jsonp', '搜索股票失败');
     return [];
   }
 }
@@ -134,7 +136,7 @@ export async function SearchFromEastmoney(keyword: string) {
     console.log('搜索结果：', Data);
     return Data || [];
   } catch (error) {
-    console.log('搜索股票失败', error);
+    logRequestError(error, 'https://searchapi.eastmoney.com/bussiness/web/QuotationLabelSearch', '搜索股票失败');
     return [];
   }
 }
@@ -193,10 +195,8 @@ export async function GetTrendFromEastmoney(secid: string, zs?: number) {
       trends: trends,
     };
   } catch (error) {
-    return {
-      secid,
-      trends: [],
-    };
+    logRequestError(error, 'http://push2his.eastmoney.com/api/qt/stock/trends2/get');
+    return { secid, trends: [] };
   }
 }
 
@@ -215,7 +215,7 @@ export async function GetPicTrendFromEastmoney(secid: string) {
     const b64encoded = btoa(String.fromCharCode.apply(null, rawBody));
     return { secid, pic: `data:image/png;base64,${b64encoded}` };
   } catch (error) {
-    console.log(error);
+    logRequestError(error, 'http://webquotepic.eastmoney.com/GetPic.aspx');
     return null;
   }
 }
@@ -270,10 +270,8 @@ export async function GetFlowTrendFromEastmoney(secid: string) {
       ffTrends: trends,
     };
   } catch (error) {
-    return {
-      secid,
-      ffTrends: [],
-    };
+    logRequestError(error, 'https://push2.eastmoney.com/api/qt/stock/fflow/kline/get');
+    return { secid, ffTrends: [] };
   }
 }
 
@@ -529,7 +527,8 @@ export async function GetDetailFromEastmoney(secid: string) {
       time: dayjs.unix(data.f86).format('MM-DD HH:mm'),
     } as Stock.DetailItem;
   } catch (error) {
-    return {} as Stock.DetailItem;
+    logRequestError(error, 'https://push2.eastmoney.com/api/qt/stock/get');
+    return null;
   }
 }
 
@@ -545,8 +544,7 @@ export async function FromEastmoney(secid: string) {
 
     const { trends } = responseTrends;
     const { ffTrends } = responseFlowTrends;
-    const { secid: _secid, ...detailRest } = responseDetail as any;
-    return { secid, ...detailRest, trends, ffTrends };
+    return { secid, ...responseDetail, trends, ffTrends };
   } catch (error) {
     return null;
   }
@@ -650,11 +648,8 @@ export async function GetKFromXTick(secid: string, code: number) {
       kt: code,
     };
   } catch (error) {
-    console.log(error);
-    return {
-      ks: [],
-      kt: code,
-    };
+    logRequestError(error, 'http://api.xtick.top/doc/market');
+    return { ks: [], kt: code };
   }
 }
 
@@ -726,11 +721,8 @@ export async function GetKFromZizai(secid: string, code: number) {
       kt: code,
     };
   } catch (error) {
-    console.log(error);
-    return {
-      ks: [],
-      kt: code,
-    };
+    logRequestError(error, 'https://api.zizizaizai.com/kline/d/');
+    return { ks: [], kt: code };
   }
 }
 
@@ -763,15 +755,30 @@ export async function GetKFromEastmoney(secid: string, code: number, limit?: num
     // const rnd = Math.floor(Math.random() * (99 - 1)) + 1;
     const stcode = Helpers.Stock.GetStockCode(secid);
     const emcode = (stcode.startsWith('6') ? 'sh' : 'sz') + stcode;
-    const stringBody = await got<string>(RandomEastmoneyHistUrl() + 'api/qt/stock/kline/get', {
+    const { body } = await got<{
+      rc: 0;
+      rt: 17;
+      svr: 182481222;
+      lt: 1;
+      full: 0;
+      data: {
+        code: '600519';
+        market: 1;
+        name: '贵州茅台';
+        decimal: 2;
+        dktotal: 4747;
+        preKPrice: 206.69;
+        klines: ['2021-07-09,2059.97,1972.11,2110.00,1945.00,244227,49006317568.00,8.02,-4.11,-84.59,1.94'];
+        // "2021-12-30,4.90,5.30,5.30,4.84,1127474,576782768.00,9.54,9.96,0.48,7.77"
+      };
+    }>(RandomEastmoneyHistUrl() + 'api/qt/stock/kline/get', {
       searchParams,
-      // responseType: 'string',
-      // headers: {
-      //   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      //   "Referer": "https://quote.eastmoney.com/" + emcode + ".html"
-      // }
+      responseType: 'json',
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://quote.eastmoney.com/" + emcode + ".html";
+      }
     });
-    const body = parseJSONP(stringBody.body);
     const ks = (body?.data?.klines || []).map((_) => {
       const [date, kp, sp, zg, zd, cjl, cje, zf, zdf, zde, hsl] = _.split(',');
       return {
@@ -796,11 +803,8 @@ export async function GetKFromEastmoney(secid: string, code: number, limit?: num
       kt: code,
     };
   } catch (error) {
-    console.log(error);
-    return {
-      ks: [],
-      kt: code,
-    };
+    logRequestError(error, 'https://push2his.eastmoney.com/api/qt/stock/kline/get');
+    return { ks: [], kt: code };
   }
 }
 
@@ -861,7 +865,7 @@ export async function GetFlowKFromEastmoney(secid: string, limit?: number) {
     });
     return klines;
   } catch (error) {
-    console.log(error);
+    logRequestError(error, 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get');
     return [];
   }
 }
@@ -961,7 +965,7 @@ export async function GetStockTradesFromEastmoney(secid: string, count: number) 
       };
     });
   } catch (error) {
-    console.log(error);
+    logRequestError(error, 'https://push2.eastmoney.com/api/qt/stock/details/get');
     return [];
   }
 }
@@ -3845,7 +3849,7 @@ export async function GetFutureTrendFromSina(symbol: string) {
         processed.push(item);
       }
       item = trends[i];
-      if (i == trends.length - 1) {
+      if (i == data.length - 1) {
         processed.push(trends[i]);
       }
     }

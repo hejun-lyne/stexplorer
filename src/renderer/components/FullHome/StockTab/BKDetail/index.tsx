@@ -36,11 +36,7 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, active, onChangeUpdate, onOp
   const { run: runGetDetail } = useRequest(Services.Stock.GetDetailFromEastmoney, {
     throwOnError: true,
     manual: true,
-    onSuccess: (d) => {
-      if (d && d.secid) {
-        setDetail(d);
-      }
-    },
+    onSuccess: (d) => (d ? setDetail(d) : undefined),
     cacheKey: `GetDetailFromEastmoney/${secid}`,
   });
   useEffect(() => {

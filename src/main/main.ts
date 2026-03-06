@@ -37,6 +37,30 @@ async function init() {
   await app.whenReady();
   await checkEnvTool();
   
+  // 注册全局快捷键打开/关闭开发者工具（release 版本也可用）
+  globalShortcut.register('F12', () => {
+    const focusedWindow = require('electron').BrowserWindow.getFocusedWindow();
+    if (focusedWindow) {
+      if (focusedWindow.webContents.isDevToolsOpened()) {
+        focusedWindow.webContents.closeDevTools();
+      } else {
+        focusedWindow.webContents.openDevTools({ mode: 'undocked' });
+      }
+    }
+  });
+  // Mac: Cmd+Option+I
+  globalShortcut.register('Alt+Command+I', () => {
+    const focusedWindow = require('electron').BrowserWindow.getFocusedWindow();
+    if (focusedWindow) {
+      if (focusedWindow.webContents.isDevToolsOpened()) {
+        focusedWindow.webContents.closeDevTools();
+      } else {
+        focusedWindow.webContents.openDevTools({ mode: 'undocked' });
+      }
+    }
+  });
+  log.info('DevTools shortcuts registered: F12, Cmd+Option+I');
+  
   const mainWindow = full();
 
   if (process.platform === 'darwin') {
@@ -159,8 +183,8 @@ function full() {
     mainWindow.webContents.once('devtools-opened', () => {
       mainWindow.webContents.focus();
     });
-    // open electron debug
-    mainWindow.webContents.openDevTools({ mode: 'undocked' });
+    // 启动时不自动打开开发者工具，使用 F12 或 Cmd+Option+I 手动打开
+    // mainWindow.webContents.openDevTools({ mode: 'undocked' });
   });
   mainWindowState.manage(mainWindow);
   ipcMain.handle('show-current-window', (event, config) => {
@@ -209,6 +233,20 @@ function worker() {
     });
     // open electron debug
     // workerWindow.webContents.openDevTools({ mode: 'undocked' });
+  });
+  
+  // Worker 窗口也支持 F12 打开 DevTools
+  workerWindow.on('focus', () => {
+    globalShortcut.register('F12', () => {
+      if (workerWindow.webContents.isDevToolsOpened()) {
+        workerWindow.webContents.closeDevTools();
+      } else {
+        workerWindow.webContents.openDevTools({ mode: 'undocked' });
+      }
+    });
+  });
+  workerWindow.on('blur', () => {
+    globalShortcut.unregister('F12');
   });
 
   return workerWindow;
