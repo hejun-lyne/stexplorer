@@ -728,34 +728,35 @@ export async function GetKFromZizai(secid: string, code: number) {
 
 export async function GetKFromEastmoney(secid: string, code: number, limit?: number) {
   try {
-    const searchParams =
-      limit == -1
-        ? {
-          secid,
-          fields1: 'f1,f2,f3,f4,f5,f6',
-          fields2: 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
-          klt: code,
-          fqt: 1,
-          beg: 0,
-          end: 20500101,
-          _: new Date().getTime(),
-        }
-        : {
-          cb: 'jQuery35109995919145397818_1763449851442',
-          secid,
-          ut: 'fa5fd1943c7b386f172d6893dbfba10b', 
-          fields1: 'f1,f2,f3,f4,f5,f6',
-          fields2: 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
-          klt: code,
-          fqt: 1,
-          end: 20500101,
-          lmt: limit || 120,
-          _: new Date().getTime(),
-        };
+    const isUnlimited = limit == -1;
+    const searchParams = isUnlimited
+      ? {
+        secid,
+        fields1: 'f1,f2,f3,f4,f5,f6',
+        fields2: 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
+        klt: code,
+        fqt: 1,
+        beg: 0,
+        end: 20500101,
+        _: new Date().getTime(),
+      }
+      : {
+        cb: 'jQuery35109995919145397818_1763449851442',
+        secid,
+        ut: 'fa5fd1943c7b386f172d6893dbfba10b', 
+        fields1: 'f1,f2,f3,f4,f5,f6',
+        fields2: 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
+        klt: code,
+        fqt: 1,
+        end: 20500101,
+        lmt: limit || 120,
+        _: new Date().getTime(),
+      };
     // const rnd = Math.floor(Math.random() * (99 - 1)) + 1;
     const stcode = Helpers.Stock.GetStockCode(secid);
     const emcode = (stcode.startsWith('6') ? 'sh' : 'sz') + stcode;
-    const { body } = await got<{
+    
+    interface KLineResponse {
       rc: 0;
       rt: 17;
       svr: 182481222;
@@ -769,17 +770,46 @@ export async function GetKFromEastmoney(secid: string, code: number, limit?: num
         dktotal: 4747;
         preKPrice: 206.69;
         klines: ['2021-07-09,2059.97,1972.11,2110.00,1945.00,244227,49006317568.00,8.02,-4.11,-84.59,1.94'];
-        // "2021-12-30,4.90,5.30,5.30,4.84,1127474,576782768.00,9.54,9.96,0.48,7.77"
       };
-    }>(RandomEastmoneyHistUrl() + 'api/qt/stock/kline/get', {
-      searchParams,
-      responseType: 'json',
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://quote.eastmoney.com/" + emcode + ".html";
+    }
+    
+    const url = RandomEastmoneyHistUrl() + 'api/qt/stock/kline/get';
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Referer": "https://quote.eastmoney.com/" + emcode + ".html"
+    };
+    
+    let data: KLineResponse['data'] | undefined;
+    
+    if (isUnlimited) {
+      // 无限制模式，使用 JSON 响应
+      const { body } = await got<KLineResponse>(url, {
+        searchParams,
+        responseType: 'json',
+        headers
+      });
+      data = body?.data;
+    } else {
+      // 有限制模式，使用 JSONP 响应
+      const { body } = await got<string>(url, {
+        searchParams,
+        responseType: 'text',
+        headers
+      });
+      // 解析 JSONP 格式: jQuery...({...})
+      const jsonpPattern = /^jQuery[^(]+\((.*)\)$/;
+      const match = body.match(jsonpPattern);
+      if (match && match[1]) {
+        try {
+          const parsed = JSON.parse(match[1]) as KLineResponse;
+          data = parsed?.data;
+        } catch (e) {
+          console.error('解析 JSONP 响应失败:', e);
+        }
       }
-    });
-    const ks = (body?.data?.klines || []).map((_) => {
+    }
+    
+    const ks = (data?.klines || []).map((_) => {
       const [date, kp, sp, zg, zd, cjl, cje, zf, zdf, zde, hsl] = _.split(',');
       return {
         secid: secid,
