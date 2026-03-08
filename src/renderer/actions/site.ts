@@ -14,7 +14,7 @@ export function syncRemoteFavorSitesAction(): ThunkAction {
     try {
       const {
         site: { stars, starsModified },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');

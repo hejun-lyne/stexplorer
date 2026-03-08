@@ -8,7 +8,7 @@ import { dependencies as externals, version } from '../../build/app/package.json
 // const path = require('path');
 // const MonacoWebpackPlugin = require('monaco-editor-webpack-plugin');
 export default {
-  externals: [...Object.keys(externals || {})],
+  externals: [...Object.keys(externals || {}), 'better-sqlite3'],
   module: {
     rules: [
       {

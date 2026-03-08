@@ -1,3 +1,7 @@
+/**
+ * GitHub 帮助函数（保留用于向后兼容）
+ * 新的存储功能请使用 storage.ts
+ */
 import * as Utils from '@/utils';
 import * as CONST from '@/constants';
 import ThingsStorage from '@/services/things';
@@ -39,7 +43,7 @@ export function InitStorage() {
     token,
     owner: (profile as GitHubSpace.Profile).name,
   });
-  const st = new Storage(githubApi);
+  const st = new Storage('github', githubApi);
   const s = new ThingsStorage(st);
 
   return s;

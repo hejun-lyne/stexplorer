@@ -23,4 +23,5 @@ export default {
   GITHUB_PROFILE: 'GITHUB_PROFILE', // Github账号信息
   GITHUB_REPO: 'ThingsStorage', // 用于数据同步的仓库
   BAIDU_TOKENS: 'BAIDU_TOKENS', // 百度账号信息
+  STORAGE_TYPE: 'STORAGE_TYPE', // 存储类型：'github' | 'sqlite'
 };

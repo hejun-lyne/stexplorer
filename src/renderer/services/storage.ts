@@ -1,8 +1,18 @@
 import { encryptObj, decryptObj } from '@/utils/crypto';
 import GitHubApi from './github';
+import SQLiteStorage from './sqliteStorage';
+import type { ContentRef, StorageType, StorageOptions } from './storageTypes';
+
 // import { dirname, basename } from 'path';
-const dirname = (path: string) => ((path.split('\\') || []).pop() || '').split('/').slice(0, -1).join('/');
-const basename = (path: string) => ((path.split('\\') || []).pop() || '').split('/').pop();
+const dirname = (path: string) => {
+  if (!path) return '';
+  return ((path.split('\\') || []).pop() || '').split('/').slice(0, -1).join('/');
+};
+const basename = (path: string) => {
+  if (!path) return '';
+  return ((path.split('\\') || []).pop() || '').split('/').pop();
+};
+
 export class RefError extends Error {
   code: number;
 
@@ -12,7 +22,8 @@ export class RefError extends Error {
   }
 }
 
-export class ContentRef {
+// GitHub 存储的 ContentRef
+export class GitHubContentRef {
   encryptKey: string;
 
   api: GitHubApi;
@@ -138,14 +149,15 @@ export class ContentRef {
   }
 }
 
-export class Storage {
+// GitHub 存储
+export class GitHubStorage {
   encryptKey: string;
 
   api: GitHubApi;
 
-  refs: Record<string, ContentRef>;
+  refs: Record<string, GitHubContentRef>;
 
-  constructor(api: GitHubApi, options: { encryptKey: string } = { encryptKey: 'jimmy' }) {
+  constructor(api: GitHubApi, options: StorageOptions = { encryptKey: 'jimmy' }) {
     this.encryptKey = options.encryptKey;
     this.api = api;
     this.refs = {};
@@ -163,7 +175,7 @@ export class Storage {
         existedItem = file;
       }
     }
-    this.refs[path] = new ContentRef(this.api, path, existedItem, { encryptKey: this.encryptKey });
+    this.refs[path] = new GitHubContentRef(this.api, path, existedItem, { encryptKey: this.encryptKey });
     return this.refs[path];
   }
 
@@ -180,7 +192,7 @@ export class Storage {
       download_url: 'https://raw.githubusercontent.com/octokit/octokit.rb/master/lib/octokit.rb';
       _links: {
         self: 'https://api.github.com/repos/octokit/octokit.rb/contents/lib/octokit.rb';
-        git: 'https://api.github.com/repos/octokit/octokit.rb/git/blobs/fff6fe3a23bf1c8ea0692b4a883af99bee26fd3b';
+        git_url: 'https://api.github.com/repos/octokit/octokit.rb/git/blobs/fff6fe3a23bf1c8ea0692b4a883af99bee26fd3b';
         html: 'https://github.com/octokit/octokit.rb/blob/master/lib/octokit.rb';
       };
     }[] = await this.api.getContents(dirname(path));
@@ -208,3 +220,58 @@ export class Storage {
     }
   }
 }
+
+// 重新导出类型
+export type { ContentRef, StorageType, StorageOptions };
+
+// 统一的 Storage 类
+export class Storage {
+  type: StorageType;
+  githubStorage?: GitHubStorage;
+  sqliteStorage?: SQLiteStorage;
+
+  constructor(
+    type: StorageType,
+    api?: GitHubApi,
+    options: StorageOptions = { encryptKey: 'jimmy' }
+  ) {
+    this.type = type;
+    
+    if (type === 'github' && api) {
+      this.githubStorage = new GitHubStorage(api, options);
+    } else if (type === 'sqlite') {
+      this.sqliteStorage = new SQLiteStorage(options);
+    }
+  }
+
+  async ref(path: string, initContent = '{}'): Promise<ContentRef> {
+    if (this.type === 'github' && this.githubStorage) {
+      return this.githubStorage.ref(path, initContent);
+    } else if (this.type === 'sqlite' && this.sqliteStorage) {
+      return this.sqliteStorage.ref(path, initContent);
+    }
+    throw new Error(`Storage not initialized for type: ${this.type}`);
+  }
+
+  async init(): Promise<void> {
+    if (this.type === 'sqlite' && this.sqliteStorage) {
+      await this.sqliteStorage.init();
+    }
+  }
+
+  async getStats(): Promise<any> {
+    if (this.type === 'sqlite' && this.sqliteStorage) {
+      return this.sqliteStorage.getStats();
+    }
+    return null;
+  }
+
+  async backup(backupPath: string): Promise<any> {
+    if (this.type === 'sqlite' && this.sqliteStorage) {
+      return this.sqliteStorage.backup(backupPath);
+    }
+    return null;
+  }
+}
+
+export default Storage;

@@ -33,15 +33,15 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, active, onChangeUpdate, onOp
   const config = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]);
   const [detail, setDetail] = useState<Stock.DetailItem>({ secid });
 
-  const { run: runGetDetail } = useRequest(Services.Stock.GetDetailFromEastmoney, {
+  const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(secid), {
     throwOnError: true,
     manual: true,
     onSuccess: (d) => (d ? setDetail(d) : undefined),
-    cacheKey: `GetDetailFromEastmoney/${secid}`,
+    cacheKey: `GetStockDetail/${secid}`,
   });
   useEffect(() => {
     if (!detail || !detail.zx) {
-      runGetDetail(secid);
+      runGetDetail();
     }
     if (!config) {
       Helpers.Stock.AppendStockDetailPush(secid, (data) => {

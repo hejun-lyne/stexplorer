@@ -108,7 +108,35 @@
       "output": "./build/release"
     },
     "extraResources": [
-      "./assets/**"
+      "./assets/**",
+      {
+        "from": "src/main/python",
+        "to": "python",
+        "filter": [
+          "**/*.py"
+        ]
+      },
+      {
+        "from": "node_modules/better-sqlite3",
+        "to": "node_modules/better-sqlite3",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/bindings",
+        "to": "node_modules/bindings",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/file-uri-to-path",
+        "to": "node_modules/file-uri-to-path",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "publish": [
       "github"
@@ -144,11 +172,13 @@
     "@teamsupercell/typings-for-css-modules-loader": "^2.5.1",
     "@testing-library/jest-dom": "^5.12.0",
     "@testing-library/react": "^12.0.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/color-hash": "^1.0.1",
     "@types/enzyme": "^3.10.5",
     "@types/enzyme-adapter-react-16": "^1.0.6",
     "@types/history": "^4.7.8",
     "@types/jest": "^27.0.1",
+    "@types/minimatch": "^6.0.0",
     "@types/node": "16.7.6",
     "@types/react": "^16.0.0",
     "@types/react-dom": "^17.0.3",
@@ -233,6 +263,7 @@
     "ahooks": "^2.10.5",
     "antd": "^4.11.2",
     "assert": "^2.0.0",
+    "better-sqlite3": "^12.6.2",
     "braft-editor": "2.3.9",
     "braft-finder": "0.0.19",
     "braft-utils": "3.0.12",

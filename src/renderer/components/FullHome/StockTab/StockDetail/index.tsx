@@ -47,16 +47,16 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
   const [tDetail, setDetails] = useState<Stock.DetailItem>({ secid, code:Helpers.Stock.GetStockCode(secid), name, market:Helpers.Stock.GetStockType(secid) } as Stock.DetailItem);
   const [stype, setSType] = useState<StrategyType>(config ? config.strategy || StrategyType.None : StrategyType.None);
   const [klines, setKLines] = useState<Stock.KLineItem[] | null>(null);
-
-  const { run: runGetDetail } = useRequest(Services.Stock.GetDetailFromEastmoney, {
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid), {
     throwOnError: true,
     manual: true,
     onSuccess: (d) => (d ? setDetails(d) : undefined),
-    cacheKey: `GetDetailFromEastmoney/${secid}`,
+    cacheKey: `GetStockDetail/${secid}`,
   });
   useEffect(() => {
     if (!tDetail.zx || !tDetail.name) {
-      runGetDetail(secid);
+      runGetDetail();
     }
     if (!config) {
       Helpers.Stock.AppendStockDetailPush(secid, (data) => {

@@ -24,6 +24,7 @@ import { PythonShell } from 'python-shell';
 // import ElectronStore from 'electron-store';
 import * as ts from 'typescript';
 import { PromiseWorker } from './promiseWorker';
+import * as database from './database';
 
 async function init() {
   console.log('当前工作目录：' + app.getAppPath());
@@ -90,6 +91,8 @@ async function init() {
     willQuitApp = true;
   });
   app.on('window-all-closed', () => {
+    // 关闭数据库连接
+    database.closeDatabase();
     if (process.platform !== 'darwin') {
       app.quit()
     }
@@ -156,16 +159,50 @@ async function init() {
   });
   ipcMain.handle('run-python-script', async (event, config) => {
     return new Promise((resolve, reject) => {
+      // 获取 Python 路径，优先使用环境变量，否则使用默认路径
+      const pythonPath = process.env.PYTHON_PATH || 
+        (process.platform === 'win32' ? 'python' : '/usr/bin/python3');
+      
+      // 获取脚本路径
+      let scriptPath: string;
+      
+      if (process.env.PYTHON_SCRIPT_PATH) {
+        // 使用环境变量指定的路径
+        scriptPath = process.env.PYTHON_SCRIPT_PATH;
+      } else if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
+        // 开发环境：使用相对路径
+        scriptPath = path.join(__dirname, '../python');
+      } else {
+        // 生产环境：Python 脚本在 extraResources 中
+        // 使用 process.resourcesPath/python
+        scriptPath = path.join(process.resourcesPath, 'python');
+      }
+      
+      // 验证脚本文件是否存在
+      const scriptFullPath = path.join(scriptPath, config.fileName);
+      const fs = require('fs');
+      
+      console.log(`Running Python script: ${config.fileName}`);
+      console.log(`Python path: ${pythonPath}`);
+      console.log(`Script path: ${scriptPath}`);
+      console.log(`Script full path: ${scriptFullPath}`);
+      console.log(`Script exists: ${fs.existsSync(scriptFullPath)}`);
+      
       const options = {
         mode: 'text',
-        pythonPath: '/opt/homebrew/Caskroom/miniforge/base/envs/pytorch_env/bin/python3',
+        pythonPath: pythonPath,
         pythonOptions: ['-u'], // get print results in real-time
-        scriptPath: '/Users/jimmy/Documents/git/electron-myquantization/src/main/python',
+        scriptPath: scriptPath,
         args: config.params,
       };
+      
       PythonShell.run(config.fileName, options, (err, results) => {
-        if (err) reject(err);
-        console.log('hello.py finished.');
+        if (err) {
+          console.error('Python script error:', err);
+          reject(err);
+          return;
+        }
+        console.log(`${config.fileName} finished.`);
         console.log('results', results);
         resolve(results);
       });
@@ -173,6 +210,61 @@ async function init() {
   });
   ipcMain.handle('app-quit', (event, config) => {
     app.quit();
+  });
+  // SQLite 数据库 IPC 处理程序
+  ipcMain.handle('sqlite-init', () => {
+    try {
+      database.initDatabase();
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error initializing SQLite:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-read', (event, { table, id }) => {
+    try {
+      const result = database.readData(table, id);
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('[Main] Error reading from SQLite:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-write', (event, { table, data, lastModified, id }) => {
+    try {
+      database.writeData(table, data, lastModified, id);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error writing to SQLite:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-delete', (event, { table, id }) => {
+    try {
+      database.deleteData(table, id);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error deleting from SQLite:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-stats', () => {
+    try {
+      const stats = database.getDatabaseStats();
+      return { success: true, stats };
+    } catch (error: any) {
+      console.error('[Main] Error getting SQLite stats:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-backup', (event, { backupPath }) => {
+    try {
+      database.backupDatabase(backupPath);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error backing up SQLite:', error);
+      return { success: false, error: error.message };
+    }
   });
 }
 

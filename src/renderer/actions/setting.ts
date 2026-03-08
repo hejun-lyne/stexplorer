@@ -15,7 +15,7 @@ export function syncRemoteSettingAction(): ThunkAction {
     try {
       const {
         setting: { systemSetting, monitorSetting, settingModified },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');

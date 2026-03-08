@@ -12,7 +12,7 @@ export function syncRemoteTrainingAction(): ThunkAction {
       try {
         const {
           training: { records, recordsModified },
-          github: { storage },
+          storage: { storage },
         } = getState();
         if (!storage) {
           throw new Error('storage未初始化');

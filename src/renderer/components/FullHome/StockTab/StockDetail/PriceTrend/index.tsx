@@ -1027,7 +1027,7 @@ function setupTrendChart(darkMode: boolean, trends: Stock.TrendItem[], zs: numbe
   options.visualMap = getVisualMap();
   options.axisPointer = getAxisPointer();
   options.tooltip.formatter = tChartTipFormatter(zs);
-  const dates = trends.map(({ datetime }) => datetime.split(' ')[1]);
+  const dates = trends.map(({ datetime }) => datetime.length >= 10 ? datetime.split(' ')[1] : datetime);
   options.xAxis = getxAxis(dates);
   const vals = trends.map((t) => t.current).concat(trends.map((t) => t.average));
   const yMin = Math.min(...vals) * 0.999;
@@ -1039,15 +1039,17 @@ function setupTrendChart(darkMode: boolean, trends: Stock.TrendItem[], zs: numbe
   options.series = [
     getTrendSeries(trends, color, markLines),
     getVolSeries(trends.map(({ vol, up }, i) => [i, vol, up])),
-    getAvgSeries(trends),
     // ...getMACDSeries(macds),
   ];
+  if (trends[0].average) {  
+    options.series.push(getAvgSeries(trends));
+  }
   return options;
 }
 function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[], zs: number) {
   opts.darkMode = darkMode;
   opts.tooltip.formatter = tChartTipFormatter(zs);
-  const dates = trends.map(({ datetime }) => datetime.split(' ')[1]);
+  const dates = trends.map(({ datetime }) => datetime.length >= 10 ? datetime.split(' ')[1] : datetime);
   for (let i = 0; i < opts.xAxis.length; i++) {
     opts.xAxis[i].data = dates;
   }
@@ -1059,7 +1061,9 @@ function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[
   opts.series[0].lineStyle.color = Utils.GetValueColor(Number(trends[trends.length - 1]?.current) - zs).color;
   opts.series[0].data = trends.map(({ current }) => current); // 价格
   opts.series[1].data = trends.map(({ current, vol, last }, i) => [i, vol, current > last ? 1 : -1]); // 成交量
-  opts.series[2].data = trends.map(({ average }) => average); // 平均价格
+  if (opts.series.length > 2) {
+    opts.series[2].data = trends.map(({ average }) => average); // 平均价格
+  }
   // macd
   // const macds = Tech.calculateMACD(trends.map((_) => _.current), 89, 25, 13); //macd(trends.map((_) => _.current));
   // opts.series[3].data = macds.histogram;
@@ -1470,11 +1474,13 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const [trendData, setTrendData] = useState({
       trends: stock ? stock.trends : [],
     });
+    const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
     const [currentActivePeriod, setCurrentActivePeriod] = useState<Stock.PeriodMarkItem | null | undefined>(null);
     const [chartOptions, setChartOptions] = useState<any>({});
+    
     const { run: handleTrends } = useThrottleFn(
       (trendd?: Stock.TrendItem[]) => {
-        if (!trendd) {
+        if (!trendd || trendd.length == 0) {
           return;
         }
         let trends: Stock.TrendItem[] = [];
@@ -1506,7 +1512,10 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         batch(() => {
           setTrendData(newTrendData);
           if (trendDates.length == 0 && trends.length > 0) {
-            const td = trends[0].datetime.substring(0, 10);
+            let td = new Date().toLocaleDateString().substring(0, 10);
+            if (trends[0].datetime.length >= 10) {
+              td = trends[0].datetime.substring(0, 10);
+            } 
             setCurrentTrendDate(td);
             setTrendDates([td]);
           }
@@ -1542,7 +1551,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         wait: 500,
       }
     );
-    const { run: runGetTrends } = useRequest(Services.Stock.GetTrendFromEastmoney, {
+    const { run: runGetTrends } = useRequest(Services.Stock.GetTrendFromDataSource, {
       throwOnError: true,
       manual: true,
       onSuccess: (data) => {
@@ -1565,7 +1574,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       if (!trendData.trends.length) {
         if (!requestTrends) {
           setRequestTrends(true);
-          runGetTrends(secid);
+          runGetTrends(kLineApiSourceSetting, secid);
         }
         // if (!useSina) {
           runGetBankuais(secid);
@@ -1751,7 +1760,6 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         wait: 500,
       }
     );
-    const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
     const { run: runGetKline } = useRequest(Services.Stock.GetKFromDataSource, {
       throwOnError: true,
       manual: true,

@@ -7,6 +7,7 @@ import { SettingState } from './setting';
 import { SiteState } from './site';
 import { NoteState } from './note';
 import { GithubState } from './github';
+import { StorageState } from './storage';
 import { BaiduState } from './baidu';
 import { StrategyState } from './strategy';
 import { TrainingState } from './training';
@@ -17,6 +18,7 @@ export type StoreState = {
   site: SiteState;
   note: NoteState;
   github: GithubState;
+  storage: StorageState;
   baidu: BaiduState;
   setting: SettingState;
   strategy: StrategyState;

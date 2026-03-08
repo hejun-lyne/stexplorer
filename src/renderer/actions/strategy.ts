@@ -13,7 +13,7 @@ export function syncRemoteStrategyGroupsAction(): ThunkAction {
     try {
       const {
         strategy: { groups, groupsModified },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');
@@ -68,7 +68,7 @@ export function syncRemoteStrategySourceAction(strategyId: number, groupId: numb
     try {
       const {
         strategy: { strategiesMapping },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');

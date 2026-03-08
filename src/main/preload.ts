@@ -180,5 +180,24 @@ contextBridge.exposeInMainWorld('contextModules', {
     async makeWorkerExec(method: string, args?: any[]) {
       return ipcRenderer.invoke('message-to-worker', { method, args });
     },
+    // SQLite 数据库操作
+    async sqliteInit() {
+      return ipcRenderer.invoke('sqlite-init');
+    },
+    async sqliteRead(table: string, id?: number | string | object) {
+      return ipcRenderer.invoke('sqlite-read', { table, id });
+    },
+    async sqliteWrite(table: string, data: any, lastModified: string, id?: number | string | object) {
+      return ipcRenderer.invoke('sqlite-write', { table, data, lastModified, id });
+    },
+    async sqliteDelete(table: string, id?: number | string | object) {
+      return ipcRenderer.invoke('sqlite-delete', { table, id });
+    },
+    async sqliteStats() {
+      return ipcRenderer.invoke('sqlite-stats');
+    },
+    async sqliteBackup(backupPath: string) {
+      return ipcRenderer.invoke('sqlite-backup', { backupPath });
+    },
   },
 });

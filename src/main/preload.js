@@ -316,6 +316,49 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
                     return [2 /*return*/, electron_1.ipcRenderer.invoke('message-to-worker', { method: method, args: args })];
                 });
             });
+        },
+        // SQLite 数据库操作
+        sqliteInit: function () {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('sqlite-init')];
+                });
+            });
+        },
+        sqliteRead: function (table, id) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('sqlite-read', { table: table, id: id })];
+                });
+            });
+        },
+        sqliteWrite: function (table, data, lastModified, id) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('sqlite-write', { table: table, data: data, lastModified: lastModified, id: id })];
+                });
+            });
+        },
+        sqliteDelete: function (table, id) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('sqlite-delete', { table: table, id: id })];
+                });
+            });
+        },
+        sqliteStats: function () {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('sqlite-stats')];
+                });
+            });
+        },
+        sqliteBackup: function (backupPath) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('sqlite-backup', { backupPath: backupPath })];
+                });
+            });
         }
     }
 });

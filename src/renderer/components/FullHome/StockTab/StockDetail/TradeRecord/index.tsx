@@ -61,8 +61,8 @@ const TradeRecord: React.FC<TradeRecordProps> = React.memo(({ active, showSeats,
       }
     }
   };
-
-  const {run: runGetStockDetailFromEastmoney} = useRequest(Services.Stock.GetDetailFromEastmoney, {
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { run: runGetStockDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, detail.secid), {
     throwOnError: true,
     manual: true,
     onSuccess: (d) => {
@@ -71,7 +71,7 @@ const TradeRecord: React.FC<TradeRecordProps> = React.memo(({ active, showSeats,
       }
     },
     pollingWhenHidden: false,
-    cacheKey: `GetDetailFromEastmoney/${detail.secid}`,
+    cacheKey: `GetStockDetail/${detail.secid}`,
   })
   const { run: runGetStockTradesFromEastmoney } = useRequest(Services.Stock.GetStockTradesFromEastmoney, {
     throwOnError: true,
@@ -85,7 +85,7 @@ const TradeRecord: React.FC<TradeRecordProps> = React.memo(({ active, showSeats,
   const func = stype == StockMarketType.US || stype == StockMarketType.USZindex ? useUSWorkDayTimeToDo : useWorkDayTimeToDo;
   func(
     () => {
-      runGetStockDetailFromEastmoney(detail.secid);
+      runGetStockDetail();
       runGetStockTradesFromEastmoney(detail.secid, 14);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null

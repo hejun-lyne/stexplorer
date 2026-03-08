@@ -14,7 +14,7 @@ export function syncRemoteBooksAction(): ThunkAction {
     try {
       const {
         note: { books, booksModified },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');
@@ -93,7 +93,7 @@ export function syncRemoteBookNoteAction(noteId: number | string, bookId: number
     try {
       const {
         note: { notesMapping },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');

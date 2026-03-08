@@ -9,6 +9,7 @@ export enum FundApiType {
   Etf, // 易天富
   ZiZai, // 自在量化
   XTick, // XTick
+  Akshare, // Akshare Python库
 }
 
 export enum TrayContent {

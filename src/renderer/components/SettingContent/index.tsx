@@ -18,6 +18,7 @@ import * as Enums from '@/utils/enums';
 import styles from './index.scss';
 import * as Services from '@/services';
 import { saveBaiduTokensAction } from '@/actions/baidu';
+import StorageSwitch from '../FullHome/Github/StorageSwitch';
 
 export interface SettingContentProps {
   onClose: () => void;
@@ -245,6 +246,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
                   { label: '东财', value: Enums.FundApiType.Eastmoney },
                   { label: 'XTick', value: Enums.FundApiType.XTick },
                   { label: 'ZiZai', value: Enums.FundApiType.ZiZai },
+                  { label: 'Akshare', value: Enums.FundApiType.Akshare },
                 ]}
                 onChange={(e) => setKLineApiSource(e.target.value)}
                 value={kLineApiSource}
@@ -252,6 +254,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
             </section>
           </div>
         </StandCard>
+        <StorageSwitch />
       </div>
       <div className={styles.exit}>
         <button type="button" onClick={() => app.quit()}>

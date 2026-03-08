@@ -45,8 +45,11 @@ const AddStock: React.FC<AddStockProps> = ({ onClose, onOpenStock, text }) => {
   }, [runSearch, text]);
 
   // 添加操作
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const onAdd = async (secid: string, type: number, name?: string) => {
-    const details = type == StockMarketType.Future ? await Helpers.Stock.GetFutureDetail(secid) : await Helpers.Stock.GetStockDetail(secid);
+    const details = type == StockMarketType.Future
+      ? await Helpers.Stock.GetFutureDetail(secid)
+      : await Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid);
     if (name) {
       details.name = name;
     }

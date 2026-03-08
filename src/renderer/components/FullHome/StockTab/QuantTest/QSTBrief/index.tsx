@@ -9,10 +9,11 @@ import * as Utils from '@/utils';
 import * as Services from '@/services';
 import { KLineType, StockMarketType } from '@/utils/enums';
 import moment from 'moment';
-import { batch } from 'react-redux';
+import { batch, useSelector } from 'react-redux';
 import QKlineBrief from './QKlineBrief';
 import QNowTrendBrief from './QNowTrendBrief';
 import QHistTrendBrief from './QHistTrendBrief';
+import { StoreState } from '@/reducers/types';
 
 export interface BKStockBriefProps {
   ktype: KLineType;
@@ -60,9 +61,10 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
     const [zs, setZs] = useState(0);
     const [zss, setZss] = useState(detail?.zss || 1);
     const [nflow, setNFlow] = useState<Stock.FlowTrendItem>();
+    const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
     useEffect(() => {
       if (!detail) {
-        Services.Stock.GetDetailFromEastmoney(secid).then((d) => {
+        Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid).then((d) => {
           if (d) {
             batch(() => {
               setDetail(d);

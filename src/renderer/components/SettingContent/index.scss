@@ -1,6 +1,9 @@
 .content {
   padding: var(--base-padding);
   // margin-top: 20px;
+  max-height: calc(100vh - 50px);
+  overflow-y: auto;
+  overflow-x: hidden;
 
   section {
     padding: 0 0;

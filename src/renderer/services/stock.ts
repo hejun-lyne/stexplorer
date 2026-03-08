@@ -8,6 +8,8 @@ import { Stock } from '@/types/stock';
 import { helper } from 'echarts';
 import * as Helpers from '../helpers';
 import * as Enums from '@/utils/enums';
+import * as AkshareAPI from './akshare';
+import store from '@/store/configureStore';
 
 const { got } = window.contextModules;
 // Helper to log request errors with URL
@@ -19,6 +21,17 @@ function logRequestError(error: any, url: string, extraInfo?: string) {
   } else {
     console.error(error);
   }
+}
+
+// 获取当前数据源类型（从 Redux store 实时读取）
+function getCurrentDataSource(): Enums.FundApiType {
+  const state = store.getState();
+  return state.setting?.systemSetting?.fundApiTypeSetting || Enums.FundApiType.Eastmoney;
+}
+
+// 判断是否使用 Akshare 数据源
+function useAkshare(): boolean {
+  return getCurrentDataSource() === Enums.FundApiType.Akshare;
 }
 
 
@@ -39,7 +52,7 @@ export function RandomEastmoneyUrl() {
 
 export function RandomEastmoneyHistUrl() {
   const rnd = Math.floor(Math.random() * (99 - 1)) + 1;
-  return 'https://push2his.eastmoney.com/';
+  return 'https://' + rnd + '.push2his.eastmoney.com/';
 }
 
 export async function SearchFromEastmoney2(keyword: string) {
@@ -142,6 +155,11 @@ export async function SearchFromEastmoney(keyword: string) {
 }
 
 export async function GetTrendFromEastmoney(secid: string, zs?: number) {
+  // 如果设置了 Akshare 数据源，使用 Akshare 获取分时数据
+  if (useAkshare()) {
+    return AkshareAPI.GetTrendFromAkshare(secid);
+  }
+  
   try {
     const {
       body: { data },
@@ -333,6 +351,11 @@ export async function BatchGetBriefsFromEastmoney(secids: string[]) {
 }
 
 export async function GetDetailFromEastmoney(secid: string) {
+  // 如果设置了 Akshare 数据源，使用 Akshare 获取详情
+  if (useAkshare()) {
+    return AkshareAPI.GetDetailFromAkshare(secid);
+  }
+  
   try {
     const {
       body: { data },
@@ -533,6 +556,11 @@ export async function GetDetailFromEastmoney(secid: string) {
 }
 
 export async function FromEastmoney(secid: string) {
+  // 如果设置了 Akshare 数据源，使用 Akshare 获取综合数据
+  if (useAkshare()) {
+    return AkshareAPI.FromAkshare(secid);
+  }
+  
   try {
     const responseTrends = await GetTrendFromEastmoney(secid);
     const responseDetail = await GetDetailFromEastmoney(secid);
@@ -557,6 +585,8 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
     return GetKFromZizai(secid, code);
   } else if (source == Enums.FundApiType.XTick) {
     return GetKFromXTick(secid, code);
+  } else if (source == Enums.FundApiType.Akshare) {
+    return AkshareAPI.GetKFromAkshare(secid, code, limit);
   }
 }
 
@@ -998,6 +1028,11 @@ export async function GetStockTradesFromEastmoney(secid: string, count: number) 
     logRequestError(error, 'https://push2.eastmoney.com/api/qt/stock/details/get');
     return [];
   }
+}
+
+export async function GetStockTradesFromDataSource(source: Enums.FundApiType, secid: string, count: number) {
+  // 成交明细暂不支持 Akshare，统一使用 Eastmoney
+  return GetStockTradesFromEastmoney(secid, count);
 }
 
 export async function GetSelfRankFromEastmoney(code: string) {
@@ -4070,4 +4105,109 @@ export async function GetFutureMintKFromSina(symbol: string, type: KLineType) {
       kt: type,
     };
   }
+}
+
+
+// ==================== Akshare 数据源封装 ====================
+// 以下是使用 akshare 替代 eastmoney 的封装函数
+
+export async function SearchFromDataSource(source: Enums.FundApiType, keyword: string) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.SearchFromAkshare(keyword);
+  }
+  // 默认使用 Eastmoney
+  return SearchFromEastmoney(keyword);
+}
+
+export async function GetDetailFromDataSource(source: Enums.FundApiType, secid: string) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GetDetailFromAkshare(secid);
+  }
+  // 默认使用 Eastmoney
+  return GetDetailFromEastmoney(secid);
+}
+
+export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: string) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GetTrendFromAkshare(secid);
+  }
+  // 默认使用 Eastmoney
+  return GetTrendFromEastmoney(secid);
+}
+
+export async function FromDataSource(source: Enums.FundApiType, secid: string) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.FromAkshare(secid);
+  }
+  // 默认使用 Eastmoney
+  return FromEastmoney(secid);
+}
+
+export async function GetBanKuaisFromDataSource(source: Enums.FundApiType, type: BKType, pageSize = 20) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GetBanKuaisFromAkshare(type, pageSize);
+  }
+  // 默认使用 Eastmoney
+  return GetBanKuais(type, pageSize);
+}
+
+export async function GetCompanyFromDataSource(source: Enums.FundApiType, secid: string) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GetCompanyFromAkshare(secid);
+  }
+  
+  // 根据市场类型选择不同的接口
+  const [mk, code] = secid.split('.');
+  const etype = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
+  
+  if (etype === Enums.StockMarketType.AB) {
+    return GetABCompany(secid);
+  } else if (etype === Enums.StockMarketType.HK) {
+    return GetHKCompany(secid);
+  } else if (etype === Enums.StockMarketType.US) {
+    return GetUSCompany(secid);
+  } else if (etype === Enums.StockMarketType.XSB) {
+    return GetXSBCompany(secid);
+  }
+  
+  return {
+    gsjs: '',
+    sshy: '',
+    dsz: '',
+    zcdz: '',
+    clrq: '',
+    ssrq: '',
+  };
+}
+
+export async function GetNewsFromDataSource(source: Enums.FundApiType, secid: string, pageIndex: number = 1, pageSize: number = 20) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GetNewsFromAkshare(secid, pageIndex, pageSize);
+  }
+  // 默认使用 Eastmoney
+  return GetNews(secid, pageIndex, pageSize);
+}
+
+export async function GetResearchesFromDataSource(source: Enums.FundApiType, secid: string, page: number = 1) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GetResearchesFromAkshare(secid, page);
+  }
+  // 默认使用 Eastmoney
+  return GetStockResearches(secid, page);
+}
+
+export async function GeZTStocksFromDataSource(source: Enums.FundApiType, pageSize = 20, date?: string) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GeZTStocksFromAkshare(pageSize, date);
+  }
+  // 默认使用 Eastmoney
+  return GeZTStocks(pageSize, date);
+}
+
+export async function GeDTStocksFromDataSource(source: Enums.FundApiType, pageSize = 20, date?: string) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GeDTStocksFromAkshare(pageSize, date);
+  }
+  // 默认使用 Eastmoney
+  return GeDTStocks(pageSize, date);
 }

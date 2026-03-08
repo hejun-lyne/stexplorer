@@ -1,6 +1,6 @@
 /**
- * GitHub 相关的 Redux Actions
- * 注意：此文件保留用于向后兼容，新的存储相关功能请使用 storage.ts
+ * 存储相关的 Redux Actions
+ * 支持 GitHub 和 SQLite 两种存储后端
  */
 import { ThunkAction } from '@/reducers/types';
 import * as Helpers from '@/helpers';
@@ -15,25 +15,79 @@ import { syncRemoteTrainingAction } from './training';
 export const SYNC_LOGIN_INFO = 'SYNC_LOGIN_INFO';
 export const SYNC_PROFILE = 'SYNC_PROFILE';
 export const SYNC_STORAGE = 'SYNC_STORAGE';
+export const SYNC_STORAGE_TYPE = 'SYNC_STORAGE_TYPE';
+
+// 初始化存储类型
+export function initStorageType(): ThunkAction {
+  return (dispatch, getState) => {
+    try {
+      const storageType = Helpers.Storage.StorageHelper.GetStorageType();
+      dispatch({ type: SYNC_STORAGE_TYPE, payload: storageType });
+    } catch (error) {
+      console.log('初始化存储类型出错', error);
+    }
+  };
+}
+
+// 切换存储类型
+export function switchStorageTypeAction(type: 'github' | 'sqlite'): ThunkAction {
+  return async (dispatch, getState) => {
+    try {
+      Helpers.Storage.StorageHelper.SetStorageType(type);
+      
+      batch(() => {
+        dispatch({ type: SYNC_STORAGE_TYPE, payload: type });
+        dispatch({ type: SYNC_STORAGE, payload: null });
+      });
+
+      // 重新初始化存储
+      if (type === 'sqlite') {
+        const st = await Helpers.Storage.StorageHelper.InitSQLiteStorage();
+        if (st) {
+          batch(() => {
+            dispatch({ type: SYNC_STORAGE, payload: st });
+            dispatch(syncRemoteFavorSitesAction());
+            dispatch(syncRemoteTrainingAction());
+            dispatch(syncRemoteTradingsAction());
+            dispatch(syncRemoteTrainingsAction());
+            dispatch(syncRemoteBooksAction());
+            dispatch(syncRemoteStrategyGroupsAction());
+            dispatch(syncRemoteSettingAction());
+          });
+        }
+      } else if (type === 'github') {
+        const st = Helpers.Storage.StorageHelper.InitGithubStorage();
+        if (st) {
+          batch(() => {
+            dispatch({ type: SYNC_STORAGE, payload: st });
+            dispatch(syncRemoteFavorSitesAction());
+            dispatch(syncRemoteTrainingAction());
+            dispatch(syncRemoteTradingsAction());
+            dispatch(syncRemoteTrainingsAction());
+            dispatch(syncRemoteBooksAction());
+            dispatch(syncRemoteStrategyGroupsAction());
+            dispatch(syncRemoteSettingAction());
+          });
+        }
+      }
+    } catch (error) {
+      console.log('切换存储类型出错', error);
+    }
+  };
+}
+
+// ===== GitHub 相关 Actions =====
 
 export function initGithubInfo(): ThunkAction {
-  return async (dispatch, getState) => {
+  return (dispatch, getState) => {
     try {
       const token = Helpers.Storage.GitHub.GetGithubToken();
       const profile = Helpers.Storage.GitHub.GetGithubProfile();
-      
-      // 检查当前存储类型
-      const storageType = Helpers.Storage.StorageHelper.GetStorageType();
-      
       batch(() => {
         dispatch({ type: SYNC_LOGIN_INFO, payload: token });
         dispatch({ type: SYNC_PROFILE, payload: profile });
-      });
-      
-      // 只有在 GitHub 存储类型下才初始化 GitHub 存储
-      if (storageType === 'github') {
         dispatch(renewStorageAction());
-      }
+      });
     } catch (error) {
       console.log('初始化Github信息出错', error);
     }
@@ -80,7 +134,6 @@ export function clearStorageAction(): ThunkAction {
 export function renewStorageAction(): ThunkAction {
   return async (dispatch, getState) => {
     try {
-      // 检查当前存储类型
       const storageType = Helpers.Storage.StorageHelper.GetStorageType();
       let st = null;
       

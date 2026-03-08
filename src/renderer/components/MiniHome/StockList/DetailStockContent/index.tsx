@@ -10,6 +10,7 @@ import Company from './Company';
 import CustomDrawerContent from '@/components/CustomDrawer/Content';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
+import * as Helpers from '@/helpers';
 
 import styles from './index.scss';
 import { Stock } from '@/types/stock';
@@ -22,12 +23,11 @@ export interface DetailStockContentProps {
 
 const DetailStockContent: React.FC<DetailStockContentProps> = ({ onEnter, onClose, secid }) => {
   const [stock, setStock] = useState<Stock.DetailItem | Record<string, any>>({});
-  useRequest(Services.Stock.GetDetailFromEastmoney, {
+  useRequest(() => Helpers.Stock.GetStockDetail(secid), {
     throwOnError: true,
     pollingInterval: 1000 * 60,
-    defaultParams: [secid],
     onSuccess: setStock,
-    cacheKey: `GetDetailFromEastmoney/${secid}`,
+    cacheKey: `GetStockDetail/${secid}`,
   });
 
   return (

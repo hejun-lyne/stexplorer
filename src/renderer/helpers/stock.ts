@@ -24,8 +24,10 @@ import moment from 'moment';
 import { EastmoneySingleStockPush, EastmoneySingleTrendsPush, EastmoneyStockDetailsPush, EastmoneyStockKlinesPush } from '@/services/push';
 const { saveString } = window.contextModules.electron;
 
-export async function GetStockDetail(secid: string) {
-  const detail = (await Services.Stock.GetDetailFromEastmoney(secid)) as unknown as Stock.DetailItem;
+export async function GetStockDetail(source:Enums.FundApiType, secid: string) {
+  // const setting = Helpers.Setting.GetSystemSetting();
+  const useAkshare = source === Enums.FundApiType.Akshare;
+  const detail = (await Services.Stock.GetDetailFromDataSource(useAkshare ? Enums.FundApiType.Akshare : Enums.FundApiType.Eastmoney, secid)) as unknown as Stock.DetailItem;
   return detail;
 }
 
@@ -34,9 +36,11 @@ export async function GetFutureDetail(secid: string) {
   return detail;
 }
 
-export async function GetStockDetails(secids: string[]) {
+export async function GetStockDetails(source:Enums.FundApiType, secids: string[]) {
+  // const setting = Helpers.Setting.GetSystemSetting();
+  const useAkshare = source === Enums.FundApiType.Akshare;
   return Adapter.ChokeGroupAdapter(
-    secids.map((secid) => () => Services.Stock.GetDetailFromEastmoney(secid)),
+    secids.map((secid) => () => Services.Stock.GetDetailFromDataSource(useAkshare ? Enums.FundApiType.Akshare : Enums.FundApiType.Eastmoney, secid)),
     10
   );
 }
@@ -48,10 +52,12 @@ export async function GetFutureDetails(secids: string[]) {
   );
 }
 
-export async function GetStockDetailAndTrendsAndFlows(secid: string) {
+export async function GetStockDetailAndTrendsAndFlows(source:Enums.FundApiType, secid: string) {
+  // const setting = Helpers.Setting.GetSystemSetting();
+  const useAkshare = source === Enums.FundApiType.Akshare;
   const collectors = [
-    () => Services.Stock.GetDetailFromEastmoney(secid),
-    () => Services.Stock.GetTrendFromEastmoney(secid),
+    () => Services.Stock.GetDetailFromDataSource(useAkshare ? Enums.FundApiType.Akshare : Enums.FundApiType.Eastmoney, secid),
+    () => Services.Stock.GetTrendFromDataSource(useAkshare ? Enums.FundApiType.Akshare : Enums.FundApiType.Eastmoney, secid),
     () => Services.Stock.GetFlowTrendFromEastmoney(secid),
   ];
   return Adapter.ConCurrencyAllAdapter(collectors);

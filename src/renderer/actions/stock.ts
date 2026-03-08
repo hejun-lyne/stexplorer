@@ -28,7 +28,7 @@ export function syncRemoteStocksAction(): ThunkAction {
     try {
       const {
         stock: { stockConfigsModified, stockConfigs },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');
@@ -102,7 +102,7 @@ export function syncRemoteTradingsAction(): ThunkAction {
     try {
       const {
         stock: { tradingsModified, tradings },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');
@@ -157,7 +157,7 @@ export function syncRemoteTrainingsAction(): ThunkAction {
     try {
       const {
         stock: { trainingsModified, trainings },
-        github: { storage },
+        storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');

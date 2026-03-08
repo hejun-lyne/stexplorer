@@ -47,10 +47,10 @@ const AddStockContent: React.FC<AddStockContentProps> = ({ defaultName, onEnter,
     throwOnError: true,
     onSuccess: (res) => setGroupList(res.filter(({ Type }) => stockTypesConfig.map(({ code }) => code).includes(Type))),
   });
-
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { data: detailSecid, show: showDetailDrawer, set: setDetailDrawer, close: closeDetailDrawer } = useDrawer('');
   async function onAdd(secid: string, type: number) {
-    const [details, responseTrends, responseFFlows] = await Helpers.Stock.GetStockDetailAndTrendsAndFlows(secid);
+    const [details, responseTrends, responseFFlows] = await Helpers.Stock.GetStockDetailAndTrendsAndFlows(kLineApiSourceSetting, secid);
     if (details) {
       setNone(false);
       dispatch(addStockAction(details, type, responseTrends?.trends, responseFFlows?.ffTrends));

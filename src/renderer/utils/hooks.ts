@@ -13,6 +13,7 @@ import * as Services from '@/services';
 import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import { initGithubInfo } from '@/actions/github';
+import { initStorageType } from '@/actions/storage';
 import { Stock } from '@/types/stock';
 import { loadBaiduTokensAction } from '@/actions/baidu';
 import { monaco } from '@monaco-editor/react';
@@ -387,6 +388,7 @@ export function useAdjustmentNotification() {
 export function useBootStrap() {
   const dispatch = useDispatch();
   useEffect(() => {
+    dispatch(initStorageType());
     dispatch(initGithubInfo());
     dispatch(loadBaiduTokensAction());
 

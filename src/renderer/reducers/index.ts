@@ -5,6 +5,7 @@ import sort from './sort';
 import site from './site';
 import note from './note';
 import github from './github';
+import storage from './storage';
 import baidu from './baidu';
 import strategy from './strategy';
 import training from './training';
@@ -17,6 +18,7 @@ export default function createRootReducer() {
     site,
     note,
     github,
+    storage,
     baidu,
     strategy,
     training

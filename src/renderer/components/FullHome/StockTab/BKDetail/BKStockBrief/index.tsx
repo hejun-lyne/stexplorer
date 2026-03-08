@@ -679,16 +679,17 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
     const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
     const { darkMode } = useHomeContext();
     const [detail, setDetail] = useState<Stock.DetailItem>({ secid });
-    const { run: runGetDetail } = useRequest(Services.Stock.GetDetailFromEastmoney, {
+    const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+    const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid), {
       throwOnError: true,
       manual: true,
       onSuccess: (d) => {
         if (d) setDetail(d);
       },
-      cacheKey: `GetDetailFromEastmoney/${secid}`,
+      cacheKey: `GetStockDetail/${secid}`,
     });
     useLayoutEffect(() => {
-      runGetDetail(secid);
+      runGetDetail();
       Helpers.Stock.AppendStockDetailPush(secid, (data) => {
         if (data) {
           let changed = false;
@@ -979,7 +980,7 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
         wait: 500,
       }
     );
-    const { run: runGetTrends } = useRequest(Services.Stock.GetTrendFromEastmoney, {
+    const { run: runGetTrends } = useRequest(Services.Stock.GetTrendFromDataSource, {
       throwOnError: true,
       manual: true,
       onSuccess: (data) => {
@@ -1022,7 +1023,7 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
       if (ontrain) {
         runGetHistTrends(secid, trainDate);
       } else {
-        runGetTrends(secid);
+        runGetTrends(kLineApiSourceSetting, secid);
         if (active) {
           const es = Helpers.Stock.SingleStockTrendPush(secid, (data) => {
             if (!data.length) {

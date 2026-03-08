@@ -30,6 +30,13 @@ declare global {
         execPyScript: (fileName: string, params: string[]) => Promise<any>;
         compileTS: (source: string) => Promise<any>;
         makeWorkerExec: (method: string, args?: any[]) => Promise<any>;
+        // SQLite 数据库操作
+        sqliteInit: () => Promise<{ success: boolean; error?: string }>;
+        sqliteRead: (table: string, id?: number | string | object) => Promise<{ success: boolean; data?: any; error?: string }>;
+        sqliteWrite: (table: string, data: any, lastModified: string, id?: number | string | object) => Promise<{ success: boolean; error?: string }>;
+        sqliteDelete: (table: string, id?: number | string | object) => Promise<{ success: boolean; error?: string }>;
+        sqliteStats: () => Promise<{ success: boolean; stats?: { size: number; tables: string[] }; error?: string }>;
+        sqliteBackup: (backupPath: string) => Promise<{ success: boolean; error?: string }>;
       };
       process: {
         production: boolean;
