@@ -972,6 +972,8 @@ export async function GetStockBankuaisFromEastmoney(secid: string) {
 }
 
 export async function GetStockTradesFromEastmoney(secid: string, count: number) {
+  console.warn('获取成交明细接口不可用，暂时无法使用');
+  return [];
   try {
     const { body } = await got<{
       rc: 0;
