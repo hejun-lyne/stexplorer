@@ -1,6 +1,7 @@
 /**
- * SQLite 存储适配器
- * 提供与 Storage 类相同的接口，但使用本地 SQLite 数据库存储
+ * 本地文件存储适配器
+ * 提供与 Storage 类相同的接口，但使用本地 JSON 文件存储
+ * 替代原来的 SQLite 存储方式
  */
 import { encryptObj, decryptObj } from '@/utils/crypto';
 import type { ContentRef } from './storageTypes';
@@ -19,7 +20,7 @@ const TABLE_MAP: Record<string, string> = {
 
 const { electron } = window.contextModules;
 
-export class SQLiteRefError extends Error {
+export class LocalRefError extends Error {
   code: number;
 
   constructor(code: number, m = 'Error') {
@@ -28,7 +29,7 @@ export class SQLiteRefError extends Error {
   }
 }
 
-export class SQLiteContentRef implements ContentRef {
+export class LocalContentRef implements ContentRef {
   encryptKey: string;
 
   table: string;
@@ -73,7 +74,11 @@ export class SQLiteContentRef implements ContentRef {
         // 等待直到读取完成
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
-      return this._cache.content;
+      // 返回包含 lastModified 和 data 的完整对象
+      return {
+        lastModified: this._cache.lastModified,
+        data: this._cache.content,
+      };
     }
     this.reading = true;
 
@@ -83,7 +88,7 @@ export class SQLiteContentRef implements ContentRef {
       if (!result.success || !result.data) {
         // 数据不存在，抛出 404 错误
         this.reading = false;
-        const error = new SQLiteRefError(404, 'Data not found');
+        const error = new LocalRefError(404, 'Data not found');
         throw error;
       }
 
@@ -93,14 +98,18 @@ export class SQLiteContentRef implements ContentRef {
       this._cache.lastModified = lastModified;
       
       this.reading = false;
-      return this._cache.content;
+      // 返回包含 lastModified 和 data 的完整对象
+      return {
+        lastModified,
+        data,
+      };
     } catch (e: any) {
       this.reading = false;
-      if (e instanceof SQLiteRefError) {
+      if (e instanceof LocalRefError) {
         throw e;
       }
-      console.error('[SQLiteContentRef] Error loading data:', e);
-      throw new SQLiteRefError(500, e.message);
+      console.error('[LocalContentRef] Error loading data:', e);
+      throw new LocalRefError(500, e.message);
     }
   }
 
@@ -121,7 +130,7 @@ export class SQLiteContentRef implements ContentRef {
         // 无需执行中间的写入操作
         return;
       }
-      console.log('[SQLiteContentRef] Will continue writing');
+      console.log('[LocalContentRef] Will continue writing');
     }
 
     this.writing = true;
@@ -133,15 +142,15 @@ export class SQLiteContentRef implements ContentRef {
         this._cache.content = contentObj.data;
         this._cache.lastModified = lastModified;
         this._cache.cached = true;
-        console.log('[SQLiteContentRef] Cache updated:', this.table, this.id);
+        console.log('[LocalContentRef] Cache updated:', this.table, this.id);
         this.writing = false;
         return { success: true };
       } else {
         this.writing = false;
-        throw new SQLiteRefError(500, result.error || 'Write failed');
+        throw new LocalRefError(500, result.error || 'Write failed');
       }
     } catch (e: any) {
-      console.error('[SQLiteContentRef] Error saving data:', e);
+      console.error('[LocalContentRef] Error saving data:', e);
       this.writing = false;
       return null;
     }
@@ -157,16 +166,16 @@ export class SQLiteContentRef implements ContentRef {
       }
       return null;
     } catch (e: any) {
-      console.error('[SQLiteContentRef] Error deleting data:', e);
+      console.error('[LocalContentRef] Error deleting data:', e);
       return null;
     }
   }
 }
 
-export class SQLiteStorage {
+export class LocalFileStorage {
   encryptKey: string;
 
-  refs: Record<string, SQLiteContentRef>;
+  refs: Record<string, LocalContentRef>;
 
   initialized: boolean;
 
@@ -183,9 +192,9 @@ export class SQLiteStorage {
     const result = await electron.sqliteInit();
     if (result.success) {
       this.initialized = true;
-      console.log('[SQLiteStorage] Initialized successfully');
+      console.log('[LocalFileStorage] Initialized successfully');
     } else {
-      console.error('[SQLiteStorage] Failed to initialize:', result.error);
+      console.error('[LocalFileStorage] Failed to initialize:', result.error);
       throw new Error(result.error);
     }
   }
@@ -193,7 +202,7 @@ export class SQLiteStorage {
   // 将文件路径转换为表名
   pathToTable(path: string): { table: string; id?: number | string | object } {
     if (!path) {
-      console.error('[SQLiteStorage] path is undefined or empty');
+      console.error('[LocalFileStorage] path is undefined or empty');
       return { table: 'unknown' };
     }
     
@@ -245,7 +254,7 @@ export class SQLiteStorage {
       await electron.sqliteWrite(table, defaultData, lastModified, id);
     }
 
-    this.refs[path] = new SQLiteContentRef(table, id, { encryptKey: this.encryptKey });
+    this.refs[path] = new LocalContentRef(table, id, { encryptKey: this.encryptKey });
     return this.refs[path];
   }
 
@@ -258,15 +267,15 @@ export class SQLiteStorage {
     }
   }
 
-  // 获取数据库统计信息
+  // 获取存储统计信息
   async getStats() {
     return electron.sqliteStats();
   }
 
-  // 备份数据库
+  // 备份存储
   async backup(backupPath: string) {
     return electron.sqliteBackup(backupPath);
   }
 }
 
-export default SQLiteStorage;
+export default LocalFileStorage;

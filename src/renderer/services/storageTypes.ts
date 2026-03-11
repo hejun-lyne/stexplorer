@@ -10,7 +10,7 @@ export interface ContentRef {
 }
 
 // 存储类型
-export type StorageType = 'github' | 'sqlite';
+export type StorageType = 'github' | 'sqlite' | 'local';
 
 // 加密选项
 export interface StorageOptions {

@@ -1,6 +1,6 @@
 /**
  * 存储帮助函数
- * 支持 GitHub 和 SQLite 两种存储后端
+ * 支持 GitHub、SQLite 和本地文件三种存储后端
  */
 import * as Utils from '@/utils';
 import * as CONST from '@/constants';
@@ -50,8 +50,8 @@ export async function InitStorage(type?: StorageType): Promise<ThingsStorage | n
   
   if (storageType === 'github') {
     return InitGithubStorage();
-  } else if (storageType === 'sqlite') {
-    return await InitSQLiteStorage();
+  } else if (storageType === 'sqlite' || storageType === 'local') {
+    return await InitLocalStorage();
   }
   
   return null;
@@ -77,13 +77,18 @@ export function InitGithubStorage() {
 }
 
 export async function InitSQLiteStorage(): Promise<ThingsStorage | null> {
+  // 兼容旧版本，现在使用本地文件存储
+  return InitLocalStorage();
+}
+
+export async function InitLocalStorage(): Promise<ThingsStorage | null> {
   try {
-    const st = new Storage('sqlite');
+    const st = new Storage('local');
     await st.init();
     const s = new ThingsStorage(st);
     return s;
   } catch (error) {
-    console.error('初始化 SQLite 存储失败:', error);
+    console.error('初始化本地文件存储失败:', error);
     return null;
   }
 }
@@ -93,8 +98,8 @@ export async function InitSQLiteStorage(): Promise<ThingsStorage | null> {
 export async function GetStorageStats() {
   const storageType = GetStorageType();
   
-  if (storageType === 'sqlite') {
-    const st = new Storage('sqlite');
+  if (storageType === 'sqlite' || storageType === 'local') {
+    const st = new Storage('local');
     await st.init();
     return st.getStats();
   }
@@ -105,13 +110,17 @@ export async function GetStorageStats() {
 export async function BackupSQLite(backupPath: string) {
   const storageType = GetStorageType();
   
-  if (storageType === 'sqlite') {
-    const st = new Storage('sqlite');
+  if (storageType === 'sqlite' || storageType === 'local') {
+    const st = new Storage('local');
     await st.init();
     return st.backup(backupPath);
   }
   
   return null;
+}
+
+export async function BackupLocalStorage(backupPath: string) {
+  return BackupSQLite(backupPath);
 }
 
 // ===== 兼容性导出（保持原有接口）=====
@@ -131,8 +140,10 @@ export const StorageHelper = {
   InitStorage,
   InitGithubStorage,
   InitSQLiteStorage,
+  InitLocalStorage,
   GetStorageStats,
   BackupSQLite,
+  BackupLocalStorage,
 };
 
 export default {

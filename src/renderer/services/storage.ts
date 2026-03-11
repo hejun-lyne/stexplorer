@@ -1,6 +1,6 @@
 import { encryptObj, decryptObj } from '@/utils/crypto';
 import GitHubApi from './github';
-import SQLiteStorage from './sqliteStorage';
+import LocalFileStorage from './localStorage';
 import type { ContentRef, StorageType, StorageOptions } from './storageTypes';
 
 // import { dirname, basename } from 'path';
@@ -228,7 +228,7 @@ export type { ContentRef, StorageType, StorageOptions };
 export class Storage {
   type: StorageType;
   githubStorage?: GitHubStorage;
-  sqliteStorage?: SQLiteStorage;
+  localStorage?: LocalFileStorage;
 
   constructor(
     type: StorageType,
@@ -239,36 +239,36 @@ export class Storage {
     
     if (type === 'github' && api) {
       this.githubStorage = new GitHubStorage(api, options);
-    } else if (type === 'sqlite') {
-      this.sqliteStorage = new SQLiteStorage(options);
+    } else if (type === 'sqlite' || type === 'local') {
+      this.localStorage = new LocalFileStorage(options);
     }
   }
 
   async ref(path: string, initContent = '{}'): Promise<ContentRef> {
     if (this.type === 'github' && this.githubStorage) {
       return this.githubStorage.ref(path, initContent);
-    } else if (this.type === 'sqlite' && this.sqliteStorage) {
-      return this.sqliteStorage.ref(path, initContent);
+    } else if ((this.type === 'sqlite' || this.type === 'local') && this.localStorage) {
+      return this.localStorage.ref(path, initContent);
     }
     throw new Error(`Storage not initialized for type: ${this.type}`);
   }
 
   async init(): Promise<void> {
-    if (this.type === 'sqlite' && this.sqliteStorage) {
-      await this.sqliteStorage.init();
+    if ((this.type === 'sqlite' || this.type === 'local') && this.localStorage) {
+      await this.localStorage.init();
     }
   }
 
   async getStats(): Promise<any> {
-    if (this.type === 'sqlite' && this.sqliteStorage) {
-      return this.sqliteStorage.getStats();
+    if ((this.type === 'sqlite' || this.type === 'local') && this.localStorage) {
+      return this.localStorage.getStats();
     }
     return null;
   }
 
   async backup(backupPath: string): Promise<any> {
-    if (this.type === 'sqlite' && this.sqliteStorage) {
-      return this.sqliteStorage.backup(backupPath);
+    if ((this.type === 'sqlite' || this.type === 'local') && this.localStorage) {
+      return this.localStorage.backup(backupPath);
     }
     return null;
   }

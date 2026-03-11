@@ -22,18 +22,13 @@ export function initGithubInfo(): ThunkAction {
       const token = Helpers.Storage.GitHub.GetGithubToken();
       const profile = Helpers.Storage.GitHub.GetGithubProfile();
       
-      // 检查当前存储类型
-      const storageType = Helpers.Storage.StorageHelper.GetStorageType();
-      
       batch(() => {
         dispatch({ type: SYNC_LOGIN_INFO, payload: token });
         dispatch({ type: SYNC_PROFILE, payload: profile });
       });
       
-      // 只有在 GitHub 存储类型下才初始化 GitHub 存储
-      if (storageType === 'github') {
-        dispatch(renewStorageAction());
-      }
+      // 初始化 GitHub 存储
+      dispatch(renewStorageAction());
     } catch (error) {
       console.log('初始化Github信息出错', error);
     }
@@ -84,8 +79,8 @@ export function renewStorageAction(): ThunkAction {
       const storageType = Helpers.Storage.StorageHelper.GetStorageType();
       let st = null;
       
-      if (storageType === 'sqlite') {
-        st = await Helpers.Storage.StorageHelper.InitSQLiteStorage();
+      if (storageType === 'sqlite' || storageType === 'local') {
+        st = await Helpers.Storage.StorageHelper.InitLocalStorage();
       } else {
         st = Helpers.Storage.StorageHelper.InitGithubStorage();
       }

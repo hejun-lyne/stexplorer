@@ -24,7 +24,7 @@ import { PythonShell } from 'python-shell';
 // import ElectronStore from 'electron-store';
 import * as ts from 'typescript';
 import { PromiseWorker } from './promiseWorker';
-import * as database from './database';
+import * as localFileStorage from './localFileStorage';
 
 async function init() {
   console.log('当前工作目录：' + app.getAppPath());
@@ -91,8 +91,8 @@ async function init() {
     willQuitApp = true;
   });
   app.on('window-all-closed', () => {
-    // 关闭数据库连接
-    database.closeDatabase();
+    // 本地文件存储无需关闭操作
+    console.log('[Main] App closing, local file storage is safe');
     if (process.platform !== 'darwin') {
       app.quit()
     }
@@ -157,6 +157,123 @@ async function init() {
     });
     return result;
   });
+  // ===== 本地文件存储 IPC 处理程序 =====
+  ipcMain.handle('local-storage-init', () => {
+    try {
+      localFileStorage.initLocalFileStorage();
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error initializing local file storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('local-storage-read', (event, { table, id }) => {
+    try {
+      const result = localFileStorage.readLocalData(table, id);
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('[Main] Error reading from local storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('local-storage-write', (event, { table, data, lastModified, id }) => {
+    try {
+      localFileStorage.writeLocalData(table, data, lastModified, id);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error writing to local storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('local-storage-delete', (event, { table, id }) => {
+    try {
+      localFileStorage.deleteLocalData(table, id);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error deleting from local storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('local-storage-stats', () => {
+    try {
+      const stats = localFileStorage.getLocalStorageStats();
+      return { success: true, stats };
+    } catch (error: any) {
+      console.error('[Main] Error getting local storage stats:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('local-storage-backup', (event, { backupPath }) => {
+    try {
+      localFileStorage.backupLocalStorage(backupPath);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error backing up local storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
+  // 保留 SQLite IPC 处理程序以保持向后兼容（内部调用本地文件存储）
+  ipcMain.handle('sqlite-init', () => {
+    try {
+      localFileStorage.initLocalFileStorage();
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error initializing storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-read', (event, { table, id }) => {
+    try {
+      const result = localFileStorage.readLocalData(table, id);
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('[Main] Error reading from storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-write', (event, { table, data, lastModified, id }) => {
+    try {
+      localFileStorage.writeLocalData(table, data, lastModified, id);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error writing to storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-delete', (event, { table, id }) => {
+    try {
+      localFileStorage.deleteLocalData(table, id);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error deleting from storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-stats', () => {
+    try {
+      const stats = localFileStorage.getLocalStorageStats();
+      return { success: true, stats };
+    } catch (error: any) {
+      console.error('[Main] Error getting storage stats:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('sqlite-backup', (event, { backupPath }) => {
+    try {
+      localFileStorage.backupLocalStorage(backupPath);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[Main] Error backing up storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
   ipcMain.handle('run-python-script', async (event, config) => {
     return new Promise((resolve, reject) => {
       // 获取 Python 路径，优先使用环境变量，否则使用默认路径
@@ -210,61 +327,6 @@ async function init() {
   });
   ipcMain.handle('app-quit', (event, config) => {
     app.quit();
-  });
-  // SQLite 数据库 IPC 处理程序
-  ipcMain.handle('sqlite-init', () => {
-    try {
-      database.initDatabase();
-      return { success: true };
-    } catch (error: any) {
-      console.error('[Main] Error initializing SQLite:', error);
-      return { success: false, error: error.message };
-    }
-  });
-  ipcMain.handle('sqlite-read', (event, { table, id }) => {
-    try {
-      const result = database.readData(table, id);
-      return { success: true, data: result };
-    } catch (error: any) {
-      console.error('[Main] Error reading from SQLite:', error);
-      return { success: false, error: error.message };
-    }
-  });
-  ipcMain.handle('sqlite-write', (event, { table, data, lastModified, id }) => {
-    try {
-      database.writeData(table, data, lastModified, id);
-      return { success: true };
-    } catch (error: any) {
-      console.error('[Main] Error writing to SQLite:', error);
-      return { success: false, error: error.message };
-    }
-  });
-  ipcMain.handle('sqlite-delete', (event, { table, id }) => {
-    try {
-      database.deleteData(table, id);
-      return { success: true };
-    } catch (error: any) {
-      console.error('[Main] Error deleting from SQLite:', error);
-      return { success: false, error: error.message };
-    }
-  });
-  ipcMain.handle('sqlite-stats', () => {
-    try {
-      const stats = database.getDatabaseStats();
-      return { success: true, stats };
-    } catch (error: any) {
-      console.error('[Main] Error getting SQLite stats:', error);
-      return { success: false, error: error.message };
-    }
-  });
-  ipcMain.handle('sqlite-backup', (event, { backupPath }) => {
-    try {
-      database.backupDatabase(backupPath);
-      return { success: true };
-    } catch (error: any) {
-      console.error('[Main] Error backing up SQLite:', error);
-      return { success: false, error: error.message };
-    }
   });
 }
 

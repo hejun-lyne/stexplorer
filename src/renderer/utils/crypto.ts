@@ -30,6 +30,9 @@ function recurseTranslate(obj: any, translate: (a: any) => any): any {
     case 'boolean':
     case 'null':
       return translate(obj);
+    case 'undefined':
+      // 跳过 undefined 值，不加密
+      return undefined;
     default:
       throw new Error(`Unsupported type (${typeOf(obj)}) of ${obj}`);
   }

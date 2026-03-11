@@ -13,7 +13,7 @@ import * as Services from '@/services';
 import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import { initGithubInfo } from '@/actions/github';
-import { initStorageType } from '@/actions/storage';
+import { initStorageType, initLocalStorageInfo, loadSyncConfigAction } from '@/actions/storage';
 import { Stock } from '@/types/stock';
 import { loadBaiduTokensAction } from '@/actions/baidu';
 import { monaco } from '@monaco-editor/react';
@@ -387,15 +387,27 @@ export function useAdjustmentNotification() {
  */
 export function useBootStrap() {
   const dispatch = useDispatch();
+  const storageType = useSelector((state: StoreState) => state.storage.type);
+  
   useEffect(() => {
     dispatch(initStorageType());
-    dispatch(initGithubInfo());
     dispatch(loadBaiduTokensAction());
+    dispatch(loadSyncConfigAction());
 
     // Monaco
     defineMonacoThemes('krTheme');
     // defineMonacoThemes('light');
   }, []);
+  
+  // 根据存储类型初始化对应的存储
+  useEffect(() => {
+    if (storageType === 'github') {
+      dispatch(initGithubInfo());
+    } else if (storageType === 'local' || storageType === 'sqlite') {
+      // 本地存储初始化
+      dispatch(initLocalStorageInfo());
+    }
+  }, [storageType]);
 }
 
 export function useMappingLocalToSystemSetting() {
