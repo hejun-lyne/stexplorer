@@ -1477,6 +1477,43 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
     const [currentActivePeriod, setCurrentActivePeriod] = useState<Stock.PeriodMarkItem | null | undefined>(null);
     const [chartOptions, setChartOptions] = useState<any>({});
+
+    // 根据分时数据合成当日K线
+    const buildDailyKFromTrends = (trends: Stock.TrendItem[], stockSecid: string, zsValue: number): Stock.KLineItem | null => {
+      if (!trends || trends.length === 0) return null;
+      let kp = trends[0].current;
+      let sp = trends[trends.length - 1].current;
+      let zg = trends[0].current;
+      let zd = trends[0].current;
+      let cjl = 0;
+      for (const t of trends) {
+        if (t.current > zg) zg = t.current;
+        if (t.current < zd) zd = t.current;
+        cjl += t.vol || 0;
+      }
+      const zde = sp - zsValue;
+      const zdf = zsValue !== 0 ? (zde / zsValue) * 100 : 0;
+      const zf = zsValue !== 0 ? ((zg - zd) / zsValue) * 100 : 0;
+      const today = new Date();
+      const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      return {
+        secid: stockSecid,
+        type: KLineType.Day,
+        date: dateStr,
+        kp,
+        sp,
+        zg,
+        zd,
+        zs: zsValue,
+        cjl,
+        cje: cjl * 100 * sp,
+        zf,
+        zdf,
+        zde,
+        hsl: 0,
+        chan: 0,
+      } as Stock.KLineItem;
+    };
     
     const { run: handleTrends } = useThrottleFn(
       (trendd?: Stock.TrendItem[]) => {
@@ -1521,6 +1558,24 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           }
           updateTrendsOption(newTrendData);
         });
+
+        // 同步更新日线K线（如果最后一根是今日合成的）
+        const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
+        const dayKlines = klineData.klines[dayIndex];
+        if (dayKlines && dayKlines.length > 0) {
+          const today = new Date();
+          const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+          const lastDayK = dayKlines[dayKlines.length - 1];
+          if (lastDayK.date === todayStr) {
+            const zsValue = dayKlines.length > 1 ? dayKlines[dayKlines.length - 2].sp : (trends[0]?.last || 0);
+            const dailyK = buildDailyKFromTrends(trends, secid, zsValue);
+            if (dailyK) {
+              const newDayKlines = [...dayKlines];
+              newDayKlines[newDayKlines.length - 1] = dailyK;
+              handeKline({ ks: newDayKlines, kt: KLineType.Day });
+            }
+          }
+        }
       },
       {
         wait: 500,
@@ -1528,7 +1583,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     );
 
     const [requestTrends, setRequestTrends] = useState(false);
-    const [requestKLines, setRequestKLines] = useState(false);
+    const [requestKLines, setRequestKLines] = useState(DefaultKTypes.map(() => false));
     const { run: updateTrendsOption } = useThrottleFn(
       (data: any) => {
         // 需要更新zs
@@ -1657,6 +1712,19 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         //     ks = ks.slice(0, stopIndex + 1);
         //   }
         // }
+        // 如果是日线且分时数据存在，检查是否需要从分时数据合成当日K线
+        if (kt == KLineType.Day && trendData.trends.length > 0) {
+          const today = new Date();
+          const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+          const lastDate = ks[ks.length - 1]?.date;
+          if (lastDate !== todayStr) {
+            const zsValue = ks[ks.length - 1]?.sp || trendData.trends[0].last || 0;
+            const dailyK = buildDailyKFromTrends(trendData.trends, secid, zsValue);
+            if (dailyK) {
+              ks = [...ks, dailyK];
+            }
+          }
+        }
         // 更新k线描述信息
         Helpers.Tech.DescribeKlines(ks);
         Helpers.Tech.DetermineKlines(ks);
@@ -1709,7 +1777,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             updateKLineOption(kIndex, newKlineData);
           });
         });
-        setRequestKLines(false);
+        const resetRequestKLines = [...requestKLines];
+        resetRequestKLines[kIndex] = false;
+        setRequestKLines(resetRequestKLines);
       },
       {
         wait: 500,
@@ -1781,8 +1851,10 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           if (klineData.klines[i] && klineData.klines[i].length) {
             // updateKLineOption(klineData);
           } else {
-            if (!requestKLines) {
-              setRequestKLines(true);
+            if (!requestKLines[i]) {
+              const newRequestKLines = [...requestKLines];
+              newRequestKLines[i] = true;
+              setRequestKLines(newRequestKLines);
               runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[i], klineData.count[i]);
             }
           }
@@ -1803,8 +1875,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
 
     useEffect(() => {
       if (trainMode) {
-        if (!requestKLines) {
-          setRequestKLines(true);
+        const mint30Index = DefaultKTypes.indexOf(KLineType.Mint30);
+        if (!requestKLines[mint30Index]) {
+          const newRequestKLines = [...requestKLines];
+          newRequestKLines[mint30Index] = true;
+          setRequestKLines(newRequestKLines);
           runGetKline(kLineApiSourceSetting, secid, KLineType.Mint30, 100000);
         }
       }
@@ -1835,15 +1910,17 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const stype = Helpers.Stock.GetStockType(secid);
     const isUSStock = stype === StockMarketType.US || stype === StockMarketType.USZindex;
     const klineCallback = () => {
-      if (typeIndex !== 0 && !requestKLines) {
-        setRequestKLines(true);
+      if (typeIndex !== 0 && !requestKLines[typeIndex]) {
+        const newRequestKLines = [...requestKLines];
+        newRequestKLines[typeIndex] = true;
+        setRequestKLines(newRequestKLines);
         runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[typeIndex], klineData.count[typeIndex]);
       }
     };
     
     // 两个 Hook 都调用，但根据股票类型只启用其中一个
-    // useWorkDayTimeToDo(isUSStock ? () => {} : klineCallback, isUSStock ? null : CONST.DEFAULT.STOCK_TREND_DELAY);
-    // useUSWorkDayTimeToDo(isUSStock ? klineCallback : () => {}, isUSStock ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
+    useWorkDayTimeToDo(isUSStock ? () => {} : klineCallback, isUSStock ? null : CONST.DEFAULT.STOCK_TREND_DELAY);
+    useUSWorkDayTimeToDo(isUSStock ? klineCallback : () => {}, isUSStock ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
 
     const [lineEnabled, setLineEnabled] = useState(false);
     const changeLineEnabled = useCallback(

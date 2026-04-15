@@ -141,14 +141,17 @@ class AkshareAPI:
                 else:
                     date_str = str(date_val)
                 
+                # 腾讯接口列名为 amount，实际表示成交量（手）
+                cjl = int(row.get("amount", 0) or 0)
+                sp = float(row.get("close", 0) or 0)
                 klines.append({
                     "date": date_str,
                     "kp": float(row.get("open", 0) or 0),
-                    "sp": float(row.get("close", 0) or 0),
+                    "sp": sp,
                     "zg": float(row.get("high", 0) or 0),
                     "zd": float(row.get("low", 0) or 0),
-                    "cjl": int(row.get("volume", 0) or 0),
-                    "cje": float(row.get("amount", 0) or 0) if "amount" in row else 0,
+                    "cjl": cjl,
+                    "cje": round(cjl * 100 * sp, 2),  # 成交额 = 成交量(手) * 100股 * 收盘价
                     "zdf": float(row.get("change_pct", 0) or 0) if "change_pct" in row else 0,
                     "zde": float(row.get("change", 0) or 0) if "change" in row else 0,
                     "hsl": 0,  # 腾讯接口不返回换手率
@@ -169,9 +172,11 @@ class AkshareAPI:
             'high': 'max',
             'low': 'min',
             'close': 'last',
-            'volume': 'sum',
-            'amount': 'sum' if 'amount' in df.columns else 'sum'
+            'amount': 'sum',
         })
+        # 删除没有交易数据的空周（amount为0或价格为NaN的）
+        weekly = weekly.dropna(subset=['open', 'high', 'low', 'close'])
+        weekly = weekly[weekly['amount'] > 0]
         weekly.reset_index(inplace=True)
         weekly['date'] = weekly['date'].dt.strftime('%Y-%m-%d')
         return weekly
@@ -188,9 +193,11 @@ class AkshareAPI:
             'high': 'max',
             'low': 'min',
             'close': 'last',
-            'volume': 'sum',
-            'amount': 'sum' if 'amount' in df.columns else 'sum'
+            'amount': 'sum',
         })
+        # 删除没有交易数据的空月（amount为0或价格为NaN的）
+        monthly = monthly.dropna(subset=['open', 'high', 'low', 'close'])
+        monthly = monthly[monthly['amount'] > 0]
         monthly.reset_index(inplace=True)
         monthly['date'] = monthly['date'].dt.strftime('%Y-%m-%d')
         return monthly
