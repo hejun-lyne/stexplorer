@@ -1,7 +1,7 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import classnames from 'classnames';
 import { useSelector, useDispatch } from 'react-redux';
-import { InputNumber, Radio, Badge, Switch, Slider, TimePicker, Input, Button, DatePicker } from 'antd';
+import { InputNumber, Radio, Badge, Switch, Slider, TimePicker, Input, Button, DatePicker, Alert, message } from 'antd';
 import moment from 'moment';
 import dayjs from 'dayjs';
 
@@ -16,8 +16,7 @@ import { setSystemSettingAction } from '@/actions/setting';
 import { StoreState } from '@/reducers/types';
 import * as Enums from '@/utils/enums';
 import styles from './index.scss';
-import * as Services from '@/services';
-import { saveBaiduTokensAction } from '@/actions/baidu';
+import { saveBaiduTokensAction, clearBaiduTokensAction, loadBaiduTokensAction } from '@/actions/baidu';
 import StorageSwitch from '../FullHome/Github/StorageSwitch';
 
 export interface SettingContentProps {
@@ -96,27 +95,31 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     });
   }
 
-  const { clientId, clientSecret, redirectUri, accessToken } = useSelector((state: StoreState) => state.baidu);
-  const openBaiduLogin = useCallback(() => {
-    onOpenUrl(`https://openapi.baidu.com/oauth/2.0/authorize?response_type=code&client_id=${clientId}&redirect_uri=oob&scope=netdisk`);
-  }, [clientId]);
-  const [bdCode, setBdCode] = useState('');
-  const [bdText, setBdText] = useState(accessToken ? '验证通过' : '开始校验');
-  function confirmBaiduCode() {
-    setBdText('开始校验');
-    if (bdCode.length == 0) {
+  // 百度网盘 Access Token
+  const { accessToken } = useSelector((state: StoreState) => state.baidu);
+  const [bdTokenInput, setBdTokenInput] = useState('');
+  
+  // 加载时读取本地缓存的 token
+  useEffect(() => {
+    dispatch(loadBaiduTokensAction());
+  }, [dispatch]);
+  
+  // 保存 Access Token
+  const handleSaveBaiduToken = useCallback(() => {
+    if (!bdTokenInput.trim()) {
+      message.warning('请输入 Access Token');
       return;
     }
-    Services.Baidu.requestOAuthTokens(bdCode, clientId, clientSecret, redirectUri).then((res) => {
-      if (!res) {
-        setBdText('验证失败');
-      } else {
-        setBdText('验证通过');
-        dispatch(saveBaiduTokensAction(res));
-      }
-      return res;
-    });
-  }
+    dispatch(saveBaiduTokensAction(bdTokenInput.trim()));
+    message.success('Access Token 已保存');
+    setBdTokenInput('');
+  }, [bdTokenInput, dispatch]);
+  
+  // 清除 Access Token
+  const handleClearBaiduToken = useCallback(() => {
+    dispatch(clearBaiduTokensAction());
+    message.success('Access Token 已清除');
+  }, [dispatch]);
   const onChangeTrainDate = useCallback((d: moment.Moment | null) => {
     if (d) {
       const nd = d.format('YYYY-MM-DD');
@@ -128,9 +131,46 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
       <style>{` html { font-size: ${baseFontSize}px }`}</style>
       <div className={styles.content}>
         <StandCard icon={<DataSourceIcon />} title="百度云盘">
-          <a onClick={openBaiduLogin}>登录并获取授权码</a>
-          <Input placeholder="输入授权码" onChange={(e) => setBdCode(e.target.value)} />
-          <Button onClick={confirmBaiduCode}>{bdText}</Button>
+          <div className={classnames(styles.setting, 'card-body')}>
+            <section>
+              <label>Access Token：</label>
+              {accessToken ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ color: '#52c41a' }}>✓ 已配置</span>
+                  <Button size="small" onClick={handleClearBaiduToken} danger>
+                    清除
+                  </Button>
+                </div>
+              ) : (
+                <span style={{ color: '#999' }}>未配置</span>
+              )}
+            </section>
+            <section>
+              <Input.Password
+                placeholder="输入百度网盘 Access Token"
+                value={bdTokenInput}
+                onChange={(e) => setBdTokenInput(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <Button type="primary" onClick={handleSaveBaiduToken} disabled={!bdTokenInput.trim()}>
+                保存
+              </Button>
+            </section>
+            <Alert
+              message="如何获取 Access Token"
+              description={
+                <ol style={{ paddingLeft: 16, margin: 0 }}>
+                  <li>访问百度网盘开放平台：<a onClick={() => onOpenUrl('https://openapi.baidu.com/oauth/2.0/authorize?response_type=token&client_id=XRUlsAlaWm5XUd4QehFDQihKwhqhOdLq&redirect_uri=oob&scope=netdisk')}>点击获取 Token</a></li>
+                  <li>登录百度账号并授权应用</li>
+                  <li>授权成功后，从浏览器地址栏复制 access_token 参数值</li>
+                  <li>将复制的 Token 粘贴到上方输入框并保存</li>
+                </ol>
+              }
+              type="info"
+              showIcon
+              style={{ marginTop: 8 }}
+            />
+          </div>
         </StandCard>
         <StandCard icon={<DataSourceIcon />} title="训练模式">
           <div className={classnames(styles.setting, 'card-body')}>

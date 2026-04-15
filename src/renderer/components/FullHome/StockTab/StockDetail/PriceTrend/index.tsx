@@ -1773,7 +1773,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           if (!trendData.trends.length) {
             if (!requestTrends) {
               setRequestTrends(true);
-              runGetTrends(secid);
+              runGetTrends(kLineApiSourceSetting, secid);
             }
           }
           // updateTrendsOption(trendData);
@@ -1811,41 +1811,39 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     }, [trainMode]);
 
     // 定时更新
-    useInterval(
-      () => {
-        if (!Utils.JudgeWorkDayTime(new Date().getTime())) {
-          // 非交易时间
-          return;
-        }
-        if (typeIndex === 0) {
-          if (!requestTrends) {
-            setRequestTrends(true);
-            runGetTrends(secid);
-          }
+    // useInterval(
+    //   () => {
+    //     if (!Utils.JudgeWorkDayTime(new Date().getTime())) {
+    //       // 非交易时间
+    //       return;
+    //     }
+    //     if (typeIndex === 0) {
+    //       if (!requestTrends) {
+    //         setRequestTrends(true);
+    //         runGetTrends(kLineApiSourceSetting, secid);
+    //       }
           
-        } else {
-          if (!requestKLines) {
-            setRequestKLines(true);
-            runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[typeIndex], klineData.count[typeIndex]);
-          }
-        }
-      },
-      active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
-    );
-    // if (!useSina) {
-      const stype = Helpers.Stock.GetStockType(secid);
-      const func = stype == StockMarketType.US || stype == StockMarketType.USZindex ? useUSWorkDayTimeToDo : useWorkDayTimeToDo;
-      func(() => {
-        if (typeIndex === 0) {
-          // runGetTrends(secid);
-        } else {
-          if (!requestKLines) {
-            setRequestKLines(true);
-            runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[typeIndex], klineData.count[typeIndex]);
-          }
-        }
-      }, CONST.DEFAULT.STOCK_TREND_DELAY);
-    // }
+    //     } else {
+    //       if (!requestKLines) {
+    //         setRequestKLines(true);
+    //         runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[typeIndex], klineData.count[typeIndex]);
+    //       }
+    //     }
+    //   },
+    //   active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
+    // );
+    const stype = Helpers.Stock.GetStockType(secid);
+    const isUSStock = stype === StockMarketType.US || stype === StockMarketType.USZindex;
+    const klineCallback = () => {
+      if (typeIndex !== 0 && !requestKLines) {
+        setRequestKLines(true);
+        runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[typeIndex], klineData.count[typeIndex]);
+      }
+    };
+    
+    // 两个 Hook 都调用，但根据股票类型只启用其中一个
+    // useWorkDayTimeToDo(isUSStock ? () => {} : klineCallback, isUSStock ? null : CONST.DEFAULT.STOCK_TREND_DELAY);
+    // useUSWorkDayTimeToDo(isUSStock ? klineCallback : () => {}, isUSStock ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
 
     const [lineEnabled, setLineEnabled] = useState(false);
     const changeLineEnabled = useCallback(

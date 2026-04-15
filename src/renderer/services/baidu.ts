@@ -85,10 +85,10 @@ export async function createDir(accessToken: string, dir: string) {
       if (res.res1.errno == 0) {
         res = await uploadFileStep3(res);
         console.log('step3: ' + JSON.stringify(res));
-        if (res.res3) {
+        if (res.res3 && res.res3.errno === 0) {
           return res.res3;
         } else {
-          throw new Error('创建文件记录失败');
+          throw new Error('创建文件记录失败: ' + (res.res3?.errno ? '错误码 ' + res.res3.errno : '未知错误'));
         }
       } else {
         return res.res1;

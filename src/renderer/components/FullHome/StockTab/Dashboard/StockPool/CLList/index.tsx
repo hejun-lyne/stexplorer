@@ -237,7 +237,7 @@ const CLList: React.FC<CLListProps> = ({ onOpenStock, active }) => {
         </Col>
       </Row>
       <div className={classNames(styles.table, styles.moreheader)}>
-        {showList.map((s) => (
+        {showList?.map((s) => (
           <Row key={s.secid} className={styles.row}>
             <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
               {s.name}

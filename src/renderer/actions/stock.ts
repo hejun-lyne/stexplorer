@@ -169,9 +169,11 @@ export function syncRemoteTrainingsAction(): ThunkAction {
           if (!content) {
             // 读取数据失败
             dispatch({ type: SET_STOCK_SYNING, payload: { v: false, t: '读取trainings数据失败' } });
+            return null;
           }
-          if (content && content.data) {
-            content?.data.forEach((act: Stock.QuantActionItem) => {
+          // 确保 data 是数组
+          if (content.data && Array.isArray(content.data)) {
+            content.data.forEach((act: Stock.QuantActionItem) => {
               act.day = moment(act.day);
               act.holds = act.holds.map((h) => {
                 return { ...h, day: moment(h.day) };
@@ -179,7 +181,8 @@ export function syncRemoteTrainingsAction(): ThunkAction {
             });
             return content;
           } else {
-            return null;
+            // 数据格式不正确，返回空数组
+            return { data: [], lastModified: content.lastModified };
           }
         })
         .then((content) => {

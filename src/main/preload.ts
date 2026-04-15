@@ -199,5 +199,13 @@ contextBridge.exposeInMainWorld('contextModules', {
     async sqliteBackup(backupPath: string) {
       return ipcRenderer.invoke('sqlite-backup', { backupPath });
     },
+    // 获取本地存储路径
+    async getLocalStoragePath() {
+      return ipcRenderer.invoke('get-local-storage-path');
+    },
+    // 获取本地存储所有文件内容
+    async getLocalStorageFiles() {
+      return ipcRenderer.invoke('get-local-storage-files');
+    },
   },
 });

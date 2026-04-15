@@ -274,6 +274,28 @@ async function init() {
     }
   });
   
+  // 获取本地存储路径
+  ipcMain.handle('get-local-storage-path', () => {
+    try {
+      const storagePath = localFileStorage.getStoragePath();
+      return { success: true, path: storagePath };
+    } catch (error: any) {
+      console.error('[Main] Error getting storage path:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
+  // 获取本地存储所有文件内容（用于同步到百度云盘）
+  ipcMain.handle('get-local-storage-files', () => {
+    try {
+      const files = localFileStorage.getLocalStorageFiles();
+      return { success: true, files };
+    } catch (error: any) {
+      console.error('[Main] Error getting storage files:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
   ipcMain.handle('run-python-script', async (event, config) => {
     return new Promise((resolve, reject) => {
       // 获取 Python 路径，优先使用环境变量，否则使用默认路径

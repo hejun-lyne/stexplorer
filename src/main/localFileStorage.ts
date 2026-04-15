@@ -163,6 +163,44 @@ export function deleteLocalData(table: string, id?: number | string | object): b
   }
 }
 
+// 读取所有本地存储文件内容（用于同步到百度云盘）
+export function getLocalStorageFiles(): { name: string; content: string }[] {
+  try {
+    // 确保存储目录已初始化
+    if (!dataDir) {
+      initLocalFileStorage();
+    }
+    
+    const files: { name: string; content: string }[] = [];
+    
+    function readDir(dir: string, prefix: string = '') {
+      if (!fs.existsSync(dir)) return;
+      const items = fs.readdirSync(dir);
+      for (const item of items) {
+        const fullPath = path.join(dir, item);
+        const relPath = prefix ? `${prefix}/${item}` : item;
+        if (fs.statSync(fullPath).isDirectory()) {
+          readDir(fullPath, relPath);
+        } else if (item.endsWith('.json')) {
+          // 只读取 JSON 文件
+          try {
+            const content = fs.readFileSync(fullPath, 'utf-8');
+            files.push({ name: relPath, content });
+          } catch (error) {
+            console.error(`[LocalFileStorage] 读取文件失败: ${relPath}`, error);
+          }
+        }
+      }
+    }
+    
+    readDir(dataDir);
+    return files;
+  } catch (error) {
+    console.error('[LocalFileStorage] 读取所有文件失败:', error);
+    return [];
+  }
+}
+
 // 获取存储统计信息
 export function getLocalStorageStats(): { size: number; tables: string[]; files: string[] } {
   try {

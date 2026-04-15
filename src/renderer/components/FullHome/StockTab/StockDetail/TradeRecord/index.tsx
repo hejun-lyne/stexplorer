@@ -62,7 +62,7 @@ const TradeRecord: React.FC<TradeRecordProps> = React.memo(({ active, showSeats,
     }
   };
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
-  const { run: runGetStockDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, detail.secid), {
+  const { run: runGetStockDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, stock.secid), {
     throwOnError: true,
     manual: true,
     onSuccess: (d) => {
@@ -71,25 +71,27 @@ const TradeRecord: React.FC<TradeRecordProps> = React.memo(({ active, showSeats,
       }
     },
     pollingWhenHidden: false,
-    cacheKey: `GetStockDetail/${detail.secid}`,
+    cacheKey: `GetStockDetail/${stock.secid}`,
   })
   const { run: runGetStockTradesFromEastmoney } = useRequest(Services.Stock.GetStockTradesFromEastmoney, {
     throwOnError: true,
     manual: true,
     onSuccess: (values) => mergeTrades(values, true),
     pollingWhenHidden: false,
-    cacheKey: `GetStockTradesFromEastmoney/${detail.secid}`,
+    cacheKey: `GetStockTradesFromEastmoney/${stock.secid}`,
   });
 
   const stype = Helpers.Stock.GetStockType(detail.secid);
-  const func = stype == StockMarketType.US || stype == StockMarketType.USZindex ? useUSWorkDayTimeToDo : useWorkDayTimeToDo;
-  func(
-    () => {
-      runGetStockDetail();
-      runGetStockTradesFromEastmoney(detail.secid, 14);
-    },
-    active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
-  );
+  const isUSStock = stype === StockMarketType.US || stype === StockMarketType.USZindex;
+  const callback = () => {
+    runGetStockDetail();
+    runGetStockTradesFromEastmoney(detail.secid, 14);
+  };
+  const delay = active ? CONST.DEFAULT.STOCK_TREND_DELAY : null;
+
+  // 两个 Hook 都调用，但根据股票类型只启用其中一个
+  // useWorkDayTimeToDo(isUSStock ? () => {} : callback, isUSStock ? null : delay);
+  // useUSWorkDayTimeToDo(isUSStock ? callback : () => {}, isUSStock ? delay : null);
 
   useEffect(() => {
     runGetStockTradesFromEastmoney(detail.secid, 14);

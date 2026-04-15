@@ -1,8 +1,7 @@
 declare namespace BaiDuDisk {
+  // 直接使用 Access Token 方式
   export interface Tokens {
-    code: string; // 授权码
     accessToken: string;
-    refreshToken: string;
     updateTime: string;
   }
 }

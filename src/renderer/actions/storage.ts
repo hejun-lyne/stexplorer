@@ -6,6 +6,7 @@ import { ThunkAction } from '@/reducers/types';
 import * as Helpers from '@/helpers';
 import ThingsStorage from '@/services/things';
 import { Storage } from '@/services/storage';
+import * as LocalStorageSync from '@/services/localStorageSync';
 import { batch } from 'react-redux';
 import { syncRemoteFavorSitesAction } from './site';
 import { syncRemoteStocksAction, syncRemoteTradingsAction, syncRemoteTrainingsAction } from './stock';
@@ -287,8 +288,6 @@ export function migrateFromGithubToLocalAction(): ThunkAction {
 
 // ===== 百度云盘同步功能 =====
 
-import * as LocalStorageSync from '@/services/localStorageSync';
-
 // 更新同步配置
 export function updateSyncConfigAction(config: Partial<{
   enabled: boolean;
@@ -429,11 +428,15 @@ export function loadSyncConfigAction(): ThunkAction {
 
 // 获取本地存储路径
 async function getLocalStoragePath(): Promise<string> {
-  // 使用 IPC 获取存储路径
-  const { ipcRenderer } = window.contextModules.electron;
-  // 这里返回默认路径，实际应该通过 IPC 获取
-  // macOS: ~/Library/Application Support/STExplorer/storage
-  // Windows: %APPDATA%/STExplorer/storage
-  // Linux: ~/.config/STExplorer/storage
-  return '';
+  try {
+    const { electron } = window.contextModules;
+    const result = await electron.getLocalStoragePath();
+    if (result.success) {
+      return result.path;
+    }
+    throw new Error(result.error || '获取存储路径失败');
+  } catch (error) {
+    console.error('[Storage] 获取本地存储路径失败:', error);
+    throw error;
+  }
 }
