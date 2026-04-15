@@ -31,40 +31,63 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [filterIndustry, setFilterIndustry] = useState<string>('');
   const [hybks, setHybks] = useState<Record<string, number>>({});
   const [sBks, setSBks] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [firstAppearMap, setFirstAppearMap] = useState<Record<string, string>>({});
+
+  const getTradingDays = useCallback((start: string, end: string) => {
+    let count = 0;
+    let d = moment(start, 'YYYYMMDD');
+    const e = moment(end, 'YYYYMMDD');
+    while (d && d.isBefore(e, 'day')) {
+      const day = d.day();
+      if (day !== 0 && day !== 6) {
+        count++;
+      }
+      d = d.add(1, 'day');
+    }
+    return count;
+  }, []);
+
+  // 自动获取下一个日期的数据
+  const fetchNext = useCallback(
+    (nextDate: string, nextPageSize: number) => {
+      setTimeout(() => {
+        runGetStocks(nextPageSize, nextDate);
+      }, 200);
+    },
+    []
+  );
+
   const { run: runGetStocks } = useRequest(Services.Stock.GeQSStocks, {
     throwOnError: true,
     manual: true,
-    onSuccess: (data) => {
+    onSuccess: (data, params) => {
+      const currentPageSize = params[0] as number;
+      const currentDate = params[1] as string;
+      
       if (data.arr) {
-        const nm = data.to == data.arr.length;
-        const idx = dates.indexOf(date);
-        if (nm) {
-          if (idx == dates.length - 1) {
-            // 已经是最后了
-            setNoMore(nm);
-          } else {
-            // 继续下一个
-            setDate(dates[idx + 1]);
-          }
-        }
-
-        // 合并数据
-        let sts = data.arr;
-        if (idx != 0) {
-          sts = ([] as Stock.QSItem[]).concat(stocks);
-          const secids = sts.map((s) => s.secid);
+        const isComplete = data.to == data.arr.length;
+        const dateIdx = dates.indexOf(currentDate);
+        
+        // 合并数据（去重：同一股票保留最新数据）
+        let mergedStocks = data.arr;
+        if (stocks.length > 0) {
+          mergedStocks = [...stocks];
+          const secids = mergedStocks.map((s) => s.secid);
           data.arr.forEach((s) => {
-            const idx = secids.indexOf(s.secid);
-            if (idx != -1) {
-              // 替换
-              sts.splice(idx, 1, s);
+            const existIdx = secids.indexOf(s.secid);
+            if (existIdx != -1) {
+              // 替换为最新数据
+              mergedStocks.splice(existIdx, 1, s);
             } else {
-              sts.push(s);
+              mergedStocks.push(s);
             }
           });
         }
+        
+        // 重新计算板块统计
         const bks = {} as Record<string, number>;
-        sts.forEach((s) => {
+        mergedStocks.forEach((s) => {
           if (bks[s.hybk]) {
             bks[s.hybk] = bks[s.hybk] + 1;
           } else {
@@ -72,27 +95,64 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           }
         });
         const nsBks = sBks.filter((s) => Object.keys(bks).indexOf(s) != -1);
+        
+        // 更新首次出现日期
+        setFirstAppearMap((prev) => {
+          const next = { ...prev };
+          data.arr.forEach((s) => {
+            if (!next[s.secid]) {
+              next[s.secid] = currentDate;
+            }
+          });
+          return next;
+        });
+
         batch(() => {
           setHybks({ ...bks });
           setSBks(nsBks);
-          setStocks(sts);
+          setStocks(mergedStocks);
         });
+
+        // 判断是否继续获取
+        if (isComplete) {
+          if (dateIdx == dates.length - 1) {
+            // 所有日期都已获取完成
+            setNoMore(true);
+            setLoading(false);
+          } else {
+            // 当前日期获取完成，继续下一个日期
+            const nextDate = dates[dateIdx + 1];
+            setDate(nextDate);
+            setPageSize(60);
+            fetchNext(nextDate, 60);
+          }
+        } else {
+          // 当前日期还有更多数据，增加 pageSize 继续获取
+          const nextPageSize = currentPageSize + 20;
+          setPageSize(nextPageSize);
+          fetchNext(currentDate, nextPageSize);
+        }
       }
     },
   });
-  const { run: mayGetStocks } = useThrottleFn(
-    (ps: number, da: string) => {
-      runGetStocks(ps, da);
-    },
-    {
-      wait: 2000,
+
+  const startQuery = useCallback(() => {
+    if (dates.length) {
+      batch(() => {
+        setNoMore(false);
+        setStocks([]);
+        setDate(dates[0]);
+        setPageSize(60);
+        setLoading(true);
+        setFirstAppearMap({});
+      });
+      // 延迟执行，确保 state 更新完成
+      setTimeout(() => {
+        runGetStocks(60, dates[0]);
+      }, 100);
     }
-  );
-  const loadMore = useCallback(() => {
-    const ps = pageSize + 20;
-    setPageSize(ps);
-    mayGetStocks(ps, date);
-  }, [pageSize, date]);
+  }, [dates, runGetStocks]);
+
   const onChangeDate = useCallback(
     (d: moment.Moment | null, isStart = true) => {
       if (!d) {
@@ -144,16 +204,6 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     },
     [dates]
   );
-  const startQuery = useCallback(() => {
-    if (dates.length) {
-      batch(() => {
-        setNoMore(false);
-        setDate(dates[0]);
-        setPageSize(60);
-        mayGetStocks(60, dates[0]);
-      });
-    }
-  }, [dates]);
 
   const [kview, setKView] = useState(false);
   const toggleBK = useCallback(
@@ -174,6 +224,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const nextDate = useCallback(() => {
     setDates([moment(dates[0], 'YYYYMMDD').add(1, 'd').format('YYYYMMDD')]);
   }, [dates]);
+  
   return (
     <>
       <div className={styles.header}>
@@ -206,7 +257,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           onClick={() => setKView(!kview)}
           className={styles.toggleK}
         />
-        <Button type="primary" onClick={startQuery}>
+        <Button type="primary" onClick={startQuery} loading={loading}>
           查询
         </Button>
       </div>
@@ -234,7 +285,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           details={stocks.filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1)) as Stock.DetailItem[]}
           active={active}
           noMore={noMore}
-          onLoadMore={loadMore}
+          onLoadMore={() => {}}
           onOpenStock={onOpenStock}
         />
       ) : (
@@ -249,11 +300,13 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
             <Col span={2}>量比</Col>
             <Col span={2}>是否新高</Col>
             <Col span={2}>连板统计</Col>
-            <Col span={6}>理由</Col>
+            <Col span={2}>入选天数</Col>
+            <Col span={4}>理由</Col>
           </Row>
           <div className={classNames(styles.table, styles.qsmoreheader)}>
             {stocks
               .filter((s) => (filterIndustry == '' ? true : filterIndustry.indexOf(s.hybk) != -1))
+              .filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1))
               .map((s) => (
                 <Row key={s.code} className={styles.row}>
                   <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
@@ -271,12 +324,18 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                   <Col span={2}>{s.lb.toFixed(2)}</Col>
                   <Col span={2}>{s.nh ? '是' : '否'}</Col>
                   <Col span={2}>{s.zttj.days + '天' + s.zttj.ct + '板'}</Col>
-                  <Col span={6}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
+                  <Col span={2}>{firstAppearMap[s.secid] ? getTradingDays(firstAppearMap[s.secid], date) + '天' : '-'}</Col>
+                  <Col span={4}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
                 </Row>
               ))}
-            {!noMore && (
-              <div className={styles.loadmore} onClick={loadMore}>
-                <span>加载更多</span>
+            {!noMore && !loading && (
+              <div className={styles.loadmore}>
+                <span>数据加载中...</span>
+              </div>
+            )}
+            {noMore && (
+              <div className={styles.loadmore}>
+                <span>已加载全部数据</span>
               </div>
             )}
           </div>
