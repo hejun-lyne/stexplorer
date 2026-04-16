@@ -3202,3 +3202,46 @@ export function LYTIndicator(klines: Stock.KLineItem[]) {
   return result;
 }
 
+export async function FilterStocksByMA(secids: string[], threshold = 0.05, klimit = 80) {
+  const results = await Adapter.ChokeGroupAdapter(
+    secids.map((secid) => async () => {
+      try {
+        const check = await CheckStockMA(secid, threshold, klimit);
+        if (check && (check.ma40 || check.ma60)) {
+          return secid;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    }),
+    10
+  );
+  return results.filter((r): r is string => r !== null);
+}
+
+export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80) {
+  try {
+    const { ks } = await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, klimit);
+    if (!ks || ks.length < 60) {
+      return null;
+    }
+    const sps = ks.map((k) => k.sp);
+    const ma40 = Utils.calculateMA(40, sps);
+    const ma60 = Utils.calculateMA(60, sps);
+    const latestSp = sps[sps.length - 1];
+    const latestMa40 = ma40[ma40.length - 1];
+    const latestMa60 = ma60[ma60.length - 1];
+    if (Number.isNaN(latestMa40) || Number.isNaN(latestMa60)) {
+      return null;
+    }
+    return {
+      secid,
+      ma40: Math.abs(latestSp / latestMa40 - 1) <= threshold,
+      ma60: Math.abs(latestSp / latestMa60 - 1) <= threshold,
+    };
+  } catch {
+    return null;
+  }
+}
+

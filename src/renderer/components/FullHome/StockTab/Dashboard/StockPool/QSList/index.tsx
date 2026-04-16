@@ -4,6 +4,7 @@ import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
 import * as Utils from '@/utils';
+import * as Helpers from '@/helpers';
 import { useState } from 'react';
 import { Stock } from '@/types/stock';
 import { useRequest, useThrottleFn } from 'ahooks';
@@ -33,6 +34,10 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [sBks, setSBks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [firstAppearMap, setFirstAppearMap] = useState<Record<string, string>>({});
+  const [maFilterSecids, setMaFilterSecids] = useState<string[]>([]);
+  const [maFilterLoading, setMaFilterLoading] = useState(false);
+  const [maResults, setMaResults] = useState<Record<string, { ma40: boolean; ma60: boolean }>>({});
+  const [maPending, setMaPending] = useState<Record<string, boolean>>({});
 
   const getTradingDays = useCallback((start: string, end: string) => {
     let count = 0;
@@ -145,6 +150,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         setPageSize(60);
         setLoading(true);
         setFirstAppearMap({});
+        setMaFilterSecids([]);
+        setMaResults({});
+        setMaPending({});
       });
       // 延迟执行，确保 state 更新完成
       setTimeout(() => {
@@ -224,6 +232,57 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const nextDate = useCallback(() => {
     setDates([moment(dates[0], 'YYYYMMDD').add(1, 'd').format('YYYYMMDD')]);
   }, [dates]);
+  const onFilterMA = useCallback(async (checked: boolean) => {
+    if (!checked) {
+      setMaFilterSecids([]);
+      return;
+    }
+    if (stocks.length === 0) {
+      return;
+    }
+    setMaFilterLoading(true);
+    const secids = stocks.map((s) => s.secid);
+    const pendingInit: Record<string, boolean> = {};
+    secids.forEach((id) => {
+      pendingInit[id] = true;
+    });
+    setMaPending(pendingInit);
+    setMaResults({});
+
+    const batchSize = 5;
+    const filtered: string[] = [];
+    for (let i = 0; i < secids.length; i += batchSize) {
+      const batch = secids.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map(async (secid) => {
+          const res = await Helpers.Stock.CheckStockMA(secid);
+          return { secid, res };
+        })
+      );
+      setMaResults((prev) => {
+        const next = { ...prev };
+        setMaPending((pPrev) => {
+          const pNext = { ...pPrev };
+          batchResults.forEach(({ secid, res }) => {
+            delete pNext[secid];
+            if (res) {
+              next[secid] = { ma40: res.ma40, ma60: res.ma60 };
+              if (res.ma40 || res.ma60) {
+                filtered.push(secid);
+              }
+            } else {
+              next[secid] = { ma40: false, ma60: false };
+            }
+          });
+          return pNext;
+        });
+        return next;
+      });
+    }
+    setMaFilterSecids(filtered);
+    setMaFilterLoading(false);
+    setMaPending({});
+  }, [stocks]);
   
   return (
     <>
@@ -260,6 +319,16 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         <Button type="primary" onClick={startQuery} loading={loading}>
           查询
         </Button>
+        &nbsp;
+        <CheckableTag
+          className="edit-tag"
+          checked={maFilterSecids.length > 0}
+          onChange={onFilterMA}
+          style={{ marginTop: 0 }}
+          disabled={maFilterLoading}
+        >
+          {maFilterLoading ? 'MA筛选中...' : 'MA筛选'}
+        </CheckableTag>
       </div>
       {Object.keys(hybks).length > 1 && (
         <div className={styles.tagbar}>
@@ -301,12 +370,15 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
             <Col span={2}>是否新高</Col>
             <Col span={2}>连板统计</Col>
             <Col span={2}>入选天数</Col>
-            <Col span={4}>理由</Col>
+            <Col span={1}>MA40</Col>
+            <Col span={1}>MA60</Col>
+            <Col span={2}>理由</Col>
           </Row>
           <div className={classNames(styles.table, styles.qsmoreheader)}>
             {stocks
               .filter((s) => (filterIndustry == '' ? true : filterIndustry.indexOf(s.hybk) != -1))
               .filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1))
+              .filter((s) => (maFilterSecids.length === 0 ? true : maFilterSecids.indexOf(s.secid) !== -1))
               .map((s) => (
                 <Row key={s.code} className={styles.row}>
                   <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
@@ -324,8 +396,10 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                   <Col span={2}>{s.lb.toFixed(2)}</Col>
                   <Col span={2}>{s.nh ? '是' : '否'}</Col>
                   <Col span={2}>{s.zttj.days + '天' + s.zttj.ct + '板'}</Col>
-                  <Col span={2}>{firstAppearMap[s.secid] ? getTradingDays(firstAppearMap[s.secid], date) + '天' : '-'}</Col>
-                  <Col span={4}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
+                  <Col span={2}>{firstAppearMap[s.secid] ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天' : '-'}</Col>
+                  <Col span={1}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma40 ? '✓' : '✗') : ''}</Col>
+                  <Col span={1}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma60 ? '✓' : '✗') : ''}</Col>
+                  <Col span={2}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
                 </Row>
               ))}
             {!noMore && !loading && (
