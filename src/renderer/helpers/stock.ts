@@ -6,6 +6,7 @@ import * as Services from '@/services';
 import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import * as Indicators from '@/helpers/tech';
+import * as AkshareAPI from '@/services/akshare';
 import dayjs from 'dayjs';
 import {
   setStockConfigAction,
@@ -3222,14 +3223,14 @@ export async function FilterStocksByMA(secids: string[], threshold = 0.05, klimi
 
 export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80) {
   try {
-    const { ks } = await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 60) {
       return null;
     }
     const sps = ks.map((k) => k.sp);
     const ma40 = Utils.calculateMA(40, sps);
     const ma60 = Utils.calculateMA(60, sps);
-    const latestSp = sps[sps.length - 1];
+    const latestZd = ks[ks.length - 1].zd;
     const latestMa40 = ma40[ma40.length - 1];
     const latestMa60 = ma60[ma60.length - 1];
     if (Number.isNaN(latestMa40) || Number.isNaN(latestMa60)) {
@@ -3237,8 +3238,8 @@ export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80)
     }
     return {
       secid,
-      ma40: Math.abs(latestSp / latestMa40 - 1) <= threshold,
-      ma60: Math.abs(latestSp / latestMa60 - 1) <= threshold,
+      ma40: Math.abs(latestZd - latestMa40) / latestZd <= threshold,
+      ma60: Math.abs(latestZd - latestMa60) / latestZd <= threshold,
     };
   } catch {
     return null;

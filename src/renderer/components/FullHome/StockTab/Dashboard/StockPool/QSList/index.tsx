@@ -1,5 +1,5 @@
 import React from 'react';
-import { Row, Col, DatePicker, Select, Button } from 'antd';
+import { Row, Col, DatePicker, Select, Button, InputNumber } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -38,6 +38,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [maFilterLoading, setMaFilterLoading] = useState(false);
   const [maResults, setMaResults] = useState<Record<string, { ma40: boolean; ma60: boolean }>>({});
   const [maPending, setMaPending] = useState<Record<string, boolean>>({});
+  const [maThreshold, setMaThreshold] = useState<number>(5);
 
   const getTradingDays = useCallback((start: string, end: string) => {
     let count = 0;
@@ -153,6 +154,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         setMaFilterSecids([]);
         setMaResults({});
         setMaPending({});
+        setMaThreshold(5);
       });
       // 延迟执行，确保 state 更新完成
       setTimeout(() => {
@@ -255,7 +257,8 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
       const batch = secids.slice(i, i + batchSize);
       const batchResults = await Promise.all(
         batch.map(async (secid) => {
-          const res = await Helpers.Stock.CheckStockMA(secid);
+          const res = await Helpers.Stock.CheckStockMA(secid, maThreshold / 100);
+          console.log('MA check', secid, res);
           return { secid, res };
         })
       );
@@ -329,6 +332,17 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         >
           {maFilterLoading ? 'MA筛选中...' : 'MA筛选'}
         </CheckableTag>
+        <InputNumber
+          size="small"
+          min={0.1}
+          max={50}
+          step={0.1}
+          value={maThreshold}
+          onChange={(v) => setMaThreshold(v || 5)}
+          formatter={(value) => `${value}%`}
+          parser={(value) => parseFloat(value?.replace('%', '') || '5')}
+          style={{ width: 60, marginLeft: 4 }}
+        />
       </div>
       {Object.keys(hybks).length > 1 && (
         <div className={styles.tagbar}>
