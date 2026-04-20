@@ -372,7 +372,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           onOpenStock={onOpenStock}
         />
       ) : (
-        <div className={styles.listview}>
+        <>
           <Row className={styles.rowheader}>
             <Col span={2}>名字</Col>
             <Col span={2}>板块</Col>
@@ -427,7 +427,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
               </div>
             )}
           </div>
-        </div>
+        </>
       )}
     </>
   );
