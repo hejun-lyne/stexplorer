@@ -11,6 +11,7 @@ declare namespace IndexScssNamespace {
     content: string;
     header: string;
     hint: string;
+    listview: string;
     loadmore: string;
     moreheader: string;
     name: string;

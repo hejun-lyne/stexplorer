@@ -38,7 +38,17 @@
 }
 
 .qsmoreheader {
-  height: calc(100% - 240px) !important;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto !important;
+}
+
+.listview {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
 }
 
 .row {
