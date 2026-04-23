@@ -191,8 +191,8 @@ export async function GetTrendFromAkshare(secid: string): Promise<{ secid: strin
       current: item.current,
       last: item.last,
       vol: item.vol,
-      average: 0,
-      up: item.current >= item.last ? 1 : -1,
+      average: item.average || 0,
+      up: item.up !== undefined ? item.up : (item.current >= item.last ? 1 : -1),
     }));
     
     return { secid, trends };

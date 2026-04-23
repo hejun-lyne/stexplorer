@@ -221,22 +221,34 @@ class AkshareAPI:
             
             trends = []
             prev_price = None
+            total_money = 0  # 累计成交额
+            total_vol = 0    # 累计成交量
             
             for _, row in df.iterrows():
                 price = float(row.get("成交价格", 0) or 0)
                 vol = int(row.get("成交量", 0) or 0)
                 time_str = row.get("成交时间", "")
                 
+                # 跳过价格为0或成交量为0的异常记录
+                if price <= 0 or vol <= 0:
+                    continue
+                
                 # 判断涨跌：与上一笔价格比较
                 up = 0
                 if prev_price is not None:
                     up = 1 if price >= prev_price else -1
+                
+                # 累计成交额和成交量，计算均价
+                total_money += price * vol * 100  # 成交额 = 价格 * 成交量(手) * 100股
+                total_vol += vol
+                average = total_money / (total_vol * 100) if total_vol > 0 else price
                 
                 trends.append({
                     "datetime": time_str,
                     "current": price,
                     "last": prev_price if prev_price is not None else price,
                     "vol": vol,
+                    "average": round(average, 2),
                     "up": up,
                 })
                 prev_price = price
@@ -257,21 +269,31 @@ class AkshareAPI:
         
         trends = []
         prev_price = None
+        total_money = 0
+        total_vol = 0
         
         for _, row in df.iterrows():
             price = float(row.get("价格", 0) or 0)
             vol = int(row.get("成交量", 0) or 0)
             time_str = row.get("时间", "")
             
+            if price <= 0 or vol <= 0:
+                continue
+            
             up = 0
             if prev_price is not None:
                 up = 1 if price >= prev_price else -1
+            
+            total_money += price * vol * 100
+            total_vol += vol
+            average = total_money / (total_vol * 100) if total_vol > 0 else price
             
             trends.append({
                 "datetime": time_str,
                 "current": price,
                 "last": prev_price if prev_price is not None else price,
                 "vol": vol,
+                "average": round(average, 2),
                 "up": up,
             })
             prev_price = price
