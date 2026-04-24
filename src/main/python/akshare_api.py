@@ -207,55 +207,77 @@ class AkshareAPI:
         """
         获取分时走势数据 - 使用腾讯财经数据源
         
-        使用腾讯财经的分笔数据接口
+        腾讯接口返回分笔成交数据，需按分钟聚合成与东财一致的分钟数据
         """
         try:
-            # 转换为腾讯 symbol 格式
             symbol = convert_secid_to_tx_symbol(secid)
-            
-            # 获取腾讯分笔数据（当日分时）
             df = ak.stock_zh_a_tick_tx_js(symbol=symbol)
             
             if df.empty:
                 return {"error": "No trend data available"}
             
-            trends = []
-            prev_price = None
-            total_money = 0  # 累计成交额
-            total_vol = 0    # 累计成交量
+            today = datetime.now().strftime('%Y-%m-%d')
+            
+            # 按分钟聚合分笔数据
+            minute_map = {}  # key: "HH:MM", value: {"prices": [], "vols": [], "last_price": 0}
             
             for _, row in df.iterrows():
                 price = float(row.get("成交价格", 0) or 0)
                 vol = int(row.get("成交量", 0) or 0)
                 time_str = row.get("成交时间", "")
                 
-                # 跳过价格为0或成交量为0的异常记录
                 if price <= 0 or vol <= 0:
                     continue
                 
-                # 判断涨跌：与上一笔价格比较
-                up = 0
-                if prev_price is not None:
-                    up = 1 if price >= prev_price else -1
+                # 提取分钟级时间 "HH:MM"
+                minute_key = time_str[:5] if len(time_str) >= 5 else time_str
+                
+                if minute_key not in minute_map:
+                    minute_map[minute_key] = {
+                        "prices": [],
+                        "vols": [],
+                        "last_price": price,
+                    }
+                minute_map[minute_key]["prices"].append(price)
+                minute_map[minute_key]["vols"].append(vol)
+                minute_map[minute_key]["last_price"] = price
+            
+            # 按时间排序并生成分钟级趋势数据
+            trends = []
+            prev_minute_close = None
+            total_money = 0
+            total_vol = 0
+            
+            for minute_key in sorted(minute_map.keys()):
+                data = minute_map[minute_key]
+                prices = data["prices"]
+                vols = data["vols"]
+                current = data["last_price"]  # 该分钟最后一笔价格作为收盘价
+                minute_vol = sum(vols)
                 
                 # 累计成交额和成交量，计算均价
-                total_money += price * vol * 100  # 成交额 = 价格 * 成交量(手) * 100股
-                total_vol += vol
-                average = total_money / (total_vol * 100) if total_vol > 0 else price
+                for p, v in zip(prices, vols):
+                    total_money += p * v * 100
+                total_vol += minute_vol
+                average = total_money / (total_vol * 100) if total_vol > 0 else current
                 
+                # last: 上一分钟的收盘价
+                last = prev_minute_close if prev_minute_close is not None else current
+                up = 1 if current >= last else -1
+                
+                # datetime 格式与东财一致: "YYYY-MM-DD HH:MM"
                 trends.append({
-                    "datetime": time_str,
-                    "current": price,
-                    "last": prev_price if prev_price is not None else price,
-                    "vol": vol,
+                    "datetime": f"{today} {minute_key}",
+                    "current": current,
+                    "last": last,
+                    "vol": minute_vol,
                     "average": round(average, 2),
                     "up": up,
                 })
-                prev_price = price
+                prev_minute_close = current
             
             return trends
         except Exception as e:
-            # 如果腾讯接口失败，尝试使用 163 接口作为备用
             try:
                 return AkshareAPI._get_trend_from_163(secid)
             except:
@@ -263,14 +285,14 @@ class AkshareAPI:
     
     @staticmethod
     def _get_trend_from_163(secid: str) -> List[Dict[str, Any]]:
-        """备用：从 163 获取分时数据"""
+        """备用：从 163 获取分时数据，按分钟聚合"""
         code = convert_secid_to_pure_code(secid)
         df = ak.stock_zh_a_tick_163(symbol=code)
         
-        trends = []
-        prev_price = None
-        total_money = 0
-        total_vol = 0
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # 按分钟聚合
+        minute_map = {}
         
         for _, row in df.iterrows():
             price = float(row.get("价格", 0) or 0)
@@ -280,23 +302,43 @@ class AkshareAPI:
             if price <= 0 or vol <= 0:
                 continue
             
-            up = 0
-            if prev_price is not None:
-                up = 1 if price >= prev_price else -1
+            minute_key = time_str[:5] if len(time_str) >= 5 else time_str
             
-            total_money += price * vol * 100
-            total_vol += vol
-            average = total_money / (total_vol * 100) if total_vol > 0 else price
+            if minute_key not in minute_map:
+                minute_map[minute_key] = {"prices": [], "vols": [], "last_price": price}
+            minute_map[minute_key]["prices"].append(price)
+            minute_map[minute_key]["vols"].append(vol)
+            minute_map[minute_key]["last_price"] = price
+        
+        trends = []
+        prev_minute_close = None
+        total_money = 0
+        total_vol = 0
+        
+        for minute_key in sorted(minute_map.keys()):
+            data = minute_map[minute_key]
+            prices = data["prices"]
+            vols = data["vols"]
+            current = data["last_price"]
+            minute_vol = sum(vols)
+            
+            for p, v in zip(prices, vols):
+                total_money += p * v * 100
+            total_vol += minute_vol
+            average = total_money / (total_vol * 100) if total_vol > 0 else current
+            
+            last = prev_minute_close if prev_minute_close is not None else current
+            up = 1 if current >= last else -1
             
             trends.append({
-                "datetime": time_str,
-                "current": price,
-                "last": prev_price if prev_price is not None else price,
-                "vol": vol,
+                "datetime": f"{today} {minute_key}",
+                "current": current,
+                "last": last,
+                "vol": minute_vol,
                 "average": round(average, 2),
                 "up": up,
             })
-            prev_price = price
+            prev_minute_close = current
         
         return trends
     
