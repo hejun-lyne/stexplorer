@@ -118,25 +118,8 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
             onPressEnter={(e) => {
               inputRef.current?.blur();
               const text = e.target.value;
-              if (
-                text.includes('.com') ||
-                text.includes('.cn') ||
-                text.includes('.org') ||
-                text.includes('.tv') ||
-                text.includes('.eth') ||
-                text.includes('.info') ||
-                text.includes('.xyz') ||
-                text.includes('.me') ||
-                text.includes('.net') ||
-                text.includes('.app') ||
-                text.includes('.website') ||
-                text.includes('.io') ||
-                text.includes('.kz') ||
-                text.includes('.top') ||
-                text.includes('.icu') ||
-                text.includes('.cc') ||
-                text.includes('.site')
-              ) {
+              const isUrl = /^(https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,}/i.test(text);
+              if (isUrl) {
                 if (!text.includes('http')) {
                   props.onChangeUrl(`http://${text}`);
                 } else {
