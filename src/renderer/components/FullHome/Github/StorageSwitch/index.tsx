@@ -5,7 +5,7 @@
 import React, { useState, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { Button, Card, Radio, Alert, Descriptions, Tag, message, Modal, Switch, InputNumber, Divider } from 'antd';
-import { CloudOutlined, SyncOutlined, FolderOutlined, ImportOutlined, ExclamationCircleOutlined, CloudUploadOutlined } from '@ant-design/icons';
+import { CloudOutlined, SyncOutlined, FolderOutlined, ImportOutlined, ExclamationCircleOutlined, CloudUploadOutlined, ExportOutlined, UploadOutlined } from '@ant-design/icons';
 import { StoreState } from '@/reducers/types';
 import { 
   switchStorageTypeAction, 
@@ -47,6 +47,8 @@ const StorageSwitch: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [dbStats, setDbStats] = useState<{ size: number; tables: string[]; files?: string[] } | null>(null);
   const [checking, setChecking] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   // 加载同步配置
   useEffect(() => {
@@ -166,6 +168,72 @@ const StorageSwitch: React.FC = () => {
     if (interval && interval >= 1) {
       dispatch(updateSyncConfigAction({ interval: interval * 60 * 1000 }));
     }
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const { electron } = window.contextModules;
+      const result = await electron.dialog.showSaveDialog({
+        title: '导出本地存储数据',
+        defaultPath: `stexplorer-backup-${new Date().toISOString().slice(0, 10)}.zip`,
+        filters: [
+          { name: 'ZIP 压缩包', extensions: ['zip'] },
+          { name: '所有文件', extensions: ['*'] },
+        ],
+      });
+      if (result.canceled || !result.filePath) {
+        setExporting(false);
+        return;
+      }
+      await Helpers.Storage.StorageHelper.ExportLocalStorageToFile(result.filePath);
+      message.success('数据导出成功');
+    } catch (error: any) {
+      message.error('导出失败: ' + error.message);
+      console.error(error);
+    }
+    setExporting(false);
+  };
+
+  const handleImport = async () => {
+    const { electron } = window.contextModules;
+    const result = await electron.dialog.showOpenDialog({
+      title: '导入本地存储数据',
+      filters: [
+        { name: 'ZIP 压缩包', extensions: ['zip'] },
+      ],
+      properties: ['openFile'],
+    });
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return;
+    }
+    const filePath = result.filePaths[0];
+
+    Modal.confirm({
+      title: '确认导入数据',
+      icon: <ExclamationCircleOutlined />,
+      content: (
+        <div>
+          <p>此操作将从备份文件恢复所有本地数据。</p>
+          <p style={{ color: '#ff4d4f' }}>注意：本地存储中的现有数据将被覆盖！</p>
+        </div>
+      ),
+      okText: '确认导入',
+      cancelText: '取消',
+      onOk: async () => {
+        setImporting(true);
+        try {
+          await Helpers.Storage.StorageHelper.ImportLocalStorageFromFile(filePath);
+          message.success('数据导入成功');
+          // 刷新统计信息
+          fetchDbStats();
+        } catch (error: any) {
+          message.error('导入失败: ' + error.message);
+          console.error(error);
+        }
+        setImporting(false);
+      },
+    });
   };
 
   const formatFileSize = (bytes: number): string => {
@@ -323,15 +391,34 @@ const StorageSwitch: React.FC = () => {
             </Descriptions>
           )}
           
-          <Button 
-            icon={<SyncOutlined spin={checking} />} 
-            onClick={fetchDbStats}
-            loading={checking}
-            size="small"
-            style={{ marginTop: 8 }}
-          >
-            刷新统计
-          </Button>
+          <div style={{ marginTop: 8 }}>
+            <Button
+              icon={<ExportOutlined />}
+              onClick={handleExport}
+              loading={exporting}
+              size="small"
+              style={{ marginRight: 8 }}
+            >
+              导出数据
+            </Button>
+            <Button
+              icon={<UploadOutlined />}
+              onClick={handleImport}
+              loading={importing}
+              size="small"
+              style={{ marginRight: 8 }}
+            >
+              导入数据
+            </Button>
+            <Button
+              icon={<SyncOutlined spin={checking} />}
+              onClick={fetchDbStats}
+              loading={checking}
+              size="small"
+            >
+              刷新统计
+            </Button>
+          </div>
         </>
       )}
 

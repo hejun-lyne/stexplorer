@@ -5,6 +5,7 @@
 import { app } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import AdmZip from 'adm-zip';
 
 // 存储目录
 let dataDir: string = '';
@@ -292,6 +293,147 @@ export const TABLE_MAP: Record<string, string> = {
   'store/strategy_groups.json': 'strategy_groups',
 };
 
+// 导出所有本地存储数据到一个 JSON 对象
+export function exportLocalData(): { version: string; exportedAt: string; files: { name: string; content: string }[] } {
+  try {
+    const files = getLocalStorageFiles();
+    return {
+      version: '1.0',
+      exportedAt: new Date().toISOString(),
+      files,
+    };
+  } catch (error) {
+    console.error('[LocalFileStorage] Error exporting data:', error);
+    return { version: '1.0', exportedAt: new Date().toISOString(), files: [] };
+  }
+}
+
+// 从导出的 JSON 数据导入到本地存储
+export function importLocalData(exportedData: { version?: string; files: { name: string; content: string }[] }): boolean {
+  try {
+    // 确保存储目录已初始化
+    if (!dataDir) {
+      initLocalFileStorage();
+    }
+
+    for (const file of exportedData.files) {
+      const filePath = path.join(dataDir, file.name);
+      const dir = path.dirname(filePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(filePath, file.content, 'utf-8');
+      console.log('[LocalFileStorage] Imported:', file.name);
+    }
+
+    console.log('[LocalFileStorage] Import completed, total files:', exportedData.files.length);
+    return true;
+  } catch (error) {
+    console.error('[LocalFileStorage] Error importing data:', error);
+    return false;
+  }
+}
+
+// 导出本地存储数据为 zip 文件
+export function exportLocalDataToZip(zipPath: string): boolean {
+  try {
+    // 确保存储目录已初始化
+    if (!dataDir) {
+      initLocalFileStorage();
+    }
+    const zip = new AdmZip();
+    zip.addLocalFolder(dataDir);
+    zip.writeZip(zipPath);
+    console.log('[LocalFileStorage] Exported to zip:', zipPath);
+    return true;
+  } catch (error) {
+    console.error('[LocalFileStorage] Error exporting to zip:', error);
+    return false;
+  }
+}
+
+// 从 zip 文件导入本地存储数据
+export function importLocalDataFromZip(zipPath: string): boolean {
+  try {
+    // 确保存储目录已初始化
+    if (!dataDir) {
+      initLocalFileStorage();
+    }
+    const zip = new AdmZip(zipPath);
+    zip.extractAllTo(dataDir, true);
+    console.log('[LocalFileStorage] Imported from zip:', zipPath);
+    return true;
+  } catch (error) {
+    console.error('[LocalFileStorage] Error importing from zip:', error);
+    return false;
+  }
+}
+
+// ===== QSList 备份功能 =====
+
+const QSLIST_BACKUP_DIR = 'backups/qslist';
+
+function getQSListBackupDir(): string {
+  if (!dataDir) {
+    initLocalFileStorage();
+  }
+  return path.join(dataDir, QSLIST_BACKUP_DIR);
+}
+
+// 读取某天的 QSList 备份
+export function readQSListBackup(date: string): { lastModified: string; data: any } | null {
+  try {
+    const backupDir = getQSListBackupDir();
+    const filePath = path.join(backupDir, `${date}.json`);
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(content);
+  } catch (error) {
+    console.error(`[LocalFileStorage] Error reading QSList backup for ${date}:`, error);
+    return null;
+  }
+}
+
+// 写入某天的 QSList 备份
+export function writeQSListBackup(date: string, data: any): boolean {
+  try {
+    const backupDir = getQSListBackupDir();
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+    const filePath = path.join(backupDir, `${date}.json`);
+    const content = JSON.stringify({
+      lastModified: new Date().toISOString(),
+      data,
+    }, null, 2);
+    fs.writeFileSync(filePath, content, 'utf-8');
+    console.log('[LocalFileStorage] QSList backup written:', date);
+    return true;
+  } catch (error) {
+    console.error(`[LocalFileStorage] Error writing QSList backup for ${date}:`, error);
+    return false;
+  }
+}
+
+// 列出所有 QSList 备份日期
+export function listQSListBackups(): string[] {
+  try {
+    const backupDir = getQSListBackupDir();
+    if (!fs.existsSync(backupDir)) {
+      return [];
+    }
+    return fs.readdirSync(backupDir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => f.replace('.json', ''))
+      .sort();
+  } catch (error) {
+    console.error('[LocalFileStorage] Error listing QSList backups:', error);
+    return [];
+  }
+}
+
 export default {
   initLocalFileStorage,
   readLocalData,
@@ -299,5 +441,12 @@ export default {
   deleteLocalData,
   getLocalStorageStats,
   backupLocalStorage,
+  exportLocalData,
+  importLocalData,
+  exportLocalDataToZip,
+  importLocalDataFromZip,
+  readQSListBackup,
+  writeQSListBackup,
+  listQSListBackups,
   TABLE_MAP,
 };

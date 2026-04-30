@@ -207,5 +207,33 @@ contextBridge.exposeInMainWorld('contextModules', {
     async getLocalStorageFiles() {
       return ipcRenderer.invoke('get-local-storage-files');
     },
+    // 导出本地存储数据
+    async exportLocalStorage() {
+      return ipcRenderer.invoke('local-storage-export');
+    },
+    // 导入本地存储数据
+    async importLocalStorage(data: { version?: string; files: { name: string; content: string }[] }) {
+      return ipcRenderer.invoke('local-storage-import', { data });
+    },
+    // 导出本地存储数据到指定文件路径
+    async exportLocalStorageToFile(filePath: string) {
+      return ipcRenderer.invoke('local-storage-export-to-file', { filePath });
+    },
+    // 从指定文件路径导入本地存储数据
+    async importLocalStorageFromFile(filePath: string) {
+      return ipcRenderer.invoke('local-storage-import-from-file', { filePath });
+    },
+    // QSList 备份读取
+    async readQSListBackup(date: string) {
+      return ipcRenderer.invoke('qslist-backup-read', { date });
+    },
+    // QSList 备份写入
+    async writeQSListBackup(date: string, data: any) {
+      return ipcRenderer.invoke('qslist-backup-write', { date, data });
+    },
+    // QSList 备份列表
+    async listQSListBackups() {
+      return ipcRenderer.invoke('qslist-backup-list');
+    },
   },
 });

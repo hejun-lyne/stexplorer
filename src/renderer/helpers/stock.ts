@@ -3246,3 +3246,56 @@ export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80)
   }
 }
 
+/**
+ * 检查股票最近3天走势是否为震荡走平或趋势向上，且偏离40日均线不超过3%
+ * @param secid 股票代码
+ * @param maThreshold 偏离40日均线阈值（默认0.03 = 3%）
+ * @param flatThreshold 震荡走平阈值（默认0.02 = 2%）
+ * @param klimit K线数据条数
+ */
+export async function CheckStockRecentTrend(secid: string, maThreshold = 0.03, flatThreshold = 0.02, klimit = 80) {
+  try {
+    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    if (!ks || ks.length < 50) {
+      return null;
+    }
+    const sps = ks.map((k) => k.sp);
+    const ma40 = Utils.calculateMA(40, sps);
+
+    const sp1 = sps[sps.length - 1]; // 最新收盘价
+    const sp2 = sps[sps.length - 2]; // 昨天收盘价
+    const sp3 = sps[sps.length - 3]; // 前天收盘价
+    const latestMa40 = ma40[ma40.length - 1];
+
+    if (Number.isNaN(latestMa40)) {
+      return null;
+    }
+
+    // 趋势向上：最新收盘价 >= 3天前收盘价
+    const isUp = sp1 >= sp3;
+
+    // 震荡走平：最近3天最高价与最低价之差 / 3天前收盘价 <= flatThreshold
+    const recentHigh = Math.max(sp1, sp2, sp3);
+    const recentLow = Math.min(sp1, sp2, sp3);
+    const isFlat = (recentHigh - recentLow) / sp3 <= flatThreshold;
+
+    // 最近3天走势是震荡走平或者趋势向上
+    const trendOK = isUp || isFlat;
+
+    // 不能偏离40日均线超过阈值
+    const ma40Deviation = Math.abs(sp1 - latestMa40) / latestMa40;
+    const ma40OK = ma40Deviation <= maThreshold;
+
+    return {
+      secid,
+      trendOK,
+      ma40OK,
+      isUp,
+      isFlat,
+      ma40Deviation,
+    };
+  } catch {
+    return null;
+  }
+}
+

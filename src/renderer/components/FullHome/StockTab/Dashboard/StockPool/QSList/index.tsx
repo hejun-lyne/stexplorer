@@ -1,5 +1,5 @@
 import React from 'react';
-import { Row, Col, DatePicker, Select, Button, InputNumber } from 'antd';
+import { Row, Col, DatePicker, Select, Button, InputNumber, Checkbox, message } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -39,6 +39,22 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [maResults, setMaResults] = useState<Record<string, { ma40: boolean; ma60: boolean }>>({});
   const [maPending, setMaPending] = useState<Record<string, boolean>>({});
   const [maThreshold, setMaThreshold] = useState<number>(5);
+  const [trendFilterSecids, setTrendFilterSecids] = useState<string[]>([]);
+  const [trendFilterLoading, setTrendFilterLoading] = useState(false);
+  const [trendResults, setTrendResults] = useState<Record<string, { trendOK: boolean; ma40OK: boolean; isUp: boolean; isFlat: boolean; ma40Deviation: number }>>({});
+  const [trendPending, setTrendPending] = useState<Record<string, boolean>>({});
+  const [autoBackup, setAutoBackup] = useState(() => Utils.GetStorage('QSList_AUTO_BACKUP', false));
+  const autoBackupRef = React.useRef(autoBackup);
+  const stocksRef = React.useRef<Stock.QSItem[]>([]);
+
+  React.useEffect(() => {
+    autoBackupRef.current = autoBackup;
+    Utils.SetStorage('QSList_AUTO_BACKUP', autoBackup);
+  }, [autoBackup]);
+
+  React.useEffect(() => {
+    stocksRef.current = stocks;
+  }, [stocks]);
 
   const getTradingDays = useCallback((start: string, end: string) => {
     let count = 0;
@@ -77,8 +93,8 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         
         // 合并数据（去重：同一股票保留最新数据）
         let mergedStocks = data.arr;
-        if (stocks.length > 0) {
-          mergedStocks = [...stocks];
+        if (stocksRef.current.length > 0) {
+          mergedStocks = [...stocksRef.current];
           const secids = mergedStocks.map((s) => s.secid);
           data.arr.forEach((s) => {
             const existIdx = secids.indexOf(s.secid);
@@ -118,19 +134,22 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           setSBks(nsBks);
           setStocks(mergedStocks);
         });
+        stocksRef.current = mergedStocks;
 
         // 判断是否继续获取
         if (isComplete) {
+          // 自动备份：保存当前日期的完整数据
+          if (autoBackupRef.current) {
+            Helpers.Storage.StorageHelper.WriteQSListBackup(currentDate, { stocks: data.arr });
+          }
+
           if (dateIdx == dates.length - 1) {
             // 所有日期都已获取完成
             setNoMore(true);
             setLoading(false);
           } else {
-            // 当前日期获取完成，继续下一个日期
-            const nextDate = dates[dateIdx + 1];
-            setDate(nextDate);
-            setPageSize(60);
-            fetchNext(nextDate, 60);
+            // 当前日期获取完成，继续处理后续日期（检查备份）
+            proceedFromIndex(dateIdx + 1);
           }
         } else {
           // 当前日期还有更多数据，增加 pageSize 继续获取
@@ -142,8 +161,91 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     },
   });
 
-  const startQuery = useCallback(() => {
+  // 合并股票数据（去重：同一股票保留最新数据）
+  const mergeStocks = useCallback((existing: Stock.QSItem[], incoming: Stock.QSItem[]): Stock.QSItem[] => {
+    const result = [...existing];
+    const secids = result.map((s) => s.secid);
+    incoming.forEach((s) => {
+      const existIdx = secids.indexOf(s.secid);
+      if (existIdx != -1) {
+        result.splice(existIdx, 1, s);
+      } else {
+        result.push(s);
+      }
+    });
+    return result;
+  }, []);
+
+  // 计算板块统计
+  const calcHybks = useCallback((stockList: Stock.QSItem[]): Record<string, number> => {
+    const bks = {} as Record<string, number>;
+    stockList.forEach((s) => {
+      if (bks[s.hybk]) {
+        bks[s.hybk] = bks[s.hybk] + 1;
+      } else {
+        bks[s.hybk] = 1;
+      }
+    });
+    return bks;
+  }, []);
+
+  // 应用备份数据到当前状态
+  const applyBackupData = useCallback((backupStocks: Stock.QSItem[], backupDate: string) => {
+    stocksRef.current = mergeStocks(stocksRef.current, backupStocks);
+    const bks = calcHybks(stocksRef.current);
+    setFirstAppearMap((prev) => {
+      const next = { ...prev };
+      backupStocks.forEach((s) => {
+        if (!next[s.secid]) {
+          next[s.secid] = backupDate;
+        }
+      });
+      return next;
+    });
+    batch(() => {
+      setStocks(stocksRef.current);
+      setHybks(bks);
+    });
+  }, [mergeStocks, calcHybks]);
+
+  // 从指定索引开始，加载连续有备份的日期，遇到没有备份的则走网络请求
+  const proceedFromIndex = useCallback(async (fromIdx: number) => {
+    for (let i = fromIdx; i < dates.length; i++) {
+      try {
+        const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(dates[i]);
+        if (backup && backup.data && backup.data.stocks && backup.data.stocks.length > 0) {
+          applyBackupData(backup.data.stocks as Stock.QSItem[], dates[i]);
+        } else {
+          // 遇到没有备份的日期，网络请求
+          setDate(dates[i]);
+          setPageSize(60);
+          setTimeout(() => {
+            runGetStocks(60, dates[i]);
+          }, 100);
+          return;
+        }
+      } catch (error) {
+        console.error('加载备份失败:', error);
+        // 出错时网络请求
+        setDate(dates[i]);
+        setPageSize(60);
+        setTimeout(() => {
+          runGetStocks(60, dates[i]);
+        }, 100);
+        return;
+      }
+    }
+    // 所有日期都处理完了
+    batch(() => {
+      setNoMore(true);
+      setLoading(false);
+    });
+  }, [dates, runGetStocks, applyBackupData]);
+
+  const startQuery = useCallback(async () => {
     if (dates.length) {
+      stocksRef.current = [];
+
       batch(() => {
         setNoMore(false);
         setStocks([]);
@@ -155,13 +257,54 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         setMaResults({});
         setMaPending({});
         setMaThreshold(5);
+        setTrendFilterSecids([]);
+        setTrendResults({});
+        setTrendPending({});
       });
+
+      // 如果启用了自动备份，逐日尝试从备份加载
+      if (autoBackupRef.current) {
+        let backupCount = 0;
+
+        for (let i = 0; i < dates.length; i++) {
+          try {
+            const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(dates[i]);
+            if (backup && backup.data && backup.data.stocks && backup.data.stocks.length > 0) {
+              applyBackupData(backup.data.stocks as Stock.QSItem[], dates[i]);
+              backupCount++;
+            } else {
+              break;
+            }
+          } catch (error) {
+            console.error('加载备份失败:', error);
+            break;
+          }
+        }
+
+        if (backupCount > 0) {
+          if (backupCount === dates.length) {
+            // 所有日期都有备份
+            batch(() => {
+              setNoMore(true);
+              setLoading(false);
+            });
+            message.success(`已从本地备份加载 ${dates.length} 天数据`);
+            return;
+          } else {
+            // 部分有备份，继续处理后续日期（检查备份或网络请求）
+            message.success(`已从本地备份加载 ${backupCount} 天数据，继续获取剩余数据`);
+            proceedFromIndex(backupCount);
+            return;
+          }
+        }
+      }
+
       // 延迟执行，确保 state 更新完成
       setTimeout(() => {
         runGetStocks(60, dates[0]);
       }, 100);
     }
-  }, [dates, runGetStocks]);
+  }, [dates, runGetStocks, applyBackupData, proceedFromIndex]);
 
   const onChangeDate = useCallback(
     (d: moment.Moment | null, isStart = true) => {
@@ -286,6 +429,59 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     setMaFilterLoading(false);
     setMaPending({});
   }, [stocks]);
+
+  const onFilterTrend = useCallback(async (checked: boolean) => {
+    if (!checked) {
+      setTrendFilterSecids([]);
+      return;
+    }
+    if (stocks.length === 0) {
+      return;
+    }
+    setTrendFilterLoading(true);
+    const secids = stocks.map((s) => s.secid);
+    const pendingInit: Record<string, boolean> = {};
+    secids.forEach((id) => {
+      pendingInit[id] = true;
+    });
+    setTrendPending(pendingInit);
+    setTrendResults({});
+
+    const batchSize = 5;
+    const filtered: string[] = [];
+    for (let i = 0; i < secids.length; i += batchSize) {
+      const batch = secids.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map(async (secid) => {
+          const res = await Helpers.Stock.CheckStockRecentTrend(secid, 0.03, 0.02);
+          console.log('Trend check', secid, res);
+          return { secid, res };
+        })
+      );
+      setTrendResults((prev) => {
+        const next = { ...prev };
+        setTrendPending((pPrev) => {
+          const pNext = { ...pPrev };
+          batchResults.forEach(({ secid, res }) => {
+            delete pNext[secid];
+            if (res) {
+              next[secid] = { trendOK: res.trendOK, ma40OK: res.ma40OK, isUp: res.isUp, isFlat: res.isFlat, ma40Deviation: res.ma40Deviation };
+              if (res.trendOK && res.ma40OK) {
+                filtered.push(secid);
+              }
+            } else {
+              next[secid] = { trendOK: false, ma40OK: false, isUp: false, isFlat: false, ma40Deviation: 0 };
+            }
+          });
+          return pNext;
+        });
+        return next;
+      });
+    }
+    setTrendFilterSecids(filtered);
+    setTrendFilterLoading(false);
+    setTrendPending({});
+  }, [stocks]);
   
   return (
     <>
@@ -343,6 +539,22 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           parser={(value) => parseFloat(value?.replace('%', '') || '5')}
           style={{ width: 60, marginLeft: 4 }}
         />
+        <CheckableTag
+          className="edit-tag"
+          checked={trendFilterSecids.length > 0}
+          onChange={onFilterTrend}
+          style={{ marginTop: 0, marginLeft: 8 }}
+          disabled={trendFilterLoading}
+        >
+          {trendFilterLoading ? '趋势筛选中...' : '趋势筛选'}
+        </CheckableTag>
+        <Checkbox
+          checked={autoBackup}
+          onChange={(e) => setAutoBackup(e.target.checked)}
+          style={{ marginLeft: 8 }}
+        >
+          自动备份
+        </Checkbox>
       </div>
       {Object.keys(hybks).length > 1 && (
         <div className={styles.tagbar}>
@@ -377,22 +589,25 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
             <Col span={2}>名字</Col>
             <Col span={2}>板块</Col>
             <Col span={2}>最新价</Col>
-            <Col span={2}>涨跌幅</Col>
+            {/* <Col span={2}>涨跌幅</Col> */}
             <Col span={2}>流通市值</Col>
-            <Col span={2}>换手率</Col>
-            <Col span={2}>量比</Col>
-            <Col span={2}>是否新高</Col>
-            <Col span={2}>连板统计</Col>
+            {/* <Col span={2}>换手率</Col> */}
+            {/* <Col span={2}>量比</Col> */}
+            {/* <Col span={2}>是否新高</Col> */}
+            {/* <Col span={2}>连板统计</Col> */}
             <Col span={2}>入选天数</Col>
-            <Col span={1}>MA40</Col>
-            <Col span={1}>MA60</Col>
-            <Col span={2}>理由</Col>
+            <Col span={2}>MA40</Col>
+            <Col span={2}>MA60</Col>
+            <Col span={3}>趋势</Col>
+            <Col span={3}>MA40偏</Col>
+            <Col span={4}>理由</Col>
           </Row>
           <div className={classNames(styles.table, styles.qsmoreheader)}>
             {stocks
               .filter((s) => (filterIndustry == '' ? true : filterIndustry.indexOf(s.hybk) != -1))
               .filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1))
               .filter((s) => (maFilterSecids.length === 0 ? true : maFilterSecids.indexOf(s.secid) !== -1))
+              .filter((s) => (trendFilterSecids.length === 0 ? true : trendFilterSecids.indexOf(s.secid) !== -1))
               .map((s) => (
                 <Row key={s.code} className={styles.row}>
                   <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
@@ -402,18 +617,20 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                   <Col span={2} className={Utils.GetValueColor(s.zdf).textClass}>
                     {(s.zx / 1000).toFixed(2)}
                   </Col>
-                  <Col span={2} className={Utils.GetValueColor(s.zdf).textClass}>
+                  {/* <Col span={2} className={Utils.GetValueColor(s.zdf).textClass}>
                     {s.zdf.toFixed(2) + '%'}
-                  </Col>
+                  </Col> */}
                   <Col span={2}>{(s.ltsz / 100000000).toFixed(2) + '亿'}</Col>
-                  <Col span={2}>{(s.hsl / 100).toFixed(2) + '%'}</Col>
+                  {/* <Col span={2}>{(s.hsl / 100).toFixed(2) + '%'}</Col>
                   <Col span={2}>{s.lb.toFixed(2)}</Col>
                   <Col span={2}>{s.nh ? '是' : '否'}</Col>
-                  <Col span={2}>{s.zttj.days + '天' + s.zttj.ct + '板'}</Col>
+                  <Col span={2}>{s.zttj.days + '天' + s.zttj.ct + '板'}</Col> */}
                   <Col span={2}>{firstAppearMap[s.secid] ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天' : '-'}</Col>
-                  <Col span={1}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma40 ? '✓' : '✗') : ''}</Col>
-                  <Col span={1}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma60 ? '✓' : '✗') : ''}</Col>
-                  <Col span={2}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
+                  <Col span={2}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma40 ? '✓' : '✗') : ''}</Col>
+                  <Col span={2}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma60 ? '✓' : '✗') : ''}</Col>
+                  <Col span={3}>{trendPending[s.secid] ? '分析中' : trendResults[s.secid] ? (trendResults[s.secid].trendOK ? '✓' : '✗') : ''}</Col>
+                  <Col span={3}>{trendPending[s.secid] ? '分析中' : trendResults[s.secid] ? (trendResults[s.secid].ma40OK ? '✓' : '✗') : ''}</Col>
+                  <Col span={4}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
                 </Row>
               ))}
             {!noMore && !loading && (

@@ -295,6 +295,83 @@ async function init() {
       return { success: false, error: error.message };
     }
   });
+
+  // 导出本地存储数据
+  ipcMain.handle('local-storage-export', () => {
+    try {
+      const data = localFileStorage.exportLocalData();
+      return { success: true, data };
+    } catch (error: any) {
+      console.error('[Main] Error exporting local storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // 导入本地存储数据
+  ipcMain.handle('local-storage-import', (event, { data }) => {
+    try {
+      const result = localFileStorage.importLocalData(data);
+      return { success: result };
+    } catch (error: any) {
+      console.error('[Main] Error importing local storage:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // 导出本地存储数据到 zip 文件
+  ipcMain.handle('local-storage-export-to-file', async (event, { filePath }) => {
+    try {
+      const result = localFileStorage.exportLocalDataToZip(filePath);
+      return { success: result };
+    } catch (error: any) {
+      console.error('[Main] Error exporting local storage to zip:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // 从 zip 文件导入本地存储数据
+  ipcMain.handle('local-storage-import-from-file', async (event, { filePath }) => {
+    try {
+      const result = localFileStorage.importLocalDataFromZip(filePath);
+      return { success: result };
+    } catch (error: any) {
+      console.error('[Main] Error importing local storage from zip:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // QSList 备份读取
+  ipcMain.handle('qslist-backup-read', (event, { date }) => {
+    try {
+      const result = localFileStorage.readQSListBackup(date);
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('[Main] Error reading QSList backup:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // QSList 备份写入
+  ipcMain.handle('qslist-backup-write', (event, { date, data }) => {
+    try {
+      const result = localFileStorage.writeQSListBackup(date, data);
+      return { success: result };
+    } catch (error: any) {
+      console.error('[Main] Error writing QSList backup:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // QSList 备份列表
+  ipcMain.handle('qslist-backup-list', () => {
+    try {
+      const result = localFileStorage.listQSListBackups();
+      return { success: true, dates: result };
+    } catch (error: any) {
+      console.error('[Main] Error listing QSList backups:', error);
+      return { success: false, error: error.message };
+    }
+  });
   
   ipcMain.handle('run-python-script', async (event, config) => {
     return new Promise((resolve, reject) => {

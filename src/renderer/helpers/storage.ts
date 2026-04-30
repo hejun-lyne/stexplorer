@@ -123,6 +123,100 @@ export async function BackupLocalStorage(backupPath: string) {
   return BackupSQLite(backupPath);
 }
 
+// ===== 本地文件导入导出 =====
+
+const { electron } = window.contextModules;
+
+export async function ExportLocalStorage() {
+  try {
+    const result = await electron.exportLocalStorage();
+    if (result.success) {
+      return result.data as { version: string; exportedAt: string; files: { name: string; content: string }[] };
+    }
+    throw new Error(result.error || '导出失败');
+  } catch (error: any) {
+    console.error('导出本地存储失败:', error);
+    throw error;
+  }
+}
+
+export async function ImportLocalStorage(data: { version?: string; files: { name: string; content: string }[] }) {
+  try {
+    const result = await electron.importLocalStorage(data);
+    if (result.success) {
+      return true;
+    }
+    throw new Error(result.error || '导入失败');
+  } catch (error: any) {
+    console.error('导入本地存储失败:', error);
+    throw error;
+  }
+}
+
+export async function ExportLocalStorageToFile(filePath: string) {
+  try {
+    const result = await electron.exportLocalStorageToFile(filePath);
+    if (result.success) {
+      return true;
+    }
+    throw new Error(result.error || '导出到文件失败');
+  } catch (error: any) {
+    console.error('导出本地存储到文件失败:', error);
+    throw error;
+  }
+}
+
+export async function ImportLocalStorageFromFile(filePath: string) {
+  try {
+    const result = await electron.importLocalStorageFromFile(filePath);
+    if (result.success) {
+      return true;
+    }
+    throw new Error(result.error || '从文件导入失败');
+  } catch (error: any) {
+    console.error('从文件导入本地存储失败:', error);
+    throw error;
+  }
+}
+
+// ===== QSList 备份 =====
+
+export async function ReadQSListBackup(date: string): Promise<{ lastModified: string; data: any } | null> {
+  try {
+    const result = await electron.readQSListBackup(date);
+    if (result.success) {
+      return result.data;
+    }
+    return null;
+  } catch (error: any) {
+    console.error('读取 QSList 备份失败:', error);
+    return null;
+  }
+}
+
+export async function WriteQSListBackup(date: string, data: any): Promise<boolean> {
+  try {
+    const result = await electron.writeQSListBackup(date, data);
+    return result.success;
+  } catch (error: any) {
+    console.error('写入 QSList 备份失败:', error);
+    return false;
+  }
+}
+
+export async function ListQSListBackups(): Promise<string[]> {
+  try {
+    const result = await electron.listQSListBackups();
+    if (result.success) {
+      return result.dates || [];
+    }
+    return [];
+  } catch (error: any) {
+    console.error('列出 QSList 备份失败:', error);
+    return [];
+  }
+}
+
 // ===== 兼容性导出（保持原有接口）=====
 
 export const GitHub = {
@@ -144,6 +238,13 @@ export const StorageHelper = {
   GetStorageStats,
   BackupSQLite,
   BackupLocalStorage,
+  ExportLocalStorage,
+  ImportLocalStorage,
+  ExportLocalStorageToFile,
+  ImportLocalStorageFromFile,
+  ReadQSListBackup,
+  WriteQSListBackup,
+  ListQSListBackups,
 };
 
 export default {
