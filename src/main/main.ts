@@ -285,6 +285,21 @@ async function init() {
     }
   });
   
+  // 设置自定义本地存储路径
+  ipcMain.handle('set-local-storage-path', (event, { dirPath }) => {
+    try {
+      const result = localFileStorage.setCustomStoragePath(dirPath || null);
+      if (result) {
+        const newPath = localFileStorage.getStoragePath();
+        return { success: true, path: newPath };
+      }
+      return { success: false, error: '设置存储路径失败' };
+    } catch (error: any) {
+      console.error('[Main] Error setting storage path:', error);
+      return { success: false, error: error.message };
+    }
+  });
+  
   // 获取本地存储所有文件内容（用于同步到百度云盘）
   ipcMain.handle('get-local-storage-files', () => {
     try {

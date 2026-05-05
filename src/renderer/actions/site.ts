@@ -30,12 +30,15 @@ export function syncRemoteFavorSitesAction(): ThunkAction {
           return content;
         })
         .then((content) => {
-          if (content && content.data && content.lastModified >= starsModified) {
-            batch(() => {
-              dispatch({ type: SYNC_FAVOR_SITES, payload: [content.data, content.lastModified] });
-              dispatch({ type: SET_SITE_SYNING, payload: { v: false, t: '读取sites完成' } });
-            });
-            return false;
+          if (content && content.data && Array.isArray(content.data) && content.lastModified >= starsModified) {
+            const data = content.data;
+            if (data.length > 0) {
+              batch(() => {
+                dispatch({ type: SYNC_FAVOR_SITES, payload: [data, content.lastModified] });
+                dispatch({ type: SET_SITE_SYNING, payload: { v: false, t: '读取sites完成' } });
+              });
+              return false;
+            }
           }
           return true;
         })

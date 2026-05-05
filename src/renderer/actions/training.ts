@@ -29,11 +29,14 @@ export function syncRemoteTrainingAction(): ThunkAction {
           })
           .then((content) => {
             if (content && content.data && content.lastModified >= recordsModified) {
-              batch(() => {
-                dispatch({ type: SYNC_TRAINING_DATA, payload: [content.data, content.lastModified] });
-                dispatch({ type: SET_TRAINING_SYNING, payload: { v: false, t: '读取ktraining完成' } });
-              });
-              return false;
+              const data = content.data;
+              if (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0) {
+                batch(() => {
+                  dispatch({ type: SYNC_TRAINING_DATA, payload: [data, content.lastModified] });
+                  dispatch({ type: SET_TRAINING_SYNING, payload: { v: false, t: '读取ktraining完成' } });
+                });
+                return false;
+              }
             }
             return true;
           })

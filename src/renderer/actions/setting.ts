@@ -33,12 +33,15 @@ export function syncRemoteSettingAction(): ThunkAction {
         .then((content) => {
           if (content && content.data && content.lastModified >= settingModified) {
             const remote = content.data as SettingState;
-            batch(() => {
-              dispatch({ type: SYNC_SYSTEM_SETTING, payload: [remote.systemSetting, content.lastModified] });
-              dispatch({ type: SYNC_MONITOR_SETTING, payload: [remote.monitorSetting, content.lastModified] });
-              dispatch({ type: SET_SETTING_SYNING, payload: { v: false, t: '读取setting完成' } });
-            });
-            return false;
+            // 只有当远程数据包含有效内容时才同步，避免空数据覆盖默认值
+            if (remote.systemSetting || remote.monitorSetting) {
+              batch(() => {
+                dispatch({ type: SYNC_SYSTEM_SETTING, payload: [remote.systemSetting, content.lastModified] });
+                dispatch({ type: SYNC_MONITOR_SETTING, payload: [remote.monitorSetting, content.lastModified] });
+                dispatch({ type: SET_SETTING_SYNING, payload: { v: false, t: '读取setting完成' } });
+              });
+              return false;
+            }
           }
           return true;
         })

@@ -5,11 +5,12 @@
 import React, { useState, useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { Button, Card, Radio, Alert, Descriptions, Tag, message, Modal, Switch, InputNumber, Divider } from 'antd';
-import { CloudOutlined, SyncOutlined, FolderOutlined, ImportOutlined, ExclamationCircleOutlined, CloudUploadOutlined, ExportOutlined, UploadOutlined } from '@ant-design/icons';
+import { CloudOutlined, SyncOutlined, FolderOutlined, ImportOutlined, ExclamationCircleOutlined, CloudUploadOutlined, ExportOutlined, UploadOutlined, FolderOpenOutlined, RedoOutlined } from '@ant-design/icons';
 import { StoreState } from '@/reducers/types';
 import { 
   switchStorageTypeAction, 
   migrateFromGithubToLocalAction,
+  renewStorageAction,
   updateSyncConfigAction,
   syncToBaiduAction,
   startAutoSyncAction,
@@ -49,6 +50,8 @@ const StorageSwitch: React.FC = () => {
   const [checking, setChecking] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [storagePath, setStoragePath] = useState<string>('');
+  const [pathLoading, setPathLoading] = useState(false);
 
   // 加载同步配置
   useEffect(() => {
@@ -68,8 +71,21 @@ const StorageSwitch: React.FC = () => {
   useEffect(() => {
     if ((storageType === 'sqlite' || storageType === 'local') && storage) {
       fetchDbStats();
+      fetchStoragePath();
     }
   }, [storageType, storage]);
+
+  // 获取当前存储路径
+  const fetchStoragePath = async () => {
+    try {
+      const path = await Helpers.Storage.StorageHelper.GetLocalStoragePath();
+      if (path) {
+        setStoragePath(path);
+      }
+    } catch (error) {
+      console.error('获取存储路径失败:', error);
+    }
+  };
 
   const fetchDbStats = async () => {
     setChecking(true);
@@ -195,6 +211,64 @@ const StorageSwitch: React.FC = () => {
     setExporting(false);
   };
 
+  const handleSelectStoragePath = async () => {
+    setPathLoading(true);
+    try {
+      const { electron } = window.contextModules;
+      const result = await electron.dialog.showOpenDialog({
+        title: '选择数据存储目录',
+        properties: ['openDirectory', 'createDirectory'],
+        buttonLabel: '选择此文件夹',
+      });
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+        setPathLoading(false);
+        return;
+      }
+      const selectedPath = result.filePaths[0];
+      
+      Modal.confirm({
+        title: '确认更改存储目录',
+        icon: <ExclamationCircleOutlined />,
+        content: (
+          <div>
+            <p>新目录: {selectedPath}</p>
+            <p>更改后现有数据不会自动迁移，需要手动导出导入。</p>
+            <p style={{ color: '#ff4d4f' }}>更改后需要重启应用才能生效！</p>
+          </div>
+        ),
+        okText: '确认更改',
+        cancelText: '取消',
+        onOk: async () => {
+          try {
+            await Helpers.Storage.StorageHelper.SetLocalStoragePath(selectedPath);
+            setStoragePath(selectedPath);
+            message.success('存储目录已更改，请重启应用');
+          } catch (error: any) {
+            message.error('更改失败: ' + error.message);
+          }
+        },
+      });
+    } catch (error: any) {
+      message.error('选择目录失败: ' + error.message);
+    }
+    setPathLoading(false);
+  };
+
+  const handleResetStoragePath = async () => {
+    setPathLoading(true);
+    try {
+      await Helpers.Storage.StorageHelper.SetLocalStoragePath(null);
+      const defaultPath = await Helpers.Storage.StorageHelper.GetLocalStoragePath();
+      if (defaultPath) {
+        setStoragePath(defaultPath);
+      }
+      message.success('已恢复默认存储目录，请重启应用');
+    } catch (error: any) {
+      message.error('恢复默认路径失败: ' + error.message);
+    }
+    setPathLoading(false);
+  };
+
   const handleImport = async () => {
     const { electron } = window.contextModules;
     const result = await electron.dialog.showOpenDialog({
@@ -225,6 +299,8 @@ const StorageSwitch: React.FC = () => {
         try {
           await Helpers.Storage.StorageHelper.ImportLocalStorageFromFile(filePath);
           message.success('数据导入成功');
+          // 重新加载数据到 Redux
+          await dispatch(renewStorageAction());
           // 刷新统计信息
           fetchDbStats();
         } catch (error: any) {
@@ -302,11 +378,53 @@ const StorageSwitch: React.FC = () => {
         <>
           <Alert
             message="本地文件存储"
-            description="数据以 JSON 文件形式存储在本地，无需网络连接即可访问。数据不会同步到云端。文件位于用户数据目录的 storage 文件夹中。"
+            description="数据以 JSON 文件形式存储在本地，无需网络连接即可访问。数据不会同步到云端。"
             type="success"
             showIcon
             style={{ marginTop: 16, marginBottom: 16 }}
           />
+          
+          {/* 存储目录设置 */}
+          <div style={{ marginBottom: 16, padding: 12, background: '#f5f5f5', borderRadius: 6 }}>
+            <div style={{ fontSize: 13, color: '#666', marginBottom: 8 }}>
+              <FolderOutlined style={{ marginRight: 4 }} />
+              当前存储目录:
+            </div>
+            <div 
+              style={{ 
+                fontSize: 13, 
+                color: '#333', 
+                wordBreak: 'break-all',
+                fontFamily: 'monospace',
+                marginBottom: 8,
+                padding: 6,
+                background: '#fff',
+                borderRadius: 4,
+                border: '1px solid #ddd'
+              }}
+            >
+              {storagePath || '加载中...'}
+            </div>
+            <div>
+              <Button
+                icon={<FolderOpenOutlined />}
+                onClick={handleSelectStoragePath}
+                loading={pathLoading}
+                size="small"
+                style={{ marginRight: 8 }}
+              >
+                更改目录
+              </Button>
+              <Button
+                icon={<RedoOutlined />}
+                onClick={handleResetStoragePath}
+                loading={pathLoading}
+                size="small"
+              >
+                恢复默认
+              </Button>
+            </div>
+          </div>
           
           {/* 百度云盘同步设置 */}
           <Divider>百度云盘同步</Divider>

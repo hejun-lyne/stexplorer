@@ -46,9 +46,11 @@ export function syncRemoteStocksAction(): ThunkAction {
         })
         .then((content) => {
           if (content && content.data && content.lastModified >= stockConfigsModified) {
-            const willUpdateAll = stockConfigs.length == 0;
-            const holdings: string[] = [];
-            (content.data as Stock.SettingItem[]).forEach((config) => {
+            const data = content.data;
+            if (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0) {
+              const willUpdateAll = stockConfigs.length == 0;
+              const holdings: string[] = [];
+              (data as Stock.SettingItem[]).forEach((config) => {
               config.onDetailed = false;
               config.expanded = false;
               if (config.holdings && config.holdings.length) {
@@ -63,12 +65,13 @@ export function syncRemoteStocksAction(): ThunkAction {
               dispatch({ type: SYNC_HOLDINGS, payload: holdings });
               dispatch({ type: SET_STOCK_SYNING, payload: { v: false, t: '读取stocks完成' } });
             });
-            if (willUpdateAll) {
-              // Helpers.Stock.UpdateStocksAllData();
-              Helpers.Stock.MultiStockDetailPush(false);
-              Helpers.Stock.UpdateStockDetails();
+              if (willUpdateAll) {
+                // Helpers.Stock.UpdateStocksAllData();
+                Helpers.Stock.MultiStockDetailPush(false);
+                Helpers.Stock.UpdateStockDetails();
+              }
+              return false;
             }
-            return false;
           }
           return true;
         })
@@ -119,11 +122,14 @@ export function syncRemoteTradingsAction(): ThunkAction {
         })
         .then((content) => {
           if (content && content.data && content.lastModified >= tradingsModified) {
-            batch(() => {
-              dispatch(setStockTradingAction(content.data, content.lastModified));
-              dispatch({ type: SET_STOCK_SYNING, payload: { v: false, t: '读取tradings完成' } });
-            });
-            return false;
+            const data = content.data;
+            if (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0) {
+              batch(() => {
+                dispatch(setStockTradingAction(data, content.lastModified));
+                dispatch({ type: SET_STOCK_SYNING, payload: { v: false, t: '读取tradings完成' } });
+              });
+              return false;
+            }
           }
           return true;
         })
@@ -187,11 +193,14 @@ export function syncRemoteTrainingsAction(): ThunkAction {
         })
         .then((content) => {
           if (content && content.data && content.lastModified >= trainingsModified) {
-            batch(() => {
-              dispatch(setStockTrainingAction(content.data, content.lastModified));
-              dispatch({ type: SET_STOCK_SYNING, payload: { v: false, t: '读取trainings完成' } });
-            });
-            return false;
+            const data = content.data;
+            if (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0) {
+              batch(() => {
+                dispatch(setStockTrainingAction(data, content.lastModified));
+                dispatch({ type: SET_STOCK_SYNING, payload: { v: false, t: '读取trainings完成' } });
+              });
+              return false;
+            }
           }
           return true;
         })

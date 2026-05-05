@@ -32,11 +32,14 @@ export function syncRemoteBooksAction(): ThunkAction {
         })
         .then((content) => {
           if (content && content.data && content.lastModified >= booksModified) {
-            batch(() => {
-              dispatch({ type: SYNC_NOTE_BOOKS, payload: [content.data, content.lastModified] });
-              dispatch({ type: SET_BOOK_SYNING, payload: { v: false, t: '读取books完成' } });
-            });
-            return [false, content.data];
+            const data = content.data;
+            if (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0) {
+              batch(() => {
+                dispatch({ type: SYNC_NOTE_BOOKS, payload: [data, content.lastModified] });
+                dispatch({ type: SET_BOOK_SYNING, payload: { v: false, t: '读取books完成' } });
+              });
+              return [false, data];
+            }
           }
           return [true, null];
         })
@@ -114,7 +117,7 @@ export function syncRemoteBookNoteAction(noteId: number | string, bookId: number
           })
           .then((content) => {
             const prev = notesMapping[noteId];
-            if (!content?.data) {
+            if (!content?.data || Object.keys(content.data).length === 0) {
               if (!prev) {
                 // 可能出错了，初始化内容为空
                 batch(() => {

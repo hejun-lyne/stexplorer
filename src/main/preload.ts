@@ -203,6 +203,10 @@ contextBridge.exposeInMainWorld('contextModules', {
     async getLocalStoragePath() {
       return ipcRenderer.invoke('get-local-storage-path');
     },
+    // 设置自定义本地存储路径
+    async setLocalStoragePath(dirPath: string | null) {
+      return ipcRenderer.invoke('set-local-storage-path', { dirPath });
+    },
     // 获取本地存储所有文件内容
     async getLocalStorageFiles() {
       return ipcRenderer.invoke('get-local-storage-files');

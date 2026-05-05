@@ -30,11 +30,14 @@ export function syncRemoteStrategyGroupsAction(): ThunkAction {
         })
         .then((content) => {
           if (content && content.data && content.lastModified >= groupsModified) {
-            batch(() => {
-              dispatch({ type: SYNC_STRATEGY_GROUPS, payload: [content.data, content.lastModified] });
-              dispatch({ type: SET_STRATEGY_SYNING, payload: { v: false, t: '读取groups完成' } });
-            });
-            return [false, content.data];
+            const data = content.data;
+            if (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0) {
+              batch(() => {
+                dispatch({ type: SYNC_STRATEGY_GROUPS, payload: [data, content.lastModified] });
+                dispatch({ type: SET_STRATEGY_SYNING, payload: { v: false, t: '读取groups完成' } });
+              });
+              return [false, data];
+            }
           }
           return [true, null];
         })
@@ -87,7 +90,7 @@ export function syncRemoteStrategySourceAction(strategyId: number, groupId: numb
           })
           .then((content) => {
             const prev = strategiesMapping[strategyId];
-            if (!content?.data) {
+            if (!content?.data || Object.keys(content.data).length === 0) {
               if (!prev) {
                 // 可能出错了，初始化内容为空
                 batch(() => {

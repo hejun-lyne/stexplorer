@@ -76,14 +76,14 @@ const setting: Reducer<SettingState> = (
       const [systemSetting, smodified] = action.payload;
       return {
         ...state,
-        systemSetting,
+        systemSetting: systemSetting || state.systemSetting,
         settingModified: smodified,
       };
     case SYNC_MONITOR_SETTING:
       const [monitorSetting, mmodified] = action.payload;
       return {
         ...state,
-        monitorSetting,
+        monitorSetting: monitorSetting || state.monitorSetting,
         settingModified: mmodified,
       };
     case SET_SETTING_SYNING:

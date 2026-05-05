@@ -123,9 +123,37 @@ export async function BackupLocalStorage(backupPath: string) {
   return BackupSQLite(backupPath);
 }
 
-// ===== 本地文件导入导出 =====
+// ===== 本地存储路径管理 =====
 
 const { electron } = window.contextModules;
+
+export async function GetLocalStoragePath(): Promise<string | null> {
+  try {
+    const result = await electron.getLocalStoragePath();
+    if (result.success && result.path) {
+      return result.path;
+    }
+    return null;
+  } catch (error: any) {
+    console.error('获取本地存储路径失败:', error);
+    return null;
+  }
+}
+
+export async function SetLocalStoragePath(dirPath: string | null): Promise<string | null> {
+  try {
+    const result = await electron.setLocalStoragePath(dirPath);
+    if (result.success && result.path) {
+      return result.path;
+    }
+    throw new Error(result.error || '设置路径失败');
+  } catch (error: any) {
+    console.error('设置本地存储路径失败:', error);
+    throw error;
+  }
+}
+
+// ===== 本地文件导入导出 =====
 
 export async function ExportLocalStorage() {
   try {
@@ -238,6 +266,8 @@ export const StorageHelper = {
   GetStorageStats,
   BackupSQLite,
   BackupLocalStorage,
+  GetLocalStoragePath,
+  SetLocalStoragePath,
   ExportLocalStorage,
   ImportLocalStorage,
   ExportLocalStorageToFile,

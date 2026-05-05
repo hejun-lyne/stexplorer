@@ -10,6 +10,12 @@ import AdmZip from 'adm-zip';
 // 存储目录
 let dataDir: string = '';
 
+// 自定义存储目录（用户指定）
+let customDataDir: string | null = null;
+
+// 自定义存储路径配置文件
+const CUSTOM_PATH_CONFIG_FILE = 'local_storage_path.json';
+
 // 文件路径映射（从表名到文件名）
 const FILE_MAP: Record<string, string> = {
   settings: 'settings.json',
@@ -27,37 +33,136 @@ const NOTES_DIR = 'notes';
 // 策略目录
 const STRATEGIES_DIR = 'strategies';
 
-// 获取存储目录路径（不初始化）
+// 获取默认存储目录路径
+function getDefaultStoragePath(): string {
+  const userDataPath = app.getPath('userData');
+  return path.join(userDataPath, 'storage');
+}
+
+// 获取自定义存储路径配置文件路径
+function getCustomPathConfigFile(): string {
+  const userDataPath = app.getPath('userData');
+  return path.join(userDataPath, CUSTOM_PATH_CONFIG_FILE);
+}
+
+// 加载自定义存储路径
+function loadCustomStoragePath(): string | null {
+  try {
+    const configFile = getCustomPathConfigFile();
+    if (fs.existsSync(configFile)) {
+      const content = fs.readFileSync(configFile, 'utf-8');
+      const config = JSON.parse(content);
+      if (config.path && typeof config.path === 'string' && fs.existsSync(config.path)) {
+        return config.path;
+      }
+    }
+  } catch (error) {
+    console.error('[LocalFileStorage] Error loading custom path:', error);
+  }
+  return null;
+}
+
+// 保存自定义存储路径
+function saveCustomStoragePath(dirPath: string | null): boolean {
+  try {
+    const configFile = getCustomPathConfigFile();
+    if (dirPath) {
+      fs.writeFileSync(configFile, JSON.stringify({ path: dirPath, updatedAt: new Date().toISOString() }, null, 2), 'utf-8');
+    } else {
+      if (fs.existsSync(configFile)) {
+        fs.unlinkSync(configFile);
+      }
+    }
+    return true;
+  } catch (error) {
+    console.error('[LocalFileStorage] Error saving custom path:', error);
+    return false;
+  }
+}
+
+// 获取当前存储目录路径（不初始化）
 export function getStoragePath(): string {
+  if (customDataDir) {
+    return customDataDir;
+  }
   if (!dataDir) {
-    const userDataPath = app.getPath('userData');
-    return path.join(userDataPath, 'storage');
+    // 先尝试加载自定义路径
+    const custom = loadCustomStoragePath();
+    if (custom) {
+      customDataDir = custom;
+      return custom;
+    }
+    return getDefaultStoragePath();
   }
   return dataDir;
+}
+
+// 设置自定义存储目录
+export function setCustomStoragePath(dirPath: string | null): boolean {
+  try {
+    if (dirPath) {
+      // 确保目录存在
+      if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
+      }
+      customDataDir = dirPath;
+      dataDir = dirPath;
+    } else {
+      // 恢复默认路径
+      customDataDir = null;
+      dataDir = getDefaultStoragePath();
+    }
+    
+    // 保存配置
+    saveCustomStoragePath(customDataDir);
+    
+    // 重新初始化子目录
+    initSubDirs();
+    
+    console.log('[LocalFileStorage] Custom path set to:', dirPath || getDefaultStoragePath());
+    return true;
+  } catch (error) {
+    console.error('[LocalFileStorage] Failed to set custom path:', error);
+    return false;
+  }
+}
+
+// 初始化子目录
+function initSubDirs(): void {
+  if (!dataDir) return;
+  
+  // 确保笔记目录存在
+  const notesDir = path.join(dataDir, NOTES_DIR);
+  if (!fs.existsSync(notesDir)) {
+    fs.mkdirSync(notesDir, { recursive: true });
+  }
+  
+  // 确保策略目录存在
+  const strategiesDir = path.join(dataDir, STRATEGIES_DIR);
+  if (!fs.existsSync(strategiesDir)) {
+    fs.mkdirSync(strategiesDir, { recursive: true });
+  }
 }
 
 // 初始化存储
 export function initLocalFileStorage(): boolean {
   try {
-    const userDataPath = app.getPath('userData');
-    dataDir = path.join(userDataPath, 'storage');
+    // 先尝试加载自定义路径
+    const custom = loadCustomStoragePath();
+    if (custom) {
+      customDataDir = custom;
+      dataDir = custom;
+    } else {
+      dataDir = getDefaultStoragePath();
+    }
     
     // 确保存储目录存在
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
     
-    // 确保笔记目录存在
-    const notesDir = path.join(dataDir, NOTES_DIR);
-    if (!fs.existsSync(notesDir)) {
-      fs.mkdirSync(notesDir, { recursive: true });
-    }
-    
-    // 确保策略目录存在
-    const strategiesDir = path.join(dataDir, STRATEGIES_DIR);
-    if (!fs.existsSync(strategiesDir)) {
-      fs.mkdirSync(strategiesDir, { recursive: true });
-    }
+    // 初始化子目录
+    initSubDirs();
     
     console.log('[LocalFileStorage] Initialized at:', dataDir);
     return true;
@@ -448,5 +553,7 @@ export default {
   readQSListBackup,
   writeQSListBackup,
   listQSListBackups,
+  setCustomStoragePath,
+  getStoragePath,
   TABLE_MAP,
 };
