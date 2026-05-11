@@ -493,6 +493,7 @@ export function readQSListBackup(date: string): { lastModified: string; data: an
     if (!fs.existsSync(filePath)) {
       return null;
     }
+    console.info("[read backup file] " + filePath);
     const content = fs.readFileSync(filePath, 'utf-8');
     return JSON.parse(content);
   } catch (error) {

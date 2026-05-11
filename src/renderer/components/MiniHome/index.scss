@@ -1,8 +1,15 @@
 .layout {
   position: relative;
-  min-height: 100vh;
+  height: 100vh;
   box-sizing: border-box;
   background-color: var(--inner-color);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.content {
+  flex: 1;
   overflow: hidden;
 }
 

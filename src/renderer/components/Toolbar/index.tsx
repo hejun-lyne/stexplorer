@@ -6,6 +6,7 @@ import { useBoolean, useThrottleFn } from 'ahooks';
 import { ReactComponent as MenuAddIcon } from '@/assets/icons/add.svg';
 import { ReactComponent as RefreshIcon } from '@/assets/icons/refresh.svg';
 import { ReactComponent as SettingIcon } from '@/assets/icons/setting.svg';
+import { ReactComponent as ExpandIcon } from '@/assets/icons/expand.svg';
 import CustomDrawer from '../CustomDrawer';
 import ManageStockContent from '../MiniHome/StockList/ManageStockContent';
 import SettingContent from '../SettingContent';
@@ -33,9 +34,15 @@ const ToolBar: React.FC<ToolBarProps> = () => {
       <style>{` html { filter: ${lowKeySetting && 'grayscale(100%)'} }`}</style>
       <style>{` html {font-size: ${baseFontSizeSetting}px }`}</style>
       <div className={styles.bar}>
-        <MenuAddIcon style={{ ...iconSize }} onClick={openManageStockDrawer} />
+        {/* <MenuAddIcon style={{ ...iconSize }} onClick={openManageStockDrawer} /> */}
         <RefreshIcon style={{ ...iconSize }} onClick={freshStocks} />
-        <SettingIcon style={{ ...iconSize }} onClick={openSettingDrawer} />
+        {/* <SettingIcon style={{ ...iconSize }} onClick={openSettingDrawer} /> */}
+        {window.location.href.includes('mini.html') && (
+          <ExpandIcon
+            style={{ ...iconSize }}
+            onClick={() => window.contextModules.electron.invoke.showCurrentWindow()}
+          />
+        )}
       </div>
       <CustomDrawer show={showManageStockDrawer}>
         <ManageStockContent

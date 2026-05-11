@@ -26,6 +26,8 @@ import * as ts from 'typescript';
 import { PromiseWorker } from './promiseWorker';
 import * as localFileStorage from './localFileStorage';
 
+let willQuitApp = false;
+
 async function init() {
   console.log('当前工作目录：' + app.getAppPath());
   lockSingleInstance();
@@ -65,8 +67,7 @@ async function init() {
   const mainWindow = full();
 
   if (process.platform === 'darwin') {
-    app.dock.setIcon(getAssetPath('icon.png'));
-    app.setAppUserModelId(app.name);
+    app.dock.hide();
   }
   new PromiseWorker(
     worker(),
@@ -74,17 +75,18 @@ async function init() {
     (error, progress) => mainWindow.webContents.send('on-progress-log', progress)
   );
 
-  // mini();
+  const mb = mini();
+  ipcMain.handle('show-current-window', () => {
+    mainWindow.show();
+    mb.hideWindow();
+  });
 
   // 相关监听
-  let willQuitApp = true;
   mainWindow.on('close', function(e) {
     if (!willQuitApp) {
       e.preventDefault();
       mainWindow.hide();
       mainWindow.setSkipTaskbar(true);
-    } else {
-      app.quit()
     }
   });
   app.on('before-quit', function () {
@@ -455,9 +457,6 @@ function full() {
     // mainWindow.webContents.openDevTools({ mode: 'undocked' });
   });
   mainWindowState.manage(mainWindow);
-  ipcMain.handle('show-current-window', (event, config) => {
-    mainWindow.show();
-  });
   app.on('web-contents-created', (e, contents) => {
     // Check for a webview
     if (contents.getType() == 'webview') {
@@ -554,8 +553,13 @@ function mini() {
       });
     });
 
-    // 目前没有适配tray，不需要隐藏dock
-    // app.dock.hide();
+    // 点击关闭按钮只隐藏窗口，不销毁；应用真正退出时允许关闭
+    mb.window!.on('close', (e) => {
+      if (!willQuitApp) {
+        e.preventDefault();
+        mb.hideWindow();
+      }
+    });
   });
   mb.on('ready', () => {
     mb.window?.setVisibleOnAllWorkspaces(true);

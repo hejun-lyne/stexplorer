@@ -46,6 +46,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [autoBackup, setAutoBackup] = useState(() => Utils.GetStorage('QSList_AUTO_BACKUP', false));
   const autoBackupRef = React.useRef(autoBackup);
   const stocksRef = React.useRef<Stock.QSItem[]>([]);
+  const loadedBackupDates = React.useRef(new Set<string>());
 
   React.useEffect(() => {
     autoBackupRef.current = autoBackup;
@@ -191,6 +192,10 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
 
   // 应用备份数据到当前状态
   const applyBackupData = useCallback((backupStocks: Stock.QSItem[], backupDate: string) => {
+    if (loadedBackupDates.current.has(backupDate)) {
+      return;
+    }
+    loadedBackupDates.current.add(backupDate);
     stocksRef.current = mergeStocks(stocksRef.current, backupStocks);
     const bks = calcHybks(stocksRef.current);
     setFirstAppearMap((prev) => {
@@ -211,11 +216,20 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   // 从指定索引开始，加载连续有备份的日期，遇到没有备份的则走网络请求
   const proceedFromIndex = useCallback(async (fromIdx: number) => {
     for (let i = fromIdx; i < dates.length; i++) {
+      console.log(`[QSList] proceedFromIndex: 检查日期 ${dates[i]} (${i + 1}/${dates.length})`);
       try {
         const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(dates[i]);
-        if (backup && backup.data && backup.data.stocks && backup.data.stocks.length > 0) {
+        console.log(`[QSList] proceedFromIndex: 日期 ${dates[i]} 读取结果`, {
+          hasBackup: !!backup,
+          hasData: backup && backup.data,
+          stocksLength: backup && backup.data ? backup.data.stocks?.length : undefined,
+          isAlreadyLoaded: loadedBackupDates.current.has(dates[i]),
+        });
+        if (backup && backup.data && backup.data.stocks !== undefined) {
+          console.log(`[QSList] proceedFromIndex: 日期 ${dates[i]} 从缓存加载 (stocks.length=${backup.data.stocks.length})`);
           applyBackupData(backup.data.stocks as Stock.QSItem[], dates[i]);
         } else {
+          console.log(`[QSList] proceedFromIndex: 日期 ${dates[i]} 无缓存，走网络请求`);
           // 遇到没有备份的日期，网络请求
           setDate(dates[i]);
           setPageSize(60);
@@ -225,7 +239,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           return;
         }
       } catch (error) {
-        console.error('加载备份失败:', error);
+        console.error(`[QSList] proceedFromIndex: 日期 ${dates[i]} 加载备份失败`, error);
         // 出错时网络请求
         setDate(dates[i]);
         setPageSize(60);
@@ -236,6 +250,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
       }
     }
     // 所有日期都处理完了
+    console.log('[QSList] proceedFromIndex: 所有日期处理完毕');
     batch(() => {
       setNoMore(true);
       setLoading(false);
@@ -262,27 +277,35 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         setTrendPending({});
       });
 
-      // 如果启用了自动备份，逐日尝试从备份加载
+      // 如果启用了自动备份，逐日尝试从备份加载（只要有缓存就加载，不连续的也加载）
       if (autoBackupRef.current) {
-        let backupCount = 0;
+        loadedBackupDates.current.clear();
+        console.log('[QSList] startQuery: 开始加载备份，日期列表', dates);
 
         for (let i = 0; i < dates.length; i++) {
+          console.log(`[QSList] startQuery: 检查日期 ${dates[i]} (${i + 1}/${dates.length})`);
           try {
             const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(dates[i]);
-            if (backup && backup.data && backup.data.stocks && backup.data.stocks.length > 0) {
+            console.log(`[QSList] startQuery: 日期 ${dates[i]} 读取结果`, {
+              hasBackup: !!backup,
+              hasData: backup && backup.data,
+              stocksLength: backup && backup.data ? backup.data.stocks?.length : undefined,
+            });
+            if (backup && backup.data && backup.data.stocks !== undefined) {
+              console.log(`[QSList] startQuery: 日期 ${dates[i]} 从缓存加载 (stocks.length=${backup.data.stocks.length})`);
               applyBackupData(backup.data.stocks as Stock.QSItem[], dates[i]);
-              backupCount++;
             } else {
-              break;
+              console.log(`[QSList] startQuery: 日期 ${dates[i]} 无缓存`);
             }
           } catch (error) {
-            console.error('加载备份失败:', error);
-            break;
+            console.error(`[QSList] startQuery: 日期 ${dates[i]} 加载备份失败`, error);
           }
         }
 
-        if (backupCount > 0) {
-          if (backupCount === dates.length) {
+        const loadedCount = loadedBackupDates.current.size;
+        console.log('[QSList] startQuery: 备份加载完成', { loadedCount, totalDates: dates.length, loadedDates: Array.from(loadedBackupDates.current) });
+        if (loadedCount > 0) {
+          if (loadedCount === dates.length) {
             // 所有日期都有备份
             batch(() => {
               setNoMore(true);
@@ -291,9 +314,11 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
             message.success(`已从本地备份加载 ${dates.length} 天数据`);
             return;
           } else {
-            // 部分有备份，继续处理后续日期（检查备份或网络请求）
-            message.success(`已从本地备份加载 ${backupCount} 天数据，继续获取剩余数据`);
-            proceedFromIndex(backupCount);
+            // 部分有备份，从第一个没有备份的日期开始处理
+            const firstMissingIdx = dates.findIndex((d) => !loadedBackupDates.current.has(d));
+            message.success(`已从本地备份加载 ${loadedCount} 天数据，继续获取剩余数据`);
+            console.log('[QSList] startQuery: 从第一个无缓存日期继续', { firstMissingIdx, missingDate: dates[firstMissingIdx] });
+            proceedFromIndex(firstMissingIdx >= 0 ? firstMissingIdx : loadedCount);
             return;
           }
         }

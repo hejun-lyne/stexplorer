@@ -9,11 +9,11 @@ const GroupTab: React.FC<PropsWithChildren<Record<string, any>>> = (props) => {
     background: variableColors['--background-color'],
     borderBottom: `1px solid ${variableColors['--border-color']}`,
     margin: 0,
-    paddingLeft: 25,
+    paddingLeft: 15,
   };
 
   return (
-    <Tabs size="small" animated={{ tabPane: true, inkBar: true }} tabBarGutter={15} tabBarStyle={groupBarStyle}>
+    <Tabs size="small" animated={{ tabPane: true, inkBar: true }} tabBarGutter={25} tabBarStyle={groupBarStyle}>
       {props.children}
     </Tabs>
   );

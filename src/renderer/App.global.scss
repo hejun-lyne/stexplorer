@@ -83,3 +83,19 @@
  .red {
    color: red;
  }
+
+ // MiniHome Tabs 内容区域可滚动
+ .mini-home-layout {
+   .ant-tabs {
+     height: 100%;
+     display: flex;
+     flex-direction: column;
+   }
+   .ant-tabs-content-holder {
+     flex: 1;
+     overflow: auto;
+   }
+   .ant-tabs-tabpane {
+     padding: 0 8px;
+   }
+ }
