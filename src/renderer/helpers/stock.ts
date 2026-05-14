@@ -3302,3 +3302,33 @@ export async function CheckStockRecentTrend(secid: string, maThreshold = 0.03, f
   }
 }
 
+/**
+ * 检查股票RSI6指标是否低于阈值（超卖）
+ * @param secid 股票代码
+ * @param threshold RSI阈值（默认30）
+ * @param klimit K线数据条数
+ */
+export async function CheckStockRSI(secid: string, threshold = 30, klimit = 80) {
+  try {
+    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    if (!ks || ks.length < 20) {
+      return null;
+    }
+    const sps = ks.map((k) => k.sp);
+    const rsi6 = Indicators.calculateRSI(sps, 6);
+    const latestRSI6 = rsi6[rsi6.length - 1];
+
+    if (Number.isNaN(latestRSI6)) {
+      return null;
+    }
+
+    return {
+      secid,
+      rsi6: latestRSI6,
+      isOversold: latestRSI6 <= threshold,
+    };
+  } catch {
+    return null;
+  }
+}
+
