@@ -3332,3 +3332,38 @@ export async function CheckStockRSI(secid: string, threshold = 30, klimit = 80) 
   }
 }
 
+export async function CheckStockMAAndRSI(secid: string, maThreshold = 0.05, rsiThreshold = 30, klimit = 80) {
+  try {
+    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    if (!ks || ks.length < 60) {
+      return null;
+    }
+    const sps = ks.map((k) => k.sp);
+    const ma20 = Utils.calculateMA(20, sps);
+    const ma40 = Utils.calculateMA(40, sps);
+    const ma60 = Utils.calculateMA(60, sps);
+    const latestZd = ks[ks.length - 1].zd;
+    const latestMa20 = ma20[ma20.length - 1];
+    const latestMa40 = ma40[ma40.length - 1];
+    const latestMa60 = ma60[ma60.length - 1];
+
+    const rsi6 = Indicators.calculateRSI(sps, 6);
+    const latestRSI6 = rsi6[rsi6.length - 1];
+
+    if (Number.isNaN(latestMa20) || Number.isNaN(latestMa40) || Number.isNaN(latestMa60) || Number.isNaN(latestRSI6)) {
+      return null;
+    }
+
+    return {
+      secid,
+      ma20: Math.abs(latestZd - latestMa20) / latestZd <= maThreshold,
+      ma40: Math.abs(latestZd - latestMa40) / latestZd <= maThreshold,
+      ma60: Math.abs(latestZd - latestMa60) / latestZd <= maThreshold,
+      rsi6: latestRSI6,
+      isOversold: latestRSI6 <= rsiThreshold,
+    };
+  } catch {
+    return null;
+  }
+}
+
