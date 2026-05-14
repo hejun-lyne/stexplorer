@@ -3228,16 +3228,19 @@ export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80)
       return null;
     }
     const sps = ks.map((k) => k.sp);
+    const ma20 = Utils.calculateMA(20, sps);
     const ma40 = Utils.calculateMA(40, sps);
     const ma60 = Utils.calculateMA(60, sps);
     const latestZd = ks[ks.length - 1].zd;
+    const latestMa20 = ma20[ma20.length - 1];
     const latestMa40 = ma40[ma40.length - 1];
     const latestMa60 = ma60[ma60.length - 1];
-    if (Number.isNaN(latestMa40) || Number.isNaN(latestMa60)) {
+    if (Number.isNaN(latestMa20) || Number.isNaN(latestMa40) || Number.isNaN(latestMa60)) {
       return null;
     }
     return {
       secid,
+      ma20: Math.abs(latestZd - latestMa20) / latestZd <= threshold,
       ma40: Math.abs(latestZd - latestMa40) / latestZd <= threshold,
       ma60: Math.abs(latestZd - latestMa60) / latestZd <= threshold,
     };

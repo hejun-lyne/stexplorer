@@ -36,13 +36,10 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [firstAppearMap, setFirstAppearMap] = useState<Record<string, string>>({});
   const [maFilterSecids, setMaFilterSecids] = useState<string[]>([]);
   const [maFilterLoading, setMaFilterLoading] = useState(false);
-  const [maResults, setMaResults] = useState<Record<string, { ma40: boolean; ma60: boolean }>>({});
+  const [maResults, setMaResults] = useState<Record<string, { ma20: boolean; ma40: boolean; ma60: boolean }>>({});
   const [maPending, setMaPending] = useState<Record<string, boolean>>({});
   const [maThreshold, setMaThreshold] = useState<number>(5);
-  const [trendFilterSecids, setTrendFilterSecids] = useState<string[]>([]);
-  const [trendFilterLoading, setTrendFilterLoading] = useState(false);
-  const [trendResults, setTrendResults] = useState<Record<string, { trendOK: boolean; ma40OK: boolean; isUp: boolean; isFlat: boolean; ma40Deviation: number }>>({});
-  const [trendPending, setTrendPending] = useState<Record<string, boolean>>({});
+
   const [autoBackup, setAutoBackup] = useState(() => Utils.GetStorage('QSList_AUTO_BACKUP', false));
   const autoBackupRef = React.useRef(autoBackup);
   const stocksRef = React.useRef<Stock.QSItem[]>([]);
@@ -272,9 +269,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         setMaResults({});
         setMaPending({});
         setMaThreshold(5);
-        setTrendFilterSecids([]);
-        setTrendResults({});
-        setTrendPending({});
+
       });
 
       // 如果启用了自动备份，逐日尝试从备份加载（只要有缓存就加载，不连续的也加载）
@@ -437,12 +432,12 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           batchResults.forEach(({ secid, res }) => {
             delete pNext[secid];
             if (res) {
-              next[secid] = { ma40: res.ma40, ma60: res.ma60 };
-              if (res.ma40 || res.ma60) {
+              next[secid] = { ma20: res.ma20, ma40: res.ma40, ma60: res.ma60 };
+              if (res.ma20 || res.ma40 || res.ma60) {
                 filtered.push(secid);
               }
             } else {
-              next[secid] = { ma40: false, ma60: false };
+              next[secid] = { ma20: false, ma40: false, ma60: false };
             }
           });
           return pNext;
@@ -455,58 +450,6 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     setMaPending({});
   }, [stocks]);
 
-  const onFilterTrend = useCallback(async (checked: boolean) => {
-    if (!checked) {
-      setTrendFilterSecids([]);
-      return;
-    }
-    if (stocks.length === 0) {
-      return;
-    }
-    setTrendFilterLoading(true);
-    const secids = stocks.map((s) => s.secid);
-    const pendingInit: Record<string, boolean> = {};
-    secids.forEach((id) => {
-      pendingInit[id] = true;
-    });
-    setTrendPending(pendingInit);
-    setTrendResults({});
-
-    const batchSize = 5;
-    const filtered: string[] = [];
-    for (let i = 0; i < secids.length; i += batchSize) {
-      const batch = secids.slice(i, i + batchSize);
-      const batchResults = await Promise.all(
-        batch.map(async (secid) => {
-          const res = await Helpers.Stock.CheckStockRecentTrend(secid, 0.03, 0.02);
-          console.log('Trend check', secid, res);
-          return { secid, res };
-        })
-      );
-      setTrendResults((prev) => {
-        const next = { ...prev };
-        setTrendPending((pPrev) => {
-          const pNext = { ...pPrev };
-          batchResults.forEach(({ secid, res }) => {
-            delete pNext[secid];
-            if (res) {
-              next[secid] = { trendOK: res.trendOK, ma40OK: res.ma40OK, isUp: res.isUp, isFlat: res.isFlat, ma40Deviation: res.ma40Deviation };
-              if (res.trendOK && res.ma40OK) {
-                filtered.push(secid);
-              }
-            } else {
-              next[secid] = { trendOK: false, ma40OK: false, isUp: false, isFlat: false, ma40Deviation: 0 };
-            }
-          });
-          return pNext;
-        });
-        return next;
-      });
-    }
-    setTrendFilterSecids(filtered);
-    setTrendFilterLoading(false);
-    setTrendPending({});
-  }, [stocks]);
   
   return (
     <>
@@ -564,15 +507,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           parser={(value) => parseFloat(value?.replace('%', '') || '5')}
           style={{ width: 60, marginLeft: 4 }}
         />
-        <CheckableTag
-          className="edit-tag"
-          checked={trendFilterSecids.length > 0}
-          onChange={onFilterTrend}
-          style={{ marginTop: 0, marginLeft: 8 }}
-          disabled={trendFilterLoading}
-        >
-          {trendFilterLoading ? '趋势筛选中...' : '趋势筛选'}
-        </CheckableTag>
+
         <Checkbox
           checked={autoBackup}
           onChange={(e) => setAutoBackup(e.target.checked)}
@@ -621,10 +556,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
             {/* <Col span={2}>是否新高</Col> */}
             {/* <Col span={2}>连板统计</Col> */}
             <Col span={2}>入选天数</Col>
+            <Col span={2}>MA20</Col>
             <Col span={2}>MA40</Col>
             <Col span={2}>MA60</Col>
-            <Col span={3}>趋势</Col>
-            <Col span={3}>MA40偏</Col>
             <Col span={4}>理由</Col>
           </Row>
           <div className={classNames(styles.table, styles.qsmoreheader)}>
@@ -632,7 +566,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
               .filter((s) => (filterIndustry == '' ? true : filterIndustry.indexOf(s.hybk) != -1))
               .filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1))
               .filter((s) => (maFilterSecids.length === 0 ? true : maFilterSecids.indexOf(s.secid) !== -1))
-              .filter((s) => (trendFilterSecids.length === 0 ? true : trendFilterSecids.indexOf(s.secid) !== -1))
+
               .map((s) => (
                 <Row key={s.code} className={styles.row}>
                   <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
@@ -651,10 +585,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                   <Col span={2}>{s.nh ? '是' : '否'}</Col>
                   <Col span={2}>{s.zttj.days + '天' + s.zttj.ct + '板'}</Col> */}
                   <Col span={2}>{firstAppearMap[s.secid] ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天' : '-'}</Col>
+                  <Col span={2}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma20 ? '✓' : '✗') : ''}</Col>
                   <Col span={2}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma40 ? '✓' : '✗') : ''}</Col>
                   <Col span={2}>{maPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma60 ? '✓' : '✗') : ''}</Col>
-                  <Col span={3}>{trendPending[s.secid] ? '分析中' : trendResults[s.secid] ? (trendResults[s.secid].trendOK ? '✓' : '✗') : ''}</Col>
-                  <Col span={3}>{trendPending[s.secid] ? '分析中' : trendResults[s.secid] ? (trendResults[s.secid].ma40OK ? '✓' : '✗') : ''}</Col>
                   <Col span={4}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
                 </Row>
               ))}
