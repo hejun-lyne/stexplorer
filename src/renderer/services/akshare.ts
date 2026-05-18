@@ -186,14 +186,16 @@ export async function GetTrendFromAkshare(secid: string): Promise<{ secid: strin
       return { secid, trends: [] };
     }
     
-    const trends = result.map((item: any) => ({
-      datetime: item.datetime,
-      current: item.current,
-      last: item.last,
-      vol: item.vol,
-      average: item.average || 0,
-      up: item.up !== undefined ? item.up : (item.current >= item.last ? 1 : -1),
-    }));
+    const trends = result
+      .map((item: any) => ({
+        datetime: item.datetime,
+        current: item.current,
+        last: item.last,
+        vol: item.vol,
+        average: item.average || 0,
+        up: item.up !== undefined ? item.up : (item.current >= item.last ? 1 : -1),
+      }))
+      .filter((t: any) => t.current > 0);
     
     return { secid, trends };
   } catch (error) {

@@ -1053,7 +1053,7 @@ function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[
   for (let i = 0; i < opts.xAxis.length; i++) {
     opts.xAxis[i].data = dates;
   }
-  const vals = trends.map((t) => t.current).concat(trends.map((t) => t.average));
+  const vals = trends.map((t) => t.current).concat(trends[0].average ? trends.map((t) => t.average) : []);
   const yMin = Math.min(...vals) * 0.999;
   const yMax = Math.max(...vals) * 1.001;
   opts.yAxis[0].min = yMin;

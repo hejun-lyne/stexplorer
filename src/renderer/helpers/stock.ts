@@ -141,17 +141,19 @@ export function SingleStockTrendPush(secid: string, callback: (trends: Stock.Tre
       prePrice: 33.66;
       trends: ['2022-01-13 09:30,33.70,33.70,33.70,33.70,4898,16505586.00,33.700'];
     }) => {
-      const trends = data.trends.map((item) => {
-        const [datetime, last, current, zg, zd, vol, money, average] = item.split(',');
-        return {
-          datetime,
-          last: Number(last),
-          current: Number(current),
-          vol: Number(vol),
-          average: Number(average),
-          up: Number(current) < Number(last) ? -1 : 1,
-        };
-      });
+      const trends = data.trends
+        .map((item) => {
+          const [datetime, last, current, zg, zd, vol, money, average] = item.split(',');
+          return {
+            datetime,
+            last: Number(last),
+            current: Number(current),
+            vol: Number(vol),
+            average: Number(average),
+            up: Number(current) < Number(last) ? -1 : 1,
+          };
+        })
+        .filter((t) => t.current > 0);
       callback(trends);
     },
     error: (message) => {

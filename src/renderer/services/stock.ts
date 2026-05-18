@@ -197,17 +197,19 @@ export async function GetTrendFromEastmoney(secid: string, zs?: number) {
       },
       responseType: 'json',
     });
-    const trends = data.trends.map((item) => {
-      const [datetime, last, current, zg, zd, vol, money, average] = item.split(',');
-      return {
-        datetime,
-        last: Number(last),
-        current: Number(current),
-        vol: Number(vol),
-        average: Number(average),
-        up: Number(current) < Number(last) ? -1 : 1,
-      };
-    });
+    const trends = data.trends
+      .map((item) => {
+        const [datetime, last, current, zg, zd, vol, money, average] = item.split(',');
+        return {
+          datetime,
+          last: Number(last),
+          current: Number(current),
+          vol: Number(vol),
+          average: Number(average),
+          up: Number(current) < Number(last) ? -1 : 1,
+        };
+      })
+      .filter((t) => t.current > 0);
     return {
       secid,
       trends: trends,
@@ -3831,6 +3833,9 @@ export async function requestDealDay(secid: string, date: string) {
     let all_vol = 0;
     let all_money = 0;
     for (let i = 0; i < deal.time.length; i++) {
+      if (deal.price[i] <= 0) {
+        continue;
+      }
       all_vol += deal.vol[i];
       all_money += deal.vol[i] * deal.price[i];
       data.push({
