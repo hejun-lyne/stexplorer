@@ -1,7 +1,7 @@
 import React, { useCallback, useRef } from 'react';
 import { useState } from 'react';
 import classnames from 'classnames';
-import { Input, List, Popover } from 'antd';
+import { Input, List, Popover, message } from 'antd';
 import {
   ArrowLeftOutlined,
   ArrowRightOutlined,
@@ -10,9 +10,11 @@ import {
   StarFilled,
   EditOutlined,
   PlayCircleOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons';
 import styles from './index.scss';
 import { NoteTabId } from '../..';
+import { DetectedVideo } from '..';
 
 export interface SiteBarProps {
   url: string;
@@ -20,6 +22,7 @@ export interface SiteBarProps {
   canForward: boolean;
   stared: boolean;
   tabsSelectVisible: boolean;
+  videos: DetectedVideo[];
   onBackward: () => void;
   onForward: () => void;
   onRefresh: () => void;
@@ -35,6 +38,36 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
   if (edittext && document.activeElement !== inputRef.current?.input) {
     setEdittext(undefined);
   }
+
+  const handleCopyVideoUrl = useCallback((src: string) => {
+    try {
+      const { clipboard } = window.contextModules.electron;
+      clipboard.writeText(src);
+      message.success('已复制视频链接');
+    } catch (e) {
+      message.error('复制失败');
+    }
+  }, []);
+
+  const handleDownloadVideo = useCallback(async (item: DetectedVideo) => {
+    try {
+      const ext = item.type === 'audio' ? '.mp3' : '.mp4';
+      const defaultPath = `video_${Date.now()}${ext}`;
+      const { dialog, downloadVideo } = window.contextModules.electron;
+      const result = await dialog.showSaveDialog({
+        defaultPath,
+        filters: [{ name: item.type === 'audio' ? 'Audio' : 'Video', extensions: [item.type === 'audio' ? 'mp3' : 'mp4'] }],
+      });
+      if (result.canceled || !result.filePath) return;
+
+      message.loading({ content: '下载中...', key: item.src, duration: 0 });
+      await downloadVideo(item.src, result.filePath);
+      message.success({ content: '下载完成', key: item.src });
+    } catch (e) {
+      message.error({ content: '下载失败', key: item.src });
+      console.error('Download video failed:', e);
+    }
+  }, []);
   function renderMenu() {
     return (
       <div className={styles.bar}>
@@ -89,19 +122,34 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
         </Popover>
         <Popover
           placement="bottom"
-          visible={props.tabsSelectVisible}
-          title="检测到可下载"
+          title="检测到视频"
           style={{ backgroundColor: '#333' }}
-          content={() => (
-            <List
-              size="small"
-              dataSource={props.getEditingNotes()}
-              renderItem={(item) => <List.Item onClick={() => props.confirmReferTab(item)}>{item.title}</List.Item>}
-            />
-          )}
+          content={() =>
+            props.videos.length ? (
+              <List
+                size="small"
+                dataSource={props.videos}
+                renderItem={(item) => (
+                  <List.Item>
+                    <div className={styles.videoItem} onClick={() => handleCopyVideoUrl(item.src)}>
+                      <span className={styles.videoType}>{item.type}</span>
+                      <span className={styles.videoSrc} title={item.src}>{item.src}</span>
+                    </div>
+                    {item.type !== 'iframe' && (
+                      <div className={styles.videoDownload} onClick={() => handleDownloadVideo(item)}>
+                        <DownloadOutlined />
+                      </div>
+                    )}
+                  </List.Item>
+                )}
+              />
+            ) : (
+              <div style={{ padding: '8px 16px', color: '#999' }}>未检测到视频</div>
+            )
+          }
           trigger="click"
         >
-          <div className={classnames(styles.btn, styles.enable)}>
+          <div className={classnames(styles.btn, props.videos.length ? styles.enable : styles.disable)}>
             <PlayCircleOutlined />
           </div>
         </Popover>

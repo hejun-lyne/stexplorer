@@ -8,6 +8,8 @@
  */
 
 import { app, globalShortcut, ipcMain, nativeTheme, dialog } from 'electron';
+import { get } from 'https';
+import { get as httpGet } from 'http';
 import windowStateKeeper from 'electron-window-state';
 import contextMenu from 'electron-context-menu';
 import { appIcon, generateWalletIcon } from './icon';
@@ -158,6 +160,30 @@ async function init() {
       compilerOptions: { module: ts.ModuleKind.CommonJS },
     });
     return result;
+  });
+  ipcMain.handle('download-video', async (event, { url, savePath }: { url: string; savePath: string }) => {
+    return new Promise((resolve, reject) => {
+      const file = fs.createWriteStream(savePath);
+      const client = url.startsWith('https') ? get : httpGet;
+      client(url, (response) => {
+        if (response.statusCode !== 200) {
+          reject(new Error(`Status Code: ${response.statusCode}`));
+          return;
+        }
+        response.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          resolve(savePath);
+        });
+      }).on('error', (err) => {
+        fs.unlink(savePath, () => {});
+        reject(err);
+      });
+      file.on('error', (err) => {
+        fs.unlink(savePath, () => {});
+        reject(err);
+      });
+    });
   });
   // ===== 本地文件存储 IPC 处理程序 =====
   ipcMain.handle('local-storage-init', () => {

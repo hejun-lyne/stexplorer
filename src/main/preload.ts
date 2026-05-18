@@ -73,6 +73,7 @@ contextBridge.exposeInMainWorld('contextModules', {
       writeText: clipboard.writeText,
       writeImage: (dataUrl: string) => clipboard.writeImage(nativeImage.createFromDataURL(dataUrl)),
     },
+    downloadVideo: (url: string, savePath: string) => ipcRenderer.invoke('download-video', { url, savePath }),
     saveImage: (filePath: string, dataUrl: string) => {
       const imageBuffer = base64ToBuffer(dataUrl);
       fs.writeFileSync(filePath, imageBuffer);

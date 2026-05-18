@@ -16,6 +16,7 @@ declare global {
           readText: Clipboard['readText'];
           writeImage: (dataUrl: string) => void;
         };
+        downloadVideo: (url: string, savePath: string) => Promise<string>;
         invoke: {
           showCurrentWindow: () => void;
           getShouldUseDarkColors: () => Promise<boolean>;
