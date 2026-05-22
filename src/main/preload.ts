@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('contextModules', {
           'on-console-log',
           'on-progress-log',
           'download-video-progress',
+          'kimi-analysis-chunk',
         ];
         if (validChannels.includes(channel)) {
           return ipcRenderer.on(channel, func);

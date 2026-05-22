@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Alert, Spin, message } from 'antd';
-import { RobotOutlined, ReloadOutlined } from '@ant-design/icons';
+import { RobotOutlined } from '@ant-design/icons';
 import { useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { Stock } from '@/types/stock';
@@ -67,37 +67,52 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, active }) => {
     setLoading(true);
     setError('');
     setAnalysis('');
+
+    const { ipcRenderer } = window.contextModules.electron;
+
+    // 监听流式 chunk
+    const chunkHandler = (_: any, data: { content?: string }) => {
+      if (data.content !== undefined) {
+        setAnalysis(data.content);
+      }
+    };
+    ipcRenderer.on('kimi-analysis-chunk', chunkHandler);
+
     try {
       const prompt = buildPrompt(stock);
-      const { ipcRenderer } = window.contextModules.electron;
       const result = await ipcRenderer.invoke('kimi-analyze-stock', {
         apiKey: kimiApiKey,
         prompt,
       });
-      if (result?.content) {
-        setAnalysis(result.content);
-      } else if (result?.error) {
+      if (result?.error) {
         setError(result.error);
-      } else {
-        setError('分析结果为空');
+        setAnalysis('');
+      } else if (result?.content) {
+        setAnalysis(result.content);
       }
     } catch (e: any) {
       setError('请求失败: ' + (e.message || String(e)));
       console.error('Kimi analyze failed:', e);
     } finally {
+      ipcRenderer.off('kimi-analysis-chunk', chunkHandler);
       setLoading(false);
     }
   }, [kimiApiKey, stock, buildPrompt]);
 
   useEffect(() => {
     if (active && stock?.code && !analysis && !loading && !error) {
-      // 首次进入且未分析时自动分析
       doAnalyze();
     }
   }, [active, stock?.code]);
 
+  // 自动滚动到底部
+  useEffect(() => {
+    if (contentRef.current && loading) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [analysis, loading]);
+
   const renderMarkdown = (text: string) => {
-    // 简单的 Markdown 渲染：标题、列表、加粗、换行
     const html = text
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -128,6 +143,9 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, active }) => {
         {!kimiApiKey && (
           <span className={styles.hint}>请先在设置中配置 Kimi API Key</span>
         )}
+        {loading && (
+          <span className={styles.streamingHint}>Kimi 正在逐字生成分析...</span>
+        )}
       </div>
 
       {error && (
@@ -141,18 +159,19 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, active }) => {
         />
       )}
 
-      {loading && (
+      {loading && !analysis && (
         <div className={styles.loading}>
           <Spin tip="Kimi 正在分析中，请稍候..." size="large" />
         </div>
       )}
 
-      {analysis && !loading && (
+      {(analysis || loading) && (
         <div className={styles.content} ref={contentRef}>
           <div
             className={styles.markdown}
-            dangerouslySetInnerHTML={renderMarkdown(analysis)}
+            dangerouslySetInnerHTML={renderMarkdown(analysis || '')}
           />
+          {loading && <span className={styles.cursor}>▌</span>}
         </div>
       )}
 
