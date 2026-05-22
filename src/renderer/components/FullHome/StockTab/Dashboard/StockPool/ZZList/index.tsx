@@ -15,12 +15,12 @@ import { Stock } from '@/types/stock';
 
 const { ipcRenderer, makeWorkerExec } = window.contextModules.electron;
 
-export interface CLListProps {
+export interface ZZListProps {
   onOpenStock: (secid: string, name: string) => void;
   active: boolean;
 }
 
-const CLList: React.FC<CLListProps> = ({ onOpenStock, active }) => {
+const ZZList: React.FC<ZZListProps> = ({ onOpenStock, active }) => {
   const stockConfigs = useSelector((state: StoreState) =>
     state.stock.stockConfigs.filter((c) => c.tags?.find((t) => t == '趋势' || t == '打板'))
   );
@@ -258,4 +258,4 @@ const CLList: React.FC<CLListProps> = ({ onOpenStock, active }) => {
   );
 };
 
-export default CLList;
+export default ZZList;

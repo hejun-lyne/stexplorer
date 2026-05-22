@@ -80,6 +80,56 @@ const CXList: React.FC<CXListProps> = ({ industries, onOpenStock, active }) => {
       mayGetStocks(20, nd);
     }
   }, []);
+  const onCalcTechIndicators = useCallback(async () => {
+    if (stocks.length === 0) {
+      return;
+    }
+    setTechFilterLoading(true);
+    const secids = stocks.map((s) => s.secid);
+    const pendingInit: Record<string, boolean> = {};
+    secids.forEach((id) => {
+      pendingInit[id] = true;
+    });
+    setTechPending(pendingInit);
+    setMaResults({});
+    setRsiResults({});
+
+    const batchSize = 5;
+    for (let i = 0; i < secids.length; i += batchSize) {
+      const batch = secids.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map(async (secid) => {
+          const res = await Helpers.Stock.CheckStockMAAndRSI(secid, maThreshold / 100, 30);
+          console.log('MA+RSI check', secid, res);
+          return { secid, res };
+        })
+      );
+      setMaResults((prev) => {
+        const next = { ...prev };
+        setRsiResults((rPrev) => {
+          const rNext = { ...rPrev };
+          setTechPending((pPrev) => {
+            const pNext = { ...pPrev };
+            batchResults.forEach(({ secid, res }) => {
+              delete pNext[secid];
+              if (res) {
+                next[secid] = { ma20: res.ma20, ma40: res.ma40, ma60: res.ma60 };
+                rNext[secid] = { rsi6: res.rsi6, isOversold: res.isOversold };
+              } else {
+                next[secid] = { ma20: false, ma40: false, ma60: false };
+                rNext[secid] = { rsi6: 0, isOversold: false };
+              }
+            });
+            return pNext;
+          });
+          return rNext;
+        });
+        return next;
+      });
+    }
+    setTechFilterLoading(false);
+    setTechPending({});
+  }, [stocks, maThreshold]);
   return (
     <>
       <div className={styles.header}>
