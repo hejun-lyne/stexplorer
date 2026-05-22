@@ -25,7 +25,9 @@ export const defaultSystemSetting: System.Setting = {
   freshDelaySetting: 3,
   ontrain: false,
   trainDate: '',
-  kLineApiSource: Enums.FundApiType.Eastmoney
+  kLineApiSourceSetting: Enums.FundApiType.Eastmoney,
+  useZizaiDayK: false,
+  kimiApiKeySetting: '',
 };
 
 export const defaultMonitorSetting: System.MonitorSetting = {

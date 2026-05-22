@@ -348,6 +348,53 @@ async function init() {
       throw e;
     }
   });
+  // ===== Kimi AI 分析 IPC 处理程序 =====
+  ipcMain.handle('kimi-analyze-stock', async (event, { apiKey, prompt }: { apiKey: string; prompt: string }) => {
+    try {
+      const trimmedKey = (apiKey || '').trim();
+      console.log('[Kimi] apiKey length:', trimmedKey.length, 'prefix:', trimmedKey.substring(0, 7));
+      if (!trimmedKey) {
+        return { error: 'API Key 未配置' };
+      }
+      if (!trimmedKey.startsWith('sk-')) {
+        return { error: 'API Key 格式不正确，应以 sk- 开头' };
+      }
+      const response = await got.post('https://api.moonshot.cn/v1/chat/completions', {
+        headers: {
+          Authorization: `Bearer ${trimmedKey}`,
+        },
+        json: {
+          model: 'kimi-k2.6',
+          messages: [
+            { role: 'system', content: '你是一位专业的股票分析师，擅长基本面分析、技术面分析、资金面分析和风险评估。请基于提供的数据给出客观、专业的分析意见。' },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 1,
+        },
+        timeout: { request: 60000 },
+        retry: 1,
+      }).json<any>();
+
+      if (response.choices && response.choices[0] && response.choices[0].message) {
+        return { content: response.choices[0].message.content };
+      }
+      return { error: 'Kimi API 返回异常' };
+    } catch (e: any) {
+      console.error('Kimi API error:', e);
+      const body = e.response?.body;
+      if (typeof body === 'string') {
+        try {
+          const parsed = JSON.parse(body);
+          return { error: `Kimi API 错误: ${parsed.error?.message || parsed.message || body}` };
+        } catch {
+          return { error: `Kimi API 错误: ${body}` };
+        }
+      }
+      const msg = e.response?.body?.error?.message || e.message || '请求失败';
+      return { error: `Kimi API 错误: ${msg}` };
+    }
+  });
+
   // ===== 本地文件存储 IPC 处理程序 =====
   ipcMain.handle('local-storage-init', () => {
     try {

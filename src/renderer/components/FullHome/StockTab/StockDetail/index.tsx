@@ -30,6 +30,7 @@ import TrackingNote from './MustRead/TrackingNote';
 import Similarity from './MustRead/Similarity';
 import PeriodMark from './MustRead/PeriodMark';
 import Guba from './MustRead/GuBa';
+import KimiAnalysis from './KimiAnalysis';
 import * as Utils from '@/utils';
 
 export interface StockDetailProps {
@@ -215,6 +216,9 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
                       onTimelineClicked={setTimelineDate}
                     />
                   </Tabs.TabPane> */}
+                  <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>Kimi 分析</span>} key={'kimi'}>
+                    <KimiAnalysis stock={nDetails} active={active} />
+                  </Tabs.TabPane>
                   <Tabs.TabPane tab={<>
                     <span style={{ padding: '0 20px' }}>跟踪笔记</span>
                     {noteChanged && <Badge status="warning" offset={[0, 0]} />}

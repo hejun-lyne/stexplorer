@@ -44,6 +44,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     ontrain,
     trainDate,
     kLineApiSourceSetting,
+    kimiApiKeySetting,
   } = useSelector((state: StoreState) => state.setting.systemSetting);
   // 数据来源
   const [fundApiType, setFundApiType] = useState(fundApiTypeSetting);
@@ -64,6 +65,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
   const [autoFresh, setAutoFresh] = useState(autoFreshSetting);
   const [freshDelay, setFreshDelay] = useState(freshDelaySetting);
   const [kLineApiSource, setKLineApiSource] = useState(kLineApiSourceSetting);
+  const [kimiApiKey, setKimiApiKey] = useState(kimiApiKeySetting);
 
   function onSave() {
     dispatch(
@@ -82,6 +84,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
         ontrain: istrain,
         trainDate: ontrainDate,
         kLineApiSourceSetting: kLineApiSource,
+        kimiApiKeySetting: kimiApiKey,
       })
     );
   }
@@ -291,6 +294,26 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
                 onChange={(e) => setKLineApiSource(e.target.value)}
                 value={kLineApiSource}
               />
+            </section>
+          </div>
+        </StandCard>
+        <StandCard icon={<SettingIcon />} title="AI 分析">
+          <div className={classnames(styles.setting, 'card-body')}>
+            <section>
+              <label>Kimi API Key：</label>
+              <Input.Password
+                value={kimiApiKey}
+                onChange={(e) => setKimiApiKey(e.target.value)}
+                placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+                size="small"
+                style={{ flex: 1 }}
+              />
+            </section>
+            <section>
+              <label></label>
+              <span style={{ fontSize: 12, color: '#999' }}>
+                在 <a onClick={() => onOpenUrl('https://platform.moonshot.cn/console/account')}>Kimi 开放平台</a> 获取 API Key
+              </span>
             </section>
           </div>
         </StandCard>

@@ -19,6 +19,8 @@ declare namespace System {
     trainDate: string; // 训练日期
 
     kLineApiSourceSetting: number; // K线加载的数据源
+
+    kimiApiKeySetting: string; // Kimi API Key
   }
 
   export interface GridSetting {

@@ -16,6 +16,7 @@ export const defaultSystemSetting: System.Setting = {
   autoFreshSetting: true,
   freshDelaySetting: 3,
   useZizaiDayK: false,
+  kimiApiKeySetting: '',
 };
 
 export function GetSystemSetting() {
