@@ -96,13 +96,20 @@
   color: var(--main-text-color);
 }
 
-.videoDownload {
+.videoAction {
   flex-shrink: 0;
   margin-left: 8px;
   cursor: pointer;
   color: var(--main-text-color);
   font-size: 0.9rem;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
   &:hover {
     color: var(--primary-color);
+    background-color: rgba(255, 255, 255, 0.1);
   }
 }

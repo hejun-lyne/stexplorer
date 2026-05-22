@@ -10,6 +10,7 @@
 import { app, globalShortcut, ipcMain, nativeTheme, dialog } from 'electron';
 import { get } from 'https';
 import { get as httpGet } from 'http';
+import got from 'got';
 import windowStateKeeper from 'electron-window-state';
 import contextMenu from 'electron-context-menu';
 import { appIcon, generateWalletIcon } from './icon';
@@ -184,6 +185,168 @@ async function init() {
         reject(err);
       });
     });
+  });
+
+  // 高级视频下载：支持 M3U8/TS 解析、重定向跟随、进度报告
+  ipcMain.handle('download-video-advanced', async (event, { url, savePath, isM3U8 }: { url: string; savePath: string; isM3U8?: boolean }) => {
+    const sendProgress = (progress: number) => {
+      event.sender.send('download-video-progress', { url, progress });
+    };
+
+    const downloadStream = async (downloadUrl: string, outputPath: string, onProgress?: (received: number, total: number) => void) => {
+      const stream = got.stream(downloadUrl, {
+        retry: 2,
+        timeout: { request: 30000 },
+        followRedirect: true,
+      });
+      const writeStream = fs.createWriteStream(outputPath);
+      return new Promise<void>((resolve, reject) => {
+        let received = 0;
+        let total = 0;
+        stream.on('response', (res) => {
+          const cl = res.headers['content-length'];
+          total = parseInt(Array.isArray(cl) ? cl[0] : (cl || '0'), 10);
+        });
+        stream.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          if (onProgress && total > 0) {
+            onProgress(received, total);
+          }
+        });
+        stream.on('error', reject);
+        writeStream.on('error', reject);
+        writeStream.on('finish', () => {
+          writeStream.close();
+          resolve();
+        });
+        stream.pipe(writeStream);
+      });
+    };
+
+    const downloadM3U8 = async (m3u8Url: string, outputPath: string): Promise<string> => {
+      // 1. 下载 M3U8 内容
+      const m3u8Text = await got(m3u8Url, {
+        retry: 2,
+        timeout: { request: 15000 },
+        followRedirect: true,
+      }).text();
+
+      // 2. 解析 M3U8
+      const lines = m3u8Text.split(/\r?\n/);
+      const tsUrls: string[] = [];
+      let hasEncryption = false;
+      const lastSlashIdx = m3u8Url.lastIndexOf('/');
+      const baseUrl = lastSlashIdx > 0 ? m3u8Url.substring(0, lastSlashIdx + 1) : m3u8Url + '/';
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('#EXT-X-KEY')) {
+          hasEncryption = true;
+        }
+        if (line.startsWith('#')) continue;
+        if (!line) continue;
+        // 这是一个媒体 URL
+        if (line.startsWith('http')) {
+          tsUrls.push(line);
+        } else {
+          // 相对 URL
+          tsUrls.push(baseUrl + line);
+        }
+      }
+
+      if (tsUrls.length === 0) {
+        // 可能是主播放列表（master playlist），尝试找子播放列表
+        let bestBandwidth = 0;
+        let bestUrl = '';
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith('#EXT-X-STREAM-INF')) {
+            const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
+            const bandwidth = bandwidthMatch ? parseInt(bandwidthMatch[1], 10) : 0;
+            const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
+            if (nextLine && !nextLine.startsWith('#')) {
+              if (bandwidth > bestBandwidth) {
+                bestBandwidth = bandwidth;
+                bestUrl = nextLine;
+              }
+            }
+          }
+        }
+        if (bestUrl) {
+          const subUrl = bestUrl.startsWith('http') ? bestUrl : baseUrl + bestUrl;
+          // 递归下载子 M3U8
+          return downloadM3U8(subUrl, outputPath);
+        }
+        throw new Error('M3U8 中未找到有效的 TS 分片');
+      }
+
+      if (hasEncryption) {
+        throw new Error('M3U8 使用了 AES-128 加密，暂不支持下载加密视频');
+      }
+
+      // 3. 逐个下载 TS 并合并
+      const tmpDir = path.join(app.getPath('temp'), `m3u8_${Date.now()}`);
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const outputStream = fs.createWriteStream(outputPath);
+
+      for (let i = 0; i < tsUrls.length; i++) {
+        const tsUrl = tsUrls[i];
+        const tsPath = path.join(tmpDir, `seg_${i.toString().padStart(5, '0')}.ts`);
+        try {
+          await downloadStream(tsUrl, tsPath);
+        } catch (e) {
+          outputStream.destroy();
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+          throw new Error(`下载 TS 分片 ${i + 1}/${tsUrls.length} 失败: ${tsUrl}`);
+        }
+        // 追加到输出文件
+        const tsBuffer = fs.readFileSync(tsPath);
+        outputStream.write(tsBuffer);
+        fs.unlinkSync(tsPath);
+        sendProgress(((i + 1) / tsUrls.length) * 100);
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        outputStream.on('finish', resolve);
+        outputStream.on('error', reject);
+        outputStream.end();
+      });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      sendProgress(100);
+      return outputPath;
+    };
+
+    try {
+      // 1. 判断是否为 M3U8（通过 URL 或 Content-Type）
+      let finalIsM3U8 = isM3U8;
+      if (!finalIsM3U8) {
+        try {
+          const headRes = await got.head(url, { retry: 2, timeout: { request: 10000 }, followRedirect: true });
+          const ct = headRes.headers['content-type'] || '';
+          if (/mpegurl|x-mpegurl|m3u8/i.test(ct)) {
+            finalIsM3U8 = true;
+          }
+        } catch (e) {
+          // 如果 head 失败，通过 URL 后缀判断
+          finalIsM3U8 = /\.m3u8([?#]|$)/i.test(url);
+        }
+      }
+
+      if (!finalIsM3U8) {
+        // 普通视频：直接下载
+        await downloadStream(url, savePath, (received, total) => {
+          if (total > 0) sendProgress((received / total) * 100);
+        });
+        sendProgress(100);
+        return savePath;
+      }
+
+      // M3U8 下载
+      return await downloadM3U8(url, savePath);
+    } catch (e: any) {
+      sendProgress(0);
+      throw e;
+    }
   });
   // ===== 本地文件存储 IPC 处理程序 =====
   ipcMain.handle('local-storage-init', () => {

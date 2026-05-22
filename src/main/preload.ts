@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('contextModules', {
           'message-from-worker',
           'on-console-log',
           'on-progress-log',
+          'download-video-progress',
         ];
         if (validChannels.includes(channel)) {
           return ipcRenderer.on(channel, func);
