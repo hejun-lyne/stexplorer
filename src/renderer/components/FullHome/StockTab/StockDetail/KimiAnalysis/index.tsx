@@ -36,10 +36,86 @@ const typeNames: Record<AnalysisType, string> = {
   fundamental: '基本面分析',
 };
 
-const SYSTEM_PROMPT = `你是一位专业的股票分析师，擅长基本面分析、技术面分析、资金面分析和风险评估。
-分析时请客观、专业，风险提示必须充分，用中文回答，格式清晰。`;
+// ===== 优化1：精简 System Prompt =====
+const SYSTEM_PROMPT = `你是股票分析师，客观专业，风险提示充分，中文回答，格式清晰。`;
 
-// ===== Markdown 解析器 =====
+// ===== 优化2：精简工具定义 =====
+const TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'get_trend',
+      description: '获取今日分时数据（价格/均价/成交量），技术分析时调用',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string', description: 'secid如0.002594' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_kline',
+      description: '获取K线数据（开收高低/成交量/涨跌幅），K线分析时调用',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string' },
+          period: { type: 'string', enum: ['day', 'week', 'month'] },
+          count: { type: 'number', description: '默认30' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_fundamental',
+      description: '获取财务指标（ROE/营收/毛利率/负债率/现金流），基本面分析时调用',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_finance',
+      description: '获取三大报表摘要（资产负债/利润/现金流量表），财务分析时调用',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
+];
+
+// ===== 优化7：按需加载工具 =====
+const getToolsByType = (type?: AnalysisType) => {
+  switch (type) {
+    case 'tech':
+      return TOOLS.filter(t => ['get_trend', 'get_kline'].includes(t.function.name));
+    case 'fundamental':
+      return TOOLS.filter(t => ['get_fundamental', 'get_finance'].includes(t.function.name));
+    case 'event':
+      return []; // 事件分析不需要工具
+    default:
+      return TOOLS;
+  }
+};
+
+// ===== Markdown 解析器（保持不变）=====
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -74,7 +150,7 @@ function parseMarkdown(text: string): string {
         code += lines[i] + '\n';
         i++;
       }
-      i++; // skip ```
+      i++;
       result += `<pre><code${lang ? ` class="language-${lang}"` : ''}>${escapeHtml(code.slice(0, -1))}</code></pre>`;
       continue;
     }
@@ -123,7 +199,6 @@ function parseMarkdown(text: string): string {
         result += tableHtml;
         continue;
       } else {
-        // 回退为段落处理
         i -= tableLines.length;
       }
     }
@@ -135,7 +210,6 @@ function parseMarkdown(text: string): string {
         quoteLines.push(lines[i].trim().slice(1).trim());
         i++;
       }
-      // 引用块内部支持简单换行
       const quoteText = quoteLines.join('\n');
       result += `<blockquote>${parseInline(escapeHtml(quoteText))}</blockquote>`;
       continue;
@@ -183,73 +257,12 @@ function parseMarkdown(text: string): string {
   return result;
 }
 
-const TOOLS = [
-  {
-    type: 'function',
-    function: {
-      name: 'get_stock_trend_data',
-      description: '获取指定股票今日的实时分时走势数据，包含每个时间点的价格、均价、成交量等信息。当用户要求进行分时走势分析时必须调用此工具。',
-      parameters: {
-        type: 'object',
-        properties: {
-          secid: { type: 'string', description: '股票secid，例如 "0.002594"' },
-        },
-        required: ['secid'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_stock_kline_data',
-      description: '获取指定股票近期K线数据，包含每根K线的日期、开盘、收盘、最高、最低、成交量、涨跌幅等。当用户要求进行K线技术分析时必须调用此工具。',
-      parameters: {
-        type: 'object',
-        properties: {
-          secid: { type: 'string', description: '股票secid，例如 "0.002594"' },
-          period: { type: 'string', enum: ['day', 'week', 'month'], description: 'K线周期，默认day' },
-          count: { type: 'number', description: '获取最近多少根K线，默认30' },
-        },
-        required: ['secid'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_stock_fundamental',
-      description: '获取指定股票的基本面数据（财务指标），包含ROE、净利润、营收、毛利率、资产负债率、现金流等关键指标。当用户要求进行基本面分析时必须调用此工具。',
-      parameters: {
-        type: 'object',
-        properties: {
-          secid: { type: 'string', description: '股票secid，例如 "0.002594"' },
-        },
-        required: ['secid'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_stock_finance_data',
-      description: '获取指定股票的财务数据（三大报表摘要），包含资产负债表、利润表、现金流量表的核心科目。当用户要求查看财务报表或详细财务数据时必须调用此工具。',
-      parameters: {
-        type: 'object',
-        properties: {
-          secid: { type: 'string', description: '股票secid，例如 "0.002594"' },
-        },
-        required: ['secid'],
-      },
-    },
-  },
-];
-
 const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, active }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [inputValue, setInputValue] = useState('');
-  const contentRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<<HTMLDivElement>(null);
   const inputRef = useRef<any>(null);
   const trendsRef = useRef(trends);
   const klinesRef = useRef(klines);
@@ -292,7 +305,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     if (!code || msgs.length === 0) return;
     try {
       await window.contextModules.electron.sqliteWrite(CACHE_TABLE, {
-        messages: msgs.slice(-100), // 最多保留100条
+        messages: msgs.slice(-100),
         stockCode: code,
         stockName: stock.name,
       }, dayjs().format('YYYY-MM-DD HH:mm:ss'), code);
@@ -315,17 +328,15 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     }
   }, [stock.name]);
 
-  // 激活或股票切换时加载缓存
   useEffect(() => {
     if (active && stock?.code) {
-      setMessages([]); // 先清空，避免显示旧股票消息
+      setMessages([]);
       loadCache(stock.code);
     } else {
       setMessages([]);
     }
   }, [active, stock?.code, loadCache]);
 
-  // messages 变化时自动保存缓存
   useEffect(() => {
     if (stock?.code && messages.length > 0) {
       const timer = setTimeout(() => {
@@ -335,63 +346,71 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     }
   }, [messages, stock?.code, saveCache]);
 
+  // ===== 优化3：精简基础信息 =====
   const buildBaseInfo = useCallback((detail: Stock.DetailItem): string => {
-    return [
-      `## 股票基本信息`,
-      `- 股票名称：${detail.name || '未知'}`,
-      `- 股票代码：${detail.code || '未知'}`,
-      `- 所属板块：${detail.hybk || '未知'}`,
-      `- 最新价：${detail.zx ? detail.zx.toFixed(2) : '未知'}`,
-      `- 涨跌幅：${detail.zdf ? detail.zdf.toFixed(2) + '%' : '未知'}`,
-      `- 涨跌额：${detail.zdd ? detail.zdd.toFixed(2) : '未知'}`,
-      `- 开盘价：${detail.jk ? detail.jk.toFixed(2) : '未知'}`,
-      `- 最高价：${detail.zg ? detail.zg.toFixed(2) : '未知'}`,
-      `- 最低价：${detail.zd ? detail.zd.toFixed(2) : '未知'}`,
-      `- 昨收价：${detail.zs ? detail.zs.toFixed(2) : '未知'}`,
-      `- 成交量：${detail.cjl ? detail.cjl.toString() : '未知'}`,
-      `- 成交额：${detail.cje ? detail.cje.toString() : '未知'}`,
-      `- 换手率：${detail.hsl ? (detail.hsl / 100).toFixed(2) + '%' : '未知'}`,
-      `- 市盈率(动)：${(detail as any).ped || '未知'}`,
-      `- 市盈率(TTM)：${(detail as any).pettm || '未知'}`,
-      `- 市净率：${(detail as any).pb || '未知'}`,
-      `- 总市值：${(detail as any).zsz ? ((detail as any).zsz / 100000000).toFixed(2) + '亿' : '未知'}`,
-      `- 流通市值：${(detail as any).ltsz ? ((detail as any).ltsz / 100000000).toFixed(2) + '亿' : '未知'}`,
-      `- 量比：${detail.lb ? detail.lb.toFixed(2) : '未知'}`,
-      `- 内盘：${detail.np || '未知'}`,
-      `- 外盘：${detail.wp || '未知'}`,
-      `- 委比：${(detail as any).wb ? (detail as any).wb.toFixed(2) + '%' : '未知'}`,
-    ].join('\n');
+    const fields: [string, any, string?][] = [
+      ['名称', detail.name],
+      ['代码', detail.code],
+      ['板块', detail.hybk],
+      ['最新价', detail.zx, '元'],
+      ['涨跌幅', detail.zdf, '%'],
+      ['换手率', detail.hsl ? detail.hsl / 100 : null, '%'],
+      ['市盈率TTM', (detail as any).pettm],
+      ['市净率', (detail as any).pb],
+      ['总市值', (detail as any).zsz ? ((detail as any).zsz / 1e8).toFixed(2) + '亿' : null],
+    ];
+    
+    const lines = fields
+      .filter(([_, v]) => v != null && v !== '' && v !== '未知')
+      .map(([k, v, unit]) => `- ${k}：${v}${unit || ''}`);
+      
+    return lines.length > 0 ? `股票信息：\n${lines.join('\n')}` : '';
   }, []);
 
+  // ===== 优化4：数据采样与聚合 =====
   const formatTrendData = useCallback((trendData?: Stock.TrendItem[]): string => {
-    if (!trendData || trendData.length === 0) {
-      return '暂无分时数据';
-    }
-    // const recent = trendData.slice(-60);
-    const rows = trendData.map((t) => {
-      const time = t.datetime.length >= 10 ? t.datetime.split(' ')[1] || t.datetime : t.datetime;
-      return `${time}\t${t.current.toFixed(2)}\t${t.average ? t.average.toFixed(2) : '-'}\t${t.vol}`;
-    });
-    return [
-      `时间\t价格\t均价\t成交量`,
-      ...rows,
-    ].join('\n');
+    if (!trendData || trendData.length === 0) return '无分时数据';
+    
+    const n = trendData.length;
+    const keyPoints = [
+      trendData[0],
+      trendData[Math.floor(n / 4)],
+      trendData[Math.floor(n / 2)],
+      trendData[Math.floor(3 * n / 4)],
+      trendData[n - 1],
+    ];
+    
+    const prices = trendData.map(t => t.current);
+    const avg = prices.reduce((a, b) => a + b) / n;
+    const max = Math.max(...prices);
+    const min = Math.min(...prices);
+    const volSum = trendData.reduce((s, t) => s + (t.vol || 0), 0);
+    
+    return `分时统计：均价${avg.toFixed(2)}，最高${max.toFixed(2)}，最低${min.toFixed(2)}，总成交${volSum}
+关键点位：${keyPoints.map(t => `${t.datetime.slice(-5)}:${t.current.toFixed(2)}`).join('，')}`;
   }, []);
 
   const formatKlineData = useCallback((klineData?: Stock.KLineItem[]): string => {
-    if (!klineData || klineData.length === 0) {
-      return '暂无K线数据';
-    }
-    const recent = klineData.slice(-120);
-    const rows = recent.map((k) => {
-      return `${k.date}\t${k.kp.toFixed(2)}\t${k.sp.toFixed(2)}\t${k.zg.toFixed(2)}\t${k.zd.toFixed(2)}\t${k.cjl}\t${k.zdf.toFixed(2)}%`;
-    });
-    return [
-      `日期\t开盘\t收盘\t最高\t最低\t成交量\t涨跌幅`,
-      ...rows,
-    ].join('\n');
+    if (!klineData || klineData.length === 0) return '无K线数据';
+    
+    const recent = klineData.slice(-20);
+    const summary = {
+      upDays: recent.filter(k => k.zdf > 0).length,
+      downDays: recent.filter(k => k.zdf < 0).length,
+      avgVol: Math.round(recent.reduce((s, k) => s + k.cjl, 0) / recent.length),
+      maxZdf: Math.max(...recent.map(k => k.zdf)),
+      minZdf: Math.min(...recent.map(k => k.zdf)),
+    };
+    
+    const rows = recent.map(k => 
+      `${k.date.slice(-5)} ${k.sp.toFixed(2)} ${k.zdf > 0 ? '+' : ''}${k.zdf.toFixed(1)}% ${(k.cjl / 1e4).toFixed(0)}万`
+    );
+    
+    return `近${recent.length}日K线：涨${summary.upDays}跌${summary.downDays}，均量${(summary.avgVol / 1e4).toFixed(0)}万，最大涨幅${summary.maxZdf.toFixed(1)}%，最大跌幅${summary.minZdf.toFixed(1)}%
+${rows.join('\n')}`;
   }, []);
 
+  // ===== 优化6：财务数据精简 =====
   const executeTools = useCallback(async (toolCalls: any[]) => {
     const results: any[] = [];
     for (const tc of toolCalls) {
@@ -399,7 +418,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
       const args = JSON.parse(tc.function?.arguments || '{}');
       let content = '';
 
-      if (name === 'get_stock_trend_data') {
+      if (name === 'get_trend') {
         let trendData = trendsRef.current;
         if (!trendData || trendData.length < 50) {
           try {
@@ -411,9 +430,8 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
             console.error('Failed to fetch trend data:', e);
           }
         }
-        const data = formatTrendData(trendData);
-        content = `以下是 ${stockRef.current?.name || args.secid} 的分时数据：\n${data}`;
-      } else if (name === 'get_stock_kline_data') {
+        content = `分时：${formatTrendData(trendData)}`;
+      } else if (name === 'get_kline') {
         let klineData = klinesRef.current;
         if (!klineData || klineData.length < 5) {
           try {
@@ -425,29 +443,43 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
             console.error('Failed to fetch kline data:', e);
           }
         }
-        const data = formatKlineData(klineData);
-        content = `以下是 ${stockRef.current?.name || args.secid} 的K线数据（最近30根日线）：\n${data}`;
-      } else if (name === 'get_stock_fundamental') {
+        content = `K线：${formatKlineData(klineData)}`;
+      } else if (name === 'get_fundamental') {
         try {
           const res = await AkshareAPI.GetFundamentalFromAkshare(stockRef.current?.secid || args.secid);
           if (res) {
-            content = `以下是 ${stockRef.current?.name || args.secid} 的基本面数据（财务指标）：\n${JSON.stringify(res, null, 2)}`;
+            const compact = Object.fromEntries(
+              Object.entries(res)
+                .filter(([_, v]) => v != null && v !== 0 && v !== '0')
+                .slice(0, 15)
+            );
+            content = `财务指标：${JSON.stringify(compact)}`;
           } else {
-            content = '暂无基本面数据';
+            content = '无基本面数据';
           }
         } catch (e) {
-          content = `获取基本面数据失败：${e}`;
+          content = `获取失败：${e}`;
         }
-      } else if (name === 'get_stock_finance_data') {
+      } else if (name === 'get_finance') {
         try {
           const res = await AkshareAPI.GetFinanceDataFromAkshare(stockRef.current?.secid || args.secid);
           if (res) {
-            content = `以下是 ${stockRef.current?.name || args.secid} 的财务数据（三大报表）：\n${JSON.stringify(res, null, 2)}`;
+            const compact = {
+              periods: res.periods?.slice(0, 2) || [],
+              keyItems: {
+                revenue: res.revenue?.slice(0, 2),
+                netProfit: res.netProfit?.slice(0, 2),
+                totalAssets: res.totalAssets?.slice(0, 2),
+                totalLiabilities: res.totalLiabilities?.slice(0, 2),
+                operatingCashFlow: res.operatingCashFlow?.slice(0, 2),
+              }
+            };
+            content = `财务报表(近2期)：${JSON.stringify(compact)}`;
           } else {
-            content = '暂无财务数据';
+            content = '无财务数据';
           }
         } catch (e) {
-          content = `获取财务数据失败：${e}`;
+          content = `获取失败：${e}`;
         }
       } else {
         content = `未知工具：${name}`;
@@ -461,6 +493,9 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     }
     return results;
   }, [formatTrendData, formatKlineData]);
+
+  // ===== 优化5：消息历史截断 =====
+  const MAX_HISTORY_ROUNDS = 4;
 
   const sendMessage = useCallback(async (typeOrText: AnalysisType | string, isOption = false) => {
     if (!kimiApiKey) {
@@ -495,23 +530,25 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     const sessionId = Date.now().toString() + Math.random().toString(36).slice(2);
     sessionIdRef.current = sessionId;
 
-    // 构建系统提示词 + 用户消息
     const baseInfo = buildBaseInfo(stock);
     const userPrompt = isOption
       ? `请对以下股票进行${typeNames[typeOrText as AnalysisType]}。\n\n${baseInfo}\n\n请根据提供的工具获取所需数据后进行分析，用中文回答，分析客观专业，风险提示充分。`
       : `${typeOrText}\n\n股票基本信息：\n${baseInfo}\n\n请根据提供的工具获取所需数据后回答，用中文回答，分析客观专业，风险提示充分。`;
 
+    // ===== 优化5：截断历史消息 =====
+    const recentMessages = messages.slice(-MAX_HISTORY_ROUNDS * 2);
+
     const apiMessages = [
       { role: 'system', content: SYSTEM_PROMPT },
+      ...recentMessages.map(m => ({ role: m.role, content: m.content })),
       { role: 'user', content: userPrompt },
     ];
 
-    // 需要传给工具的 tools 列表
-    const tools = (isOption && (typeOrText === 'tech' || typeOrText === 'fundamental')) || !isOption
-      ? TOOLS
-      : undefined;
+    // ===== 优化7：按需加载工具 =====
+    const tools = isOption 
+      ? getToolsByType(typeOrText as AnalysisType) 
+      : TOOLS;
 
-    // 监听流式 chunk
     const chunkHandler = (_: any, data: { content?: string }) => {
       if (data.content !== undefined) {
         setMessages((prev) => {
@@ -526,10 +563,9 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     };
     ipcRenderer.on('kimi-analysis-chunk', chunkHandler);
 
-    // 监听工具调用请求
     const toolHandler = async (_: any, data: { requestId: string; sessionId?: string; toolCalls: any[] }) => {
       if (data.sessionId && data.sessionId !== sessionIdRef.current) {
-        return; // 不是当前 session 的请求，忽略
+        return;
       }
       try {
         const results = await executeTools(data.toolCalls);
@@ -589,7 +625,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
       ipcRenderer.off('kimi-tool-request', toolHandler);
       setLoading(false);
     }
-  }, [kimiApiKey, stock, buildBaseInfo, executeTools]);
+  }, [kimiApiKey, stock, buildBaseInfo, executeTools, messages]);
 
   const handleSend = useCallback(() => {
     const text = inputValue.trim();
@@ -597,13 +633,6 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     setInputValue('');
     sendMessage(text, false);
   }, [inputValue, loading, sendMessage]);
-
-  // const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-  //   if (e.key === 'Enter' && !e.shiftKey) {
-  //     e.preventDefault();
-  //     handleSend();
-  //   }
-  // }, [handleSend]);
 
   const handleOptionClick = useCallback((type: AnalysisType) => {
     if (loading) return;
@@ -724,7 +753,6 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
             ref={inputRef}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            // onKeyDown={handleKeyDown}
             placeholder={kimiApiKey ? '输入您的问题，按 Enter 发送，Shift+Enter 换行...' : '请先在设置中配置 Kimi API Key'}
             autoSize={{ minRows: 1, maxRows: 4 }}
             disabled={!kimiApiKey || loading}
