@@ -411,10 +411,48 @@ export async function GetMoneyFlowFromAkshare(secid: string): Promise<any> {
   }
 }
 
+// ==================== 基本面数据 ====================
+
+export async function GetFundamentalFromAkshare(secid: string): Promise<any> {
+  try {
+    const code = secid.split('.').pop() || secid;
+    const result = await callAkshare('get_stock_fundamental', { code });
+    
+    if (result.error) {
+      console.error('获取基本面数据失败:', result.error);
+      return null;
+    }
+    
+    return result;
+  } catch (error) {
+    logError(error, 'GetFundamentalFromAkshare', '获取基本面数据失败');
+    return null;
+  }
+}
+
+// ==================== 财务数据 ====================
+
+export async function GetFinanceDataFromAkshare(secid: string): Promise<any> {
+  try {
+    const code = secid.split('.').pop() || secid;
+    const result = await callAkshare('get_stock_finance_data', { code });
+    
+    if (result.error) {
+      console.error('获取财务数据失败:', result.error);
+      return null;
+    }
+    
+    return result;
+  } catch (error) {
+    logError(error, 'GetFinanceDataFromAkshare', '获取财务数据失败');
+    return null;
+  }
+}
+
 // ==================== 综合查询 ====================
 
 export async function FromAkshare(secid: string): Promise<any> {
-  """获取股票综合数据（趋势+详情）"""
+  // 获取股票综合数据（趋势+详情）
   try {
     const [trendResult, detailResult] = await Promise.all([
       GetTrendFromAkshare(secid),

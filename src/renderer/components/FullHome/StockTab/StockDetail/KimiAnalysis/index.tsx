@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Alert, Input, Tag } from 'antd';
-import { RobotOutlined, SendOutlined, StockOutlined, LineChartOutlined, FireOutlined, BankOutlined, UserOutlined } from '@ant-design/icons';
+import { RobotOutlined, SendOutlined, StockOutlined, LineChartOutlined, FireOutlined, BankOutlined, UserOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { Stock } from '@/types/stock';
+import * as AkshareAPI from '@/services/akshare';
+import dayjs from 'dayjs';
 import styles from './index.scss';
 
 export interface KimiAnalysisProps {
@@ -212,6 +214,34 @@ const TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_fundamental',
+      description: '获取指定股票的基本面数据（财务指标），包含ROE、净利润、营收、毛利率、资产负债率、现金流等关键指标。当用户要求进行基本面分析时必须调用此工具。',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string', description: '股票secid，例如 "0.002594"' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_finance_data',
+      description: '获取指定股票的财务数据（三大报表摘要），包含资产负债表、利润表、现金流量表的核心科目。当用户要求查看财务报表或详细财务数据时必须调用此工具。',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string', description: '股票secid，例如 "0.002594"' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
 ];
 
 const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, active }) => {
@@ -240,6 +270,70 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   useEffect(() => {
     scrollToBottom();
   }, [messages, loading, scrollToBottom]);
+
+  // ===== 磁盘缓存 =====
+  const CACHE_TABLE = 'kimi_analysis';
+
+  const loadCache = useCallback(async (code: string) => {
+    try {
+      const result = await window.contextModules.electron.sqliteRead(CACHE_TABLE, code);
+      if (result?.success && result.data?.data?.messages) {
+        const cached = result.data.data.messages as Message[];
+        if (cached.length > 0) {
+          setMessages(cached);
+        }
+      }
+    } catch (e) {
+      console.error('加载 Kimi 分析缓存失败:', e);
+    }
+  }, []);
+
+  const saveCache = useCallback(async (code: string, msgs: Message[]) => {
+    if (!code || msgs.length === 0) return;
+    try {
+      await window.contextModules.electron.sqliteWrite(CACHE_TABLE, {
+        messages: msgs.slice(-100), // 最多保留100条
+        stockCode: code,
+        stockName: stock.name,
+      }, dayjs().format('YYYY-MM-DD HH:mm:ss'), code);
+    } catch (e) {
+      console.error('保存 Kimi 分析缓存失败:', e);
+    }
+  }, [stock.name]);
+
+  const clearCache = useCallback(async (code: string) => {
+    if (!code) return;
+    try {
+      await window.contextModules.electron.sqliteWrite(CACHE_TABLE, {
+        messages: [],
+        stockCode: code,
+        stockName: stock.name,
+      }, dayjs().format('YYYY-MM-DD HH:mm:ss'), code);
+      setMessages([]);
+    } catch (e) {
+      console.error('清除 Kimi 分析缓存失败:', e);
+    }
+  }, [stock.name]);
+
+  // 激活或股票切换时加载缓存
+  useEffect(() => {
+    if (active && stock?.code) {
+      setMessages([]); // 先清空，避免显示旧股票消息
+      loadCache(stock.code);
+    } else {
+      setMessages([]);
+    }
+  }, [active, stock?.code, loadCache]);
+
+  // messages 变化时自动保存缓存
+  useEffect(() => {
+    if (stock?.code && messages.length > 0) {
+      const timer = setTimeout(() => {
+        saveCache(stock.code, messages);
+      }, 800);
+      return () => clearTimeout(timer);
+    }
+  }, [messages, stock?.code, saveCache]);
 
   const buildBaseInfo = useCallback((detail: Stock.DetailItem): string => {
     return [
@@ -288,7 +382,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     if (!klineData || klineData.length === 0) {
       return '暂无K线数据';
     }
-    const recent = klineData.slice(-240);
+    const recent = klineData.slice(-120);
     const rows = recent.map((k) => {
       return `${k.date}\t${k.kp.toFixed(2)}\t${k.sp.toFixed(2)}\t${k.zg.toFixed(2)}\t${k.zd.toFixed(2)}\t${k.cjl}\t${k.zdf.toFixed(2)}%`;
     });
@@ -306,11 +400,55 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
       let content = '';
 
       if (name === 'get_stock_trend_data') {
-        const data = formatTrendData(trendsRef.current);
+        let trendData = trendsRef.current;
+        if (!trendData || trendData.length < 50) {
+          try {
+            const res = await AkshareAPI.GetTrendFromAkshare(stockRef.current?.secid || args.secid);
+            if (res?.trends && res.trends.length > 0) {
+              trendData = res.trends;
+            }
+          } catch (e) {
+            console.error('Failed to fetch trend data:', e);
+          }
+        }
+        const data = formatTrendData(trendData);
         content = `以下是 ${stockRef.current?.name || args.secid} 的分时数据：\n${data}`;
       } else if (name === 'get_stock_kline_data') {
-        const data = formatKlineData(klinesRef.current);
+        let klineData = klinesRef.current;
+        if (!klineData || klineData.length < 5) {
+          try {
+            const res = await AkshareAPI.GetKFromAkshare(stockRef.current?.secid || args.secid, 101);
+            if (res?.ks && res.ks.length > 0) {
+              klineData = res.ks;
+            }
+          } catch (e) {
+            console.error('Failed to fetch kline data:', e);
+          }
+        }
+        const data = formatKlineData(klineData);
         content = `以下是 ${stockRef.current?.name || args.secid} 的K线数据（最近30根日线）：\n${data}`;
+      } else if (name === 'get_stock_fundamental') {
+        try {
+          const res = await AkshareAPI.GetFundamentalFromAkshare(stockRef.current?.secid || args.secid);
+          if (res) {
+            content = `以下是 ${stockRef.current?.name || args.secid} 的基本面数据（财务指标）：\n${JSON.stringify(res, null, 2)}`;
+          } else {
+            content = '暂无基本面数据';
+          }
+        } catch (e) {
+          content = `获取基本面数据失败：${e}`;
+        }
+      } else if (name === 'get_stock_finance_data') {
+        try {
+          const res = await AkshareAPI.GetFinanceDataFromAkshare(stockRef.current?.secid || args.secid);
+          if (res) {
+            content = `以下是 ${stockRef.current?.name || args.secid} 的财务数据（三大报表）：\n${JSON.stringify(res, null, 2)}`;
+          } else {
+            content = '暂无财务数据';
+          }
+        } catch (e) {
+          content = `获取财务数据失败：${e}`;
+        }
       } else {
         content = `未知工具：${name}`;
       }
@@ -369,7 +507,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     ];
 
     // 需要传给工具的 tools 列表
-    const tools = (isOption && (typeOrText === 'tech')) || !isOption
+    const tools = (isOption && (typeOrText === 'tech' || typeOrText === 'fundamental')) || !isOption
       ? TOOLS
       : undefined;
 
@@ -460,12 +598,12 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     sendMessage(text, false);
   }, [inputValue, loading, sendMessage]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  }, [handleSend]);
+  // const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  //   if (e.key === 'Enter' && !e.shiftKey) {
+  //     e.preventDefault();
+  //     handleSend();
+  //   }
+  // }, [handleSend]);
 
   const handleOptionClick = useCallback((type: AnalysisType) => {
     if (loading) return;
@@ -569,6 +707,16 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
                 {opt.label}
               </Button>
             ))}
+            <Button
+              size="small"
+              icon={<DeleteOutlined />}
+              onClick={() => stock?.code && clearCache(stock.code)}
+              disabled={!stock?.code}
+              danger
+              ghost
+            >
+              清除历史
+            </Button>
           </div>
         )}
         <div className={styles.inputRow}>
@@ -576,7 +724,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
             ref={inputRef}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
+            // onKeyDown={handleKeyDown}
             placeholder={kimiApiKey ? '输入您的问题，按 Enter 发送，Shift+Enter 换行...' : '请先在设置中配置 Kimi API Key'}
             autoSize={{ minRows: 1, maxRows: 4 }}
             disabled={!kimiApiKey || loading}

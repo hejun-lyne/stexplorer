@@ -1575,7 +1575,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           if (lastDayK.date === todayStr) {
             const zsValue = dayKlines.length > 1 ? dayKlines[dayKlines.length - 2].sp : (trends[0]?.last || 0);
             const dailyK = buildDailyKFromTrends(trends, secid, zsValue);
-            if (dailyK) {
+            if (dailyK && dailyK.sp !== lastDayK.sp && dailyK.kp !== lastDayK.kp) {
               const newDayKlines = [...dayKlines];
               newDayKlines[newDayKlines.length - 1] = dailyK;
               handeKline({ ks: newDayKlines, kt: KLineType.Day });

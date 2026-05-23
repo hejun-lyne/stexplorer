@@ -516,6 +516,111 @@ class AkshareAPI:
             return stocks
         except Exception as e:
             return {"error": str(e)}
+    
+    @staticmethod
+    def get_stock_fundamental(code: str) -> Dict[str, Any]:
+        """获取股票基本面数据（财务指标）"""
+        try:
+            df = ak.stock_financial_analysis_indicator(symbol=code)
+            if df.empty:
+                return {"error": "No data available"}
+            
+            row = df.iloc[0]
+            return {
+                "code": code,
+                "report_date": str(row.get("报告期", "")),
+                "roe": float(row.get("净资产收益率", 0) or 0),
+                "roe_diluted": float(row.get("净资产收益率-摊薄", 0) or 0),
+                "net_profit": float(row.get("净利润", 0) or 0),
+                "net_profit_growth": float(row.get("净利润同比增长率", 0) or 0),
+                "revenue": float(row.get("营业总收入", 0) or 0),
+                "revenue_growth": float(row.get("营业收入同比增长率", 0) or 0),
+                "gross_margin": float(row.get("毛利率", 0) or 0),
+                "net_margin": float(row.get("净利率", 0) or 0),
+                "eps": float(row.get("每股收益", 0) or 0),
+                "bps": float(row.get("每股净资产", 0) or 0),
+                "debt_ratio": float(row.get("资产负债率", 0) or 0),
+                "current_ratio": float(row.get("流动比率", 0) or 0),
+                "quick_ratio": float(row.get("速动比率", 0) or 0),
+                "inventory_turnover": float(row.get("存货周转率", 0) or 0),
+                "receivable_turnover": float(row.get("应收账款周转率", 0) or 0),
+                "operating_cash_flow": float(row.get("经营活动现金流量净额", 0) or 0),
+                "investing_cash_flow": float(row.get("投资活动现金流量净额", 0) or 0),
+                "financing_cash_flow": float(row.get("筹资活动现金流量净额", 0) or 0),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    @staticmethod
+    def get_stock_finance_data(code: str) -> Dict[str, Any]:
+        """获取股票财务数据（三大报表摘要）"""
+        try:
+            # 资产负债表
+            balance = {}
+            try:
+                balance_df = ak.stock_balance_sheet_by_report_em(symbol=code)
+                if not balance_df.empty:
+                    row = balance_df.iloc[0]
+                    balance = {
+                        "report_date": str(row.get("报告期", "")),
+                        "total_assets": float(row.get("资产总计", 0) or 0),
+                        "total_liabilities": float(row.get("负债合计", 0) or 0),
+                        "total_equity": float(row.get("所有者权益合计", 0) or 0),
+                        "monetary_funds": float(row.get("货币资金", 0) or 0),
+                        "accounts_receivable": float(row.get("应收账款", 0) or 0),
+                        "inventory": float(row.get("存货", 0) or 0),
+                        "goodwill": float(row.get("商誉", 0) or 0),
+                    }
+            except Exception:
+                pass
+            
+            # 利润表
+            profit = {}
+            try:
+                profit_df = ak.stock_profit_sheet_by_report_em(symbol=code)
+                if not profit_df.empty:
+                    row = profit_df.iloc[0]
+                    profit = {
+                        "report_date": str(row.get("报告期", "")),
+                        "total_revenue": float(row.get("营业总收入", 0) or 0),
+                        "operating_revenue": float(row.get("营业收入", 0) or 0),
+                        "operating_cost": float(row.get("营业成本", 0) or 0),
+                        "operating_profit": float(row.get("营业利润", 0) or 0),
+                        "total_profit": float(row.get("利润总额", 0) or 0),
+                        "net_profit": float(row.get("净利润", 0) or 0),
+                        "rd_expense": float(row.get("研发费用", 0) or 0),
+                        "sales_expense": float(row.get("销售费用", 0) or 0),
+                        "management_expense": float(row.get("管理费用", 0) or 0),
+                        "financial_expense": float(row.get("财务费用", 0) or 0),
+                    }
+            except Exception:
+                pass
+            
+            # 现金流量表
+            cash = {}
+            try:
+                cash_df = ak.stock_cash_flow_sheet_by_report_em(symbol=code)
+                if not cash_df.empty:
+                    row = cash_df.iloc[0]
+                    cash = {
+                        "report_date": str(row.get("报告期", "")),
+                        "net_operating_cash_flow": float(row.get("经营活动产生的现金流量净额", 0) or 0),
+                        "net_investing_cash_flow": float(row.get("投资活动产生的现金流量净额", 0) or 0),
+                        "net_financing_cash_flow": float(row.get("筹资活动产生的现金流量净额", 0) or 0),
+                        "cash_equivalent_increase": float(row.get("现金及现金等价物净增加额", 0) or 0),
+                        "ending_cash": float(row.get("期末现金及现金等价物余额", 0) or 0),
+                    }
+            except Exception:
+                pass
+            
+            return {
+                "code": code,
+                "balance_sheet": balance,
+                "profit_statement": profit,
+                "cash_flow_statement": cash,
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
 
 # 导入 pandas 用于数据聚合
