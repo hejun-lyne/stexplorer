@@ -431,6 +431,153 @@ async function init() {
     }
   });
 
+  // ===== Kimi AI Tools 调用（支持 function calling）=====
+  const pendingToolRequests = new Map<string, { resolve: (value: any) => void; reject: (reason?: any) => void }>();
+
+  ipcMain.handle('kimi-analyze-with-tools', async (event, { apiKey, messages, tools, sessionId }: { apiKey: string; messages: any[]; tools?: any[]; sessionId?: string }) => {
+    try {
+      const trimmedKey = (apiKey || '').trim();
+      if (!trimmedKey) {
+        return { error: 'API Key 未配置' };
+      }
+      if (!trimmedKey.startsWith('sk-')) {
+        return { error: 'API Key 格式不正确，应以 sk- 开头' };
+      }
+
+      // 第一步：非流式调用，检查是否需要 tool_calls
+      const firstResponse = await got.post('https://api.moonshot.cn/v1/chat/completions', {
+        headers: {
+          Authorization: `Bearer ${trimmedKey}`,
+          'Content-Type': 'application/json',
+        },
+        json: {
+          model: 'kimi-k2.6',
+          messages,
+          tools: tools || [],
+          temperature: 1,
+          stream: false,
+        },
+        timeout: { request: 120000 },
+        retry: 0,
+      });
+
+      const firstData = JSON.parse(firstResponse.body);
+      const firstChoice = firstData.choices?.[0];
+
+      if (firstChoice?.finish_reason === 'tool_calls' && firstChoice?.message?.tool_calls?.length > 0) {
+        const requestId = Date.now().toString() + Math.random().toString(36).slice(2);
+
+        // 通知 renderer 执行 tools
+        event.sender.send('kimi-tool-request', {
+          requestId,
+          sessionId,
+          toolCalls: firstChoice.message.tool_calls,
+        });
+
+        // 等待 renderer 返回结果
+        const toolResults = await new Promise<any[]>((resolve, reject) => {
+          pendingToolRequests.set(requestId, { resolve, reject });
+          // 30 秒超时
+          setTimeout(() => {
+            if (pendingToolRequests.has(requestId)) {
+              pendingToolRequests.delete(requestId);
+              reject(new Error('工具调用超时'));
+            }
+          }, 30000);
+        });
+
+        // 构造新 messages
+        const newMessages = [
+          ...messages,
+          firstChoice.message,
+          ...toolResults,
+        ];
+
+        // 第二步：流式调用，获得最终输出
+        const stream = got.stream.post('https://api.moonshot.cn/v1/chat/completions', {
+          headers: {
+            Authorization: `Bearer ${trimmedKey}`,
+            Accept: 'text/event-stream',
+          },
+          json: {
+            model: 'kimi-k2.6',
+            messages: newMessages,
+            temperature: 1,
+            stream: true,
+          },
+          timeout: { request: 120000 },
+          retry: 0,
+        });
+
+        return new Promise<{ content?: string; error?: string }>((resolve) => {
+          let buffer = '';
+          let fullContent = '';
+
+          stream.on('data', (chunk: Buffer) => {
+            buffer += chunk.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith('data:')) continue;
+              const dataStr = trimmed.slice(5).trim();
+              if (dataStr === '[DONE]') continue;
+              try {
+                const data = JSON.parse(dataStr);
+                const delta = data.choices?.[0]?.delta;
+                if (delta?.content) {
+                  fullContent += delta.content;
+                  event.sender.send('kimi-analysis-chunk', { content: fullContent });
+                }
+              } catch {
+                // 忽略解析失败的行
+              }
+            }
+          });
+
+          stream.on('end', () => {
+            resolve({ content: fullContent });
+          });
+
+          stream.on('error', (e: any) => {
+            console.error('Kimi stream error:', e);
+            const body = e.response?.body;
+            let msg = '';
+            if (typeof body === 'string') {
+              try {
+                const parsed = JSON.parse(body);
+                msg = parsed.error?.message || parsed.message || body;
+              } catch {
+                msg = body;
+              }
+            } else {
+              msg = e.response?.body?.error?.message || e.message || '请求失败';
+            }
+            resolve({ error: `Kimi API 错误: ${msg}` });
+          });
+        });
+      }
+
+      // 无需 tool_calls，直接返回文本
+      const content = firstChoice?.message?.content || '';
+      return { content };
+    } catch (e: any) {
+      console.error('Kimi API error:', e);
+      return { error: `Kimi API 错误: ${e.message || '请求失败'}` };
+    }
+  });
+
+  ipcMain.handle('kimi-tool-response', async (_event, { requestId, results }: { requestId: string; results: any[] }) => {
+    const pending = pendingToolRequests.get(requestId);
+    if (pending) {
+      pending.resolve(results);
+      pendingToolRequests.delete(requestId);
+      return { success: true };
+    }
+    return { success: false, error: '未找到对应的工具请求' };
+  });
+
   // ===== 本地文件存储 IPC 处理程序 =====
   ipcMain.handle('local-storage-init', () => {
     try {

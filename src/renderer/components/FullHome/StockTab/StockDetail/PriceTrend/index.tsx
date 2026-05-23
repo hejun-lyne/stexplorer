@@ -59,6 +59,7 @@ export interface PriceTrendProps {
   toDate?: string;
   onTimelineDate?: string;
   updateKLineData: (ks: Stock.KLineItem[]) => void;
+  updateTrendData?: (trends: Stock.TrendItem[]) => void;
   updateKType?: (ktype: KLineType) => void;
   updateMType?: (mtype: MAPeriodType) => void;
   outRange?: { start: number; end: number };
@@ -1459,6 +1460,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     onSelectedAreaUpdated,
     addStock,
     removeStock,
+    updateTrendData,
   }) => {
     const stock = useSelector((state: StoreState) => state.stock.stocksMapping[secid]);
     const config = useSelector((state: StoreState) => state.stock.stockConfigsMapping[secid]);
@@ -1558,6 +1560,10 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           }
           updateTrendsOption(newTrendData);
         });
+
+        if (updateTrendData) {
+          updateTrendData(trends);
+        }
 
         // 同步更新日线K线（如果最后一根是今日合成的）
         const dayIndex = DefaultKTypes.indexOf(KLineType.Day);

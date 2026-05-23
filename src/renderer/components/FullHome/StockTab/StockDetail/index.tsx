@@ -48,6 +48,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
   const [tDetail, setDetails] = useState<Stock.DetailItem>({ secid, code:Helpers.Stock.GetStockCode(secid), name, market:Helpers.Stock.GetStockType(secid) } as Stock.DetailItem);
   const [stype, setSType] = useState<StrategyType>(config ? config.strategy || StrategyType.None : StrategyType.None);
   const [klines, setKLines] = useState<Stock.KLineItem[] | null>(null);
+  const [trends, setTrends] = useState<Stock.TrendItem[]>([]);
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid), {
     throwOnError: true,
@@ -55,6 +56,10 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
     onSuccess: (d) => (d ? setDetails(d) : undefined),
     cacheKey: `GetStockDetail/${secid}`,
   });
+  const updateTrendData = useCallback((t: Stock.TrendItem[]) => {
+    setTrends(t);
+  }, []);
+
   useEffect(() => {
     if (!tDetail.zx || !tDetail.name) {
       runGetDetail();
@@ -205,8 +210,10 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
                   toDate={trainMode ? toDate : undefined}
                   onTimelineDate={timelineDate}
                   updateKLineData={updateKlines}
+                  updateTrendData={updateTrendData}
                 />
-                <Tabs defaultActiveKey={'news'} className={styles.rightTab} style={{ width: initWidth }}>
+                <Tabs defaultActiveKey={'news'} className={styles.rightTab}>
+                  {/* <Tabs defaultActiveKey={'news'} className={styles.rightTab} style={{ width: initWidth }}> */}
                   {/* <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易策略</span>} key={'strategy'}>
                     <SStrategy
                       stype={stype}
@@ -217,7 +224,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
                     />
                   </Tabs.TabPane> */}
                   <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>Kimi 分析</span>} key={'kimi'}>
-                    <KimiAnalysis stock={nDetails} active={active} />
+                    <KimiAnalysis stock={nDetails} trends={trends} klines={klines || undefined} active={active} />
                   </Tabs.TabPane>
                   <Tabs.TabPane tab={<>
                     <span style={{ padding: '0 20px' }}>跟踪笔记</span>

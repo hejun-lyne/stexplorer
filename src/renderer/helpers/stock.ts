@@ -548,7 +548,7 @@ export function MultiStockDetailPush(restart:boolean) {
               r.syl = d.f9;
             }
             if (d.f10) {
-              r.lb = d.f10;
+              r.lb = d.f10 / 100;
             }
             if (d.f15) {
               r.zg = d.f15 / 100;
