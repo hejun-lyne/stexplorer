@@ -5,6 +5,7 @@ import { useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { Stock } from '@/types/stock';
 import * as AkshareAPI from '@/services/akshare';
+import * as Services from '@/services';
 import dayjs from 'dayjs';
 import styles from './index.scss';
 
@@ -37,7 +38,7 @@ const typeNames: Record<AnalysisType, string> = {
   fundamental: '基本面分析',
 };
 
-const SYSTEM_PROMPT = `你是股票分析师，客观专业，风险提示充分，中文回答，格式清晰。`;
+const SYSTEM_PROMPT = `你是股票分析师，客观专业，风险提示充分，中文回答，格式清晰。数据格式说明：【】内为数据类别，| 分隔不同字段，表格有明确的列标题。`;
 
 const TOOLS = [
   {
@@ -98,6 +99,91 @@ const TOOLS = [
       },
     },
   },
+  // ===== 事件热点分析专用工具 =====
+  {
+    type: 'function',
+    function: {
+      name: 'get_news',
+      description: '股票新闻',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string', description: 'secid如1.603829' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_researches',
+      description: '机构研报',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_themes',
+      description: '概念题材',
+      parameters: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', description: '纯股票代码如603829' },
+        },
+        required: ['code'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_longhubang',
+      description: '龙虎榜',
+      parameters: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', description: '纯股票代码如603829' },
+        },
+        required: ['code'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_events',
+      description: '公司事件',
+      parameters: {
+        type: 'object',
+        properties: {
+          code: { type: 'string', description: '纯股票代码如603829' },
+        },
+        required: ['code'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_moneyflow',
+      description: '资金流向',
+      parameters: {
+        type: 'object',
+        properties: {
+          secid: { type: 'string' },
+        },
+        required: ['secid'],
+      },
+    },
+  },
 ];
 
 const getToolsByType = (type?: AnalysisType) => {
@@ -107,7 +193,7 @@ const getToolsByType = (type?: AnalysisType) => {
     case 'fundamental':
       return TOOLS.filter(t => ['get_fundamental', 'get_finance'].includes(t.function.name));
     case 'event':
-      return [];
+      return TOOLS.filter(t => ['get_news', 'get_researches', 'get_themes', 'get_longhubang', 'get_events', 'get_moneyflow'].includes(t.function.name));
     default:
       return TOOLS;
   }
@@ -358,29 +444,30 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     
     const lines = fields
       .filter(([_, v]) => v != null && v !== '' && v !== '未知')
-      .map(([k, v, unit]) => `- ${k}：${v}${unit || ''}`);
+      .map(([k, v, unit]) => `${k}：${v}${unit || ''}`);
       
-    return lines.length > 0 ? `股票信息：\n${lines.join('\n')}` : '';
+    return lines.length > 0 ? `【股票信息】\n${lines.join(' | ')}` : '';
   }, []);
 
   // ===== 双模式分时数据 =====
   const formatTrendData = useCallback((trendData?: Stock.TrendItem[], mode: DataPrecision = 'fast'): string => {
-    if (!trendData || trendData.length === 0) return '无分时数据';
+    if (!trendData || trendData.length === 0) return '【分时数据】暂无';
+    
+    const prices = trendData.map(t => t.current);
+    const avg = prices.reduce((a, b) => a + b) / prices.length;
+    const max = Math.max(...prices);
+    const min = Math.min(...prices);
+    const volSum = trendData.reduce((s, t) => s + (t.vol || 0), 0);
+    
+    const stats = `【分时统计】均价${avg.toFixed(2)} | 最高${max.toFixed(2)} | 最低${min.toFixed(2)} | 总成交${volSum}手`;
     
     if (mode === 'deep') {
-      // 深度模式：每5分钟采样，保留足够细节用于形态识别
       const sampled = trendData.filter((_, i) => i % 5 === 0);
-      const prices = trendData.map(t => t.current);
-      const avg = prices.reduce((a, b) => a + b) / prices.length;
-      const max = Math.max(...prices);
-      const min = Math.min(...prices);
-      const volSum = trendData.reduce((s, t) => s + (t.vol || 0), 0);
-      
-      return `分时统计：均价${avg.toFixed(2)}，最高${max.toFixed(2)}，最低${min.toFixed(2)}，总成交${volSum}
-采样点位(每5分钟)：${sampled.map(t => `${t.datetime.slice(-5)}:${t.current.toFixed(2)}`).join('，')}`;
+      const rows = sampled.map(t => `${t.datetime.slice(-8)}  ${t.current.toFixed(2)}  ${t.vol || 0}`);
+      return `${stats}\n【分时明细】(每5分钟采样)\n时间        价格    成交量\n${rows.join('\n')}`;
     }
     
-    // 快速模式：5个关键点位+统计
+    // fast 模式
     const n = trendData.length;
     const keyPoints = [
       trendData[0],
@@ -389,23 +476,16 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
       trendData[Math.floor(3 * n / 4)],
       trendData[n - 1],
     ];
+    const keyRows = keyPoints.map(t => `${t.datetime.slice(-8)}  ${t.current.toFixed(2)}`);
     
-    const prices = trendData.map(t => t.current);
-    const avg = prices.reduce((a, b) => a + b) / n;
-    const max = Math.max(...prices);
-    const min = Math.min(...prices);
-    const volSum = trendData.reduce((s, t) => s + (t.vol || 0), 0);
-    
-    return `分时统计：均价${avg.toFixed(2)}，最高${max.toFixed(2)}，最低${min.toFixed(2)}，总成交${volSum}
-关键点位：${keyPoints.map(t => `${t.datetime.slice(-5)}:${t.current.toFixed(2)}`).join('，')}`;
+    return `${stats}\n【关键点位】\n${keyRows.join('\n')}`;
   }, []);
 
   // ===== 双模式K线数据 =====
   const formatKlineData = useCallback((klineData?: Stock.KLineItem[], mode: DataPrecision = 'fast'): string => {
-    if (!klineData || klineData.length === 0) return '无K线数据';
+    if (!klineData || klineData.length === 0) return '【K线数据】暂无';
     
     if (mode === 'deep') {
-      // 深度模式：最近60根完整K线，支持形态识别
       const recent = klineData.slice(-60);
       const summary = {
         upDays: recent.filter(k => k.zdf > 0).length,
@@ -416,14 +496,16 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
       };
       
       const rows = recent.map(k => 
-        `${k.date} ${k.kp.toFixed(2)} ${k.sp.toFixed(2)} ${k.zg.toFixed(2)} ${k.zd.toFixed(2)} ${(k.cjl/1e4).toFixed(0)}万 ${k.zdf.toFixed(2)}%`
+        `${k.date}  ${k.kp.toFixed(2)}  ${k.sp.toFixed(2)}  ${k.zg.toFixed(2)}  ${k.zd.toFixed(2)}  ${(k.cjl/1e4).toFixed(1)}万  ${k.zdf.toFixed(2)}%`
       );
       
-      return `近${recent.length}日K线：涨${summary.upDays}跌${summary.downDays}，均量${(summary.avgVol/1e4).toFixed(0)}万，最大涨幅${summary.maxZdf.toFixed(1)}%，最大跌幅${summary.minZdf.toFixed(1)}%
-${rows.join('\n')}`;
+      return `【K线统计】近${recent.length}日：涨${summary.upDays}天 | 跌${summary.downDays}天 | 均量${(summary.avgVol/1e4).toFixed(1)}万手 | 最大涨幅${summary.maxZdf.toFixed(1)}% | 最大跌幅${summary.minZdf.toFixed(1)}%
+  【K线明细】
+  日期        开盘    收盘    最高    最低    成交量    涨跌幅
+  ${rows.join('\n')}`;
     }
     
-    // 快速模式：20根精简
+    // fast 模式
     const recent = klineData.slice(-20);
     const summary = {
       upDays: recent.filter(k => k.zdf > 0).length,
@@ -434,15 +516,18 @@ ${rows.join('\n')}`;
     };
     
     const rows = recent.map(k => 
-      `${k.date.slice(-5)} ${k.sp.toFixed(2)} ${k.zdf > 0 ? '+' : ''}${k.zdf.toFixed(1)}% ${(k.cjl/1e4).toFixed(0)}万`
+      `${k.date}  ${k.sp.toFixed(2)}  ${k.zdf > 0 ? '+' : ''}${k.zdf.toFixed(1)}%  ${(k.cjl/1e4).toFixed(1)}万`
     );
     
-    return `近${recent.length}日K线：涨${summary.upDays}跌${summary.downDays}，均量${(summary.avgVol/1e4).toFixed(0)}万，最大涨幅${summary.maxZdf.toFixed(1)}%，最大跌幅${summary.minZdf.toFixed(1)}%
-${rows.join('\n')}`;
+    return `【K线统计】近${recent.length}日：涨${summary.upDays}天 | 跌${summary.downDays}天 | 均量${(summary.avgVol/1e4).toFixed(1)}万手
+  【K线明细】
+  日期        收盘    涨跌幅    成交量
+  ${rows.join('\n')}`;
   }, []);
 
   const executeTools = useCallback(async (toolCalls: any[], precision: DataPrecision) => {
     const results: any[] = [];
+    const getCode = (secid: string) => secid.split('.').pop() || '';
     for (const tc of toolCalls) {
       const name = tc.function?.name;
       const args = JSON.parse(tc.function?.arguments || '{}');
@@ -476,42 +561,181 @@ ${rows.join('\n')}`;
         content = `K线：${formatKlineData(klineData, precision)}`;
       } else if (name === 'get_fundamental') {
         try {
-          const res = await AkshareAPI.GetFundamentalFromAkshare(stockRef.current?.secid || args.secid);
-          if (res) {
-            const compact = Object.fromEntries(
-              Object.entries(res)
-                .filter(([_, v]) => v != null && v !== 0 && v !== '0')
-                .slice(0, 15)
-            );
-            content = `财务指标：${JSON.stringify(compact)}`;
+          // GetStockStatics 需要纯代码（如 603829），从 secid 提取
+          const code = (stockRef.current?.secid || args.secid).split('.').pop() || '';
+          const res = await Services.Stock.GetStockStatics(code);
+
+          if (res && Object.keys(res).length > 0) {
+            // 提取东财必读指标的关键字段，过滤空值和"暂未披露"
+            const fields: [string, any][] = [
+              ['股票代码', res.SECURITY_CODE],
+              ['股票名称', res.SECURITY_NAME_ABBR],
+              ['动态市盈率', res.PE_DYNAMIC],
+              ['静态市盈率', res.PE_STATIC],
+              ['市盈率TTM', res.PE_TTM],
+              ['市净率', res.PB_MRQ_REALTIME || res.PB_NEW_NOTICE],
+              ['净资产收益率ROE', res.ROE],
+              ['每股收益EPS', res.EPS],
+              ['每股净资产BPS', res.BVPS],
+              ['营业总收入', res.TOTAL_OPERATE_INCOME],
+              ['净利润', res.NETPROFIT],
+              ['毛利率', res.GROSS_PROFIT_RATIO],
+              ['净利率', res.NPR],
+              ['资产负债率', res.DEBT],
+              ['质押比例', res.PLEDGE_RATIO],
+            ];
+
+            const lines = fields
+              .filter(([_, v]) => v != null && v !== '' && String(v) !== '暂未披露' && !String(v).includes('null'))
+              .map(([k, v]) => `${k}：${v}`);
+
+            content = lines.length > 0
+              ? `【财务指标】\n${lines.join(' | ')}`
+              : '【财务指标】该股票暂无有效财务指标数据';
           } else {
-            content = '无基本面数据';
+            content = '【财务指标】暂无数据（可能为新股或数据未披露）';
           }
         } catch (e) {
-          content = `获取失败：${e}`;
+          content = `【财务指标】获取异常：${e}`;
         }
       } else if (name === 'get_finance') {
         try {
-          const res = await AkshareAPI.GetFinanceDataFromAkshare(stockRef.current?.secid || args.secid);
-          if (res) {
-            const compact = {
-              periods: res.periods?.slice(0, 2) || [],
-              keyItems: {
-                revenue: res.revenue?.slice(0, 2),
-                netProfit: res.netProfit?.slice(0, 2),
-                totalAssets: res.totalAssets?.slice(0, 2),
-                totalLiabilities: res.totalLiabilities?.slice(0, 2),
-                operatingCashFlow: res.operatingCashFlow?.slice(0, 2),
-              }
-            };
-            content = `财务报表(近2期)：${JSON.stringify(compact)}`;
+          // GetReportData 需要纯代码
+          const code = (stockRef.current?.secid || args.secid).split('.').pop() || '';
+          const res = await Services.Stock.GetReportData(code);
+
+          if (res && Array.isArray(res) && res.length > 0) {
+            // 取最近2期数据
+            const recent = res.slice(0, 2);
+            
+            const periods = recent.map((item: any) => {
+              const fields: [string, any][] = [
+                ['报告期', item.REPORT_DATE_NAME || item.REPORT_DATE],
+                ['营业总收入', item.TOTAL_OPERATE_INCOME || item.TOTALOPERATEREVE],
+                ['归属净利润', item.PARENTNETPROFIT],
+                ['扣非净利润', item.KCFJCXSYJLR],
+                ['每股收益', item.EPSJB],
+                ['每股净资产', item.BPS],
+                ['每股经营现金流', item.MGJYXJJE],
+                ['ROE(加权)', item.ROEJQ],
+                ['毛利率', item.GROSS_PROFIT_RATIO],
+                ['净利率', item.NPR],
+                ['资产负债率', item.ZCFZL],
+                ['流动比率', item.LD],
+                ['速动比率', item.SD],
+                ['存货周转天数', item.CHZZTS],
+                ['应收账款周转天数', item.YSZKZZTS],
+              ];
+
+              const lines = fields
+                .filter(([_, v]) => v != null && v !== '' && String(v) !== 'null' && !String(v).includes('暂未披露'))
+                .map(([k, v]) => `${k}：${v}`);
+
+              return lines.join(' | ');
+            });
+
+            content = `【财务报表】最近${recent.length}期数据\n${periods.join('\n')}`;
           } else {
-            content = '无财务数据';
+            content = '【财务报表】暂无报表数据（可能为新股或数据未披露）';
           }
         } catch (e) {
-          content = `获取失败：${e}`;
+          content = `【财务报表】获取异常：${e}`;
         }
-      } else {
+      } // ===== 新增：事件热点工具 =====
+      else if (name === 'get_news') {
+        try {
+          const secid = stockRef.current?.secid || args.secid;
+          const res = await Services.Stock.GetNews(secid, 1, 10);
+          if (res && res.length > 0) {
+            const lines = res.slice(0, 10).map((n: any) => `${n.time?.slice(0, 10)} ${n.title}`);
+            content = `【新闻资讯】最近${res.length}条：\n${lines.join('\n')}`;
+          } else {
+            content = '【新闻资讯】暂无最新新闻';
+          }
+        } catch (e) {
+          content = `【新闻资讯】获取失败：${e}`;
+        }
+      }
+      else if (name === 'get_researches') {
+        try {
+          const secid = stockRef.current?.secid || args.secid;
+          const res = await Services.Stock.GetStockResearches(secid, 1);
+          if (res && res.length > 0) {
+            const lines = res.slice(0, 5).map((r: any) => 
+              `${r.publish_time?.slice(0, 10)} [${r.em_rating_name || '评级'}] ${r.title}（${r.source}）`
+            );
+            content = `【机构研报】最近${Math.min(res.length, 5)}篇：\n${lines.join('\n')}`;
+          } else {
+            content = '【机构研报】暂无研报';
+          }
+        } catch (e) {
+          content = `【机构研报】获取失败：${e}`;
+        }
+      }
+      else if (name === 'get_themes') {
+        try {
+          const code = getCode(stockRef.current?.secid || args.secid || args.code);
+          const res = await Services.Stock.GetStockThemes(code, 1);
+          if (res && Array.isArray(res) && res.length > 0) {
+            const lines = res.slice(0, 8).map((t: any) => 
+              `${t.BOARD_NAME}（${t.SELECTED_BOARD_REASON?.slice(0, 30)}...）`
+            );
+            content = `【概念题材】共${res.length}个相关概念：\n${lines.join('\n')}`;
+          } else {
+            content = '【概念题材】暂无概念数据';
+          }
+        } catch (e) {
+          content = `【概念题材】获取失败：${e}`;
+        }
+      }
+      else if (name === 'get_longhubang') {
+        try {
+          const code = getCode(stockRef.current?.secid || args.secid || args.code);
+          const res = await Services.Stock.GetLongHuBang(code, 1);
+          if (res && Array.isArray(res) && res.length > 0) {
+            const lines = res.slice(0, 3).map((l: any) => {
+              const topBuy = l.LIST?.slice(0, 3).map((b: any) => `${b.OPERATEDEPT_NAME}买${(b.BUY_AMT_REAL / 1e4).toFixed(0)}万`).join('，');
+              return `${l.TRADE_DATE?.slice(0, 10)} ${l.EXPLANATION}，净买${(l.NET_BUY / 1e4).toFixed(0)}万 [${topBuy}]`;
+            });
+            content = `【龙虎榜】最近${Math.min(res.length, 3)}次：\n${lines.join('\n')}`;
+          } else {
+            content = '【龙虎榜】近期未上榜';
+          }
+        } catch (e) {
+          content = `【龙虎榜】获取失败：${e}`;
+        }
+      }
+      else if (name === 'get_events') {
+        try {
+          const code = getCode(stockRef.current?.secid || args.secid || args.code);
+          const res = await Services.Stock.GetStockEvents(code, 1);
+          if (res && Array.isArray(res) && res.length > 0) {
+            const flat = res.flat().slice(0, 5);
+            const lines = flat.map((e: any) => `${e.NOTICE_DATE?.slice(0, 10)} ${e.EVENT_TYPE}：${e.LEVEL1_CONTENT}`);
+            content = `【公司事件】最近${flat.length}条：\n${lines.join('\n')}`;
+          } else {
+            content = '【公司事件】暂无重大事件';
+          }
+        } catch (e) {
+          content = `【公司事件】获取失败：${e}`;
+        }
+      }
+      else if (name === 'get_moneyflow') {
+        try {
+          const secid = stockRef.current?.secid || args.secid;
+          // 优先用东财实时资金流向（从 stock.ts 的 FromEastmoney 里取 ffTrends 最后一笔）
+          const res = await Services.Stock.GetFlowTrendFromEastmoney(secid);
+          if (res?.ffTrends && res.ffTrends.length > 0) {
+            const latest = res.ffTrends[res.ffTrends.length - 1];
+            content = `【资金流向】当日主力净流入${(latest.main / 1e4).toFixed(0)}万，超大单${(latest.superbig / 1e4).toFixed(0)}万，大单${(latest.big / 1e4).toFixed(0)}万，中单${(latest.medium / 1e4).toFixed(0)}万，小单${(latest.small / 1e4).toFixed(0)}万`;
+          } else {
+            content = '【资金流向】暂无数据';
+          }
+        } catch (e) {
+          content = `【资金流向】获取失败：${e}`;
+        }
+      }
+    else {
         content = `未知工具：${name}`;
       }
 
