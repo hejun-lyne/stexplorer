@@ -369,10 +369,12 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   }, [messages, loading, scrollToBottom]);
 
   const CACHE_TABLE = 'kimi_analysis';
-
+  // ===== 缓存相关：按股票动态分表 =====
+  const getCacheTable = (code: string) => `kimi_analysis_${code}`;
   const loadCache = useCallback(async (code: string) => {
     try {
-      const result = await window.contextModules.electron.sqliteRead(CACHE_TABLE, code);
+      const table = getCacheTable(code);
+      const result = await window.contextModules.electron.sqliteRead(table, code);
       if (result?.success && result.data?.data?.messages) {
         const cached = result.data.data.messages as Message[];
         if (cached.length > 0) {
@@ -387,7 +389,8 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   const saveCache = useCallback(async (code: string, msgs: Message[]) => {
     if (!code || msgs.length === 0) return;
     try {
-      await window.contextModules.electron.sqliteWrite(CACHE_TABLE, {
+      const table = getCacheTable(code);
+      await window.contextModules.electron.sqliteWrite(table, {
         messages: msgs.slice(-100),
         stockCode: code,
         stockName: stock.name,
@@ -400,7 +403,8 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   const clearCache = useCallback(async (code: string) => {
     if (!code) return;
     try {
-      await window.contextModules.electron.sqliteWrite(CACHE_TABLE, {
+      const table = getCacheTable(code);
+      await window.contextModules.electron.sqliteWrite(table, {
         messages: [],
         stockCode: code,
         stockName: stock.name,

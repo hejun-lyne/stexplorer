@@ -186,6 +186,9 @@ function getFilePath(table: string, id?: number | string | object): string {
   
   const filename = FILE_MAP[table];
   if (!filename) {
+    if (table.indexOf('kimi_analysis') >= 0) {
+      return path.join(dataDir, 'kimi_analysis', `${table}.json`);
+    }
     return path.join(dataDir, `${table}.json`);
   }
   return path.join(dataDir, filename);

@@ -524,7 +524,13 @@ async function init() {
 
         stream.on('error', (e: any) => {
           event.sender.off('destroyed', destroyOnDisconnect);
-          console.error('Kimi stream error:', e);
+          // 关键修复：如果已有数据，直接返回，不报错
+          if (hasReceivedData && fullContent) {
+            console.warn('[Kimi] 流式传输超时，但已有部分数据，返回已生成内容');
+            resolve({ content: fullContent });
+            return;
+          }
+          
           const msg = parseKimiError(e);
           resolve({ error: `Kimi API 错误: ${msg}` });
         });
@@ -569,7 +575,7 @@ async function init() {
               stream: false,
             },
             timeout: { 
-              request: 120000,
+              request: 300000,
               connect: 10000,
             },
             retry: {
@@ -656,7 +662,7 @@ async function init() {
                 stream: true,
               },
               timeout: { 
-                request: 120000,
+                request: 300000,
                 connect: 10000,
               },
               retry: {
@@ -728,6 +734,14 @@ async function init() {
             stream.on('error', (e: any) => {
               event.sender.off('destroyed', destroyOnDisconnect);
               const msg = parseKimiError(e);
+              
+              // 关键修复：超时/断流但已有数据时，返回已有内容
+              const isTimeout = e.code === 'ETIMEDOUT' || msg.includes('Timeout');
+              if ((isTimeout || e.code === 'ECONNRESET') && hasReceivedData && fullContent) {
+                console.warn(`[Kimi] 第二步流中断（${e.code || 'timeout'}），返回已生成的 ${fullContent.length} 字`);
+                resolve({ content: fullContent });
+                return;
+              }
               
               // 如果是过载错误且没有收到任何数据，标记为可降级
               const isOverloaded = msg.toLowerCase().includes('overloaded') || 
