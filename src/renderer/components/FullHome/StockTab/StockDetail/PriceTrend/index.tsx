@@ -1726,7 +1726,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           if (lastDate !== todayStr) {
             const zsValue = ks[ks.length - 1]?.sp || trendData.trends[0].last || 0;
             const dailyK = buildDailyKFromTrends(trendData.trends, secid, zsValue);
-            if (dailyK) {
+            if (dailyK && dailyK.sp !== ks[ks.length - 1].sp && dailyK.kp !== ks[ks.length - 1].kp) {
               ks = [...ks, dailyK];
             }
           }

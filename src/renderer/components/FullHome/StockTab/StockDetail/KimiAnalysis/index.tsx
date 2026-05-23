@@ -23,6 +23,7 @@ interface Message {
 }
 
 type AnalysisType = 'tech' | 'event' | 'fundamental';
+type DataPrecision = 'fast' | 'deep';
 
 const analysisOptions: { type: AnalysisType; label: string; icon: React.ReactNode; color: string }[] = [
   { type: 'tech', label: '技术分析', icon: <StockOutlined />, color: '#1890ff' },
@@ -36,10 +37,8 @@ const typeNames: Record<AnalysisType, string> = {
   fundamental: '基本面分析',
 };
 
-// ===== 优化1：精简 System Prompt =====
 const SYSTEM_PROMPT = `你是股票分析师，客观专业，风险提示充分，中文回答，格式清晰。`;
 
-// ===== 优化2：精简工具定义 =====
 const TOOLS = [
   {
     type: 'function',
@@ -101,7 +100,6 @@ const TOOLS = [
   },
 ];
 
-// ===== 优化7：按需加载工具 =====
 const getToolsByType = (type?: AnalysisType) => {
   switch (type) {
     case 'tech':
@@ -109,13 +107,22 @@ const getToolsByType = (type?: AnalysisType) => {
     case 'fundamental':
       return TOOLS.filter(t => ['get_fundamental', 'get_finance'].includes(t.function.name));
     case 'event':
-      return []; // 事件分析不需要工具
+      return [];
     default:
       return TOOLS;
   }
 };
 
-// ===== Markdown 解析器（保持不变）=====
+// 根据分析类型自动决定数据精度
+const getDataPrecision = (type?: AnalysisType): DataPrecision => {
+  switch (type) {
+    case 'tech': return 'deep';
+    case 'fundamental':
+    case 'event':
+    default: return 'fast';
+  }
+};
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
@@ -141,7 +148,6 @@ function parseMarkdown(text: string): string {
   while (i < lines.length) {
     const line = lines[i];
 
-    // 代码块
     if (line.trim().startsWith('```')) {
       const lang = line.trim().slice(3).trim();
       let code = '';
@@ -155,7 +161,6 @@ function parseMarkdown(text: string): string {
       continue;
     }
 
-    // 标题
     const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
@@ -165,14 +170,12 @@ function parseMarkdown(text: string): string {
       continue;
     }
 
-    // 分割线
     if (line.trim().match(/^(-{3,}|\*{3,}|_{3,})\s*$/)) {
       result += '<hr/>';
       i++;
       continue;
     }
 
-    // 表格
     if (line.trim().startsWith('|')) {
       const tableLines: string[] = [];
       while (i < lines.length && lines[i].trim().startsWith('|')) {
@@ -203,7 +206,6 @@ function parseMarkdown(text: string): string {
       }
     }
 
-    // 引用块
     if (line.trim().startsWith('>')) {
       let quoteLines: string[] = [];
       while (i < lines.length && lines[i].trim().startsWith('>')) {
@@ -215,7 +217,6 @@ function parseMarkdown(text: string): string {
       continue;
     }
 
-    // 无序列表
     if (line.trim().match(/^[-*]\s/)) {
       result += '<ul>';
       while (i < lines.length && lines[i].trim().match(/^[-*]\s/)) {
@@ -227,7 +228,6 @@ function parseMarkdown(text: string): string {
       continue;
     }
 
-    // 有序列表
     if (line.trim().match(/^\d+\.\s/)) {
       result += '<ol>';
       while (i < lines.length && lines[i].trim().match(/^\d+\.\s/)) {
@@ -239,13 +239,11 @@ function parseMarkdown(text: string): string {
       continue;
     }
 
-    // 空行
     if (line.trim() === '') {
       i++;
       continue;
     }
 
-    // 普通段落
     let para = '';
     while (i < lines.length && lines[i].trim() !== '') {
       para += lines[i] + ' ';
@@ -262,7 +260,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [inputValue, setInputValue] = useState('');
-  const contentRef = useRef<<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<any>(null);
   const trendsRef = useRef(trends);
   const klinesRef = useRef(klines);
@@ -284,7 +282,6 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     scrollToBottom();
   }, [messages, loading, scrollToBottom]);
 
-  // ===== 磁盘缓存 =====
   const CACHE_TABLE = 'kimi_analysis';
 
   const loadCache = useCallback(async (code: string) => {
@@ -346,12 +343,11 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     }
   }, [messages, stock?.code, saveCache]);
 
-  // ===== 优化3：精简基础信息 =====
   const buildBaseInfo = useCallback((detail: Stock.DetailItem): string => {
     const fields: [string, any, string?][] = [
       ['名称', detail.name],
       ['代码', detail.code],
-      ['板块', detail.hybk],
+      ['板块', detail.bk],
       ['最新价', detail.zx, '元'],
       ['涨跌幅', detail.zdf, '%'],
       ['换手率', detail.hsl ? detail.hsl / 100 : null, '%'],
@@ -367,10 +363,24 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     return lines.length > 0 ? `股票信息：\n${lines.join('\n')}` : '';
   }, []);
 
-  // ===== 优化4：数据采样与聚合 =====
-  const formatTrendData = useCallback((trendData?: Stock.TrendItem[]): string => {
+  // ===== 双模式分时数据 =====
+  const formatTrendData = useCallback((trendData?: Stock.TrendItem[], mode: DataPrecision = 'fast'): string => {
     if (!trendData || trendData.length === 0) return '无分时数据';
     
+    if (mode === 'deep') {
+      // 深度模式：每5分钟采样，保留足够细节用于形态识别
+      const sampled = trendData.filter((_, i) => i % 5 === 0);
+      const prices = trendData.map(t => t.current);
+      const avg = prices.reduce((a, b) => a + b) / prices.length;
+      const max = Math.max(...prices);
+      const min = Math.min(...prices);
+      const volSum = trendData.reduce((s, t) => s + (t.vol || 0), 0);
+      
+      return `分时统计：均价${avg.toFixed(2)}，最高${max.toFixed(2)}，最低${min.toFixed(2)}，总成交${volSum}
+采样点位(每5分钟)：${sampled.map(t => `${t.datetime.slice(-5)}:${t.current.toFixed(2)}`).join('，')}`;
+    }
+    
+    // 快速模式：5个关键点位+统计
     const n = trendData.length;
     const keyPoints = [
       trendData[0],
@@ -390,9 +400,30 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
 关键点位：${keyPoints.map(t => `${t.datetime.slice(-5)}:${t.current.toFixed(2)}`).join('，')}`;
   }, []);
 
-  const formatKlineData = useCallback((klineData?: Stock.KLineItem[]): string => {
+  // ===== 双模式K线数据 =====
+  const formatKlineData = useCallback((klineData?: Stock.KLineItem[], mode: DataPrecision = 'fast'): string => {
     if (!klineData || klineData.length === 0) return '无K线数据';
     
+    if (mode === 'deep') {
+      // 深度模式：最近60根完整K线，支持形态识别
+      const recent = klineData.slice(-60);
+      const summary = {
+        upDays: recent.filter(k => k.zdf > 0).length,
+        downDays: recent.filter(k => k.zdf < 0).length,
+        avgVol: Math.round(recent.reduce((s, k) => s + k.cjl, 0) / recent.length),
+        maxZdf: Math.max(...recent.map(k => k.zdf)),
+        minZdf: Math.min(...recent.map(k => k.zdf)),
+      };
+      
+      const rows = recent.map(k => 
+        `${k.date} ${k.kp.toFixed(2)} ${k.sp.toFixed(2)} ${k.zg.toFixed(2)} ${k.zd.toFixed(2)} ${(k.cjl/1e4).toFixed(0)}万 ${k.zdf.toFixed(2)}%`
+      );
+      
+      return `近${recent.length}日K线：涨${summary.upDays}跌${summary.downDays}，均量${(summary.avgVol/1e4).toFixed(0)}万，最大涨幅${summary.maxZdf.toFixed(1)}%，最大跌幅${summary.minZdf.toFixed(1)}%
+${rows.join('\n')}`;
+    }
+    
+    // 快速模式：20根精简
     const recent = klineData.slice(-20);
     const summary = {
       upDays: recent.filter(k => k.zdf > 0).length,
@@ -403,15 +434,14 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     };
     
     const rows = recent.map(k => 
-      `${k.date.slice(-5)} ${k.sp.toFixed(2)} ${k.zdf > 0 ? '+' : ''}${k.zdf.toFixed(1)}% ${(k.cjl / 1e4).toFixed(0)}万`
+      `${k.date.slice(-5)} ${k.sp.toFixed(2)} ${k.zdf > 0 ? '+' : ''}${k.zdf.toFixed(1)}% ${(k.cjl/1e4).toFixed(0)}万`
     );
     
-    return `近${recent.length}日K线：涨${summary.upDays}跌${summary.downDays}，均量${(summary.avgVol / 1e4).toFixed(0)}万，最大涨幅${summary.maxZdf.toFixed(1)}%，最大跌幅${summary.minZdf.toFixed(1)}%
+    return `近${recent.length}日K线：涨${summary.upDays}跌${summary.downDays}，均量${(summary.avgVol/1e4).toFixed(0)}万，最大涨幅${summary.maxZdf.toFixed(1)}%，最大跌幅${summary.minZdf.toFixed(1)}%
 ${rows.join('\n')}`;
   }, []);
 
-  // ===== 优化6：财务数据精简 =====
-  const executeTools = useCallback(async (toolCalls: any[]) => {
+  const executeTools = useCallback(async (toolCalls: any[], precision: DataPrecision) => {
     const results: any[] = [];
     for (const tc of toolCalls) {
       const name = tc.function?.name;
@@ -430,7 +460,7 @@ ${rows.join('\n')}`;
             console.error('Failed to fetch trend data:', e);
           }
         }
-        content = `分时：${formatTrendData(trendData)}`;
+        content = `分时：${formatTrendData(trendData, precision)}`;
       } else if (name === 'get_kline') {
         let klineData = klinesRef.current;
         if (!klineData || klineData.length < 5) {
@@ -443,7 +473,7 @@ ${rows.join('\n')}`;
             console.error('Failed to fetch kline data:', e);
           }
         }
-        content = `K线：${formatKlineData(klineData)}`;
+        content = `K线：${formatKlineData(klineData, precision)}`;
       } else if (name === 'get_fundamental') {
         try {
           const res = await AkshareAPI.GetFundamentalFromAkshare(stockRef.current?.secid || args.secid);
@@ -494,7 +524,6 @@ ${rows.join('\n')}`;
     return results;
   }, [formatTrendData, formatKlineData]);
 
-  // ===== 优化5：消息历史截断 =====
   const MAX_HISTORY_ROUNDS = 4;
 
   const sendMessage = useCallback(async (typeOrText: AnalysisType | string, isOption = false) => {
@@ -535,7 +564,6 @@ ${rows.join('\n')}`;
       ? `请对以下股票进行${typeNames[typeOrText as AnalysisType]}。\n\n${baseInfo}\n\n请根据提供的工具获取所需数据后进行分析，用中文回答，分析客观专业，风险提示充分。`
       : `${typeOrText}\n\n股票基本信息：\n${baseInfo}\n\n请根据提供的工具获取所需数据后回答，用中文回答，分析客观专业，风险提示充分。`;
 
-    // ===== 优化5：截断历史消息 =====
     const recentMessages = messages.slice(-MAX_HISTORY_ROUNDS * 2);
 
     const apiMessages = [
@@ -544,10 +572,10 @@ ${rows.join('\n')}`;
       { role: 'user', content: userPrompt },
     ];
 
-    // ===== 优化7：按需加载工具 =====
-    const tools = isOption 
-      ? getToolsByType(typeOrText as AnalysisType) 
-      : TOOLS;
+    const tools = isOption ? getToolsByType(typeOrText as AnalysisType) : TOOLS;
+    
+    // ===== 自动选择数据精度 =====
+    const precision = isOption ? getDataPrecision(typeOrText as AnalysisType) : 'fast';
 
     const chunkHandler = (_: any, data: { content?: string }) => {
       if (data.content !== undefined) {
@@ -568,7 +596,7 @@ ${rows.join('\n')}`;
         return;
       }
       try {
-        const results = await executeTools(data.toolCalls);
+        const results = await executeTools(data.toolCalls, precision);
         await ipcRenderer.invoke('kimi-tool-response', { requestId: data.requestId, results });
       } catch (e) {
         console.error('Tool execution failed:', e);

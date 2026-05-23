@@ -212,7 +212,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
                   updateKLineData={updateKlines}
                   updateTrendData={updateTrendData}
                 />
-                <Tabs defaultActiveKey={'news'} className={styles.rightTab}>
+                <Tabs defaultActiveKey={'news'} className={styles.rightTab} style={{ width: initWidth }}>
                   {/* <Tabs defaultActiveKey={'news'} className={styles.rightTab} style={{ width: initWidth }}> */}
                   {/* <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易策略</span>} key={'strategy'}>
                     <SStrategy
