@@ -533,9 +533,9 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   // ===== RSI 回测 =====
   const backtestRSIMultiPeriod = (closes: number[], currentIdx: number) => {
     const periods = [
-      { name: 'RSI6', days: 6, hold: 5 },   // 短线
-      { name: 'RSI12', days: 12, hold: 10 }, // 波段（主基准）
-      { name: 'RSI24', days: 24, hold: 20 }, // 中线
+      { name: 'RSI6', days: 6, hold: 3 },   // 短线
+      { name: 'RSI12', days: 12, hold: 6 }, // 波段（主基准）
+      { name: 'RSI24', days: 24, hold: 12 }, // 中线
     ];
     
     const results = periods.map(({ name, days, hold }) => {
@@ -996,7 +996,11 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     // ===== 自动选择数据精度 =====
     const precision = isOption ? getDataPrecision(typeOrText as AnalysisType) : 'fast';
 
-    const chunkHandler = (_: any, data: { content?: string }) => {
+    // ===== 关键修复：chunkHandler 增加 sessionId 过滤 =====
+    const chunkHandler = (_: any, data: { content?: string; sessionId?: string }) => {
+      if (data.sessionId && data.sessionId !== sessionIdRef.current) {
+        return; // 不是当前 session 的 chunk，忽略
+      }
       if (data.content !== undefined) {
         setMessages((prev) => {
           const last = prev[prev.length - 1];

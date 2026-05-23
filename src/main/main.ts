@@ -505,7 +505,7 @@ async function init() {
               const delta = data.choices?.[0]?.delta;
               if (delta?.content) {
                 fullContent += delta.content;
-                event.sender.send('kimi-analysis-chunk', { content: fullContent });
+                event.sender.send('kimi-analysis-chunk', { content: fullContent, sessionId: data.session_id });
               }
             } catch {
               // 忽略解析失败的行
@@ -714,7 +714,7 @@ async function init() {
                   const delta = data.choices?.[0]?.delta;
                   if (delta?.content) {
                     fullContent += delta.content;
-                    event.sender.send('kimi-analysis-chunk', { content: fullContent });
+                    event.sender.send('kimi-analysis-chunk', { content: fullContent, sessionId: data.session_id });
                   }
                 } catch {
                   // 忽略
