@@ -940,7 +940,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     return results;
   }, [formatTrendData, formatKlineData]);
 
-  const MAX_HISTORY_ROUNDS = 4;
+  const MAX_HISTORY_ROUNDS = 0; // ===== 关闭历史对话，专注当前问题 =====
 
   const sendMessage = useCallback(async (typeOrText: AnalysisType | string, isOption = false) => {
     if (!kimiApiKey) {
@@ -980,7 +980,10 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
       ? `请对以下股票进行${typeNames[typeOrText as AnalysisType]}。\n\n${baseInfo}\n\n请根据提供的工具获取所需数据后进行分析，用中文回答，分析客观专业，风险提示充分。`
       : `${typeOrText}\n\n股票基本信息：\n${baseInfo}\n\n请根据提供的工具获取所需数据后回答，用中文回答，分析客观专业，风险提示充分。`;
 
-    const recentMessages = messages.slice(-MAX_HISTORY_ROUNDS * 2);
+    const recentMessages = messages
+    .slice(-MAX_HISTORY_ROUNDS * 2)
+    .filter(m => m.role === 'user') // 只保留用户提问
+    .map(m => ({ role: m.role, content: m.content }));
 
     const apiMessages = [
       { role: 'system', content: SYSTEM_PROMPT },
@@ -1040,8 +1043,9 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
         setError(result.error);
         setMessages((prev) => {
           const last = prev[prev.length - 1];
-          if (last && last.role === 'assistant') {
-            return [...prev.slice(0, -1), { ...last, content: `❌ 分析失败：${result.error}` }];
+          if (last && last.role === 'assistant' && last.content === '') {
+            // 把空消息替换为错误提示，避免下次传空
+            return [...prev.slice(0, -1), { ...last, content: `❌ ${result.error}` }];
           }
           return prev;
         });
