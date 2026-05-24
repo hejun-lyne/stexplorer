@@ -12,6 +12,7 @@ import CXList from './CXList';
 import ZBList from './ZBList';
 import DTList from './DTList';
 import STList from './STList';
+import HoldView from './HoldView';
 import { Stock } from '@/types/stock';
 import { StoreState } from '@/reducers/types';
 import * as Utils from '@/utils';
@@ -137,26 +138,8 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
         <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>K线训练</span>} key={'ktrain'}>
           <KTrain onOpenStock={onOpenStock} active={activeKey === 'ktrain'} />
         </Tabs.TabPane>
-        <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>持有股票</span>} key={'holds'}>
-          <div className={styles.hint}>动态仓位管理，跟环境匹配</div>
-          <div className={styles.header}>
-            <Row>
-              <Col span={12}>
-                <Row>
-                  <Col span={4}>名字</Col>
-                  <Col span={3}>最新</Col>
-                  <Col span={5}>日期</Col>
-                  <Col span={3}>价格</Col>
-                  <Col span={5}>策略</Col>
-                  <Col span={4}>盈亏</Col>
-                </Row>
-              </Col>
-              <Col span={12}>理由</Col>
-            </Row>
-          </div>
-          <div className={styles.table}>
-            {holds.map((t) => HoldRow(t, stocksMapping[t.secid] ? stocksMapping[t.secid].detail.zx || 0 : 0))}
-          </div>
+        <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易管理</span>} key={'holds'}>
+          <HoldView onOpenStock={onOpenStock} />
         </Tabs.TabPane>
         <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>概念板块</span>} key={'gainians'}>
           <BKList

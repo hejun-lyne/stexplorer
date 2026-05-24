@@ -29,7 +29,7 @@ const Dashboard: React.FC<DashboardProps> = React.memo(({ settings, onOpenStock 
   }, []);
   return (
     <div className={styles.container} ref={parent}>
-      <div style={{padding: 10, color: 'yellow'}}>{'>>>>> 问问自己做好准备了吗？<<<<<'} <Button type="primary" onClick={isReady}>准备好了</Button></div>
+      {/* <div style={{padding: 10, color: 'yellow'}}>{'>>>>> 问问自己做好准备了吗？<<<<<'} <Button type="primary" onClick={isReady}>准备好了</Button></div> */}
       <div style={{ height: fullList ? '0' : '32%', overflowY: 'auto', overflowX: 'hidden' }}>
         <MarketMonitor />
         {/* <Stragegies onOpenStock={onOpenStock} /> */}

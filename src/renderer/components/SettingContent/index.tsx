@@ -45,6 +45,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     trainDate,
     kLineApiSourceSetting,
     kimiApiKeySetting,
+    initialCapital,
   } = useSelector((state: StoreState) => state.setting.systemSetting);
   // 数据来源
   const [fundApiType, setFundApiType] = useState(fundApiTypeSetting);
@@ -85,6 +86,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
         trainDate: ontrainDate,
         kLineApiSourceSetting: kLineApiSource,
         kimiApiKeySetting: kimiApiKey,
+        initialCapital,
       })
     );
   }

@@ -21,6 +21,7 @@ declare namespace System {
     kLineApiSourceSetting: number; // K线加载的数据源
 
     kimiApiKeySetting: string; // Kimi API Key
+    initialCapital: number; // 初始本金
   }
 
   export interface GridSetting {

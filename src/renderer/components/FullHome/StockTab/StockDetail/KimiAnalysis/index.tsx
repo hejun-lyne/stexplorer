@@ -9,6 +9,7 @@ import * as Services from '@/services';
 import dayjs from 'dayjs';
 import styles from './index.scss';
 import { calculateMACD, calculateRSI } from '@/helpers/tech';
+import { BacktestRSIBounce } from '@/helpers/stock';
 
 export interface KimiAnalysisProps {
   stock: Stock.DetailItem;
@@ -531,40 +532,6 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   }, []);
 
   // ===== RSI 回测 =====
-  const backtestRSIMultiPeriod = (closes: number[], currentIdx: number) => {
-    const periods = [
-      { name: 'RSI6', days: 6, hold: 3 },   // 短线
-      { name: 'RSI12', days: 12, hold: 6 }, // 波段（主基准）
-      { name: 'RSI24', days: 24, hold: 12 }, // 中线
-    ];
-    
-    const results = periods.map(({ name, days, hold }) => {
-      const rsi = calculateRSI(closes, days);
-      const overbought: number[] = [];
-      const oversold: number[] = [];
-      
-      for (let i = days; i < currentIdx - hold; i++) {
-        if (rsi[i] > 70) overbought.push((closes[i+hold] - closes[i]) / closes[i] * 100);
-        if (rsi[i] < 30) oversold.push((closes[i+hold] - closes[i]) / closes[i] * 100);
-      }
-      
-      const avg = (arr: number[]) => arr.length ? arr.reduce((a,b) => a+b, 0) / arr.length : 0;
-      const winRate = (arr: number[]) => arr.length ? arr.filter(v => v > 0).length / arr.length * 100 : 0;
-      
-      return {
-        period: name,
-        obCount: overbought.length,
-        obAvg: avg(overbought),
-        obWin: winRate(overbought),
-        osCount: oversold.length,
-        osAvg: avg(oversold),
-        osWin: winRate(oversold),
-        current: rsi[currentIdx],
-      };
-    });
-    
-    return results;
-  };
   
   const backtestRSI = (klineData: Stock.KLineItem[], closes: number[], rsi6: number[], currentIdx: number) => {
     // 1. 超买回测：RSI6 > 70 后 N 日表现
@@ -725,25 +692,38 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
             backtestStr = `\n【历史回测】当前${state}，历史样本不足（需至少35根K线）`;
           }
 
-          // --- RSI 多周期回测 ---
-          const rsiResults = backtestRSIMultiPeriod(closes, idx);
-          const rsiLines = rsiResults.map((r: any) => {
-            const ob = r.obCount > 0 ? `超买${r.obCount}次/${r.hold}日收益${r.obAvg.toFixed(1)}%(胜率${r.obWin.toFixed(0)}%)` : '';
-            const os = r.osCount > 0 ? `超卖${r.osCount}次/${r.hold}日收益${r.osAvg.toFixed(1)}%(胜率${r.osWin.toFixed(0)}%)` : '';
-            return `${r.period}：${ob || '无超买样本'} | ${os || '无超卖样本'} | 当前${r.current.toFixed(1)}`;
-          });
+          // --- RSI 超卖反弹回测 ---
+          const rsi6Result = BacktestRSIBounce(closes, rsi6, idx, 30, 5);
+          const rsi12Result = BacktestRSIBounce(closes, rsi12, idx, 30, 5);
+          const rsi24Result = BacktestRSIBounce(closes, rsi24, idx, 30, 5);
+
+          const formatRSIResult = (name: string, r: any) => {
+            const history = r.count > 0
+              ? `历史反弹${r.count}次，5日平均收益${r.avgReturn.toFixed(1)}%(胜率${r.winRate.toFixed(0)}%)，平均超卖${r.avgOversoldDays.toFixed(1)}天`
+              : '无历史反弹样本';
+            const status = r.daysSinceRebound >= 0
+              ? `${r.currentStatus}，距反弹${r.daysSinceRebound}天`
+              : r.currentStatus;
+            return `${name}：${history} | 当前${r.currentRSI.toFixed(1)}（${status}）`;
+          };
+
+          const rsiLines = [
+            formatRSIResult('RSI6', rsi6Result),
+            formatRSIResult('RSI12', rsi12Result),
+            formatRSIResult('RSI24', rsi24Result),
+          ];
 
           // 共振判断
-          const r6 = rsiResults[0].current;
-          const r12 = rsiResults[1].current;
-          const r24 = rsiResults[2].current;
+          const r6 = rsi6[idx];
+          const r12 = rsi12[idx];
+          const r24 = rsi24[idx];
           let resonance = '';
           if (r6 > 70 && r12 > 70 && r24 > 70) resonance = '（三周期共振超买，极端过热）';
           else if (r6 < 30 && r12 < 30 && r24 < 30) resonance = '（三周期共振超卖，极端低迷）';
           else if (r6 > 70 && r24 < 60) resonance = '（短高长低，上涨中继）';
           else if (r6 < 30 && r24 > 40) resonance = '（短低长高，下跌中继）';
 
-          rsiBacktestStr = `\n【RSI多周期回测】\n${rsiLines.join('\n')}${resonance}`;
+          rsiBacktestStr = `\n【RSI超卖反弹回测】\n${rsiLines.join('\n')}${resonance}`;
         }
 
         const data = formatKlineData(klineData, precision);
@@ -940,7 +920,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     return results;
   }, [formatTrendData, formatKlineData]);
 
-  const MAX_HISTORY_ROUNDS = 0; // ===== 关闭历史对话，专注当前问题 =====
+  const MAX_HISTORY_ROUNDS = 1; // ===== 关闭历史对话，专注当前问题 =====
 
   const sendMessage = useCallback(async (typeOrText: AnalysisType | string, isOption = false) => {
     if (!kimiApiKey) {

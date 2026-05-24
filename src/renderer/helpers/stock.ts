@@ -3334,7 +3334,93 @@ export async function CheckStockRSI(secid: string, threshold = 30, klimit = 80) 
   }
 }
 
-export async function CheckStockMAAndRSI(secid: string, maThreshold = 0.05, rsiThreshold = 30, klimit = 80) {
+export function BacktestRSIBounce(closes: number[], rsi: number[], currentIdx: number, oversoldThreshold: number = 30, holdDays: number = 5) {
+  const signals: Array<{
+    buyIndex: number;
+    return5d: number;
+    oversoldDays: number; // 在超卖区停留天数
+    minRSI: number; // 超卖区间最低 RSI
+    reboundDay: number; // 反弹当天 RSI 值
+  }> = [];
+
+  let inOversold = false;
+    let oversoldStart = -1;
+    let minRSIInOversold = 100;
+
+    for (let i = 1; i < currentIdx - holdDays; i++) {
+      // 进入超卖区
+      if (rsi[i] <= oversoldThreshold && !inOversold) {
+        inOversold = true;
+        oversoldStart = i;
+        minRSIInOversold = rsi[i];
+      }
+
+      // 更新超卖区最低 RSI
+      if (inOversold && rsi[i] < minRSIInOversold) {
+        minRSIInOversold = rsi[i];
+      }
+
+      // 反弹确认：RSI 从 ≤30 上穿 30
+      if (inOversold && rsi[i - 1] <= oversoldThreshold && rsi[i] > oversoldThreshold) {
+        signals.push({
+          buyIndex: i,
+          return5d: (closes[i + holdDays] - closes[i]) / closes[i] * 100,
+          oversoldDays: i - oversoldStart,
+          minRSI: minRSIInOversold,
+          reboundDay: rsi[i],
+        });
+
+        // 重置，避免 30 附近震荡产生重复信号
+        inOversold = false;
+        oversoldStart = -1;
+        minRSIInOversold = 100;
+      }
+
+      // 如果 RSI 一直在 30 以上，确保状态重置
+      if (rsi[i] > oversoldThreshold && rsi[i - 1] > oversoldThreshold) {
+        inOversold = false;
+      }
+    }
+
+    const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+    const winRate = (arr: number[]) => (arr.length ? (arr.filter((v) => v > 0).length / arr.length) * 100 : 0);
+
+    // 当前状态
+    let currentStatus = '中性';
+    let daysSinceRebound = -1;
+    if (currentIdx >= 1) {
+      const curr = rsi[currentIdx];
+      const prev = rsi[currentIdx - 1];
+      if (curr <= oversoldThreshold) {
+        currentStatus = '超卖区';
+      } else if (prev <= oversoldThreshold && curr > oversoldThreshold) {
+        currentStatus = '刚反弹（上穿30）';
+        daysSinceRebound = 0;
+      } else {
+        // 找最近一次反弹
+        for (let j = currentIdx - 1; j >= 1; j--) {
+          if (rsi[j - 1] <= oversoldThreshold && rsi[j] > oversoldThreshold) {
+            daysSinceRebound = currentIdx - j;
+            currentStatus = daysSinceRebound <= 3 ? '反弹初期' : '反弹已持续';
+            break;
+          }
+        }
+      }
+    }
+
+    return {
+      count: signals.length,
+      avgReturn: avg(signals.map((s) => s.return5d)),
+      winRate: winRate(signals.map((s) => s.return5d)),
+      avgOversoldDays: avg(signals.map((s) => s.oversoldDays)),
+      avgMinRSI: avg(signals.map((s) => s.minRSI)),
+      currentStatus,
+      currentRSI: rsi[currentIdx],
+      daysSinceRebound,
+    };
+}
+
+export async function CheckStockMAAndRSI(secid: string, maThreshold = 0.05, rsiThreshold = 30, klimit = 120) {
   try {
     const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 60) {
@@ -3349,12 +3435,14 @@ export async function CheckStockMAAndRSI(secid: string, maThreshold = 0.05, rsiT
     const latestMa40 = ma40[ma40.length - 1];
     const latestMa60 = ma60[ma60.length - 1];
 
-    const rsi6 = Indicators.calculateRSI(sps, 6);
-    const latestRSI6 = rsi6[rsi6.length - 1];
-
-    if (Number.isNaN(latestMa20) || Number.isNaN(latestMa40) || Number.isNaN(latestMa60) || Number.isNaN(latestRSI6)) {
+    if (Number.isNaN(latestMa20) || Number.isNaN(latestMa40) || Number.isNaN(latestMa60)) {
       return null;
     }
+
+    const rsi6 = Indicators.calculateRSI(sps, 6);
+    const rsi12 = Indicators.calculateRSI(sps, 12);
+
+    const latestRSI6 = rsi6[rsi6.length - 1];
 
     return {
       secid,

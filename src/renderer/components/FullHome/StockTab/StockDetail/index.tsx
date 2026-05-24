@@ -31,6 +31,7 @@ import Similarity from './MustRead/Similarity';
 import PeriodMark from './MustRead/PeriodMark';
 import Guba from './MustRead/GuBa';
 import KimiAnalysis from './KimiAnalysis';
+import Holdings from './Holdings';
 import * as Utils from '@/utils';
 
 export interface StockDetailProps {
@@ -232,9 +233,9 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
                   </>} key={'matches'}>
                     <TrackingNote secid={secid} active={active} onNoteUpdated={setNoteChanged} />
                   </Tabs.TabPane>
-                  {/* <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>区间标记</span>} key={'similar'}>
-                    <PeriodMark secid={secid} showPeriod={setActivePeriond} />
-                  </Tabs.TabPane> */}
+                  <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易记录</span>} key={'similar'}>
+                    <Holdings secid={secid} />
+                  </Tabs.TabPane>
                   <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>股吧评论</span>} key={'guba'}>
                     <Guba secid={secid} active={active} openUrl={onOpenUrl} />
                   </Tabs.TabPane>
