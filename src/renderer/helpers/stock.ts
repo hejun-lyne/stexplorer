@@ -3334,6 +3334,284 @@ export async function CheckStockRSI(secid: string, threshold = 30, klimit = 80) 
   }
 }
 
+// ===== 均线回踩买入策略参数优化 =====
+export interface MABacktestTrade {
+  buyIndex: number;
+  sellIndex: number;
+  returnPct: number;
+  maxDrawdownPct: number;
+}
+
+export interface MABacktestResult {
+  maPeriod: number;
+  holdDays: number;
+  trendDays: number;
+  threshold: number;
+  totalReturn: number;
+  winRate: number;
+  tradeCount: number;
+  avgReturn: number;
+  maxDrawdown: number;
+  profitFactor: number;
+  score: number;
+  trades: MABacktestTrade[];
+}
+
+export function backtestMABounce(
+  klines: Stock.KLineItem[],
+  maPeriods: number[] = [5, 10, 20, 30, 60],
+  holdDaysOptions: number[] = [5, 10, 20]
+): MABacktestResult[] {
+  const testKlines = klines.slice(-120); // 取最近200天数据进行回测
+  const startIndex = klines.length - testKlines.length;
+  const closes = testKlines.map((k) => k.sp);
+  const allResults: MABacktestResult[] = [];
+
+  // 参数网格
+  const trendDaysOptions = [3, 5, 10]; // 趋势确认：连续N天收盘价在均线上方
+  const bounceThresholds = [0.01, 0.02, 0.03, 0.05]; // 回踩阈值：收盘价在均线 ±X% 内
+
+  for (const period of maPeriods) {
+    const ma =  Indicators.calculateMA(closes, period);
+
+    for (const holdDays of holdDaysOptions) {
+      for (const trendDays of trendDaysOptions) {
+        for (const threshold of bounceThresholds) {
+          const trades: MABacktestTrade[] = [];
+
+          // 从有足够数据的位置开始
+          const startIdx = Math.max(period, period + trendDays);
+          for (let i = startIdx; i < closes.length - holdDays; i++) {
+            if (isNaN(ma[i]) || ma[i] === 0) continue;
+
+            // 1. 趋势确认：前 trendDays 天收盘价在均线上方，且均线本身向上
+            let trendValid = true;
+            for (let j = i - trendDays; j < i; j++) {
+              if (j < 1 || isNaN(ma[j]) || isNaN(ma[j - 1])) {
+                trendValid = false;
+                break;
+              }
+              if (closes[j] <= ma[j] || ma[j] <= ma[j - 1]) {
+                trendValid = false;
+                break;
+              }
+            }
+            if (!trendValid) continue;
+
+            // 2. 回踩信号：最低价触及/接近均线，收盘价收回且在均线 ±threshold 范围内
+            const maVal = ma[i];
+            const close = closes[i];
+            const low = testKlines[i].zd;
+            const open = testKlines[i].kp;
+
+            const touchedMA = low <= maVal * 1.005; // 最低价触碰或轻微跌破均线
+            const recovered = close >= maVal * 0.98; // 收盘收回在均线上方附近
+            const nearMA = Math.abs(close - maVal) / maVal <= threshold; // 收盘在均线阈值范围内
+
+            if (touchedMA && recovered && nearMA) {
+              // 3. 反弹确认：当日收阳 或 次日收盘高于当日
+              const todayUp = close > open;
+              const nextDayUp = i + 1 < closes.length && closes[i + 1] > close;
+
+              if (todayUp || nextDayUp) {
+                // 计算持有期收益和最大回撤
+                let maxPrice = close;
+                let maxDD = 0;
+                const sellIdx = Math.min(i + holdDays, closes.length - 1);
+                for (let d = i + 1; d <= sellIdx && d < closes.length; d++) {
+                  if (closes[d] > maxPrice) maxPrice = closes[d];
+                  const dd = (maxPrice - closes[d]) / maxPrice * 100;
+                  if (dd > maxDD) maxDD = dd;
+                }
+
+                const sellPrice = closes[sellIdx];
+                const ret = (sellPrice - close) / close * 100;
+
+                trades.push({
+                  buyIndex: i + startIndex,
+                  sellIndex: sellIdx + startIndex,
+                  returnPct: ret,
+                  maxDrawdownPct: maxDD,
+                });
+              }
+            }
+          }
+
+          // 过滤：至少交易 3 次才有统计意义
+          if (trades.length >= 3) {
+            const returns = trades.map((t) => t.returnPct);
+            const wins = returns.filter((r) => r > 0);
+            const totalReturn = returns.reduce((a, b) => a + b, 0);
+            const winRate = (wins.length / returns.length) * 100;
+            const avgReturn = totalReturn / returns.length;
+            const maxDrawdown = Math.min(...returns);
+
+            const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+            const losses = returns.filter((r) => r <= 0);
+            const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
+            const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
+
+            // 综合评分：收益 × 胜率 × 交易次数系数 / (1 + |回撤|/10)
+            const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) / (1 + Math.abs(maxDrawdown) / 10);
+
+            allResults.push({
+              maPeriod: period,
+              holdDays,
+              trendDays,
+              threshold,
+              totalReturn,
+              winRate,
+              tradeCount: trades.length,
+              avgReturn,
+              maxDrawdown,
+              profitFactor,
+              score,
+              trades: [...trades],
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // 按综合评分降序
+  allResults.sort((a, b) => b.score - a.score);
+  return allResults;
+};
+
+// ===== RSI 策略参数优化回测 =====
+export interface RSIBacktestTrade {
+  buyIndex: number;
+  sellIndex: number;
+  buyPrice: number;
+  sellPrice: number;
+  returnPct: number;
+  maxDrawdownPct: number; // 持仓期最大回撤
+}
+
+export interface RSIBacktestResult {
+  rsiPeriod: number;      // 6 / 12 / 24
+  buyThreshold: number;     // 超卖反弹买入阈值
+  sellThreshold: number;    // 超买卖出阈值
+  trades: RSIBacktestTrade[];
+  totalReturn: number;      // 累加收益率（非复利）
+  winRate: number;
+  tradeCount: number;
+  avgReturn: number;
+  maxDrawdown: number;     // 单笔最大亏损
+  profitFactor: number;     // 盈亏比
+  score: number;            // 综合评分
+}
+
+export function optimizeRSIStrategy(
+  klines: Stock.KLineItem[],
+  rsiPeriods: number[] = [6, 12, 24]
+): RSIBacktestResult[] {
+  const testKlines = klines.slice(-120);
+  const startIndex = klines.length - testKlines.length;
+  const closes = testKlines.map(k => k.sp);
+  const allResults: RSIBacktestResult[] = [];
+
+  // 参数网格：超卖买点 15-35，超买卖点 65-85
+  const buyThresholds = [15, 20, 25, 28, 30, 35];
+  const sellThresholds = [65, 70, 72, 75, 80, 85];
+
+  for (const period of rsiPeriods) {
+    const rsi = Indicators.calculateRSI(closes, period);
+
+    for (const buyTh of buyThresholds) {
+      for (const sellTh of sellThresholds) {
+        if (buyTh >= sellTh) continue; // 买入阈值必须低于卖出阈值
+
+        const trades: RSIBacktestTrade[] = [];
+        let inOversold = false;   // 是否曾进入超卖区（确保是"反弹"而非高位回落）
+        let holding = false;
+        let buyPrice = 0;
+        let buyIndex = -1;
+        let maxPriceSinceBuy = 0;
+
+        for (let i = 1; i < closes.length; i++) {
+          // 跟踪是否进入超卖区
+          if (rsi[i] <= buyTh) inOversold = true;
+
+          if (!holding) {
+            // 买入信号：曾进入超卖区，且 RSI 从下方上穿 buyTh（确认反弹）
+            if (inOversold && rsi[i - 1] <= buyTh && rsi[i] > buyTh) {
+              holding = true;
+              buyPrice = closes[i];
+              buyIndex = i;
+              maxPriceSinceBuy = buyPrice;
+              inOversold = false;
+            }
+          } else {
+            // 更新持仓期最高价（计算回撤）
+            if (closes[i] > maxPriceSinceBuy) maxPriceSinceBuy = closes[i];
+
+            // 卖出信号：RSI 进入超买区（≥ sellTh）
+            // 用"进入即卖"比"下穿卖"更及时，避免利润回吐
+            if (rsi[i] >= sellTh) {
+              const sellPrice = closes[i];
+              const ret = (sellPrice - buyPrice) / buyPrice * 100;
+              const dd = (maxPriceSinceBuy - sellPrice) / maxPriceSinceBuy * 100; // 从高点回撤
+
+              trades.push({
+                buyIndex: buyIndex + startIndex,
+                sellIndex: i + startIndex,
+                buyPrice,
+                sellPrice,
+                returnPct: ret,
+                maxDrawdownPct: dd,
+              });
+
+              holding = false;
+              buyPrice = 0;
+              buyIndex = -1;
+              maxPriceSinceBuy = 0;
+            }
+          }
+        }
+
+        // 过滤：至少交易 3 次才有统计意义
+        if (trades.length >= 3) {
+          const returns = trades.map(t => t.returnPct);
+          const wins = returns.filter(r => r > 0);
+          const losses = returns.filter(r => r <= 0);
+
+          const totalReturn = returns.reduce((a, b) => a + b, 0);
+          const winRate = (wins.length / returns.length) * 100;
+          const avgReturn = totalReturn / returns.length;
+          const maxDrawdown = Math.min(...returns);
+          const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+          const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
+          const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
+
+          // 综合评分：收益 × 胜率 × 交易次数系数 / (1 + |回撤|/10)
+          // 避免"押中一次大行情"的极端策略胜出
+          const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) / (1 + Math.abs(maxDrawdown) / 10);
+
+          allResults.push({
+            rsiPeriod: period,
+            buyThreshold: buyTh,
+            sellThreshold: sellTh,
+            trades,
+            totalReturn,
+            winRate,
+            tradeCount: trades.length,
+            avgReturn,
+            maxDrawdown,
+            profitFactor,
+            score,
+          });
+        }
+      }
+    }
+  }
+
+  // 按综合评分降序
+  allResults.sort((a, b) => b.score - a.score);
+  return allResults;
+};
+
 export function BacktestRSIBounce(closes: number[], rsi: number[], currentIdx: number, oversoldThreshold: number = 30, holdDays: number = 5) {
   const signals: Array<{
     buyIndex: number;

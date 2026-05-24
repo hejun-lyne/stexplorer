@@ -33,6 +33,7 @@ import Guba from './MustRead/GuBa';
 import KimiAnalysis from './KimiAnalysis';
 import Holdings from './Holdings';
 import * as Utils from '@/utils';
+import BacktestAnalysis from './BacktestAnalysis';
 
 export interface StockDetailProps {
   secid: string;
@@ -233,7 +234,10 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
                   </>} key={'matches'}>
                     <TrackingNote secid={secid} active={active} onNoteUpdated={setNoteChanged} />
                   </Tabs.TabPane>
-                  <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易记录</span>} key={'similar'}>
+                  <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>回测分析</span>} key={'backtest'}>
+                    <BacktestAnalysis secid={secid} klines={klines || undefined} />
+                  </Tabs.TabPane>
+                  <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易记录</span>} key={'holdings'}>
                     <Holdings secid={secid} />
                   </Tabs.TabPane>
                   <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>股吧评论</span>} key={'guba'}>

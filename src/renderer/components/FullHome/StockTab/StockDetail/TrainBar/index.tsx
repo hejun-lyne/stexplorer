@@ -108,7 +108,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(
       const lastS = config.sellPoints?.length ? config.sellPoints.slice(-1)[0].x : null;
       if (!lastB || (lastS && lastS > lastB)) {
         // 卖了才能买
-        dispatch(addStockTradePointAction(secid, all30Mints[dateIdx].date, all30Mints[dateIdx].zg, true));
+        dispatch(addStockTradePointAction(secid, all30Mints[dateIdx].date, all30Mints[dateIdx].zg, true, "train"));
       }
     }, [all30Mints, dateIdx, config]);
     const doSell = useCallback(() => {
@@ -116,12 +116,12 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(
       const lastS = config.sellPoints?.length ? config.sellPoints.slice(-1)[0].x : null;
       if (lastB && (!lastS || lastB > lastS)) {
         // 买了才能卖
-        dispatch(addStockTradePointAction(secid, all30Mints[dateIdx].date, all30Mints[dateIdx].zg, false));
+        dispatch(addStockTradePointAction(secid, all30Mints[dateIdx].date, all30Mints[dateIdx].zg, false, "train"));
       }
     }, [all30Mints, dateIdx, config]);
     const clearBS = useCallback(() => {
       batch(() => {
-        dispatch(clearStockTradePointAction(secid, true));
+        dispatch(clearStockTradePointAction(secid, true, "train"));
         dispatch(clearKNoteAction(secid, true));
       });
     }, [secid]);

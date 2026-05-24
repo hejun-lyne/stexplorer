@@ -980,7 +980,7 @@ export function deleteStockMarkLineAction(value: number, sid: string): ThunkActi
   };
 }
 
-export function addStockTradePointAction(secid: string, date: string, value: number, isBuy: boolean, isTrain = true): ThunkAction {
+export function addStockTradePointAction(secid: string, date: string, value: number, isBuy: boolean, type:string): ThunkAction {
   return (dispatch, getState) => {
     try {
       const {
@@ -991,13 +991,13 @@ export function addStockTradePointAction(secid: string, date: string, value: num
         if (isBuy) {
           if (ss.buyPoints) {
             ss.buyPoints = ss.buyPoints.filter((p) => p.x != date);
-            ss.buyPoints.push({ x: date, y: value, t: isTrain });
-          } else ss.buyPoints = [{ x: date, y: value, t: isTrain }];
+            ss.buyPoints.push({ x: date, y: value, t: type });
+          } else ss.buyPoints = [{ x: date, y: value, t: type }];
         } else {
           if (ss.sellPoints) {
             ss.sellPoints = ss.sellPoints.filter((p) => p.x != date);
-            ss.sellPoints.push({ x: date, y: value, t: isTrain });
-          } else ss.sellPoints = [{ x: date, y: value, t: isTrain }];
+            ss.sellPoints.push({ x: date, y: value, t: type });
+          } else ss.sellPoints = [{ x: date, y: value, t: type }];
         }
         dispatch(setStockConfigAction(Utils.DeepCopy(stockConfigs)));
       }
@@ -1007,7 +1007,7 @@ export function addStockTradePointAction(secid: string, date: string, value: num
   };
 }
 
-export function deleteStockTradePointAction(secid: string, date: string, isBuy: boolean): ThunkAction {
+export function deleteStockTradePointAction(secid: string, date: string, isBuy: boolean, type:string): ThunkAction {
   return (dispatch, getState) => {
     try {
       const {
@@ -1015,9 +1015,9 @@ export function deleteStockTradePointAction(secid: string, date: string, isBuy: 
       } = getState();
       const ss = stockConfigs.find((s) => s.secid === secid);
       if (isBuy) {
-        if (ss && ss.buyPoints) ss.buyPoints = ss.buyPoints.filter((s) => s.x != date);
+        if (ss && ss.buyPoints) ss.buyPoints = ss.buyPoints.filter((s) => s.x != date && s.t != type);
       } else {
-        if (ss && ss.sellPoints) ss.sellPoints = ss.sellPoints.filter((s) => s.x != date);
+        if (ss && ss.sellPoints) ss.sellPoints = ss.sellPoints.filter((s) => s.x != date && s.t != type);
       }
       dispatch(setStockConfigAction(Utils.DeepCopy(stockConfigs)));
     } catch (error) {
@@ -1026,7 +1026,7 @@ export function deleteStockTradePointAction(secid: string, date: string, isBuy: 
   };
 }
 
-export function clearStockTradePointAction(secid: string, isTrain: boolean): ThunkAction {
+export function clearStockTradePointAction(secid: string, isTrain: boolean, type:string): ThunkAction {
   return (dispatch, getState) => {
     try {
       const {
@@ -1034,9 +1034,13 @@ export function clearStockTradePointAction(secid: string, isTrain: boolean): Thu
       } = getState();
       const ss = stockConfigs.find((s) => s.secid === secid);
       if (isTrain) {
-        if (ss && ss.buyPoints) ss.buyPoints = ss.buyPoints.filter((s) => s.t != undefined && !s.t);
-        if (ss && ss.sellPoints) ss.sellPoints = [];
-        if (ss && ss.buyPoints) ss.buyPoints = [];
+        // 保留手动标记 (t 不存在或为 false)
+        if (ss && ss.buyPoints) ss.buyPoints = ss.buyPoints.filter((s) => s.t !== type);
+        if (ss && ss.sellPoints) ss.sellPoints = ss.sellPoints.filter((s) => s.t !== type);
+      } else {
+        // 保留训练标记 (t === true)
+        if (ss && ss.buyPoints) ss.buyPoints = ss.buyPoints.filter((s) => s.t === type);
+        if (ss && ss.sellPoints) ss.sellPoints = ss.sellPoints.filter((s) => s.t === type);
       }
       dispatch(setStockConfigAction(Utils.DeepCopy(stockConfigs)));
     } catch (error) {

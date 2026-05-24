@@ -28,8 +28,8 @@ declare namespace Stock {
       qstype: DayTrendType; // 趋势类型
     };
     markLines?: number[]; // 标记线
-    buyPoints?: { x: string; y: number; t: boolean }[]; // 买入标记
-    sellPoints?: { x: string; y: number; t: boolean }[]; // 买入标记
+    buyPoints?: { x: string; y: number; t: string }[]; // 买入标记
+    sellPoints?: { x: string; y: number; t: string }[]; // 买入标记
     similars?: SimilarItem[];
     periodMarks: PeriodMarkItem[];
   }

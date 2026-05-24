@@ -532,7 +532,7 @@ function getTechSeries(techType: TechIndicatorType, ks: Stock.KLineItem[]) {
   const {names, values} = Tech.calculateIndicators(ks, techType);
   return getTechSeriesWithResult(techType, values, names);
 }
-function getKSeries(data: any[], markPoints: Record<string, any>, markLines: any[]) {
+function getKSeries(data: any[], markPoints: any[], markLines: any[]) {
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
   return {
     name: 'K线',
@@ -553,7 +553,7 @@ function getKSeries(data: any[], markPoints: Record<string, any>, markLines: any
         fontSize: 8,
         // offset: [0, 5],
       },
-      data: markPoints,
+      data: Array.isArray(markPoints) ? markPoints : [],
     },
     markLine: {
       symbol: 'none',
@@ -1093,7 +1093,7 @@ function setupClineChart(
   options.xAxis = getxAxis(dates);
   options.yAxis = getyAxis(darkMode);
   options.series = [
-    getKSeries(values, {}, []), 
+    getKSeries(values, [], []), 
     getChanSeries(chans), 
     getVolSeries(vols), 
     // ...getMACDSeries(macds)
@@ -1166,8 +1166,8 @@ function setupKlineChart(
   const showBK = bkks && bkks.length > 0;
   options.yAxis = getyAxis(darkMode, chouma ? chouma.steps : undefined, showChouma);
   if (!showChouma) {
-    const startI = Math.floor(((_klines.length - 1) * range.start) / 100);
-    const endI = Math.ceil(((_klines.length - 1) * range.end) / 100);
+    const startI = Math.floor((_klines.length * range.start) / 100);
+    const endI = Math.ceil((_klines.length * range.end) / 100);
     const showed = _klines.slice(startI, endI);
     options.yAxis[0].min = Math.min(...showed.map((_) => _.zd));
     options.yAxis[0].max = Math.max(...showed.map((_) => _.zg));
@@ -1220,9 +1220,7 @@ function updateCKChart(
   opts.darkMode = darkMode;
   opts.dataZoom.start = range.start;
   opts.dataZoom.end = range.end;
-  if (opts.grid.length < 4) {
-    return;
-  }
+
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
   opts.visualMap[0].pieces[0].color = variableColors['--reduce-color'];
   opts.visualMap[0].pieces[1].color = variableColors['--increase-color'];
@@ -1232,13 +1230,16 @@ function updateCKChart(
     borderColor: variableColors['--increase-color'],
     borderColor0: variableColors['--reduce-color'],
   };
+
+  // 无论 grid 数量多少，都需要更新 yAxis min/max
   if (!showChouma) {
     const startI = Math.floor((opts.series[0].data.length * range.start) / 100);
     const endI = Math.ceil((opts.series[0].data.length * range.end) / 100);
     const showed = opts.series[0].data.slice(startI, endI);
-    opts.yAxis[0].min = Math.min(...showed.map((_: any[]) => _[2]));
-    opts.yAxis[0].max = Math.max(...showed.map((_: any[]) => _[3]));
-  } else if (chouma) {
+    opts.yAxis[0].min = Math.min(...showed.map((d: any) => d[2]));
+    opts.yAxis[0].max = Math.max(...showed.map((d: any) => d[3]));
+  } else if (chouma && opts.grid.length >= 4) {
+    // 只有存在筹码 grid 时才处理筹码相关逻辑
     const cm = alignChouma(
       opts.series[0].data.map((d: any[]) => {
         return {
@@ -2337,7 +2338,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                 ? config.buyPoints.map((p) => {
                     const x = typeIndex == 1 ? p.x : p.x.substring(0, 10);
                     return {
-                      value: '买',
+                      value: p.t ? 'T买' : '买',
                       coord: [x, p.y],
                       itemStyle: {
                         color: increaseColor,
@@ -2350,7 +2351,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                 config.sellPoints.map((p) => {
                   const x = typeIndex == 1 ? p.x : p.x.substring(0, 10);
                   return {
-                    value: '卖',
+                    value: p.t ? 'T卖' : '卖',
                     coord: [x, p.y],
                     itemStyle: {
                       color: reduceColor,
@@ -2390,8 +2391,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
               if (opt.series[0].markLine) {
                 opt.series[0].markLine.data = mData;
               }
-              if (opt.series[0].markPoint && pData.length > 0) {
-                opt.series[0].markPoint.data = opt.series[0].markPoint.data.concat(pData);
+              if (opt.series[0].markPoint) {
+                opt.series[0].markPoint.data = pData;
               }
             });
             const sopt = chartOptions[typeIndex][optIndex];
