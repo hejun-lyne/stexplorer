@@ -1049,6 +1049,46 @@ export function clearStockTradePointAction(secid: string, isTrain: boolean, type
   };
 }
 
+export function setStockTradePointsAction(
+  secid: string,
+  buyPoints: { x: string; y: number; t: string }[],
+  sellPoints: { x: string; y: number; t: string }[],
+  clearTypes?: string[]
+): ThunkAction {
+  return (dispatch, getState) => {
+    try {
+      const {
+        stock: { stockConfigs },
+      } = getState();
+      const ss = stockConfigs.find((s) => s.secid === secid);
+      if (!ss) {
+        return;
+      }
+
+      if (clearTypes?.length) {
+        if (ss.buyPoints) ss.buyPoints = ss.buyPoints.filter((p) => !clearTypes.includes(p.t));
+        if (ss.sellPoints) ss.sellPoints = ss.sellPoints.filter((p) => !clearTypes.includes(p.t));
+      }
+
+      buyPoints.forEach((p) => {
+        if (!ss.buyPoints) ss.buyPoints = [];
+        ss.buyPoints = ss.buyPoints.filter((bp) => bp.x !== p.x || bp.t !== p.t);
+        ss.buyPoints.push(p);
+      });
+
+      sellPoints.forEach((p) => {
+        if (!ss.sellPoints) ss.sellPoints = [];
+        ss.sellPoints = ss.sellPoints.filter((sp) => sp.x !== p.x || sp.t !== p.t);
+        ss.sellPoints.push(p);
+      });
+
+      dispatch(setStockConfigAction(Utils.DeepCopy(stockConfigs)));
+    } catch (error) {
+      console.log('批量设置标的买卖点出错', error);
+    }
+  };
+}
+
 export function sortStocksAction(): ThunkAction {
   return (dispatch, getState) => {
     console.log('sort not supported now');

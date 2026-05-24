@@ -3479,6 +3479,163 @@ export function backtestMABounce(
   return allResults;
 };
 
+import { calculateMACD } from '@/utils/tech';
+
+export interface MACDTrade {
+  buyIndex: number;
+  sellIndex: number;
+  returnPct: number;
+  maxDrawdownPct: number;
+  holdDays: number;
+}
+
+export interface MACDStrategyResult {
+  fast: number;
+  slow: number;
+  signal: number;
+  requireAboveZero: boolean;
+  requirePriorNegative: boolean;
+  trades: MACDTrade[];
+  totalReturn: number;
+  winRate: number;
+  tradeCount: number;
+  avgReturn: number;
+  avgHoldDays: number;
+  maxDrawdown: number;
+  profitFactor: number;
+  score: number;
+}
+
+export function optimizeMACDStrategy(klines: Stock.KLineItem[]): MACDStrategyResult[] {
+  const closes = klines.map(k => k.sp);
+  const allResults: MACDStrategyResult[] = [];
+
+  // 参数网格
+  const fastPeriods = [8, 12, 15];
+  const slowPeriods = [21, 26, 30];
+  const signalPeriods = [7, 9, 12];
+  const aboveZeroOptions = [true, false];      // 是否要求零轴上方金叉
+  const priorNegOptions = [true, false];      // 是否要求金叉前 MACD 曾为负
+
+  for (const fast of fastPeriods) {
+    for (const slow of slowPeriods) {
+      if (fast >= slow) continue;
+      for (const signal of signalPeriods) {
+        for (const requireAboveZero of aboveZeroOptions) {
+          for (const requirePriorNegative of priorNegOptions) {
+            const macd = calculateMACD(closes, slow, fast, signal);
+            const dif = macd.MACD;
+            const dea = macd.signal;
+            const hist = macd.histogram;
+
+            const trades: MACDTrade[] = [];
+            let holding = false;
+            let buyPrice = 0;
+            let buyIndex = -1;
+            let maxPrice = 0;
+
+            for (let i = 2; i < closes.length - 1; i++) {
+              if (!holding) {
+                // 金叉判断
+                const goldenCross = dif[i] > dea[i] && dif[i - 1] <= dea[i - 1];
+                if (!goldenCross) continue;
+
+                // 零轴过滤
+                if (requireAboveZero && (dif[i] <= 0 || dea[i] <= 0)) continue;
+
+                // 金叉前必须有负 MACD（确保从空头区域恢复）
+                let hadNegative = false;
+                if (requirePriorNegative) {
+                  for (let j = Math.max(0, i - 5); j < i; j++) {
+                    if (hist[j] < 0) { hadNegative = true; break; }
+                  }
+                  if (!hadNegative) continue;
+                }
+
+                // 柱状线确认：当前柱 > 0 且比前一天大（动能增强）
+                if (hist[i] <= 0 || hist[i] <= hist[i - 1]) continue;
+
+                holding = true;
+                buyPrice = closes[i];
+                buyIndex = i;
+                maxPrice = buyPrice;
+              } else {
+                if (closes[i] > maxPrice) maxPrice = closes[i];
+
+                // 卖出条件 1：死叉
+                const deadCross = dif[i] < dea[i] && dif[i - 1] >= dea[i - 1];
+                // 卖出条件 2：柱状线连续 2 天显著缩短（止盈）
+                const histShrink = hist[i] > 0 && hist[i] < hist[i - 1] && hist[i - 1] < hist[i - 2];
+                const sharpShrink = histShrink && hist[i] < hist[i - 1] * 0.7;
+
+                if (deadCross || sharpShrink) {
+                  const sellPrice = closes[i];
+                  const ret = (sellPrice - buyPrice) / buyPrice * 100;
+                  const dd = maxPrice > buyPrice 
+                    ? (maxPrice - Math.min(...closes.slice(buyIndex, i + 1))) / maxPrice * 100 
+                    : 0;
+
+                  trades.push({
+                    buyIndex,
+                    sellIndex: i,
+                    returnPct: ret,
+                    maxDrawdownPct: dd,
+                    holdDays: i - buyIndex,
+                  });
+
+                  holding = false;
+                  buyPrice = 0;
+                  buyIndex = -1;
+                  maxPrice = 0;
+                }
+              }
+            }
+
+            if (trades.length >= 3) {
+              const returns = trades.map(t => t.returnPct);
+              const wins = returns.filter(r => r > 0);
+              const totalReturn = returns.reduce((a, b) => a + b, 0);
+              const avgReturn = totalReturn / returns.length;
+              const winRate = (wins.length / returns.length) * 100;
+              const maxDrawdown = Math.min(...returns);
+              const avgHold = trades.reduce((s, t) => s + t.holdDays, 0) / trades.length;
+
+              const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+              const losses = returns.filter(r => r <= 0);
+              const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
+              const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
+
+              // 评分：收益 × 胜率 × 交易次数系数 / (1 + |回撤|/10) / (1 + 持仓天数/20)
+              // 偏好：高收益、高胜率、低回撤、适中持仓天数
+              const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) 
+                / (1 + Math.abs(maxDrawdown) / 10) 
+                / (1 + Math.abs(avgHold - 5) / 10);
+
+              allResults.push({
+                fast, slow, signal,
+                requireAboveZero,
+                requirePriorNegative,
+                trades,
+                totalReturn,
+                winRate,
+                tradeCount: trades.length,
+                avgReturn,
+                avgHoldDays: avgHold,
+                maxDrawdown,
+                profitFactor,
+                score,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  allResults.sort((a, b) => b.score - a.score);
+  return allResults;
+};
+
 // ===== RSI 策略参数优化回测 =====
 export interface RSIBacktestTrade {
   buyIndex: number;

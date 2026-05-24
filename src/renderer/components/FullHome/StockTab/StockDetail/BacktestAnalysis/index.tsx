@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { Button, Table, Tag, Row, Col, Alert, Checkbox } from 'antd';
 import { useDispatch } from 'react-redux';
-import { addStockTradePointAction, clearStockTradePointAction } from '@/actions/stock';
+import { setStockTradePointsAction } from '@/actions/stock';
 import { backtestMABounce, optimizeRSIStrategy, MABacktestResult, RSIBacktestResult } from '@/helpers/stock';
 import { calculateMA, calculateRSI } from '@/helpers/tech';
 import { Stock } from '@/types/stock';
@@ -35,15 +35,15 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
   const applyMarks = useCallback(
     (showMA: boolean, showRSI: boolean) => {
       if (!klines) return;
-      dispatch(clearStockTradePointAction(secid, true, "ma"));
-      dispatch(clearStockTradePointAction(secid, true, "rsi"));
+      const buyPoints: { x: string; y: number; t: string }[] = [];
+      const sellPoints: { x: string; y: number; t: string }[] = [];
 
       if (showMA && topMAResult) {
         topMAResult.trades.forEach((t) => {
           const buyK = klines[t.buyIndex];
           const sellK = klines[t.sellIndex];
-          if (buyK) dispatch(addStockTradePointAction(secid, buyK.date, buyK.sp, true, "ma"));
-          if (sellK) dispatch(addStockTradePointAction(secid, sellK.date, sellK.sp, false, "ma"));
+          if (buyK) buyPoints.push({ x: buyK.date, y: buyK.sp, t: 'ma' });
+          if (sellK) sellPoints.push({ x: sellK.date, y: sellK.sp, t: 'ma' });
         });
       }
 
@@ -51,10 +51,12 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
         topRSIResult.trades.forEach((t) => {
           const buyK = klines[t.buyIndex];
           const sellK = klines[t.sellIndex];
-          if (buyK) dispatch(addStockTradePointAction(secid, buyK.date, buyK.sp, true, "rsi"));
-          if (sellK) dispatch(addStockTradePointAction(secid, sellK.date, sellK.sp, false, "rsi"));
+          if (buyK) buyPoints.push({ x: buyK.date, y: buyK.sp, t: 'rsi' });
+          if (sellK) sellPoints.push({ x: sellK.date, y: sellK.sp, t: 'rsi' });
         });
       }
+
+      dispatch(setStockTradePointsAction(secid, buyPoints, sellPoints, ['ma', 'rsi']));
     },
     [topMAResult, topRSIResult, klines, secid, dispatch]
   );
@@ -130,9 +132,14 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
       const sellIdx = Math.min(foundBuy.index + topMAResult.holdDays, klines.length - 1);
       const buyK = klines[foundBuy.index];
       const sellK = klines[sellIdx];
-      dispatch(clearStockTradePointAction(secid, true, "ma"));
-      dispatch(addStockTradePointAction(secid, buyK.date, buyK.sp, true, "ma"));
-      dispatch(addStockTradePointAction(secid, sellK.date, sellK.sp, false, "ma"));
+      dispatch(
+        setStockTradePointsAction(
+          secid,
+          [{ x: buyK.date, y: buyK.sp, t: 'ma' }],
+          [{ x: sellK.date, y: sellK.sp, t: 'ma' }],
+          ['ma']
+        )
+      );
       setTestResult(
         `MA策略：最近20根发现买入信号！日期 ${buyK.date}，价格 ${buyK.sp.toFixed(2)}，预期持有${topMAResult.holdDays}天至 ${sellK.date}`
       );
@@ -177,17 +184,23 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
 
     if (foundBuy) {
       const buyK = klines[foundBuy.index];
-      dispatch(clearStockTradePointAction(secid, true, "rsi"));
-      dispatch(addStockTradePointAction(secid, buyK.date, buyK.sp, true, "rsi"));
-
+      const sellPoints: { x: string; y: number; t: string }[] = [];
       let msg = `RSI策略：最近20根发现买入信号！日期 ${buyK.date}，价格 ${buyK.sp.toFixed(2)}`;
       if (foundSell) {
         const sellK = klines[foundSell.index];
-        dispatch(addStockTradePointAction(secid, sellK.date, sellK.sp, false, "rsi"));
+        sellPoints.push({ x: sellK.date, y: sellK.sp, t: 'rsi' });
         msg += `，卖出日期 ${sellK.date}，价格 ${sellK.sp.toFixed(2)}`;
       } else {
         msg += '，尚未出现RSI超买卖出信号';
       }
+      dispatch(
+        setStockTradePointsAction(
+          secid,
+          [{ x: buyK.date, y: buyK.sp, t: 'rsi' }],
+          sellPoints,
+          ['rsi']
+        )
+      );
       setTestResult(msg);
       if (!showRSIPoints) {
         setShowRSIPoints(true);
