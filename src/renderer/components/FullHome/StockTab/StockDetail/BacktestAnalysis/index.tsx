@@ -81,7 +81,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
     [applyMarks, showMAPoints, topRSIResult]
   );
 
-  // 测试最近20根K线 - MA回踩策略
+  // 测试最近5根K线 - MA回踩策略
   const testMARecent = useCallback(() => {
     if (!topMAResult || !klines || klines.length < topMAResult.maPeriod + topMAResult.trendDays + 1) {
       setTestResult('K线数据不足，无法测试');
@@ -89,7 +89,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
     }
     const closes = klines.map((k) => k.sp);
     const ma = calculateMA(closes, topMAResult.maPeriod);
-    const recentStart = Math.max(topMAResult.maPeriod + topMAResult.trendDays, klines.length - 20);
+    const recentStart = Math.max(topMAResult.maPeriod + topMAResult.trendDays, klines.length - 5);
 
     let foundBuy: { index: number; price: number } | null = null;
 
@@ -152,7 +152,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
     }
   }, [topMAResult, klines, secid, dispatch, showMAPoints]);
 
-  // 测试最近20根K线 - RSI策略
+  // 测试最近5根K线 - RSI策略
   const testRSIRecent = useCallback(() => {
     if (!topRSIResult || !klines || klines.length < topRSIResult.rsiPeriod + 1) {
       setTestResult('K线数据不足，无法测试');
@@ -160,7 +160,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
     }
     const closes = klines.map((k) => k.sp);
     const rsi = calculateRSI(closes, topRSIResult.rsiPeriod);
-    const recentStart = Math.max(topRSIResult.rsiPeriod + 1, klines.length - 20);
+    const recentStart = Math.max(topRSIResult.rsiPeriod + 1, klines.length - 5);
 
     let inOversold = false;
     let foundBuy: { index: number; price: number } | null = null;

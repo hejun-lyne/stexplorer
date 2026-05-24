@@ -35,13 +35,10 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [loading, setLoading] = useState(false);
   const [firstAppearMap, setFirstAppearMap] = useState<Record<string, string>>({});
   const [techFilterLoading, setTechFilterLoading] = useState(false);
-  const [maResults, setMaResults] = useState<Record<string, { ma20: boolean; ma40: boolean; ma60: boolean }>>({});
-  const [rsiResults, setRsiResults] = useState<Record<string, { rsi6: number; isOversold: boolean }>>({});
+  const [maResults, setMaResults] = useState<Record<string, { ma: boolean; macd: boolean; rsi: boolean }>>({});
   const [techPending, setTechPending] = useState<Record<string, boolean>>({});
-  const [maThreshold, setMaThreshold] = useState<number>(5);
-  const [filterMA20, setFilterMA20] = useState(false);
-  const [filterMA40, setFilterMA40] = useState(false);
-  const [filterMA60, setFilterMA60] = useState(false);
+  const [filterMA, setFilterMA] = useState(false);
+  const [filterMACD, setFilterMACD] = useState(false);
   const [filterRSI, setFilterRSI] = useState(false);
 
   const [autoBackup, setAutoBackup] = useState(() => Utils.GetStorage('QSList_AUTO_BACKUP', false));
@@ -270,12 +267,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         setLoading(true);
         setFirstAppearMap({});
         setMaResults({});
-        setRsiResults({});
         setTechPending({});
-        setMaThreshold(5);
-        setFilterMA20(false);
-        setFilterMA40(false);
-        setFilterMA60(false);
+        setFilterMA(false);
+        setFilterMACD(false);
         setFilterRSI(false);
 
       });
@@ -417,44 +411,37 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     });
     setTechPending(pendingInit);
     setMaResults({});
-    setRsiResults({});
 
     const batchSize = 5;
     for (let i = 0; i < secids.length; i += batchSize) {
       const batch = secids.slice(i, i + batchSize);
       const batchResults = await Promise.all(
         batch.map(async (secid) => {
-          const res = await Helpers.Stock.CheckStockMAAndRSI(secid, maThreshold / 100, 30);
-          console.log('MA+RSI check', secid, res);
+          const res = await Helpers.Stock.CheckStockBacktestSignals(secid);
+          console.log('Backtest signals', secid, res);
           return { secid, res };
         })
       );
       setMaResults((prev) => {
         const next = { ...prev };
-        setRsiResults((rPrev) => {
-          const rNext = { ...rPrev };
-          setTechPending((pPrev) => {
-            const pNext = { ...pPrev };
-            batchResults.forEach(({ secid, res }) => {
-              delete pNext[secid];
-              if (res) {
-                next[secid] = { ma20: res.ma20, ma40: res.ma40, ma60: res.ma60 };
-                rNext[secid] = { rsi6: res.rsi6, isOversold: res.isOversold };
-              } else {
-                next[secid] = { ma20: false, ma40: false, ma60: false };
-                rNext[secid] = { rsi6: 0, isOversold: false };
-              }
-            });
-            return pNext;
+        setTechPending((pPrev) => {
+          const pNext = { ...pPrev };
+          batchResults.forEach(({ secid, res }) => {
+            delete pNext[secid];
+            if (res) {
+              next[secid] = { ma: res.ma, macd: res.macd, rsi: res.rsi };
+            } else {
+              next[secid] = { ma: false, macd: false, rsi: false };
+            }
           });
-          return rNext;
+          return pNext;
         });
         return next;
       });
     }
     setTechFilterLoading(false);
     setTechPending({});
-  }, [stocks, maThreshold]);
+  }, [stocks]);
 
   
   return (
@@ -500,18 +487,6 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         >
           技术指标
         </Button>
-        <InputNumber
-          size="small"
-          min={0.1}
-          max={50}
-          step={0.1}
-          value={maThreshold}
-          onChange={(v) => setMaThreshold(v || 5)}
-          formatter={(value) => `${value}%`}
-          parser={(value) => parseFloat(value?.replace('%', '') || '5')}
-          style={{ width: 60, marginLeft: 4 }}
-        />
-
         <Checkbox
           checked={autoBackup}
           onChange={(e) => setAutoBackup(e.target.checked)}
@@ -561,29 +536,25 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
             {/* <Col span={2}>连板统计</Col> */}
             <Col span={2}>入选天数</Col>
             <Col span={2}>
-              <Checkbox checked={filterMA20} onChange={(e) => setFilterMA20(e.target.checked)} style={{ color: '#fff' }}>MA20</Checkbox>
+              <Checkbox checked={filterMA} onChange={(e) => setFilterMA(e.target.checked)} style={{ color: '#fff' }}>MA</Checkbox>
             </Col>
             <Col span={2}>
-              <Checkbox checked={filterMA40} onChange={(e) => setFilterMA40(e.target.checked)} style={{ color: '#fff' }}>MA40</Checkbox>
+              <Checkbox checked={filterMACD} onChange={(e) => setFilterMACD(e.target.checked)} style={{ color: '#fff' }}>MACD</Checkbox>
             </Col>
             <Col span={2}>
-              <Checkbox checked={filterMA60} onChange={(e) => setFilterMA60(e.target.checked)} style={{ color: '#fff' }}>MA60</Checkbox>
+              <Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>RSI</Checkbox>
             </Col>
-            <Col span={2}>
-              <Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>RSI6</Checkbox>
-            </Col>
-            <Col span={4}>理由</Col>
+            <Col span={8}>理由</Col>
           </Row>
           <div className={classNames(styles.table, styles.qsmoreheader)}>
             {stocks
               .filter((s) => (filterIndustry == '' ? true : filterIndustry.indexOf(s.hybk) != -1))
               .filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1))
               .filter((s) => {
-                if (!filterMA20 && !filterMA40 && !filterMA60 && !filterRSI) return true;
-                if (filterMA20 && maResults[s.secid] && !maResults[s.secid].ma20) return false;
-                if (filterMA40 && maResults[s.secid] && !maResults[s.secid].ma40) return false;
-                if (filterMA60 && maResults[s.secid] && !maResults[s.secid].ma60) return false;
-                if (filterRSI && rsiResults[s.secid] && !rsiResults[s.secid].isOversold) return false;
+                if (!filterMA && !filterMACD && !filterRSI) return true;
+                if (filterMA && maResults[s.secid] && !maResults[s.secid].ma) return false;
+                if (filterMACD && maResults[s.secid] && !maResults[s.secid].macd) return false;
+                if (filterRSI && maResults[s.secid] && !maResults[s.secid].rsi) return false;
                 return true;
               })
 
@@ -605,11 +576,10 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                   <Col span={2}>{s.nh ? '是' : '否'}</Col>
                   <Col span={2}>{s.zttj.days + '天' + s.zttj.ct + '板'}</Col> */}
                   <Col span={2}>{firstAppearMap[s.secid] ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天' : '-'}</Col>
-                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma20 ? '✓' : '✗') : ''}</Col>
-                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma40 ? '✓' : '✗') : ''}</Col>
-                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma60 ? '✓' : '✗') : ''}</Col>
-                  <Col span={2}>{techPending[s.secid] ? '分析中' : rsiResults[s.secid] ? (rsiResults[s.secid].isOversold ? '✓' : '✗') : ''}</Col>
-                  <Col span={4}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
+                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma ? '✓' : '✗') : ''}</Col>
+                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].macd ? '✓' : '✗') : ''}</Col>
+                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].rsi ? '✓' : '✗') : ''}</Col>
+                  <Col span={8}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
                 </Row>
               ))}
             {!noMore && !loading && (

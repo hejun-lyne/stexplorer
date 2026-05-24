@@ -3479,7 +3479,7 @@ export function backtestMABounce(
   return allResults;
 };
 
-import { calculateMACD } from '@/utils/tech';
+import { calculateMACD } from '@/helpers/tech';
 
 export interface MACDTrade {
   buyIndex: number;
@@ -3853,6 +3853,129 @@ export function BacktestRSIBounce(closes: number[], rsi: number[], currentIdx: n
       currentRSI: rsi[currentIdx],
       daysSinceRebound,
     };
+}
+
+export async function CheckStockBacktestSignals(secid: string, klimit = 120) {
+  try {
+    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    if (!ks || ks.length < 60) {
+      return null;
+    }
+    const closes = ks.map((k) => k.sp);
+    const len = closes.length;
+
+    // 1. MA回测 - 找到最佳策略
+    const maResults = backtestMABounce(ks);
+    const bestMA = maResults[0];
+
+    // 2. MACD回测 - 找到最佳策略
+    const macdResults = optimizeMACDStrategy(ks);
+    const bestMACD = macdResults[0];
+
+    // 3. RSI回测 - 找到最佳策略
+    const rsiResults = optimizeRSIStrategy(ks);
+    const bestRSI = rsiResults[0];
+
+    // 验证MA最近5根K线
+    let maSignal = false;
+    if (bestMA) {
+      const ma = Indicators.calculateMA(closes, bestMA.maPeriod);
+      for (let i = len - 5; i < len - bestMA.holdDays; i++) {
+        if (i < bestMA.maPeriod + bestMA.trendDays) continue;
+        if (isNaN(ma[i]) || ma[i] === 0) continue;
+
+        let trendValid = true;
+        for (let j = i - bestMA.trendDays; j < i; j++) {
+          if (j < 1 || isNaN(ma[j]) || isNaN(ma[j - 1])) {
+            trendValid = false;
+            break;
+          }
+          if (closes[j] <= ma[j] || ma[j] <= ma[j - 1]) {
+            trendValid = false;
+            break;
+          }
+        }
+        if (!trendValid) continue;
+
+        const maVal = ma[i];
+        const close = closes[i];
+        const low = ks[i].zd;
+        const open = ks[i].kp;
+
+        const touchedMA = low <= maVal * 1.005;
+        const recovered = close >= maVal * 0.98;
+        const nearMA = Math.abs(close - maVal) / maVal <= bestMA.threshold;
+
+        if (touchedMA && recovered && nearMA) {
+          const todayUp = close > open;
+          const nextDayUp = i + 1 < closes.length && closes[i + 1] > close;
+          if (todayUp || nextDayUp) {
+            maSignal = true;
+            break;
+          }
+        }
+      }
+    }
+
+    // 验证MACD最近5根K线
+    let macdSignal = false;
+    if (bestMACD) {
+      const macd = Indicators.calculateMACD(closes, bestMACD.slow, bestMACD.fast, bestMACD.signal);
+      const dif = macd.MACD;
+      const dea = macd.signal;
+      const hist = macd.histogram;
+
+      for (let i = Math.max(2, len - 5); i < len; i++) {
+        const goldenCross = dif[i] > dea[i] && dif[i - 1] <= dea[i - 1];
+        if (!goldenCross) continue;
+
+        if (bestMACD.requireAboveZero && (dif[i] <= 0 || dea[i] <= 0)) continue;
+
+        if (bestMACD.requirePriorNegative) {
+          let hadNegative = false;
+          for (let j = Math.max(0, i - 5); j < i; j++) {
+            if (hist[j] < 0) {
+              hadNegative = true;
+              break;
+            }
+          }
+          if (!hadNegative) continue;
+        }
+
+        if (hist[i] <= 0 || hist[i] <= hist[i - 1]) continue;
+
+        macdSignal = true;
+        break;
+      }
+    }
+
+    // 验证RSI最近5根K线
+    let rsiSignal = false;
+    if (bestRSI) {
+      const rsi = Indicators.calculateRSI(closes, bestRSI.rsiPeriod);
+      let inOversold = false;
+      for (let i = 1; i < len; i++) {
+        if (rsi[i] <= bestRSI.buyThreshold) inOversold = true;
+
+        if (inOversold && rsi[i - 1] <= bestRSI.buyThreshold && rsi[i] > bestRSI.buyThreshold) {
+          if (i >= len - 5) {
+            rsiSignal = true;
+            break;
+          }
+          inOversold = false;
+        }
+      }
+    }
+
+    return {
+      secid,
+      ma: maSignal,
+      macd: macdSignal,
+      rsi: rsiSignal,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function CheckStockMAAndRSI(secid: string, maThreshold = 0.05, rsiThreshold = 30, klimit = 120) {
