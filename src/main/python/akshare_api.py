@@ -62,7 +62,129 @@ def is_board_code(secid: str) -> bool:
     if secid.startswith("90."):
         return True
     code = convert_secid_to_pure_code(secid)
-    return code.startswith("BK")
+    return code.startswith("BK") or code.startswith("88") or code.startswith("3")
+
+
+def _get_ths_cookie() -> str:
+    """获取同花顺 cookie v_code"""
+    try:
+        from py_mini_racer import MiniRacer
+        import os
+        # 尝试从 akshare 的数据目录读取 ths.js
+        ths_js_paths = [
+            os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages/akshare/data/ths.js"),
+            "/usr/local/lib/python3.9/site-packages/akshare/data/ths.js",
+            "/usr/lib/python3.9/site-packages/akshare/data/ths.js",
+        ]
+        js_content = None
+        for path in ths_js_paths:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    js_content = f.read()
+                break
+        
+        if not js_content:
+            return ""
+        
+        js_code = MiniRacer()
+        js_code.eval(js_content)
+        return js_code.call("v")
+    except Exception:
+        return ""
+
+
+def _get_board_stocks_from_ths(code: str) -> List[Dict[str, Any]]:
+    """
+    从同花顺获取板块成分股
+    
+    code: 同花顺板块代码，如 "881121"（行业）或 "301558"（概念）
+    """
+    if requests is None:
+        return []
+    
+    try:
+        v_code = _get_ths_cookie()
+        if not v_code:
+            return []
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Cookie": f"v={v_code}",
+        }
+        
+        # 判断是行业板块还是概念板块
+        if code.startswith("88"):
+            url = f"https://q.10jqka.com.cn/thshy/detail/code/{code}/"
+            headers["Referer"] = "https://q.10jqka.com.cn/thshy/"
+        elif code.startswith("3"):
+            url = f"https://q.10jqka.com.cn/gn/detail/code/{code}/"
+            headers["Referer"] = "https://q.10jqka.com.cn/gn/"
+        else:
+            return []
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(response.text, "lxml")
+        table = soup.find("table")
+        if not table:
+            return []
+        
+        stocks = []
+        rows = table.find_all("tr")
+        for row in rows[1:]:  # 跳过表头
+            cols = row.find_all("td")
+            if len(cols) < 5:
+                continue
+            stock_code = cols[1].text.strip()
+            name = cols[2].text.strip()
+            if not stock_code or not stock_code.isdigit():
+                continue
+            
+            # 判断市场: 6开头为沪市(1)，其他为深市(0)
+            market = 1 if stock_code.startswith("6") else 0
+            
+            # 尝试解析数值字段
+            try:
+                zx = float(cols[3].text.strip() or 0)
+            except ValueError:
+                zx = 0
+            try:
+                zdf = float(cols[4].text.strip().replace("%", "") or 0)
+            except ValueError:
+                zdf = 0
+            
+            stocks.append({
+                "code": stock_code,
+                "name": name,
+                "secid": f"{market}.{stock_code}",
+                "zx": zx,
+                "zdf": zdf,
+                "zdd": 0,
+                "cjl": 0,
+                "cje": 0,
+                "zf": 0,
+                "zg": 0,
+                "zd": 0,
+                "jk": 0,
+                "zs": 0,
+                "lb": 0,
+                "hsl": 0,
+                "syl": 0,
+                "sjl": 0,
+                "sz": 0,
+                "lt": 0,
+                "cm5": 0,
+                "cd60": 0,
+                "cy1": 0,
+                "cs": 0,
+            })
+        
+        return stocks
+    except Exception as e:
+        print(f"同花顺板块成分股获取失败: {code}, {e}")
+        return []
 
 
 def _get_board_kline_from_eastmoney(secid: str, period: str = "daily") -> List[Dict[str, Any]]:
@@ -490,8 +612,26 @@ class AkshareAPI:
                     "cje": float(row.get("成交额", 0) or 0),
                 })
             return boards
-        except Exception as e:
-            return {"error": str(e)}
+        except Exception:
+            # 东财接口失败，切换到同花顺
+            try:
+                if bk_type == "industry":
+                    df = ak.stock_board_industry_name_ths()
+                else:
+                    df = ak.stock_board_concept_name_ths()
+                
+                boards = []
+                for _, row in df.iterrows():
+                    boards.append({
+                        "code": row.get("code", ""),
+                        "name": row.get("name", ""),
+                        "zdf": 0,
+                        "zsz": 0,
+                        "cje": 0,
+                    })
+                return boards
+            except Exception as e:
+                return {"error": str(e)}
     
     @staticmethod
     def get_board_stocks(secid: str, count: int = 20) -> Dict[str, Any]:
@@ -504,7 +644,7 @@ class AkshareAPI:
         try:
             code = convert_secid_to_pure_code(secid)
             
-            # 尝试行业板块接口，失败则尝试概念板块接口
+            # 尝试东财接口（行业板块 -> 概念板块）
             df = None
             try:
                 df = ak.stock_board_industry_cons_em(symbol=code)
@@ -514,51 +654,61 @@ class AkshareAPI:
                 except Exception:
                     pass
             
-            if df is None or df.empty:
-                return {"total": 0, "stocks": []}
-            
-            stocks = []
-            for _, row in df.iterrows():
-                stock_code = str(row.get("代码", ""))
-                if not stock_code:
-                    continue
-                # 判断市场: 6开头为沪市(1)，其他为深市(0)
-                market = 1 if stock_code.startswith("6") else 0
+            if df is not None and not df.empty:
+                stocks = []
+                for _, row in df.iterrows():
+                    stock_code = str(row.get("代码", ""))
+                    if not stock_code:
+                        continue
+                    # 判断市场: 6开头为沪市(1)，其他为深市(0)
+                    market = 1 if stock_code.startswith("6") else 0
+                    
+                    stocks.append({
+                        "code": stock_code,
+                        "name": str(row.get("名称", "")),
+                        "secid": f"{market}.{stock_code}",
+                        "zx": float(row.get("最新价", 0) or 0),
+                        "zdf": float(row.get("涨跌幅", 0) or 0),
+                        "zdd": float(row.get("涨跌额", 0) or 0),
+                        "cjl": int(float(row.get("成交量", 0) or 0)),
+                        "cje": float(row.get("成交额", 0) or 0),
+                        "zf": float(row.get("振幅", 0) or 0),
+                        "zg": float(row.get("最高", 0) or 0),
+                        "zd": float(row.get("最低", 0) or 0),
+                        "jk": float(row.get("今开", 0) or 0),
+                        "zs": float(row.get("昨收", 0) or 0),
+                        "lb": 0,
+                        "hsl": float(row.get("换手率", 0) or 0),
+                        "syl": float(row.get("市盈率-动态", 0) or 0) if "市盈率-动态" in row else 0,
+                        "sjl": float(row.get("市净率", 0) or 0),
+                        "sz": float(row.get("总市值", 0) or 0),
+                        "lt": float(row.get("流通市值", 0) or 0),
+                        "cm5": 0,
+                        "cd60": 0,
+                        "cy1": 0,
+                        "cs": 0,
+                    })
                 
-                stocks.append({
-                    "code": stock_code,
-                    "name": str(row.get("名称", "")),
-                    "secid": f"{market}.{stock_code}",
-                    "zx": float(row.get("最新价", 0) or 0),
-                    "zdf": float(row.get("涨跌幅", 0) or 0),
-                    "zdd": float(row.get("涨跌额", 0) or 0),
-                    "cjl": int(float(row.get("成交量", 0) or 0)),
-                    "cje": float(row.get("成交额", 0) or 0),
-                    "zf": float(row.get("振幅", 0) or 0),
-                    "zg": float(row.get("最高", 0) or 0),
-                    "zd": float(row.get("最低", 0) or 0),
-                    "jk": float(row.get("今开", 0) or 0),
-                    "zs": float(row.get("昨收", 0) or 0),
-                    "lb": 0,  # akshare 不返回量比
-                    "hsl": float(row.get("换手率", 0) or 0),
-                    "syl": float(row.get("市盈率-动态", 0) or 0) if "市盈率-动态" in row else 0,
-                    "sjl": float(row.get("市净率", 0) or 0),
-                    "sz": float(row.get("总市值", 0) or 0),
-                    "lt": float(row.get("流通市值", 0) or 0),
-                    "cm5": 0,
-                    "cd60": 0,
-                    "cy1": 0,
-                    "cs": 0,
-                })
+                # 按涨跌幅排序（降序）
+                stocks.sort(key=lambda x: x["zdf"], reverse=True)
+                
+                # 限制数量
+                if count > 0 and len(stocks) > count:
+                    stocks = stocks[:count]
+                
+                return {"total": len(df), "stocks": stocks}
             
-            # 按涨跌幅排序（降序）
-            stocks.sort(key=lambda x: x["zdf"], reverse=True)
+            # 东财接口失败，尝试同花顺（同花顺代码: 88开头为行业，3开头为概念）
+            if code.startswith("88") or code.startswith("3"):
+                stocks = _get_board_stocks_from_ths(code)
+                if stocks:
+                    # 按涨跌幅排序（降序）
+                    stocks.sort(key=lambda x: x["zdf"], reverse=True)
+                    if count > 0 and len(stocks) > count:
+                        stocks = stocks[:count]
+                    return {"total": len(stocks), "stocks": stocks}
             
-            # 限制数量
-            if count > 0 and len(stocks) > count:
-                stocks = stocks[:count]
-            
-            return {"total": len(df), "stocks": stocks}
+            return {"total": 0, "stocks": []}
         except Exception as e:
             return {"error": str(e)}
     
