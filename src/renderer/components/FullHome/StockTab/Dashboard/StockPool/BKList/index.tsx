@@ -11,6 +11,8 @@ import { Stock } from '@/types/stock';
 import { useRequest } from 'ahooks';
 import { useCallback } from 'react';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
+import { useSelector } from 'react-redux';
+import { StoreState } from '@/reducers/types';
 
 export interface BKListProps {
   type: BKType;
@@ -33,7 +35,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [filterMA40, setFilterMA40] = useState(false);
   const [filterMA60, setFilterMA60] = useState(false);
   const [filterRSI, setFilterRSI] = useState(false);
-  const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuais, {
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
     throwOnError: true,
     manual: true,
     onSuccess: (d: { to: number; arr: Stock.BanKuaiItem[] }) => {
@@ -42,18 +45,18 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       onBankuaisUpdate(type, d.arr);
     },
   });
-  const mayGetBankuais = useCallback((t: BKType, ps: number) => {
-    runGetBankuais(t, ps);
+  const mayGetBankuais = useCallback((source: number, t: BKType, ps: number) => {
+    runGetBankuais(source, t, ps);
   }, []);
-  useWorkDayTimeToDo(() => mayGetBankuais(type, pageSize), active ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
+  useWorkDayTimeToDo(() => mayGetBankuais(kLineApiSourceSetting, type, pageSize), active ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
   useEffect(() => {
-    runGetBankuais(type, pageSize);
-  }, []);
+    runGetBankuais(kLineApiSourceSetting, type, pageSize);
+  }, [kLineApiSourceSetting]);
   const loadMore = useCallback(() => {
     const ps = pageSize + 40;
     setPageSize(ps);
-    mayGetBankuais(type, ps);
-  }, [type, pageSize]);
+    mayGetBankuais(kLineApiSourceSetting, type, ps);
+  }, [kLineApiSourceSetting, type, pageSize]);
 
   const onCalcTechIndicators = useCallback(async () => {
     if (bankuais.length === 0) {

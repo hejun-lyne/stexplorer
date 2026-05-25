@@ -32,7 +32,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [filtering, setFiltering] = useState(false);
   const [ftypes, setFtypes] = useState<number[]>([]);
   const [filterSecids, setFilterSecids] = useState<string[]>([]);
-  const { fundApiTypeSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
     manual: true,
@@ -72,15 +72,15 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   );
   useWorkDayTimeToDo(
     () => {
-      mayGetStocks(fundApiTypeSetting, secid, pageSize);
+      mayGetStocks(kLineApiSourceSetting, secid, pageSize);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
   );
   const loadMore = useCallback(() => {
     const ps = pageSize + 40;
     setPageSize(ps);
-    mayGetStocks(fundApiTypeSetting, secid, ps);
-  }, [pageSize, secid, fundApiTypeSetting]);
+    mayGetStocks(kLineApiSourceSetting, secid, ps);
+  }, [pageSize, secid, kLineApiSourceSetting]);
 
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
@@ -97,8 +97,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   );
 
   useEffect(() => {
-    mayGetStocks(fundApiTypeSetting, secid, pageSize);
-  }, [secid, fundApiTypeSetting]);
+    mayGetStocks(kLineApiSourceSetting, secid, pageSize);
+  }, [secid, kLineApiSourceSetting]);
 
   const updateFtypes = useCallback(
     (ts: any[]) => {

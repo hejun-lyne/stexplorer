@@ -27,11 +27,11 @@ const BanKuaiStocks: React.FC<BanKuaiStocksProps> = React.memo(({ secid, active,
   const [count, setCount] = useState(40);
   const [noMore, setNoMore] = useState(false);
   const [stocks, setStocks] = useState<Stock.DetailItem[]>([]);
-  const { fundApiTypeSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runGetStocks } = useRequest(Services.Stock.GetBankuaiStocksFromDataSource, {
     throwOnError: true,
     manual: true,
-    defaultParams: [fundApiTypeSetting, secid, count],
+    defaultParams: [kLineApiSourceSetting, secid, count],
     onSuccess: (data) => {
       setNoMore(data.total == data.stocks.length);
       setStocks(data.stocks as Stock.DetailItem[]);
@@ -49,14 +49,14 @@ const BanKuaiStocks: React.FC<BanKuaiStocksProps> = React.memo(({ secid, active,
   });
   useWorkDayTimeToDo(
     () => {
-      runGetStocks(fundApiTypeSetting, secid, count);
+      runGetStocks(kLineApiSourceSetting, secid, count);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
   );
 
   useEffect(() => {
-    runGetStocks(fundApiTypeSetting, secid, count);
-  }, [secid, fundApiTypeSetting]);
+    runGetStocks(kLineApiSourceSetting, secid, count);
+  }, [secid, kLineApiSourceSetting]);
 
   const [filtering, setFiltering] = useState(false);
   const [ftypes, setFtypes] = useState<number[]>([]);

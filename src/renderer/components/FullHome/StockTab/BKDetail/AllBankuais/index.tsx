@@ -52,7 +52,7 @@ const AllBankuais: React.FC<AllBankuaisProps> = React.memo(({ active, bktype, op
   const [sorting, setSorting] = useState(false);
   const [stype, setStype] = useState<number>(KSortType.None);
   const [slimit, setSLimit] = useState(30);
-  const { fundApiTypeSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
     throwOnError: true,
     manual: true,
@@ -72,10 +72,10 @@ const AllBankuais: React.FC<AllBankuaisProps> = React.memo(({ active, bktype, op
   const mayGetBankuais = useCallback((source: number, t: BKType, ps: number) => {
     runGetBankuais(source, t, ps);
   }, []);
-  useWorkDayTimeToDo(() => mayGetBankuais(fundApiTypeSetting, bktype, pageSize), active ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
+  useWorkDayTimeToDo(() => mayGetBankuais(kLineApiSourceSetting, bktype, pageSize), active ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
   useEffect(() => {
-    runGetBankuais(fundApiTypeSetting, bktype, pageSize);
-  }, [fundApiTypeSetting, bktype, pageSize]);
+    runGetBankuais(kLineApiSourceSetting, bktype, pageSize);
+  }, [kLineApiSourceSetting, bktype, pageSize]);
   const { run: runSortStocks } = useRequest(Helpers.Stock.SortMultiKlines, {
     throwOnError: true,
     manual: true,

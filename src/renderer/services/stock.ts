@@ -26,7 +26,7 @@ function logRequestError(error: any, url: string, extraInfo?: string) {
 // 获取当前数据源类型（从 Redux store 实时读取）
 function getCurrentDataSource(): Enums.FundApiType {
   const state = store.getState();
-  return state.setting?.systemSetting?.fundApiTypeSetting || Enums.FundApiType.Eastmoney;
+  return state.setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney;
 }
 
 // 判断是否使用 Akshare 数据源
@@ -1725,7 +1725,7 @@ export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, 
   // if (source === Enums.FundApiType.Akshare) {
   //   result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
   // } else {
-    result = await GetBankuaiStocksFromEastmoney(secid, count);
+    result = await GetBankuaiStocksFromDataSource(source, secid, count);
   // }
 
   // 3. 写入磁盘缓存
