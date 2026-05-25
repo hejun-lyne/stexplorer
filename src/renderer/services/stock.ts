@@ -1725,7 +1725,7 @@ export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, 
   // if (source === Enums.FundApiType.Akshare) {
   //   result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
   // } else {
-    result = await GetBankuaiStocksFromDataSource(source, secid, count);
+    result = await GetBankuaiStocksFromEastmoney(secid, count);
   // }
 
   // 3. 写入磁盘缓存
