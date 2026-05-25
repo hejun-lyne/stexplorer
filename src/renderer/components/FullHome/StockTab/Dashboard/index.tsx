@@ -17,7 +17,7 @@ import { syncRemoteStocksAction } from '@/actions/stock';
 
 export interface DashboardProps {
   settings: System.MonitorSetting;
-  onOpenStock: (secid: string, name: string, change?: number) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
 }
 
 const Dashboard: React.FC<DashboardProps> = React.memo(({ settings, onOpenStock }) => {

@@ -18,7 +18,7 @@ import moment from 'moment';
 export interface AllBankuaisWrapperProps {
   secid: string;
   active: boolean;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   addStockMonitors: (items: Stock.BanKuaiItem[]) => void;
 }
 
@@ -40,7 +40,7 @@ export interface AllBankuaisProps {
   secid: string;
   active: boolean;
   bktype: BKType;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   addStockMonitors: (items: Stock.BanKuaiItem[]) => void;
 }
 
@@ -146,7 +146,7 @@ const AllBankuais: React.FC<AllBankuaisProps> = React.memo(({ active, bktype, op
           <>
             {(sortedBankuais || bankuais).map((stock) => (
               <div key={stock.code}>
-                <a onClick={() => openStock(stock.secid, stock.name, stock.zdf)}>
+                <a onClick={() => openStock(stock.secid, stock.name, '', stock.zdf)}>
                   <label style={{ marginRight: 10, cursor: 'pointer', display: 'inline-block', width: 50 }}>{stock.name}</label>
                 </a>
                 {/* <span className={classnames(Utils.GetValueColor(stock.zdf).textClass)}>{stock.zx + '  '}</span> */}

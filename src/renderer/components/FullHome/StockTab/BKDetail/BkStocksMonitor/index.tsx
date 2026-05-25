@@ -14,7 +14,7 @@ export interface BKStockMonitorProps {
   markdate?: string;
   moveTop?: (secid: string) => void;
   remove?: (secid: string) => void;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   range: { start: number; end: number };
   area?: { start: string; end: string } | null;
 }

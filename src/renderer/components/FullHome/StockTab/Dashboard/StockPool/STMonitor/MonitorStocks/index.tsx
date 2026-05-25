@@ -15,7 +15,7 @@ export interface MonitorStocksProps {
   details: Stock.DetailItem[];
   noMore: boolean;
   loadMore: () => void;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   addStockMonitor: (s: string) => void;
   delStockMonitor: (s: string) => void;
 }
@@ -74,7 +74,7 @@ const MonitorStocks: React.FC<MonitorStocksProps> = React.memo(
           <>
             {filterStocks.map((stock) => (
               <div key={stock.code}>
-                <a onClick={() => openStock(stock.secid, stock.name, stock.zdf)}>
+                <a onClick={() => openStock(stock.secid, stock.name, '', stock.zdf)}>
                   <label style={{ marginRight: 0, cursor: 'pointer', display: 'inline-block', color: stockConfigsMapping[stock.secid].marktype == 1 ? '#FF9933' : stockConfigsMapping[stock.secid].marktype == 2 ? '#0099DD' : stockConfigsMapping[stock.secid].marktype == 3 ? '#B4CF66' : 'var(--text-color)' }}>{stock.name}</label>
                   &nbsp;
                   <span className={styles.hybk}>{(stockConfigsMapping[stock.secid]?.hybk?.name || [''])}&nbsp;</span>

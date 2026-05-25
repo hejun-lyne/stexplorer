@@ -425,6 +425,7 @@ declare namespace Stock {
     name: string;
     market: number;
     secid: string;
+    firstAppear: string;
     reason: number; // 推荐理由//次值&1 = 1；//60日新高 //次值 & 2 = 2；//近期多次涨停
     zx: number;
     zdf: number;

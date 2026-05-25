@@ -15,7 +15,7 @@ import { StockMarketType } from '@/utils/enums';
 
 export interface AddStockProps {
   onClose: () => void;
-  onOpenStock: (secid: string, name: string, type?: StockMarketType) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, type?: StockMarketType) => void;
   text: string;
 }
 
@@ -79,7 +79,7 @@ const AddStock: React.FC<AddStockProps> = ({ onClose, onOpenStock, text }) => {
                   <div key={secid} className={styles.stock}>
                     <div>
                       <div className={styles.name}>
-                        <a className={styles.nameText} onClick={() => onOpenStock(secid, Name)}>
+                        <a className={styles.nameText} onClick={() => onOpenStock(secid, Name, '', undefined, Type)}>
                           {Name}
                         </a>
                       </div>
@@ -112,7 +112,7 @@ const AddStock: React.FC<AddStockProps> = ({ onClose, onOpenStock, text }) => {
                 <div key={secid} className={styles.stock}>
                   <div>
                     <div className={styles.name}>
-                      <a className={styles.nameText} onClick={() => onOpenStock(secid, Name, StockMarketType.Future)}>
+                      <a className={styles.nameText} onClick={() => onOpenStock(secid, Name, '', undefined, StockMarketType.Future)}>
                         {Name}
                       </a>
                     </div>

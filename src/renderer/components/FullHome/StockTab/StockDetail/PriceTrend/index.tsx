@@ -58,6 +58,7 @@ export interface PriceTrendProps {
   activePeriod?: Stock.PeriodMarkItem;
   toDate?: string;
   onTimelineDate?: string;
+  firstQSAppear?: string;
   updateKLineData: (ks: Stock.KLineItem[]) => void;
   updateTrendData?: (trends: Stock.TrendItem[]) => void;
   updateKType?: (ktype: KLineType) => void;
@@ -1452,6 +1453,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     trainMode,
     activePeriod,
     toDate,
+    firstQSAppear,
     onTimelineDate,
     updateKLineData,
     updateKType,
@@ -2361,6 +2363,33 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                 })
               );
             }
+            // firstQSAppear 黄色标记
+            if (firstQSAppear && typeIndex !== 0 && klineData.klines[typeIndex]?.length > 0) {
+              const day = firstQSAppear.substring(0, 10);
+              const ks = klineData.klines[typeIndex];
+              let idx = -1;
+              for (let i = 0; i < ks.length; i++) {
+                if (ks[i].date.length === firstQSAppear.length) {
+                  if (ks[i].date === firstQSAppear) {
+                    idx = i;
+                    break;
+                  }
+                } else if (ks[i].date.startsWith(day)) {
+                  idx = i;
+                  break;
+                }
+              }
+              if (idx !== -1) {
+                const k = ks[idx];
+                pData.push({
+                  value: '首板',
+                  coord: [k.date, String(k.zg)],
+                  itemStyle: {
+                    color: '#FFD700', // 金黄色标记
+                  },
+                });
+              }
+            }
             chartOptions[typeIndex].forEach((opt: any) => {
               if (typeIndex != 0 && typeIndex <= DefaultKTypes.indexOf(KLineType.Mint60)) {
                 // 标记一下交易日
@@ -2460,6 +2489,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         config?.buyPoints,
         config?.sellPoints,
         activePeriod,
+        firstQSAppear,
       ]
     );
 

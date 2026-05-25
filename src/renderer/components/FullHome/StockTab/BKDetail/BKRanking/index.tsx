@@ -17,7 +17,7 @@ import { batch } from 'react-redux';
 export interface BKRankingProps {
   bks: Stock.BanKuaiItem[];
   active: boolean;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
 }
 
 const BKRanking: React.FC<BKRankingProps> = React.memo(({ bks, active, openStock }) => {
@@ -48,7 +48,7 @@ const BKRanking: React.FC<BKRankingProps> = React.memo(({ bks, active, openStock
       dataIndex: 'name',
       width: 80,
       fixed: 'left',
-      render: (d, r) => <a onClick={() => openStock(r.secid, d, r.zdf)}>{d}</a>,
+      render: (d, r) => <a onClick={() => openStock(r.secid, d, '', r.zdf)}>{d}</a>,
     },
     {
       title: '涨跌',

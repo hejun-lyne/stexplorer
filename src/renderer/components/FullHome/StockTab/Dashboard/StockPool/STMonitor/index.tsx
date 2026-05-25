@@ -15,7 +15,7 @@ export interface STMonitorProps {
   noMore: boolean;
   markdate?: string;
   onLoadMore: () => void;
-  onOpenStock: (secid: string, name: string, change?: number) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   stopStock?: (secid: string) => void;
 }
 

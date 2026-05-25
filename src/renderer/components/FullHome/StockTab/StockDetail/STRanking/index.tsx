@@ -17,7 +17,7 @@ import { batch } from 'react-redux';
 export interface STRankingProps {
   details: Stock.DetailItem[];
   active: boolean;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
 }
 
 const STRanking: React.FC<STRankingProps> = React.memo(({ details, active, openStock }) => {
@@ -45,7 +45,7 @@ const STRanking: React.FC<STRankingProps> = React.memo(({ details, active, openS
       dataIndex: 'name',
       width: 80,
       fixed: 'left',
-      render: (d, r) => <a onClick={() => openStock(r.secid, d, r.zdf)}>{d}</a>,
+      render: (d, r) => <a onClick={() => openStock(r.secid, d, '', r.zdf)}>{d}</a>,
     },
     {
       title: '涨跌',

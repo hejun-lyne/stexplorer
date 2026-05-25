@@ -19,7 +19,7 @@ import STMonitor from '../STMonitor';
 
 export interface QSListProps {
   industries: Stock.BanKuaiItem[];
-  onOpenStock: (secid: string, name: string) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string) => void;
   active: boolean;
 }
 
@@ -123,6 +123,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           data.arr.forEach((s) => {
             if (!next[s.secid]) {
               next[s.secid] = currentDate;
+              s.firstAppear = currentDate;
             }
           });
           return next;
@@ -560,7 +561,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
 
               .map((s) => (
                 <Row key={s.code} className={styles.row}>
-                  <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
+                  <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name, firstAppearMap[s.secid])}>
                     {s.name}
                   </Col>
                   <Col span={2}>{s.hybk}</Col>

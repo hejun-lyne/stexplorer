@@ -141,7 +141,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
         )
       );
       setTestResult(
-        `MA策略：最近20根发现买入信号！日期 ${buyK.date}，价格 ${buyK.sp.toFixed(2)}，预期持有${topMAResult.holdDays}天至 ${sellK.date}`
+        `MA策略：最近5根发现买入信号！日期 ${buyK.date}，价格 ${buyK.sp.toFixed(2)}，预期持有${topMAResult.holdDays}天至 ${sellK.date}`
       );
       // 勾选MA显示
       if (!showMAPoints) {
@@ -185,7 +185,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
     if (foundBuy) {
       const buyK = klines[foundBuy.index];
       const sellPoints: { x: string; y: number; t: string }[] = [];
-      let msg = `RSI策略：最近20根发现买入信号！日期 ${buyK.date}，价格 ${buyK.sp.toFixed(2)}`;
+      let msg = `RSI策略：最近5根发现买入信号！日期 ${buyK.date}，价格 ${buyK.sp.toFixed(2)}`;
       if (foundSell) {
         const sellK = klines[foundSell.index];
         sellPoints.push({ x: sellK.date, y: sellK.sp, t: 'rsi' });
@@ -289,7 +289,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
                   显示MA买卖点
                 </Checkbox>
                 <Button size="small" onClick={testMARecent}>
-                  测试最近20根
+                  测试最近5根
                 </Button>
               </div>
             )}
@@ -321,7 +321,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
                   显示RSI买卖点
                 </Checkbox>
                 <Button size="small" onClick={testRSIRecent}>
-                  测试最近20根
+                  测试最近5根
                 </Button>
               </div>
             )}

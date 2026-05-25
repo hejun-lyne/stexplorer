@@ -24,7 +24,7 @@ export interface BKStockBriefProps {
   markdate?: string;
   moveTop?: (secid: string) => void;
   remove?: (secid: string) => void;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   outRange: { start: number; end: number };
   outArea: { start: string; end: string } | null | undefined;
 }
@@ -1055,7 +1055,7 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
       tchart,
       [trendOption, darkMode]
     );
-    const onOpenStock = useCallback(() => openStock(secid, detail.name, detail.zdf), [secid, detail]);
+    const onOpenStock = useCallback(() => openStock(secid, detail.name, '', detail.zdf), [secid, detail]);
     return (
       <aside className={classnames(styles.content)}>
         <div className={styles.toolbar}>

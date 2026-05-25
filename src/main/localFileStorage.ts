@@ -189,7 +189,7 @@ function getFilePath(table: string, id?: number | string | object): string {
     if (table.indexOf('kimi_analysis') >= 0) {
       return path.join(dataDir, 'kimi_analysis', `${table}.json`);
     } else if(table.indexOf('kline_cache') >= 0) {
-      return path.join(dataDir, 'kline_cache', `${table}.json`);
+      return path.join(dataDir, 'kline_cache', `${table}_${id}.json`);
     } else if(table.indexOf('board_stocks_cache') >= 0) {
       return path.join(dataDir, 'board_stocks_cache', `${table}.json`);
     }

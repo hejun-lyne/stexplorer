@@ -25,7 +25,7 @@ export interface BKDetailProps {
   secid: string;
   active: boolean;
   onChangeUpdate: (tid: string, change: number) => void;
-  onOpenStock: (secid: string, name: string, change?: number) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   onOpenUrl: (url: string) => void;
 }
 

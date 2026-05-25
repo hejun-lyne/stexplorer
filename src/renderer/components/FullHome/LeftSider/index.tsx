@@ -26,7 +26,7 @@ export const stockTypesConfig = [
 export interface LeftSiderProps {
   activeTabid: string | undefined;
   width: number;
-  openStock: (secid: string, name: string, change?: number, type?: Enums.StockMarketType) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number, type?: Enums.StockMarketType) => void;
   openTag:(name: string, markettype: Enums.StockMarketType) => void;
   openSite: (site: Site.FavorItem) => void;
   barHidden: boolean;

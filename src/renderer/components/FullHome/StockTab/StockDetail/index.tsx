@@ -39,12 +39,13 @@ export interface StockDetailProps {
   secid: string;
   active: boolean;
   name: string;
+  firstQSAppear?: string;
   onChangeUpdate: (tid: string, change: number) => void;
-  onOpenStock: (secid: string, name: string, change?: number) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   onOpenUrl: (url: string) => void;
 }
 
-const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChangeUpdate, onOpenStock, onOpenUrl }) => {
+const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSAppear, onChangeUpdate, onOpenStock, onOpenUrl }) => {
   const config = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]);
   const stock = useSelector((store: StoreState) => store.stock.stocksMapping[secid]);
   const [tDetail, setDetails] = useState<Stock.DetailItem>({ secid, code:Helpers.Stock.GetStockCode(secid), name, market:Helpers.Stock.GetStockType(secid) } as Stock.DetailItem);
@@ -210,6 +211,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, onChange
                   trainMode={trainMode}
                   activePeriod={activePeriod}
                   toDate={trainMode ? toDate : undefined}
+                  firstQSAppear={firstQSAppear}
                   onTimelineDate={timelineDate}
                   updateKLineData={updateKlines}
                   updateTrendData={updateTrendData}

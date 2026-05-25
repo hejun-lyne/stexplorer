@@ -21,7 +21,7 @@ import ZZList from './ZZList';
 import KTrain from './KTrain';
 
 export interface StockPoolProps {
-  onOpenStock: (secid: string, name: string) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string) => void;
 }
 const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
   const [activeKey, setActiveKey] = useState('stocks');
@@ -60,7 +60,7 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
           <Col span={12}>
             <Row>
               <Col span={4}>
-                <a onClick={() => onOpenStock(h.secid, h.name)}>{h.name}</a>
+                <a onClick={() => onOpenStock(h.secid, h.name, '')}>{h.name}</a>
               </Col>
               <Col span={3} className={Utils.GetValueColor(zx - h.price).textClass}>
                 {!isNaN(zx) ? zx.toFixed(2) : '--'}

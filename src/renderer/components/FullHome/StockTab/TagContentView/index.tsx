@@ -7,7 +7,7 @@ import STMonitor from '../Dashboard/StockPool/STMonitor';
 export interface TagContentViewProps {
   name: string;
   type: StockMarketType;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
 }
 
 const TagContentView: React.FC<TagContentViewProps> = React.memo(({ name, type, openStock }) => {

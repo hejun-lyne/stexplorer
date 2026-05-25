@@ -39,6 +39,7 @@ import TagContentView from './TagContentView';
 export interface StockTabId {
   tid: string; // secid
   name: string; // stock name
+  firstQSAppear?: string; // 首次出现在强势股票时间
   change: number; // 涨跌幅
   type?: StockMarketType;
 }
@@ -84,7 +85,7 @@ export interface StockTabProps {
   onNoteChange: (tid: string, title?: string, changed?: boolean) => void;
   onStrategyChange: (tid: string, title?: string, changed?: boolean) => void;
   onNewSite: (url: string) => void;
-  onNewStock: (secid: string, name: string, change?: number) => void;
+  onNewStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   onAppendRefer: (tab: NoteTabId, url: string, text: string) => void;
   activeTabid: string | undefined;
 }
@@ -290,6 +291,7 @@ const StockTab: React.FC<StockTabProps> = React.memo(
                           active={activeTabid === tab.tid}
                           secid={tab.tid}
                           name={tab.name}
+                          firstQSAppear={tab.firstQSAppear}
                           onChangeUpdate={onStockChange}
                           onOpenStock={onNewStock}
                           onOpenUrl={onNewSite}

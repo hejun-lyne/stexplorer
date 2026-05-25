@@ -69,12 +69,13 @@ const FullHome: React.FC<FullHomeProps> = () => {
   const [kview, setKView] = useState(false);
   const dispatch = useDispatch();
   // 打开详情
-  const openStock = useCallback((secid: string, name: string, change?: number, type?: StockMarketType) => {
+  const openStock = useCallback((secid: string, name: string, firstQSAppear?: string, change?: number, type?: StockMarketType) => {
     const tab = homeCaches.stockTabs.find((s) => s.tid === secid);
     if (!tab) {
       homeCaches.stockTabs.push({
         tid: secid,
         name: name,
+        firstQSAppear: firstQSAppear,
         change: change || 0,
         type: type || StockMarketType.AB,
       });

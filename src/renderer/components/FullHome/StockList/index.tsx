@@ -11,7 +11,7 @@ import StockTagHeader from './StockTagHeader';
 interface StockListProps {
   filterText: string;
   type: number;
-  onStockDetail: (secid: string, name: string, change?: number, type?: StockMarketType) => void;
+  onStockDetail: (secid: string, name: string, firstQSAppear?: string, change?: number, type?: StockMarketType) => void;
   onAddStockTag: (secid: string) => void;
   onTagViewAll: (name: string, markettype: StockMarketType) => void;
 }
@@ -87,7 +87,7 @@ const StockList: React.FC<StockListProps> = React.memo(({ filterText, type, onSt
                       key={s.secid}
                       config={s}
                       tags={tags}
-                      onClick={(c) => onStockDetail(c.secid, c.name, undefined, c.type)}
+                      onClick={(c) => onStockDetail(c.secid, c.name, '', undefined, c.type)}
                       onAddTag={onAddStockTag}
                     />
                   ))}

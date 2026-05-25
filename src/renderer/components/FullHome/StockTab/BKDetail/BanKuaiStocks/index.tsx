@@ -18,7 +18,7 @@ import { StoreState } from '@/reducers/types';
 export interface BanKuaiStocksProps {
   secid: string;
   active: boolean;
-  openStock: (secid: string, name: string, change?: number) => void;
+  openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   addStockMonitors: (items: Stock.DetailItem[]) => void;
   onStocksUpdated: (details: Stock.DetailItem[]) => void;
 }
@@ -115,7 +115,7 @@ const BanKuaiStocks: React.FC<BanKuaiStocksProps> = React.memo(({ secid, active,
         <>
           {filterStocks.map((stock) => (
             <div key={stock.code}>
-              <a onClick={() => openStock(stock.secid, stock.name, stock.zdf)}>
+              <a onClick={() => openStock(stock.secid, stock.name, '', stock.zdf)}>
                 <label style={{ marginRight: 10, cursor: 'pointer', display: 'inline-block', width: 50 }}>{stock.name}</label>
               </a>
               <span className={classnames(Utils.GetValueColor(stock.zdf).textClass)}>{stock.zx + '  '}</span>
