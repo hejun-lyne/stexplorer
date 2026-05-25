@@ -2298,7 +2298,8 @@ export async function QuantAllStsAnalyze(tilDate: string, onMessage: (message: s
   for (let i = 0; i < bks.length; i++) {
     const bksecid = bks[i].secid;
     onMessage('获取板块所有股票信息 ' + bks[i].name);
-    bkSts[bksecid] = (await Services.Stock.GetBankuaiStocksFromEastmoney(bksecid, 50)).stocks;
+    const source = store.getState().setting?.systemSetting?.fundApiTypeSetting || Enums.FundApiType.Eastmoney;
+    bkSts[bksecid] = (await Services.Stock.GetBankuaiStocksFromDataSource(source, bksecid, 50)).stocks;
     onMessage('获取板块所有股票信息完毕 ' + bks[i].name);
     QUANT_CACHE.bkSts = bkSts;
     async function getKlines(s: string, t: number, c: number) {
@@ -2382,7 +2383,8 @@ export async function QuantStsAnalyze(bksecid: string, tilDate: string, onMessag
   const stKlines: Record<string, any[]> = QUANT_CACHE.stKlines || {};
   if (!bkSts[bksecid]) {
     onMessage('获取板块所有股票信息');
-    bkSts[bksecid] = (await Services.Stock.GetBankuaiStocksFromEastmoney(bksecid, 50)).stocks;
+    const source = store.getState().setting?.systemSetting?.fundApiTypeSetting || Enums.FundApiType.Eastmoney;
+    bkSts[bksecid] = (await Services.Stock.GetBankuaiStocksFromDataSource(source, bksecid, 50)).stocks;
   }
   const ststats: Stock.KLineStatisticItem[] = [];
   const sts = bkSts[bksecid].filter((_) => _.name.indexOf('ST') == -1 && _.secid.indexOf('688') == -1);
@@ -2750,7 +2752,8 @@ export async function TestQuantStrategy(
       const bsecid = bk.secid;
       if (!bkSts[bsecid]) {
         onMessage('获取板块所有股票信息');
-        bkSts[bsecid] = (await Services.Stock.GetBankuaiStocksFromEastmoney(bsecid, 50)).stocks;
+        const source = store.getState().setting?.systemSetting?.fundApiTypeSetting || Enums.FundApiType.Eastmoney;
+        bkSts[bsecid] = (await Services.Stock.GetBankuaiStocksFromDataSource(source, bsecid, 50)).stocks;
       }
       let ststats: Stock.KLineStatisticItem[] = [];
       const sts = bkSts[bsecid].filter((_) => _.name.indexOf('ST') == -1 && _.secid.indexOf('688') == -1);
@@ -3039,7 +3042,8 @@ export async function downloadStockFFlows(accessToken: string, stsecid: string, 
   for (let i = 0; i < bks.length; i++) {
     const bksecid = bks[i].secid;
     if (!bkSts[bksecid]) {
-      bkSts[bksecid] = (await Services.Stock.GetBankuaiStocksFromEastmoney(bksecid, 100)).stocks;
+      const source = store.getState().setting?.systemSetting?.fundApiTypeSetting || Enums.FundApiType.Eastmoney;
+      bkSts[bksecid] = (await Services.Stock.GetBankuaiStocksFromDataSource(source, bksecid, 100)).stocks;
     }
     if (bkSts[bksecid].find((_) => _.secid == stsecid)) {
       bk = bks[i];
@@ -3101,7 +3105,8 @@ export async function cacheStockFFLows(accessToken: string, onMessage: (msg: str
   for (let i = 0; i < bks.length; i++) {
     const bksecid = bks[i].secid;
     if (!bkSts[bksecid]) {
-      bkSts[bksecid] = (await Services.Stock.GetBankuaiStocksFromEastmoney(bksecid, 100)).stocks;
+      const source = store.getState().setting?.systemSetting?.fundApiTypeSetting || Enums.FundApiType.Eastmoney;
+      bkSts[bksecid] = (await Services.Stock.GetBankuaiStocksFromDataSource(source, bksecid, 100)).stocks;
       const stFlows: Record<string, any[]> = {};
       onMessage('获取板块所有股票现金流 ' + bks[i].name);
       const collectors = bkSts[bksecid].map((st) => () => Services.Stock.GetFlowTrendFromEastmoney(st.secid));

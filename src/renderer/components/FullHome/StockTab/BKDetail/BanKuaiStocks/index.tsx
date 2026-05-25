@@ -12,7 +12,8 @@ import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { Button, Checkbox } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import { KFilterType, KFilterTypeNames } from '@/utils/enums';
-import { batch } from 'react-redux';
+import { batch, useSelector } from 'react-redux';
+import { StoreState } from '@/reducers/types';
 
 export interface BanKuaiStocksProps {
   secid: string;
@@ -26,10 +27,11 @@ const BanKuaiStocks: React.FC<BanKuaiStocksProps> = React.memo(({ secid, active,
   const [count, setCount] = useState(40);
   const [noMore, setNoMore] = useState(false);
   const [stocks, setStocks] = useState<Stock.DetailItem[]>([]);
-  const { run: runGetStocks } = useRequest(Services.Stock.GetBankuaiStocksFromEastmoney, {
+  const { fundApiTypeSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { run: runGetStocks } = useRequest(Services.Stock.GetBankuaiStocksFromDataSource, {
     throwOnError: true,
     manual: true,
-    defaultParams: [secid, count],
+    defaultParams: [fundApiTypeSetting, secid, count],
     onSuccess: (data) => {
       setNoMore(data.total == data.stocks.length);
       setStocks(data.stocks as Stock.DetailItem[]);
@@ -43,18 +45,18 @@ const BanKuaiStocks: React.FC<BanKuaiStocksProps> = React.memo(({ secid, active,
         );
       }
     },
-    cacheKey: `GetBankuaiStockFromEastmoney/${secid}`,
+    cacheKey: `GetBankuaiStockFromDataSource/${secid}`,
   });
   useWorkDayTimeToDo(
     () => {
-      runGetStocks(secid, count);
+      runGetStocks(fundApiTypeSetting, secid, count);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
   );
 
   useEffect(() => {
-    runGetStocks(secid, count);
-  }, [secid]);
+    runGetStocks(fundApiTypeSetting, secid, count);
+  }, [secid, fundApiTypeSetting]);
 
   const [filtering, setFiltering] = useState(false);
   const [ftypes, setFtypes] = useState<number[]>([]);

@@ -10,6 +10,7 @@ Akshare API 封装模块
 import sys
 import json
 import argparse
+import random
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta, date
 
@@ -19,6 +20,12 @@ try:
 except ImportError:
     print(json.dumps({"error": "请先安装 akshare: pip install akshare"}, ensure_ascii=False))
     sys.exit(1)
+
+# 尝试导入 requests（akshare 依赖，通常已安装）
+try:
+    import requests
+except ImportError:
+    requests = None
 
 
 def convert_secid_to_tx_symbol(secid: str) -> str:
@@ -50,9 +57,124 @@ def convert_secid_to_pure_code(secid: str) -> str:
     return secid
 
 
+def is_board_code(secid: str) -> bool:
+    """判断是否为板块代码"""
+    if secid.startswith("90."):
+        return True
+    code = convert_secid_to_pure_code(secid)
+    return code.startswith("BK")
+
+
+def _get_board_kline_from_eastmoney(secid: str, period: str = "daily") -> List[Dict[str, Any]]:
+    """
+    从 Eastmoney 获取板块K线数据
+    
+    akshare 的个股接口不支持板块代码，但 Eastmoney 的 K 线接口支持
+    """
+    if requests is None:
+        return {"error": "requests 库未安装"}
+    
+    try:
+        # period 映射
+        period_map = {
+            "daily": "101",
+            "weekly": "102",
+            "monthly": "103",
+        }
+        klt = period_map.get(period, "101")
+        
+        # 生成随机子域名
+        rnd = random.randint(1, 99)
+        url = f"https://{rnd}.push2his.eastmoney.com/api/qt/stock/kline/get"
+        
+        params = {
+            "secid": secid,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "klt": klt,
+            "fqt": "1",
+            "end": "20500101",
+            "lmt": "1000",
+            "_": str(int(datetime.now().timestamp() * 1000)),
+        }
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": "https://quote.eastmoney.com/",
+        }
+        
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        # 尝试解析 JSON，如果不成功则解析 JSONP
+        text = response.text.strip()
+        try:
+            resp_data = json.loads(text)
+        except json.JSONDecodeError:
+            # JSONP 格式: jQuery...({...})
+            if text.startswith("jQuery") or text.startswith("("):
+                start = text.find("(")
+                end = text.rfind(")")
+                if start != -1 and end != -1:
+                    text = text[start + 1:end]
+                resp_data = json.loads(text)
+            else:
+                raise
+        
+        klines = resp_data.get("data", {}).get("klines", [])
+        
+        result = []
+        for line in klines:
+            parts = line.split(",")
+            if len(parts) >= 11:
+                result.append({
+                    "date": parts[0],
+                    "kp": float(parts[1] or 0),
+                    "sp": float(parts[2] or 0),
+                    "zg": float(parts[3] or 0),
+                    "zd": float(parts[4] or 0),
+                    "cjl": int(float(parts[5] or 0)),
+                    "cje": float(parts[6] or 0),
+                    "zdf": float(parts[8] or 0),
+                    "zde": float(parts[9] or 0),
+                    "hsl": float(parts[10] or 0),
+                })
+        
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
 class AkshareAPI:
     """akshare 接口封装类"""
     
+    @staticmethod
+    def get_trade_dates(year: Optional[int] = None) -> List[str]:
+        """
+        获取全年交易日列表
+        
+        参数:
+            year: 年份，如 2026；不传则默认当年
+        
+        返回:
+            该年份所有交易日的日期字符串列表，格式 "YYYY-MM-DD"
+        """
+        try:
+            df = ak.tool_trade_date_hist_sina()
+            if df.empty:
+                return {"error": "No trade date data available"}
+            
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+            target_year = year if year is not None else datetime.now().year
+            
+            mask = df["trade_date"].dt.year == target_year
+            filtered = df.loc[mask].copy().sort_values("trade_date")
+            
+            dates = filtered["trade_date"].dt.strftime("%Y-%m-%d").tolist()
+            return dates
+        except Exception as e:
+            return {"error": str(e)}
+
     @staticmethod
     def search_stock(keyword: str) -> List[Dict[str, Any]]:
         """搜索股票"""
@@ -112,6 +234,10 @@ class AkshareAPI:
         adjust: qfq-前复权, hfq-后复权, 空字符串-不复权
         """
         try:
+            # 板块代码使用 Eastmoney 数据源（akshare 个股接口不支持板块）
+            if is_board_code(secid):
+                return _get_board_kline_from_eastmoney(secid, period)
+            
             # 转换为腾讯 symbol 格式
             symbol = convert_secid_to_tx_symbol(secid)
             
@@ -364,6 +490,75 @@ class AkshareAPI:
                     "cje": float(row.get("成交额", 0) or 0),
                 })
             return boards
+        except Exception as e:
+            return {"error": str(e)}
+    
+    @staticmethod
+    def get_board_stocks(secid: str, count: int = 20) -> Dict[str, Any]:
+        """
+        获取板块成分股
+        
+        secid: 板块代码，如 "90.BK0428"
+        count: 返回数量限制
+        """
+        try:
+            code = convert_secid_to_pure_code(secid)
+            
+            # 尝试行业板块接口，失败则尝试概念板块接口
+            df = None
+            try:
+                df = ak.stock_board_industry_cons_em(symbol=code)
+            except Exception:
+                try:
+                    df = ak.stock_board_concept_cons_em(symbol=code)
+                except Exception:
+                    pass
+            
+            if df is None or df.empty:
+                return {"total": 0, "stocks": []}
+            
+            stocks = []
+            for _, row in df.iterrows():
+                stock_code = str(row.get("代码", ""))
+                if not stock_code:
+                    continue
+                # 判断市场: 6开头为沪市(1)，其他为深市(0)
+                market = 1 if stock_code.startswith("6") else 0
+                
+                stocks.append({
+                    "code": stock_code,
+                    "name": str(row.get("名称", "")),
+                    "secid": f"{market}.{stock_code}",
+                    "zx": float(row.get("最新价", 0) or 0),
+                    "zdf": float(row.get("涨跌幅", 0) or 0),
+                    "zdd": float(row.get("涨跌额", 0) or 0),
+                    "cjl": int(float(row.get("成交量", 0) or 0)),
+                    "cje": float(row.get("成交额", 0) or 0),
+                    "zf": float(row.get("振幅", 0) or 0),
+                    "zg": float(row.get("最高", 0) or 0),
+                    "zd": float(row.get("最低", 0) or 0),
+                    "jk": float(row.get("今开", 0) or 0),
+                    "zs": float(row.get("昨收", 0) or 0),
+                    "lb": 0,  # akshare 不返回量比
+                    "hsl": float(row.get("换手率", 0) or 0),
+                    "syl": float(row.get("市盈率-动态", 0) or 0) if "市盈率-动态" in row else 0,
+                    "sjl": float(row.get("市净率", 0) or 0),
+                    "sz": float(row.get("总市值", 0) or 0),
+                    "lt": float(row.get("流通市值", 0) or 0),
+                    "cm5": 0,
+                    "cd60": 0,
+                    "cy1": 0,
+                    "cs": 0,
+                })
+            
+            # 按涨跌幅排序（降序）
+            stocks.sort(key=lambda x: x["zdf"], reverse=True)
+            
+            # 限制数量
+            if count > 0 and len(stocks) > count:
+                stocks = stocks[:count]
+            
+            return {"total": len(df), "stocks": stocks}
         except Exception as e:
             return {"error": str(e)}
     

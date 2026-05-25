@@ -12,7 +12,8 @@ import { useCallback } from 'react';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
 import classNames from 'classnames';
-import { batch } from 'react-redux';
+import { batch, useSelector } from 'react-redux';
+import { StoreState } from '@/reducers/types';
 
 export interface STListProps {
   industries: Stock.BanKuaiItem[];
@@ -31,6 +32,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [filtering, setFiltering] = useState(false);
   const [ftypes, setFtypes] = useState<number[]>([]);
   const [filterSecids, setFilterSecids] = useState<string[]>([]);
+  const { fundApiTypeSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
     manual: true,
@@ -42,7 +44,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     },
   });
   const [stocks, setStocks] = useState<Stock.DetailItem[]>([]);
-  const { run: runGetStocks } = useRequest(Services.Stock.GetBankuaiStocksFromEastmoney, {
+  const { run: runGetStocks } = useRequest(Services.Stock.GetBankuaiStocksFromDataSource, {
     throwOnError: true,
     manual: true,
     onSuccess: (data) => {
@@ -59,9 +61,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     },
   });
   const { run: mayGetStocks } = useThrottleFn(
-    (secid: string, ps: number) => {
+    (source: number, secid: string, ps: number) => {
       if (secid.length > 0) {
-        runGetStocks(secid, ps);
+        runGetStocks(source, secid, ps);
       }
     },
     {
@@ -70,15 +72,15 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   );
   useWorkDayTimeToDo(
     () => {
-      mayGetStocks(secid, pageSize);
+      mayGetStocks(fundApiTypeSetting, secid, pageSize);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
   );
   const loadMore = useCallback(() => {
     const ps = pageSize + 40;
     setPageSize(ps);
-    mayGetStocks(secid, ps);
-  }, [pageSize, secid]);
+    mayGetStocks(fundApiTypeSetting, secid, ps);
+  }, [pageSize, secid, fundApiTypeSetting]);
 
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
@@ -95,8 +97,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   );
 
   useEffect(() => {
-    mayGetStocks(secid, pageSize);
-  }, [secid]);
+    mayGetStocks(fundApiTypeSetting, secid, pageSize);
+  }, [secid, fundApiTypeSetting]);
 
   const updateFtypes = useCallback(
     (ts: any[]) => {

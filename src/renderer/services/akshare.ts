@@ -47,6 +47,111 @@ async function callAkshare(method: string, params: Record<string, any> = {}): Pr
   }
 }
 
+// ==================== 交易日历 ====================
+
+const TRADE_CALENDAR_TABLE = 'trade_calendar';
+
+/**
+ * 从 AKShare 获取指定年份交易日列表
+ */
+export async function GetTradeDatesFromAkshare(year?: string): Promise<string[]> {
+  try {
+    const result = await callAkshare('get_trade_dates', { 
+      year: year || new Date().getFullYear().toString() 
+    });
+    if (result.error) {
+      console.error('获取交易日历失败:', result.error);
+      return [];
+    }
+    return result.dates || [];
+  } catch (error) {
+    console.error('GetTradeDatesFromAkshare error:', error);
+    return [];
+  }
+}
+
+/**
+ * 判断某天是否为交易日（带本地缓存）
+ */
+export async function IsTradeDay(date?: string): Promise<boolean> {
+  const checkDate = date || dayjs().format('YYYYMMDD');
+  const cleanDate = checkDate.replace(/-/g, '');
+  const year = cleanDate.substring(0, 4);
+  
+  // 1. 先读本地缓存
+  try {
+    const cached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
+    if (cached?.success && cached.data?.data?.dates) {
+      const dates: string[] = cached.data.data.dates;
+      return dates.includes(cleanDate);
+    }
+  } catch (e) {
+    // 缓存不存在，继续往下
+  }
+  
+  // 2. 缓存未命中，从 AKShare 拉取全年
+  const dates = await GetTradeDatesFromAkshare(year);
+  if (dates.length === 0) {
+    // 兜底：周一到周五为交易（简易判断）
+    const weekday = dayjs(checkDate).day();
+    return weekday !== 0 && weekday !== 6;
+  }
+  
+  // 3. 写入本地缓存（有效期一年）
+  try {
+    await window.contextModules.electron.sqliteWrite(TRADE_CALENDAR_TABLE, {
+      dates,
+      year,
+      syncedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+    }, dayjs().format('YYYY-MM-DD HH:mm:ss'), year);
+  } catch (e) {
+    console.error('缓存交易日历失败:', e);
+  }
+  
+  return dates.includes(cleanDate);
+}
+
+/**
+ * 批量判断多个日期是否为交易日
+ */
+export async function FilterTradeDays(dates: string[]): Promise<string[]> {
+  if (dates.length === 0) return [];
+  
+  // 按年份分组，减少缓存查询次数
+  const yearMap: Record<string, string[]> = {};
+  dates.forEach(d => {
+    const clean = d.replace(/-/g, '');
+    const year = clean.substring(0, 4);
+    if (!yearMap[year]) yearMap[year] = [];
+    yearMap[year].push(clean);
+  });
+  
+  const tradeDays: string[] = [];
+  for (const [year, yearDates] of Object.entries(yearMap)) {
+    // 确保该年缓存存在
+    const cached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
+    let validDates: string[] = [];
+    
+    if (cached?.success && cached.data?.data?.dates) {
+      validDates = cached.data.data.dates;
+    } else {
+      validDates = await GetTradeDatesFromAkshare(year);
+      if (validDates.length > 0) {
+        await window.contextModules.electron.sqliteWrite(TRADE_CALENDAR_TABLE, {
+          dates: validDates,
+          year,
+        }, dayjs().format('YYYY-MM-DD HH:mm:ss'), year);
+      }
+    }
+    
+    yearDates.forEach(d => {
+      if (validDates.includes(d)) tradeDays.push(d);
+    });
+  }
+  
+  return tradeDays;
+}
+
 // ==================== 搜索相关 ====================
 
 export async function SearchFromAkshare(keyword: string): Promise<any[]> {
@@ -124,29 +229,96 @@ export async function GetDetailFromAkshare(secid: string): Promise<Stock.DetailI
  * 支持: 日K线(通过日K接口获取)、周/月K线(通过日K聚合)
  * 复权: 支持前复权(qfq)、后复权(hfq)、不复权
  */
+// ==================== K 线数据 (腾讯财经数据源) ====================
+/**
+ * 获取K线数据 - 使用腾讯财经数据源
+ * 
+ * 数据源: 腾讯财经 (stock_zh_a_hist_tx)
+ * 支持: 日K线(通过日K接口获取)、周/月K线(通过日K聚合)
+ * 复权: 支持前复权(qfq)、后复权(hfq)、不复权
+ * 
+ * 缓存策略:
+ * - 使用 sqlite 磁盘缓存，key 为 secid + period
+ * - 如果缓存最后日期 >= 当前应有数据的最新日期，直接返回缓存
+ * - 当前应有数据的最新日期计算：
+ *   - 若今天是交易日且当前时间 >= 17:00（收盘2小时后），期望日期为今天
+ *   - 否则，期望日期为今天之前的最后一个交易日
+ */
 export async function GetKFromAkshare(secid: string, code: number, limit?: number): Promise<{ ks: Stock.KLineItem[], kt: number }> {
+  const periodMap: Record<number, string> = {
+    [KLineType.Day]: 'daily',
+    [KLineType.Week]: 'weekly',
+    [KLineType.Month]: 'monthly',
+  };
+
+  const period = periodMap[code] || 'daily';
+  const cacheKey = `${secid}_${period}`;
+  const cacheTable = 'kline_cache';
+
+  // 辅助：计算当前K线数据应有的最新日期
+  async function getExpectedLatestDate(): Promise<string> {
+    const now = dayjs();
+    const today = now.format('YYYY-MM-DD');
+    const year = now.format('YYYY');
+
+    // 获取当年交易日列表
+    let tradeDates = await GetTradeDatesFromAkshare(year);
+    if (tradeDates.length === 0) {
+      // 跨年场景：尝试前一年
+      const prevYear = (parseInt(year) - 1).toString();
+      tradeDates = await GetTradeDatesFromAkshare(prevYear);
+    }
+
+    const isTodayTradeDay = tradeDates.includes(today);
+
+    // 今天是交易日且已过17点（收盘2小时后），当天K线已可用
+    if (isTodayTradeDay && now.hour() >= 17) {
+      return today;
+    }
+
+    // 否则，取今天之前的最后一个交易日
+    const prevDates = tradeDates.filter(d => d < today);
+    return prevDates.pop() || today;
+  }
+
   try {
-    // 映射 K 线类型
-    const periodMap: Record<number, string> = {
-      [KLineType.Day]: 'daily',
-      [KLineType.Week]: 'weekly',
-      [KLineType.Month]: 'monthly',
-    };
-    
-    const period = periodMap[code] || 'daily';
+    // 1. 尝试读取磁盘缓存
+    const cached = await window.contextModules.electron.sqliteRead(cacheTable, cacheKey);
+    if (cached?.success && cached.data?.data?.ks && cached.data.data.ks.length > 0) {
+      const ks: Stock.KLineItem[] = cached.data.data.ks;
+      const lastDate = ks[ks.length - 1].date;
+
+      // 2. 判断缓存是否仍有效
+      const expectedLatestDate = await getExpectedLatestDate();
+
+      if (lastDate >= expectedLatestDate) {
+        // 缓存有效，按 limit 裁剪后返回
+        if (limit && limit > 0 && ks.length > limit) {
+          return { ks: ks.slice(-limit), kt: code };
+        }
+        return { ks, kt: code };
+      }
+      // 缓存过期，继续往下请求新数据
+    }
+  } catch (e) {
+    // 缓存读取异常，忽略并继续请求
+  }
+
+  // 3. 缓存未命中或已过期，请求新数据
+  try {
     const result = await callAkshare('get_kline_data', { secid, period });
-    
+
     if (result.error) {
       console.error('获取K线失败:', result.error);
       return { ks: [], kt: code };
     }
-    
+
     // 限制数量
     let klines = result;
     if (limit && limit > 0 && klines.length > limit) {
       klines = klines.slice(-limit);
     }
-    
+
     const ks = klines.map((item: any) => ({
       secid,
       type: code,
@@ -162,14 +334,25 @@ export async function GetKFromAkshare(secid: string, code: number, limit?: numbe
       hsl: item.hsl,
       chan: 0, // ChanType.Unknow
     }));
-    
+
+    // 4. 写入磁盘缓存
+    try {
+      await window.contextModules.electron.sqliteWrite(cacheTable, {
+        ks,
+        secid,
+        period,
+        cachedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      }, dayjs().format('YYYY-MM-DD HH:mm:ss'), cacheKey);
+    } catch (e) {
+      console.error('写入K线缓存失败:', e);
+    }
+
     return { ks, kt: code };
   } catch (error) {
     logError(error, 'GetKFromAkshare', '获取K线数据失败');
     return { ks: [], kt: code };
   }
 }
-
 // ==================== 分时走势 (腾讯财经数据源) ====================
 /**
  * 获取分时走势数据 - 使用腾讯财经数据源
@@ -234,6 +417,24 @@ export async function GetBanKuaisFromAkshare(type: number, pageSize = 20): Promi
   } catch (error) {
     logError(error, 'GetBanKuaisFromAkshare', '获取板块数据失败');
     return {};
+  }
+}
+
+// ==================== 板块成分股 ====================
+
+export async function GetBankuaiStocksFromAkshare(secid: string, count = 20): Promise<any> {
+  try {
+    const result = await callAkshare('get_board_stocks', { secid, count });
+    
+    if (result.error) {
+      console.error('获取板块成分股失败:', result.error);
+      return { total: 0, stocks: [] };
+    }
+    
+    return result;
+  } catch (error) {
+    logError(error, 'GetBankuaiStocksFromAkshare', '获取板块成分股失败');
+    return { total: 0, stocks: [] };
   }
 }
 

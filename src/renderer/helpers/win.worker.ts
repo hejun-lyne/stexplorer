@@ -5,6 +5,7 @@ import * as Services from '@/services';
 import * as Utils from '@/utils';
 import * as Tech from '@/helpers/tech';
 import { Stock } from '@/types/stock';
+import * as Enums from '@/utils/enums';
 const { ipcRenderer } = window.contextModules.electron;
 
 export function postMessageOut(messageId: number, error: any, result?: any) {
@@ -96,7 +97,7 @@ export function getAllBkSts(bks: Stock.BanKuaiItem[]) {
       return { secid: bk.secid, name: bk.name, stocks: prev };
     }
     bridgeProgressLog('开始请求板块标的数据: ' + bk.name);
-    const res = await Services.Stock.GetBankuaiStocksFromEastmoney(bk.secid, 200);
+    const res = await Services.Stock.GetBankuaiStocksFromDataSource(Enums.FundApiType.Eastmoney, bk.secid, 200);
     if (res.stocks && res.stocks.length > 0) {
       MemoryCache.set(key, res.stocks, MemoryCache.kDefaultCacheExpireTime);
     }

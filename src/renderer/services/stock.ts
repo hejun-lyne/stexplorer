@@ -1529,6 +1529,14 @@ export async function GetBankuaiStocksFromEastmoney(secid: string, count = 20) {
   }
 }
 
+export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, secid: string, count = 20) {
+  if (source === Enums.FundApiType.Akshare) {
+    return AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
+  }
+  // 默认使用 Eastmoney
+  return GetBankuaiStocksFromEastmoney(secid, count);
+}
+
 
 export async function GetGubaCode(secid: string) {
   try {
