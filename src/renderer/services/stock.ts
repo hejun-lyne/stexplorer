@@ -580,16 +580,190 @@ export async function FromEastmoney(secid: string) {
   }
 }
 
-export async function GetKFromDataSource(source:Enums.FundApiType, secid: string, code: number, limit?: number) {
-  if (source == Enums.FundApiType.Eastmoney) {
-    return GetKFromEastmoney(secid, code, limit);
-  } else if (source == Enums.FundApiType.ZiZai) {
-    return GetKFromZizai(secid, code);
-  } else if (source == Enums.FundApiType.XTick) {
-    return GetKFromXTick(secid, code);
-  } else if (source == Enums.FundApiType.Akshare) {
-    return AkshareAPI.GetKFromAkshare(secid, code, limit);
+/**
+ * 用成分股K线等权平均合成板块K线
+ * 当板块K线接口失败时作为 fallback
+ */
+async function synthesizeBoardKline(secid: string, code: number): Promise<Stock.KLineItem[] | null> {
+  try {
+    // 获取板块成分股，最多取30只避免请求过多
+    const boardStocks = await GetBankuaiStocksFromDataSource(Enums.FundApiType.Akshare, secid, 30);
+    if (!boardStocks?.stocks || boardStocks.stocks.length === 0) {
+      console.error('板块成分股为空，无法合成K线:', secid);
+      return null;
+    }
+
+    // 获取每只成分股的K线
+    const stockKlines: Stock.KLineItem[][] = [];
+    for (const stock of boardStocks.stocks) {
+      try {
+        const stockSecid = stock.code?.startsWith('6') ? `1.${stock.code}` : `0.${stock.code}`;
+        const kResult = await GetKFromDataSource(Enums.FundApiType.Akshare, stockSecid, code);
+        if (kResult.ks && kResult.ks.length > 0) {
+          stockKlines.push(kResult.ks);
+        }
+      } catch (e) {
+        // 单只股票获取失败，忽略
+      }
+    }
+
+    if (stockKlines.length === 0) {
+      console.error('无有效成分股K线数据，无法合成:', secid);
+      return null;
+    }
+
+    // 按日期聚合所有成分股数据
+    const dateMap: Record<string, Stock.KLineItem[]> = {};
+    stockKlines.forEach(klines => {
+      klines.forEach(k => {
+        if (!dateMap[k.date]) dateMap[k.date] = [];
+        dateMap[k.date].push(k);
+      });
+    });
+
+    // 等权平均计算每一天的板块K线
+    const sortedDates = Object.keys(dateMap).sort();
+    const synthesized: Stock.KLineItem[] = [];
+    let prevSp = 0;
+
+    for (const date of sortedDates) {
+      const dayData = dateMap[date];
+      const count = dayData.length;
+      if (count === 0) continue;
+
+      // 价格类指标：等权算术平均
+      const kp = dayData.reduce((sum, d) => sum + (d.kp || 0), 0) / count;
+      const sp = dayData.reduce((sum, d) => sum + (d.sp || 0), 0) / count;
+      const zg = dayData.reduce((sum, d) => sum + (d.zg || 0), 0) / count;
+      const zd = dayData.reduce((sum, d) => sum + (d.zd || 0), 0) / count;
+
+      // 成交量/成交额：累加（板块总成交）
+      const cjl = dayData.reduce((sum, d) => sum + (d.cjl || 0), 0);
+      const cje = dayData.reduce((sum, d) => sum + (d.cje || 0), 0);
+
+      // 涨跌幅：等权平均
+      const zdf = dayData.reduce((sum, d) => sum + (d.zdf || 0), 0) / count;
+
+      // 涨跌额：根据平均价格差计算
+      const zde = prevSp > 0 ? NP.round(sp - prevSp, 2) : 0;
+
+      // 换手率：等权平均
+      const hsl = dayData.reduce((sum, d) => sum + (d.hsl || 0), 0) / count;
+
+      synthesized.push({
+        secid,
+        type: code,
+        date,
+        kp: NP.round(kp, 2),
+        sp: NP.round(sp, 2),
+        zg: NP.round(zg, 2),
+        zd: NP.round(zd, 2),
+        cjl: Math.round(cjl),
+        cje: NP.round(cje, 2),
+        zdf: NP.round(zdf, 2),
+        zde: NP.round(zde, 2),
+        hsl: NP.round(hsl, 2),
+        chan: 0,
+      });
+
+      prevSp = sp;
+    }
+
+    return synthesized;
+  } catch (e) {
+    console.error('合成板块K线失败:', secid, e);
+    return null;
   }
+}
+
+export async function GetKFromDataSource(source:Enums.FundApiType, secid: string, code: number, limit?: number) {
+  const periodMap: Record<number, string> = {
+    [KLineType.Day]: 'daily',
+    [KLineType.Week]: 'weekly',
+    [KLineType.Month]: 'monthly',
+  };
+  const period = periodMap[code] || 'daily';
+  const cacheKey = `${secid}_${period}`;
+  const cacheTable = 'kline_cache';
+
+  // 辅助：计算当前K线数据应有的最新日期
+  async function getExpectedLatestDate(): Promise<string> {
+    const now = dayjs();
+    const today = now.format('YYYY-MM-DD');
+    const year = now.format('YYYY');
+
+    let tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(year);
+    if (tradeDates.length === 0) {
+      const prevYear = (parseInt(year) - 1).toString();
+      tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(prevYear);
+    }
+
+    const isTodayTradeDay = tradeDates.includes(today);
+
+    if (isTodayTradeDay && now.hour() >= 17) {
+      return today;
+    }
+
+    const prevDates = tradeDates.filter(d => d < today);
+    return prevDates.pop() || today;
+  }
+
+  // 1. 尝试读取磁盘缓存
+  try {
+    const cached = await window.contextModules.electron.sqliteRead(cacheTable, cacheKey);
+    if (cached?.success && cached.data?.data?.ks && cached.data.data.ks.length > 0) {
+      const ks: Stock.KLineItem[] = cached.data.data.ks;
+      const lastDate = ks[ks.length - 1].date;
+      const expectedLatestDate = await getExpectedLatestDate();
+
+      if (lastDate >= expectedLatestDate) {
+        if (limit && limit > 0 && ks.length > limit) {
+          return { ks: ks.slice(-limit), kt: code };
+        }
+        return { ks, kt: code };
+      }
+    }
+  } catch (e) {
+    // 缓存读取异常，忽略并继续请求
+  }
+
+  // 2. 缓存未命中或已过期，请求新数据
+  let result: { ks: Stock.KLineItem[], kt: number } | undefined;
+  if (source == Enums.FundApiType.Eastmoney) {
+    result = await GetKFromEastmoney(secid, code, limit);
+  } else if (source == Enums.FundApiType.ZiZai) {
+    result = await GetKFromZizai(secid, code);
+  } else if (source == Enums.FundApiType.XTick) {
+    result = await GetKFromXTick(secid, code);
+  } else if (source == Enums.FundApiType.Akshare) {
+    result = await AkshareAPI.GetKFromAkshare(secid, code, limit);
+    // 板块代码获取失败时，尝试用成分股合成
+    if ((!result || result.ks.length === 0) && secid.startsWith('90.BK')) {
+      console.log('板块K线接口失败，尝试用成分股合成:', secid);
+      const synthesized = await synthesizeBoardKline(secid, code);
+      if (synthesized && synthesized.length > 0) {
+        result = { ks: synthesized, kt: code };
+      } else {
+        console.error('板块K线合成失败:', secid);
+      }
+    }
+  }
+
+  // 3. 写入磁盘缓存
+  if (result && result.ks && result.ks.length > 0) {
+    try {
+      await window.contextModules.electron.sqliteWrite(cacheTable, {
+        ks: result.ks,
+        secid,
+        period,
+        cachedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      }, dayjs().format('YYYY-MM-DD HH:mm:ss'), cacheKey);
+    } catch (e) {
+      console.error('写入K线缓存失败:', e);
+    }
+  }
+
+  return result || { ks: [], kt: code };
 }
 
 export async function GetKFromXTick(secid: string, code: number) {
@@ -1530,11 +1704,45 @@ export async function GetBankuaiStocksFromEastmoney(secid: string, count = 20) {
 }
 
 export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, secid: string, count = 20) {
-  if (source === Enums.FundApiType.Akshare) {
-    return AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
+  const cacheTable = 'board_stocks_cache';
+  const cacheKey = `${secid}_${count}`;
+
+  // 1. 尝试读取磁盘缓存（板块成分股一天内有效）
+  try {
+    const cached = await window.contextModules.electron.sqliteRead(cacheTable, cacheKey);
+    if (cached?.success && cached.data?.data?.stocks) {
+      const cachedAt = cached.data.data.cachedAt;
+      if (cachedAt && dayjs().diff(dayjs(cachedAt), 'hour') < 24) {
+        return cached.data.data;
+      }
+    }
+  } catch (e) {
+    // 缓存读取异常，忽略
   }
-  // 默认使用 Eastmoney
-  return GetBankuaiStocksFromEastmoney(secid, count);
+
+  // 2. 请求新数据
+  let result: any;
+  // if (source === Enums.FundApiType.Akshare) {
+  //   result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
+  // } else {
+    result = await GetBankuaiStocksFromEastmoney(secid, count);
+  // }
+
+  // 3. 写入磁盘缓存
+  if (result && result.stocks) {
+    try {
+      await window.contextModules.electron.sqliteWrite(cacheTable, {
+        ...result,
+        secid,
+        count,
+        cachedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      }, dayjs().format('YYYY-MM-DD HH:mm:ss'), cacheKey);
+    } catch (e) {
+      console.error('写入板块成分股缓存失败:', e);
+    }
+  }
+
+  return result;
 }
 
 

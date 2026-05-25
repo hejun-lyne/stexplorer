@@ -228,21 +228,8 @@ export async function GetDetailFromAkshare(secid: string): Promise<Stock.DetailI
  * 数据源: 腾讯财经 (stock_zh_a_hist_tx)
  * 支持: 日K线(通过日K接口获取)、周/月K线(通过日K聚合)
  * 复权: 支持前复权(qfq)、后复权(hfq)、不复权
- */
-// ==================== K 线数据 (腾讯财经数据源) ====================
-/**
- * 获取K线数据 - 使用腾讯财经数据源
  * 
- * 数据源: 腾讯财经 (stock_zh_a_hist_tx)
- * 支持: 日K线(通过日K接口获取)、周/月K线(通过日K聚合)
- * 复权: 支持前复权(qfq)、后复权(hfq)、不复权
- * 
- * 缓存策略:
- * - 使用 sqlite 磁盘缓存，key 为 secid + period
- * - 如果缓存最后日期 >= 当前应有数据的最新日期，直接返回缓存
- * - 当前应有数据的最新日期计算：
- *   - 若今天是交易日且当前时间 >= 17:00（收盘2小时后），期望日期为今天
- *   - 否则，期望日期为今天之前的最后一个交易日
+ * 注意：缓存逻辑已迁移到 stock.ts 的 GetKFromDataSource
  */
 export async function GetKFromAkshare(secid: string, code: number, limit?: number): Promise<{ ks: Stock.KLineItem[], kt: number }> {
   const periodMap: Record<number, string> = {
@@ -252,69 +239,19 @@ export async function GetKFromAkshare(secid: string, code: number, limit?: numbe
   };
 
   const period = periodMap[code] || 'daily';
-  const cacheKey = `${secid}_${period}`;
-  const cacheTable = 'kline_cache';
-
-  // 辅助：计算当前K线数据应有的最新日期
-  async function getExpectedLatestDate(): Promise<string> {
-    const now = dayjs();
-    const today = now.format('YYYY-MM-DD');
-    const year = now.format('YYYY');
-
-    // 获取当年交易日列表
-    let tradeDates = await GetTradeDatesFromAkshare(year);
-    if (tradeDates.length === 0) {
-      // 跨年场景：尝试前一年
-      const prevYear = (parseInt(year) - 1).toString();
-      tradeDates = await GetTradeDatesFromAkshare(prevYear);
-    }
-
-    const isTodayTradeDay = tradeDates.includes(today);
-
-    // 今天是交易日且已过17点（收盘2小时后），当天K线已可用
-    if (isTodayTradeDay && now.hour() >= 17) {
-      return today;
-    }
-
-    // 否则，取今天之前的最后一个交易日
-    const prevDates = tradeDates.filter(d => d < today);
-    return prevDates.pop() || today;
-  }
 
   try {
-    // 1. 尝试读取磁盘缓存
-    const cached = await window.contextModules.electron.sqliteRead(cacheTable, cacheKey);
-    if (cached?.success && cached.data?.data?.ks && cached.data.data.ks.length > 0) {
-      const ks: Stock.KLineItem[] = cached.data.data.ks;
-      const lastDate = ks[ks.length - 1].date;
-
-      // 2. 判断缓存是否仍有效
-      const expectedLatestDate = await getExpectedLatestDate();
-
-      if (lastDate >= expectedLatestDate) {
-        // 缓存有效，按 limit 裁剪后返回
-        if (limit && limit > 0 && ks.length > limit) {
-          return { ks: ks.slice(-limit), kt: code };
-        }
-        return { ks, kt: code };
-      }
-      // 缓存过期，继续往下请求新数据
-    }
-  } catch (e) {
-    // 缓存读取异常，忽略并继续请求
-  }
-
-  // 3. 缓存未命中或已过期，请求新数据
-  try {
+    let klines: any[] = [];
     const result = await callAkshare('get_kline_data', { secid, period });
 
-    if (result.error) {
-      console.error('获取K线失败:', result.error);
+    if (result.error || !Array.isArray(result) || result.length === 0) {
+      console.error('获取K线失败:', result.error || 'Empty data');
       return { ks: [], kt: code };
     }
 
+    klines = result;
+
     // 限制数量
-    let klines = result;
     if (limit && limit > 0 && klines.length > limit) {
       klines = klines.slice(-limit);
     }
@@ -334,18 +271,6 @@ export async function GetKFromAkshare(secid: string, code: number, limit?: numbe
       hsl: item.hsl,
       chan: 0, // ChanType.Unknow
     }));
-
-    // 4. 写入磁盘缓存
-    try {
-      await window.contextModules.electron.sqliteWrite(cacheTable, {
-        ks,
-        secid,
-        period,
-        cachedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-      }, dayjs().format('YYYY-MM-DD HH:mm:ss'), cacheKey);
-    } catch (e) {
-      console.error('写入K线缓存失败:', e);
-    }
 
     return { ks, kt: code };
   } catch (error) {

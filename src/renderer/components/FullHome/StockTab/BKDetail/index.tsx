@@ -31,9 +31,10 @@ export interface BKDetailProps {
 
 const BKDetail: React.FC<BKDetailProps> = ({ secid, active, onChangeUpdate, onOpenStock, onOpenUrl }) => {
   const config = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]);
+  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const [detail, setDetail] = useState<Stock.DetailItem>({ secid });
 
-  const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(secid), {
+  const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid), {
     throwOnError: true,
     manual: true,
     onSuccess: (d) => (d ? setDetail(d) : undefined),

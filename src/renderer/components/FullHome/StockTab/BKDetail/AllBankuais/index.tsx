@@ -11,7 +11,8 @@ import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { Button, DatePicker, Input, InputNumber, Select, Tabs } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import { BKType, KSortType, KSortTypeNames } from '@/utils/enums';
-import { batch } from 'react-redux';
+import { batch, useSelector } from 'react-redux';
+import { StoreState } from '@/reducers/types';
 import moment from 'moment';
 
 export interface AllBankuaisWrapperProps {
@@ -51,7 +52,8 @@ const AllBankuais: React.FC<AllBankuaisProps> = React.memo(({ active, bktype, op
   const [sorting, setSorting] = useState(false);
   const [stype, setStype] = useState<number>(KSortType.None);
   const [slimit, setSLimit] = useState(30);
-  const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuais, {
+  const { fundApiTypeSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
     throwOnError: true,
     manual: true,
     onSuccess: (d: { to: number; arr: Stock.BanKuaiItem[] }) => {
@@ -67,13 +69,13 @@ const AllBankuais: React.FC<AllBankuaisProps> = React.memo(({ active, bktype, op
       }
     },
   });
-  const mayGetBankuais = useCallback((t: BKType, ps: number) => {
-    runGetBankuais(t, ps);
+  const mayGetBankuais = useCallback((source: number, t: BKType, ps: number) => {
+    runGetBankuais(source, t, ps);
   }, []);
-  useWorkDayTimeToDo(() => mayGetBankuais(bktype, pageSize), active ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
+  useWorkDayTimeToDo(() => mayGetBankuais(fundApiTypeSetting, bktype, pageSize), active ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
   useEffect(() => {
-    runGetBankuais(bktype, pageSize);
-  }, [bktype, pageSize]);
+    runGetBankuais(fundApiTypeSetting, bktype, pageSize);
+  }, [fundApiTypeSetting, bktype, pageSize]);
   const { run: runSortStocks } = useRequest(Helpers.Stock.SortMultiKlines, {
     throwOnError: true,
     manual: true,
