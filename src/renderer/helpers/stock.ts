@@ -428,6 +428,19 @@ let sAppendStocks: {
   secid: string;
   callback: Function;
 }[] = [];
+let restartTimer: ReturnType<typeof setTimeout> | null = null;
+let isPushing = false;
+let pendingRestart = false;
+
+function debouncedRestart() {
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+  }
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    MultiStockDetailPush(true);
+  }, 300);
+}
 
 export function AppendStockDetailPush(secid: string, callback: (detail: Stock.PartDetailItem) => void) {
   const kv = sAppendStocks.find((o) => o.secid === secid);
@@ -440,36 +453,41 @@ export function AppendStockDetailPush(secid: string, callback: (detail: Stock.Pa
     callback
   });
 
-  // 重新开始
-  MultiStockDetailPush(true);
+  debouncedRestart();
 }
 
 export function RemoveStockDetailPush(secid: string) {
   let found = false;
   for (let i = 0; i < sAppendStocks.length; i++) {
-    if (sAppendStocks[i].secid == secid) {
+    if (sAppendStocks[i].secid === secid) {
       found = true;
       sAppendStocks.splice(i, 1);
       break;
     }
   }
   if (found) {
-    // 重新开始
-    MultiStockDetailPush(true);
+    debouncedRestart();
   }
 }
 export function MultiStockDetailPush(restart:boolean) {
+  if (isPushing) {
+    pendingRestart = true;
+    return;
+  }
+  isPushing = true;
+  pendingRestart = false;
   // if (sPush && !Utils.JudgeWorkDayTime(new Date().getTime())) {
   //   // 非交易时间不更新
   //   return;
   // }
-  if (sPush != null) {
-    if(!restart) {
-      return;
-    }
-    sPush.close();
-  }
   try {
+    if (sPush != null) {
+      if(!restart) {
+        return;
+      }
+      sPush.close();
+      sPush = null as any;
+    }
     const {
       stock: { stockConfigs },
     } = store.getState();
@@ -586,6 +604,11 @@ export function MultiStockDetailPush(restart:boolean) {
     });
   } catch (e) {
     console.error('ResetStockPush', e);
+  } finally {
+    isPushing = false;
+    if (pendingRestart) {
+      MultiStockDetailPush(true);
+    }
   }
 }
 

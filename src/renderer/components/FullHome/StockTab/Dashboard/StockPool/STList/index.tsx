@@ -259,11 +259,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             </Col>
             <Col span={3}>{(s.lt).toFixed(2) + '亿'}</Col>
             <Col span={3}>{(s.hsl).toFixed(2) + '%'}</Col>
-            <Col span={3} className={Utils.GetValueColor((s as any).mainIn).textClass}>
-              {formatMoneyFlow((s as any).mainIn)}
+            <Col span={3} className={Utils.GetValueColor((s as any).main_in).textClass}>
+              {formatMoneyFlow((s as any).main_in)}
             </Col>
-            <Col span={3} className={Utils.GetValueColor((s as any).mainIn5d).textClass}>
-              {formatMoneyFlow((s as any).mainIn5d)}
+            <Col span={3} className={Utils.GetValueColor((s as any).main_in_5d).textClass}>
+              {formatMoneyFlow((s as any).main_in_5d)}
             </Col>
           </Row>
         ))}
