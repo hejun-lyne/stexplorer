@@ -62,11 +62,14 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     arr.sort((a, b) => {
       let left = 0, right = 0;
       if (key === 'szbl') {
-        left = a.szs / (a.szs + a.xds);
-        right = b.szs / (b.szs + b.xds);
+        const totalA = (Number(a.szs) || 0) + (Number(a.xds) || 0);
+        const totalB = (Number(b.szs) || 0) + (Number(b.xds) || 0);
+        left = totalA > 0 ? (Number(a.szs) || 0) / totalA : 0;
+        right = totalB > 0 ? (Number(b.szs) || 0) / totalB : 0;
       } else {
-        left = (a as any)[key];
-        right = (b as any)[key];
+        // 统一转数值，避免字符串字典序或 NaN
+        left = Number((a as any)[key]) || 0;
+        right = Number((b as any)[key]) || 0;
       }
       if (t == 1) {
         return left - right;
@@ -81,6 +84,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     let type = sortTypes[key] || 0;
     type = type == 0 ? 1 : type == 1 ? 2 : 0;
     setSortTypes({ [key]: type });
+    setCurrentPage(1); // 切排序时回到第一页
   }, [sortTypes]);
 
   const showList = useMemo(() => {
@@ -261,14 +265,14 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             <Col span={2}>{techPending[b.secid] ? '分析中' : rsiResults[b.secid] ? (rsiResults[b.secid].isOversold ? '✓' : '✗') : ''}</Col>
           </Row>
         ))}
-        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '10px 0' }}>
-          <Button size="small" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={safePage <= 1}>上一页</Button>
-          <span style={{ margin: '0 12px', color: 'var(--main-text-color)' }}>{safePage} / {totalPage}</span>
-          <Button size="small" onClick={() => setCurrentPage((p) => Math.min(totalPage, p + 1))} disabled={safePage >= totalPage}>下一页</Button>
-          {!noMore && (
-            <Button size="small" onClick={loadMore} style={{ marginLeft: 8 }}>加载更多</Button>
-          )}
-        </div>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '5px 0', borderTop: '1px solid var(--main-border-color)' }}>
+        <Button size="small" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={safePage <= 1}>上一页</Button>
+        <span style={{ margin: '0 12px', color: 'var(--main-text-color)' }}>{safePage} / {totalPage}</span>
+        <Button size="small" onClick={() => setCurrentPage((p) => Math.min(totalPage, p + 1))} disabled={safePage >= totalPage}>下一页</Button>
+        {!noMore && (
+          <Button size="small" onClick={loadMore} style={{ marginLeft: 8 }}>加载更多</Button>
+        )}
       </div>
     </>
   );

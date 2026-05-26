@@ -1749,21 +1749,21 @@ export async function GetBankuaiStocksFromEastmoney(secid: string, count = 20) {
 }
 
 export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, secid: string, count = 20) {
-  const cacheTable = 'board_stocks_cache';
-  const cacheKey = `${secid}_${count}`;
+  // const cacheTable = 'board_stocks_cache';
+  // const cacheKey = `${secid}_${count}`;
 
-  // 1. 尝试读取磁盘缓存（板块成分股一天内有效）
-  try {
-    const cached = await window.contextModules.electron.sqliteRead(cacheTable, cacheKey);
-    if (cached?.success && cached.data?.data?.stocks && cached.data?.data?.stocks.length > 0) {
-      const cachedAt = cached.data.data.cachedAt;
-      if (cachedAt && dayjs().diff(dayjs(cachedAt), 'hour') < 24) {
-        return cached.data.data;
-      }
-    }
-  } catch (e) {
-    // 缓存读取异常，忽略
-  }
+  // // 1. 尝试读取磁盘缓存（板块成分股一天内有效）
+  // try {
+  //   const cached = await window.contextModules.electron.sqliteRead(cacheTable, cacheKey);
+  //   if (cached?.success && cached.data?.data?.stocks && cached.data?.data?.stocks.length > 0) {
+  //     const cachedAt = cached.data.data.cachedAt;
+  //     if (cachedAt && dayjs().diff(dayjs(cachedAt), 'hour') < 24) {
+  //       return cached.data.data;
+  //     }
+  //   }
+  // } catch (e) {
+  //   // 缓存读取异常，忽略
+  // }
 
   // 2. 请求新数据
   let result: any;
@@ -1775,19 +1775,19 @@ export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, 
     result = await GetBankuaiStocksFromEastmoney(secid, count);
   }
 
-  // 3. 写入磁盘缓存
-  if (result && result.stocks) {
-    try {
-      await window.contextModules.electron.sqliteWrite(cacheTable, {
-        ...result,
-        secid,
-        count,
-        cachedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-      }, dayjs().format('YYYY-MM-DD HH:mm:ss'), cacheKey);
-    } catch (e) {
-      console.error('写入板块成分股缓存失败:', e);
-    }
-  }
+  // // 3. 写入磁盘缓存
+  // if (result && result.stocks) {
+  //   try {
+  //     await window.contextModules.electron.sqliteWrite(cacheTable, {
+  //       ...result,
+  //       secid,
+  //       count,
+  //       cachedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+  //     }, dayjs().format('YYYY-MM-DD HH:mm:ss'), cacheKey);
+  //   } catch (e) {
+  //     console.error('写入板块成分股缓存失败:', e);
+  //   }
+  // }
 
   return result;
 }
