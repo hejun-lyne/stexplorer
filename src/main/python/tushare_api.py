@@ -1070,7 +1070,7 @@ class TushareAPI:
         """获取板块成分股，支持东财和同花顺板块
         
         自动判断板块类型：
-        - BK 开头 → 东财板块（dc_member + moneyflow_dc + moneyflow）
+        - BK 开头 → 东财板块（dc_member + moneyflow_dc）
         - 88/3 开头 → 同花顺板块（网页抓取 + moneyflow_ths）
         
         返回字段补全：通过 daily + daily_basic 获取最新行情
@@ -1199,31 +1199,33 @@ class TushareAPI:
                 except Exception as e:
                     print(f"[moneyflow_ths 查询失败] {e}")
             else:
-                # 东财：当日用 moneyflow_dc
+                # 东财板块个股：用 moneyflow_dc（6000积分，每日盘后更新）
+                # 先获取最近5个交易日
+                trade_dates: List[str] = []
                 try:
-                    dc_mf = safe_api_call(pro.moneyflow_dc, trade_date=trade_date)
-                    if dc_mf is not None and not (isinstance(dc_mf, dict) and dc_mf.get("error")) and not dc_mf.empty:
-                        for _, row in dc_mf.iterrows():
-                            tc = str(row.get("ts_code", ""))
-                            if tc in member_map:
-                                main_in_map[tc] = _to_float(row.get("net_amount", 0)) * 10000
+                    cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=trade_date, is_open='1')
+                    if cal_df is not None and not cal_df.empty:
+                        trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
                 except Exception as e:
-                    print(f"[moneyflow_dc 查询失败] {e}")
+                    print(f"[trade_cal 查询失败] {e}")
 
-                # 东财：5日用 moneyflow 标准接口累加
-                try:
-                    mf_5d = safe_api_call(pro.moneyflow, start_date=start_date_5d, end_date=trade_date)
-                    if mf_5d is not None and not (isinstance(mf_5d, dict) and mf_5d.get("error")) and not mf_5d.empty:
-                        temp_5d: Dict[str, float] = {}
-                        for _, row in mf_5d.iterrows():
-                            tc = str(row.get("ts_code", ""))
-                            if tc in member_map:
-                                # net_mf 单位：千元 → 元
-                                temp_5d[tc] = temp_5d.get(tc, 0) + _to_float(row.get("net_mf", 0)) * 1000
-                        for tc, val in temp_5d.items():
-                            main_in_5d_map[tc] = val
-                except Exception as e:
-                    print(f"[moneyflow 5日查询失败] {e}")
+                # 逐日查询 moneyflow_dc 全市场数据，累加成分股
+                for td in trade_dates:
+                    try:
+                        dc_mf = safe_api_call(pro.moneyflow_dc, trade_date=td)
+                        if dc_mf is not None and not (isinstance(dc_mf, dict) and dc_mf.get("error")) and not dc_mf.empty:
+                            for _, row in dc_mf.iterrows():
+                                tc = str(row.get("ts_code", ""))
+                                if tc in member_map:
+                                    # net_amount 单位：万元 → 元
+                                    net_amount = _to_float(row.get("net_amount", 0)) * 10000
+                                    # 最新日期记为当日
+                                    if td == trade_dates[-1]:
+                                        main_in_map[tc] = net_amount
+                                    # 全部累加为5日
+                                    main_in_5d_map[tc] = main_in_5d_map.get(tc, 0) + net_amount
+                    except Exception as e:
+                        print(f"[moneyflow_dc {td} 查询失败] {e}")
 
             # ========== 组装结果 ==========
             stocks = []
@@ -1460,7 +1462,7 @@ class TushareAPI:
                     "source": "dc",
                 }
             else:
-                # 个股资金流向：Tushare 标准 moneyflow（直接返回净流入）
+                # 个股资金流向：Tushare 标准 moneyflow
                 ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
                 df = safe_api_call(pro.moneyflow, ts_code=ts_code, start_date=today, end_date=today)
                 if isinstance(df, dict) and df.get("error"):
@@ -1468,12 +1470,17 @@ class TushareAPI:
                 if df is None or df.empty:
                     return {"error": "No data"}
                 row = df.iloc[0]
+                # moneyflow 返回 buy/sell 金额，需手动计算各档位净流入
+                small_in = _to_float(row.get("buy_sm_amount", 0)) - _to_float(row.get("sell_sm_amount", 0))
+                medium_in = _to_float(row.get("buy_md_amount", 0)) - _to_float(row.get("sell_md_amount", 0))
+                big_in = _to_float(row.get("buy_lg_amount", 0)) - _to_float(row.get("sell_lg_amount", 0))
+                super_big_in = _to_float(row.get("buy_elg_amount", 0)) - _to_float(row.get("sell_elg_amount", 0))
                 return {
-                    "main_in": _to_float(row.get("net_mf", 0)),
-                    "small_in": _to_float(row.get("net_mf_sm", 0)),
-                    "medium_in": _to_float(row.get("net_mf_md", 0)),
-                    "big_in": _to_float(row.get("net_mf_lg", 0)),
-                    "super_big_in": _to_float(row.get("net_mf_huge", 0)),
+                    "main_in": _to_float(row.get("net_mf_amount", 0)),
+                    "small_in": round(small_in, 2),
+                    "medium_in": round(medium_in, 2),
+                    "big_in": round(big_in, 2),
+                    "super_big_in": round(super_big_in, 2),
                     "source": "tushare",
                 }
         except Exception as e:
