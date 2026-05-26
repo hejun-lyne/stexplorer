@@ -39,6 +39,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [nameFilter, setNameFilter] = useState('');
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
   const [currentPage, setCurrentPage] = useState(1);
+  const [showList, setShowList] = useState<Stock.BanKuaiItem[]>([]);
   const PAGE_SIZE = 50;
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
@@ -54,40 +55,18 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     runGetBankuais(source, t, ps);
   }, []);
 
-  const sortItems = useCallback((items: Stock.BanKuaiItem[], key: string, t: number) => {
-    if (t == 0) {
-      return items;
-    }
-    const arr = [...items];
-    arr.sort((a, b) => {
-      let left = 0, right = 0;
-      if (key === 'szbl') {
-        const totalA = (Number(a.szs) || 0) + (Number(a.xds) || 0);
-        const totalB = (Number(b.szs) || 0) + (Number(b.xds) || 0);
-        left = totalA > 0 ? (Number(a.szs) || 0) / totalA : 0;
-        right = totalB > 0 ? (Number(b.szs) || 0) / totalB : 0;
-      } else {
-        // 统一转数值，避免字符串字典序或 NaN
-        left = Number((a as any)[key]) || 0;
-        right = Number((b as any)[key]) || 0;
-      }
-      if (t == 1) {
-        return left - right;
-      } else {
-        return right - left;
-      }
+  // 1. 修复 updateSortType：使用函数式更新消除闭包陷阱，并切排序时回到第1页
+  const updateSortType = useCallback((key: string) => {
+    setSortTypes((prev) => {
+      const current = prev[key] || 0;
+      const nextType = current === 0 ? 1 : current === 1 ? 2 : 0;
+      // 如果切回0（取消排序），直接清空对象，避免残留旧key干扰
+      return nextType === 0 ? {} : { [key]: nextType };
     });
-    return arr;
+    setCurrentPage(1);
   }, []);
 
-  const updateSortType = useCallback((key: string) => {
-    let type = sortTypes[key] || 0;
-    type = type == 0 ? 1 : type == 1 ? 2 : 0;
-    setSortTypes({ [key]: type });
-    setCurrentPage(1); // 切排序时回到第一页
-  }, [sortTypes]);
-
-  const showList = useMemo(() => {
+  useEffect(() => {
     let list = bankuais.filter((b) => {
       if (nameFilter && !b.name.includes(nameFilter)) return false;
       if (!filterMA20 && !filterMA40 && !filterMA60 && !filterRSI) return true;
@@ -99,10 +78,31 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     });
     const keys = Object.keys(sortTypes);
     if (keys.length === 1) {
-      list = sortItems(list, keys[0], sortTypes[keys[0]]);
+      const key = keys[0];
+      const t = sortTypes[key];
+      if (t !== 0) {
+        list = [...list].sort((a, b) => {
+          let left = 0, right = 0;
+          if (key === 'szbl') {
+            const totalA = (Number(a.szs) || 0) + (Number(a.xds) || 0);
+            const totalB = (Number(b.szs) || 0) + (Number(b.xds) || 0);
+            left = totalA > 0 ? (Number(a.szs) || 0) / totalA : 0;
+            right = totalB > 0 ? (Number(b.szs) || 0) / totalB : 0;
+          } else {
+            left = Number((a as any)[key]) || 0;
+            right = Number((b as any)[key]) || 0;
+          }
+          if (left === right) return 0;
+          if (t == 1) {
+            return left > right ? 1 : -1;
+          } else {
+            return left < right ? 1 : -1;
+          }
+        });
+      }
     }
-    return list;
-  }, [bankuais, sortTypes, nameFilter, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, sortItems]);
+    setShowList(list);
+  }, [bankuais, sortTypes, nameFilter, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults]);
 
   const totalPage = Math.max(1, Math.ceil(showList.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPage);
@@ -178,40 +178,50 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
 
   return (
     <>
-      <div className={styles.header}>
-        <Input
-          size="small"
-          placeholder="名字过滤"
-          value={nameFilter}
-          onChange={(e) => setNameFilter(e.target.value)}
-          style={{ width: 100, marginRight: 8 }}
-        />
-        <Button
-          size="small"
-          type="primary"
-          onClick={() => runGetBankuais(kLineApiSourceSetting, type, pageSize)}
-        >
-          刷新
-        </Button>
-        <Button
-          size="small"
-          onClick={onCalcTechIndicators}
-          loading={techFilterLoading}
-          style={{ marginLeft: 4 }}
-        >
-          技术指标
-        </Button>
-        <InputNumber
-          size="small"
-          min={0.1}
-          max={50}
-          step={0.1}
-          value={maThreshold}
-          onChange={(v) => setMaThreshold(v || 5)}
-          formatter={(value) => `${value}%`}
-          parser={(value) => parseFloat(value?.replace('%', '') || '5')}
-          style={{ width: 60, marginLeft: 4 }}
-        />
+      <div className={styles.header} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <Input
+            size="small"
+            placeholder="名字过滤"
+            value={nameFilter}
+            onChange={(e) => setNameFilter(e.target.value)}
+            style={{ width: 100, marginRight: 8 }}
+          />
+          <Button
+            size="small"
+            type="primary"
+            onClick={() => runGetBankuais(kLineApiSourceSetting, type, pageSize)}
+          >
+            刷新
+          </Button>
+          <Button
+            size="small"
+            onClick={onCalcTechIndicators}
+            loading={techFilterLoading}
+            style={{ marginLeft: 4 }}
+          >
+            技术指标
+          </Button>
+          <InputNumber
+            size="small"
+            min={0.1}
+            max={50}
+            step={0.1}
+            value={maThreshold}
+            onChange={(v) => setMaThreshold(v || 5)}
+            formatter={(value) => `${value}%`}
+            parser={(value) => parseFloat(value?.replace('%', '') || '5')}
+            style={{ width: 60, marginLeft: 4 }}
+          />
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <Button size="small" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={safePage <= 1}>上一页</Button>
+          <span style={{ margin: '0 8px', color: 'var(--main-text-color)' }}>{safePage} / {totalPage}</span>
+          <Button size="small" onClick={() => setCurrentPage((p) => Math.min(totalPage, p + 1))} disabled={safePage >= totalPage}>下一页</Button>
+          {!noMore && (
+            <Button size="small" onClick={loadMore} style={{ marginLeft: 8 }}>加载更多</Button>
+          )}
+        </div>
       </div>
       <Row className={styles.header}>
         <Col span={3}>名字</Col>
@@ -241,8 +251,9 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         <Col span={2}><Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>RSI6</Checkbox></Col>
       </Row>
       <div className={styles.table}>
-        {pageData.map((b) => (
-          <Row key={b.code} className={styles.row}>
+        <div className={styles.table}>
+        {pageData.map((b, index) => (
+          <Row key={`${b.code}-${index}`} className={styles.row}>
             <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenBKStocks(type, b.secid)}>
               {b.name}
             </Col>
@@ -250,12 +261,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               {!isNaN(b.zdf) ? b.zdf.toFixed(2) + '%' : '--'}
             </Col>
             <Col span={3}>{isNaN(b.hsl) ? '--' : parseFloat(b.hsl).toFixed(2) + '%'}</Col>
-            <Col span={3} className="text-up">
-              {b.szs}
-            </Col>
-            <Col span={3} className="text-down">
-              {b.xds}
-            </Col>
+            <Col span={3} className="text-up">{b.szs}</Col>
+            <Col span={3} className="text-down">{b.xds}</Col>
             <Col span={3} className={Utils.GetValueColor(b.szs - b.xds).textClass}>
               {((b.szs / (b.szs + b.xds)) * 100).toFixed(2) + '%'}
             </Col>
@@ -265,14 +272,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             <Col span={2}>{techPending[b.secid] ? '分析中' : rsiResults[b.secid] ? (rsiResults[b.secid].isOversold ? '✓' : '✗') : ''}</Col>
           </Row>
         ))}
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '5px 0', borderTop: '1px solid var(--main-border-color)' }}>
-        <Button size="small" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={safePage <= 1}>上一页</Button>
-        <span style={{ margin: '0 12px', color: 'var(--main-text-color)' }}>{safePage} / {totalPage}</span>
-        <Button size="small" onClick={() => setCurrentPage((p) => Math.min(totalPage, p + 1))} disabled={safePage >= totalPage}>下一页</Button>
-        {!noMore && (
-          <Button size="small" onClick={loadMore} style={{ marginLeft: 8 }}>加载更多</Button>
-        )}
+        {/* ...分页按钮... */}
+        </div>
       </div>
     </>
   );
