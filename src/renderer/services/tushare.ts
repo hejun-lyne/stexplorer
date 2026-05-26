@@ -351,6 +351,8 @@ export async function GetBanKuaisFromTushare(type: number, pageSize = 20): Promi
       lt: item.lt || 0,
       cje: item.cje || 0,
       cjl: item.cjl || 0,
+      mainIn: item.main_in || 0,
+      mainIn5d: item.main_in_5d || 0,
     }));
     
     return { to: result.boards.length, arr };

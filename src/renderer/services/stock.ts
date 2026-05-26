@@ -3436,6 +3436,8 @@ export async function GetBanKuais(type: BKType, pageSize = 20) {
           zsz: d.f20,
           szs: d.f104,
           xds: d.f105,
+          mainIn: 0,
+          mainIn5d: 0,
         } as Stock.BanKuaiItem;
       }),
     };

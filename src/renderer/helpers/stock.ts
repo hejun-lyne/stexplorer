@@ -430,7 +430,7 @@ let sAppendStocks: {
 }[] = [];
 
 export function AppendStockDetailPush(secid: string, callback: (detail: Stock.PartDetailItem) => void) {
-  const kv = sAppendStocks.find((o) => {o.secid == secid});
+  const kv = sAppendStocks.find((o) => o.secid === secid);
   if (kv) {
     kv.callback = callback;
     return;
@@ -449,7 +449,7 @@ export function RemoveStockDetailPush(secid: string) {
   for (let i = 0; i < sAppendStocks.length; i++) {
     if (sAppendStocks[i].secid == secid) {
       found = true;
-      sAppendStocks.splice(i);
+      sAppendStocks.splice(i, 1);
       break;
     }
   }
@@ -569,7 +569,7 @@ export function MultiStockDetailPush(restart:boolean) {
             return r;
           });
           details.forEach((v) => {
-            const kv = sAppendStocks.find((o) => {o.secid == v.secid});
+            const kv = sAppendStocks.find((o) => o.secid === v.secid);
             if (kv) {
               kv.callback(v);
             }

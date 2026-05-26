@@ -234,13 +234,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
               {s.zx.toFixed(2)}
             </Col>
             <Col span={4} className={Utils.GetValueColor(s.zdd).textClass}>
-              {(s.zdd / 100).toFixed(2)}
+              {(s.zdd).toFixed(2)}
             </Col>
             <Col span={4} className={Utils.GetValueColor(s.zdf).textClass}>
               {s.zdf.toFixed(2) + '%'}
             </Col>
-            <Col span={4}>{(s.lt / 100000000).toFixed(2) + '亿'}</Col>
-            <Col span={4}>{(s.hsl / 100).toFixed(2) + '%'}</Col>
+            <Col span={4}>{(s.lt).toFixed(2) + '亿'}</Col>
+            <Col span={4}>{(s.hsl).toFixed(2) + '%'}</Col>
           </Row>
         ))}
         {!noMore && (

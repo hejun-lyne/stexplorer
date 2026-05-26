@@ -11,6 +11,7 @@ import sys
 import json
 import argparse
 import os
+import math
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta, date
 
@@ -149,14 +150,20 @@ def _standardize_date(d: Any) -> str:
 
 def _to_float(val) -> float:
     try:
-        return float(val) if val is not None else 0
+        if val is None:
+            return 0
+        f = float(val)
+        return 0 if math.isnan(f) else f
     except (ValueError, TypeError):
         return 0
 
 
 def _to_int(val) -> int:
     try:
-        return int(float(val)) if val is not None else 0
+        if val is None:
+            return 0
+        f = float(val)
+        return 0 if math.isnan(f) else int(f)
     except (ValueError, TypeError):
         return 0
 
@@ -827,6 +834,9 @@ class TushareAPI:
         dc_index 返回字段：ts_code, name, idx_type, trade_date, open, close, high, low,
         pre_close, avg_price, change, pct_change, volume, amount, total_mv, float_mv,
         turnover_rate, up_num, down_num, flat_num
+
+        补充资金流向：moneyflow_ind_dc（行业）/ moneyflow_con_dc（概念）
+        返回今日主力净流入(main_in) 和 最近5日主力净流入(main_in_5d)
         """
         try:
             pro = get_pro()
@@ -836,11 +846,34 @@ class TushareAPI:
                 return df
             if df is None or (isinstance(df, pd.DataFrame) and df.empty):
                 return {"error": "No data"}
-            # 调试：记录实际返回的字段名和前几行数据（通过返回值传递）
-            debug_info = {
-                "columns": df.columns.tolist(),
-                "first_row": df.iloc[0].to_dict() if not df.empty else {},
-            }
+
+            # 去重：同一板块可能在接口返回中重复出现
+            df = df.drop_duplicates(subset=['ts_code'], keep='first')
+
+            # 获取资金流向数据
+            today = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+
+            # 行业板块用 moneyflow_ind_dc，概念板块用 moneyflow_con_dc
+            if bk_type == "industry":
+                flow_df = safe_api_call(pro.moneyflow_ind_dc, start_date=start_date, end_date=today)
+            else:
+                flow_df = safe_api_call(pro.moneyflow_con_dc, start_date=start_date, end_date=today)
+
+            today_flow_map: Dict[str, float] = {}
+            flow_5d_map: Dict[str, float] = {}
+
+            if flow_df is not None and not (isinstance(flow_df, dict) and flow_df.get("error")) and not flow_df.empty:
+                # 获取最近5个交易日的日期（降序）
+                dates = sorted(flow_df['trade_date'].astype(str).unique(), reverse=True)[:5]
+                for _, row in flow_df.iterrows():
+                    ts_code = str(row.get("ts_code", ""))
+                    date = str(row.get("trade_date", ""))
+                    net_amount = _to_float(row.get("net_amount", 0))
+                    if date == dates[0]:  # 最新日期（今日）
+                        today_flow_map[ts_code] = net_amount
+                    if date in dates:  # 最近5日累加
+                        flow_5d_map[ts_code] = flow_5d_map.get(ts_code, 0) + net_amount
 
             boards = []
             for _, row in df.iterrows():
@@ -859,11 +892,12 @@ class TushareAPI:
                     "cjl": _to_int(row.get("volume", 0)),         # 成交量
                     "szs": _to_int(row.get("up_num", 0)),         # 上涨家数
                     "xds": _to_int(row.get("down_num", 0)),        # 下跌家数
+                    "main_in": today_flow_map.get(ts_code, 0),     # 今日主力净流入（元）
+                    "main_in_5d": flow_5d_map.get(ts_code, 0),     # 5日主力净流入（元）
                     "source": "dc",
                 })
             return {
                 "boards": boards,
-                "debug": debug_info,
                 "count": len(boards),
             }
         except Exception as e:

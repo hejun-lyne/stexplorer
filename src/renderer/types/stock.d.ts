@@ -396,6 +396,8 @@ declare namespace Stock {
     hsl: number;
     szs: number; // 上涨数
     xds: number; // 下跌数
+    mainIn: number; // 今日主力净流入（元）
+    mainIn5d: number; // 5日主力净流入（元）
   }
 
   export interface ZTItem {

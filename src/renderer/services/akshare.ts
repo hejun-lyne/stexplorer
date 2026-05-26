@@ -336,6 +336,8 @@ export async function GetBanKuaisFromAkshare(type: number, pageSize = 20): Promi
       zsz: item.zsz,
       szs: 0,
       xds: 0,
+      mainIn: 0,
+      mainIn5d: 0,
     }));
     
     return { to: result.length, arr };

@@ -56,6 +56,18 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   }, []);
 
   // 1. 修复 updateSortType：使用函数式更新消除闭包陷阱，并切排序时回到第1页
+  // 格式化资金流向金额（元 -> 亿/万）
+  const formatMoneyFlow = (val: number) => {
+    const v = Number(val) || 0;
+    if (Math.abs(v) >= 1e8) {
+      return (v / 1e8).toFixed(2) + '亿';
+    }
+    if (Math.abs(v) >= 1e4) {
+      return (v / 1e4).toFixed(2) + '万';
+    }
+    return v.toFixed(0);
+  };
+
   const updateSortType = useCallback((key: string) => {
     setSortTypes((prev) => {
       const current = prev[key] || 0;
@@ -245,6 +257,14 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           上涨比例
           <Button size="small" type="text" icon={sortTypes.szbl == 1 ? <CaretUpOutlined /> : sortTypes.szbl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szbl')} />
         </Col>
+        <Col span={3}>
+          今日主力净流入
+          <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
+        </Col>
+        <Col span={3}>
+          5日主力净流入
+          <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
+        </Col>
         <Col span={2}><Checkbox checked={filterMA20} onChange={(e) => setFilterMA20(e.target.checked)} style={{ color: '#fff' }}>MA20</Checkbox></Col>
         <Col span={2}><Checkbox checked={filterMA40} onChange={(e) => setFilterMA40(e.target.checked)} style={{ color: '#fff' }}>MA40</Checkbox></Col>
         <Col span={2}><Checkbox checked={filterMA60} onChange={(e) => setFilterMA60(e.target.checked)} style={{ color: '#fff' }}>MA60</Checkbox></Col>
@@ -265,6 +285,12 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             <Col span={3} className="text-down">{b.xds}</Col>
             <Col span={3} className={Utils.GetValueColor(b.szs - b.xds).textClass}>
               {((b.szs / (b.szs + b.xds)) * 100).toFixed(2) + '%'}
+            </Col>
+            <Col span={3} className={Utils.GetValueColor(b.mainIn).textClass}>
+              {formatMoneyFlow(b.mainIn)}
+            </Col>
+            <Col span={3} className={Utils.GetValueColor(b.mainIn5d).textClass}>
+              {formatMoneyFlow(b.mainIn5d)}
             </Col>
             <Col span={2}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma20 ? '✓' : '✗') : ''}</Col>
             <Col span={2}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma40 ? '✓' : '✗') : ''}</Col>
