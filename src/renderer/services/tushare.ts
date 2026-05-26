@@ -2,7 +2,8 @@
  * Tushare 数据源调用服务
  * 用于提供 tushare 数据接口的接入
  * 
- * 需要设置 TUSHARE_TOKEN 环境变量或在系统中配置 token
+ * Token 从系统设置中读取（setting.systemSetting.tushareTokenSetting）
+ * 支持 6000 积分会员的绝大部分接口
  */
 
 import dayjs from 'dayjs';
@@ -11,6 +12,7 @@ import * as Utils from '@/utils';
 import { KLineType, StockMarketType } from '@/utils/enums';
 import { Stock } from '@/types/stock';
 import * as Helpers from '../helpers';
+import store from '@/store/configureStore';
 
 const { execPyScript } = window.contextModules.electron;
 
@@ -36,7 +38,12 @@ function logError(error: any, method: string, extraInfo?: string) {
  */
 async function callTushare(method: string, params: Record<string, any> = {}): Promise<any> {
   try {
-    const result = await execPyScript(TUSHARE_SCRIPT, [method, '--params', JSON.stringify(params)]);
+    const token = store.getState().setting?.systemSetting?.tushareTokenSetting || '';
+    const args = [method, '--params', JSON.stringify(params)];
+    if (token) {
+      args.push('--token', token);
+    }
+    const result = await execPyScript(TUSHARE_SCRIPT, args);
     // Python 脚本会输出 JSON 字符串
     if (Array.isArray(result) && result.length > 0) {
       const output = result[result.length - 1]; // 取最后一行输出

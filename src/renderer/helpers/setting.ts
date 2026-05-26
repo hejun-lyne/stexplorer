@@ -17,6 +17,7 @@ export const defaultSystemSetting: System.Setting = {
   freshDelaySetting: 3,
   useZizaiDayK: false,
   kimiApiKeySetting: '',
+  tushareTokenSetting: '',
   initialCapital: 100000,
 };
 

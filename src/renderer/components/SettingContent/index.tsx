@@ -45,6 +45,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     trainDate,
     kLineApiSourceSetting,
     kimiApiKeySetting,
+    tushareTokenSetting,
     initialCapital,
   } = useSelector((state: StoreState) => state.setting.systemSetting);
   // 数据来源
@@ -66,6 +67,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
   const [autoFresh, setAutoFresh] = useState(autoFreshSetting);
   const [freshDelay, setFreshDelay] = useState(freshDelaySetting);
   const [kLineApiSource, setKLineApiSource] = useState(kLineApiSourceSetting);
+  const [tushareToken, setTushareToken] = useState(tushareTokenSetting);
   const [kimiApiKey, setKimiApiKey] = useState(kimiApiKeySetting);
 
   function onSave() {
@@ -85,6 +87,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
         ontrain: istrain,
         trainDate: ontrainDate,
         kLineApiSourceSetting: kLineApiSource,
+        tushareTokenSetting: tushareToken,
         kimiApiKeySetting: kimiApiKey,
         initialCapital,
       })
@@ -297,6 +300,22 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
                 onChange={(e) => setKLineApiSource(e.target.value)}
                 value={kLineApiSource}
               />
+            </section>
+            <section>
+              <label>Tushare Token：</label>
+              <Input.Password
+                value={tushareToken}
+                onChange={(e) => setTushareToken(e.target.value)}
+                placeholder="在 tushare.pro 注册获取"
+                size="small"
+                style={{ flex: 1 }}
+              />
+            </section>
+            <section>
+              <label></label>
+              <span style={{ fontSize: 12, color: '#999' }}>
+                在 <a onClick={() => onOpenUrl('https://tushare.pro/register')}>Tushare Pro</a> 注册获取 Token，6000 积分可调用大部分接口
+              </span>
             </section>
           </div>
         </StandCard>

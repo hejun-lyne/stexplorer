@@ -28,6 +28,7 @@ export const defaultSystemSetting: System.Setting = {
   kLineApiSourceSetting: Enums.FundApiType.Eastmoney,
   useZizaiDayK: false,
   kimiApiKeySetting: '',
+  tushareTokenSetting: '',
   initialCapital: 100000,
 };
 
