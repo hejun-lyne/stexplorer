@@ -246,66 +246,66 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         </div>
       </div>
       <Row className={styles.header}>
-        <Col span={2}>名字</Col>
-        <Col span={1}>
+        <Col span={4}>名字</Col>
+        <Col span={2}>
           涨跌幅
           <Button size="small" type="text" icon={sortTypes.zdf == 1 ? <CaretUpOutlined /> : sortTypes.zdf == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('zdf')} />
         </Col>
-        <Col span={1}>
+        <Col span={2}>
           换手率
           <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
         </Col>
-        <Col span={1}>
+        <Col span={2}>
           上涨家数
           <Button size="small" type="text" icon={sortTypes.szs == 1 ? <CaretUpOutlined /> : sortTypes.szs == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szs')} />
         </Col>
-        <Col span={1}>
+        <Col span={2}>
           下跌家数
           <Button size="small" type="text" icon={sortTypes.xds == 1 ? <CaretUpOutlined /> : sortTypes.xds == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('xds')} />
         </Col>
-        <Col span={1}>
+        <Col span={2}>
           上涨比例
           <Button size="small" type="text" icon={sortTypes.szbl == 1 ? <CaretUpOutlined /> : sortTypes.szbl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szbl')} />
         </Col>
-        <Col span={2}>
+        <Col span={3}>
           今日主力净流入
           <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
         </Col>
-        <Col span={2}>
+        <Col span={3}>
           5日主力净流入
           <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
         </Col>
-        <Col span={2}><Checkbox checked={filterMA20} onChange={(e) => setFilterMA20(e.target.checked)} style={{ color: '#fff' }}>MA20</Checkbox></Col>
-        <Col span={2}><Checkbox checked={filterMA40} onChange={(e) => setFilterMA40(e.target.checked)} style={{ color: '#fff' }}>MA40</Checkbox></Col>
-        <Col span={2}><Checkbox checked={filterMA60} onChange={(e) => setFilterMA60(e.target.checked)} style={{ color: '#fff' }}>MA60</Checkbox></Col>
-        <Col span={2}><Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>RSI6</Checkbox></Col>
+        <Col span={1}><Checkbox checked={filterMA20} onChange={(e) => setFilterMA20(e.target.checked)} style={{ color: '#fff' }}>MA20</Checkbox></Col>
+        <Col span={1}><Checkbox checked={filterMA40} onChange={(e) => setFilterMA40(e.target.checked)} style={{ color: '#fff' }}>MA40</Checkbox></Col>
+        <Col span={1}><Checkbox checked={filterMA60} onChange={(e) => setFilterMA60(e.target.checked)} style={{ color: '#fff' }}>MA60</Checkbox></Col>
+        <Col span={1}><Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>RSI6</Checkbox></Col>
       </Row>
       <div className={styles.table}>
         <div className={styles.table}>
         {pageData.map((b, index) => (
           <Row key={`${b.code}-${index}`} className={styles.row}>
-            <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenBKStocks(type, b.secid)}>
+            <Col span={4} style={{ cursor: 'pointer' }} onClick={() => onOpenBKStocks(type, b.secid)}>
               {b.name}
             </Col>
-            <Col span={1} style={{ cursor: 'pointer' }} className={Utils.GetValueColor(b.zdf).textClass} onClick={() => onOpenBK(b.secid, b.name)}>
+            <Col span={2} style={{ cursor: 'pointer' }} className={Utils.GetValueColor(b.zdf).textClass} onClick={() => onOpenBK(b.secid, b.name)}>
               {!isNaN(b.zdf) ? b.zdf.toFixed(2) + '%' : '--'}
             </Col>
-            <Col span={1}>{isNaN(b.hsl) ? '--' : parseFloat(b.hsl).toFixed(2) + '%'}</Col>
-            <Col span={1} className="text-up">{b.szs}</Col>
-            <Col span={1} className="text-down">{b.xds}</Col>
-            <Col span={1} className={Utils.GetValueColor(b.szs - b.xds).textClass}>
+            <Col span={2}>{isNaN(b.hsl) ? '--' : parseFloat(b.hsl).toFixed(2) + '%'}</Col>
+            <Col span={2} className="text-up">{b.szs}</Col>
+            <Col span={2} className="text-down">{b.xds}</Col>
+            <Col span={2} className={Utils.GetValueColor(b.szs - b.xds).textClass}>
               {((b.szs / (b.szs + b.xds)) * 100).toFixed(2) + '%'}
             </Col>
-            <Col span={2} className={Utils.GetValueColor(b.mainIn).textClass}>
+            <Col span={3} className={Utils.GetValueColor(b.mainIn).textClass}>
               {formatMoneyFlow(b.mainIn)}
             </Col>
-            <Col span={2} className={Utils.GetValueColor(b.mainIn5d).textClass}>
+            <Col span={3} className={Utils.GetValueColor(b.mainIn5d).textClass}>
               {formatMoneyFlow(b.mainIn5d)}
             </Col>
-            <Col span={2}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma20 ? '✓' : '✗') : ''}</Col>
-            <Col span={2}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma40 ? '✓' : '✗') : ''}</Col>
-            <Col span={2}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma60 ? '✓' : '✗') : ''}</Col>
-            <Col span={2}>{techPending[b.secid] ? '分析中' : rsiResults[b.secid] ? (rsiResults[b.secid].isOversold ? '✓' : '✗') : ''}</Col>
+            <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma20 ? '✓' : '✗') : ''}</Col>
+            <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma40 ? '✓' : '✗') : ''}</Col>
+            <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma60 ? '✓' : '✗') : ''}</Col>
+            <Col span={1}>{techPending[b.secid] ? '分析中' : rsiResults[b.secid] ? (rsiResults[b.secid].isOversold ? '✓' : '✗') : ''}</Col>
           </Row>
         ))}
         {/* ...分页按钮... */}
