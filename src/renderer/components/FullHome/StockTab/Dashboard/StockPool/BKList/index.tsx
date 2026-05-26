@@ -40,6 +40,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
   const [currentPage, setCurrentPage] = useState(1);
   const [showList, setShowList] = useState<Stock.BanKuaiItem[]>([]);
+  const [dataSource, setDataSource] = useState<'dc' | 'ths'>('dc');
   const PAGE_SIZE = 50;
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
@@ -51,8 +52,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       onBankuaisUpdate(type, d.arr);
     },
   });
-  const mayGetBankuais = useCallback((source: number, t: BKType, ps: number) => {
-    runGetBankuais(source, t, ps);
+  const mayGetBankuais = useCallback((source: number, t: BKType, ps: number, ds: string) => {
+    runGetBankuais(source, t, ps, ds);
   }, []);
 
   // 1. 修复 updateSortType：使用函数式更新消除闭包陷阱，并切排序时回到第1页
@@ -129,13 +130,13 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   // useWorkDayTimeToDo(() => mayGetBankuais(kLineApiSourceSetting, type, pageSize), active ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
   useEffect(() => {
     setCurrentPage(1);
-    runGetBankuais(kLineApiSourceSetting, type, pageSize);
-  }, [kLineApiSourceSetting, type]);
+    runGetBankuais(kLineApiSourceSetting, type, pageSize, dataSource);
+  }, [kLineApiSourceSetting, type, dataSource]);
   const loadMore = useCallback(() => {
     const ps = pageSize + 40;
     setPageSize(ps);
-    mayGetBankuais(kLineApiSourceSetting, type, ps);
-  }, [kLineApiSourceSetting, type, pageSize]);
+    mayGetBankuais(kLineApiSourceSetting, type, ps, dataSource);
+  }, [kLineApiSourceSetting, type, pageSize, dataSource]);
 
   const onCalcTechIndicators = useCallback(async () => {
     if (bankuais.length === 0) {
@@ -199,10 +200,19 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             onChange={(e) => setNameFilter(e.target.value)}
             style={{ width: 100, marginRight: 8 }}
           />
+          <Select
+            size="small"
+            value={dataSource}
+            onChange={(v) => setDataSource(v as 'dc' | 'ths')}
+            style={{ width: 100, marginRight: 8 }}
+          >
+            <Select.Option value="dc">东财数据</Select.Option>
+            <Select.Option value="ths">同花顺数据</Select.Option>
+          </Select>
           <Button
             size="small"
             type="primary"
-            onClick={() => runGetBankuais(kLineApiSourceSetting, type, pageSize)}
+            onClick={() => runGetBankuais(kLineApiSourceSetting, type, pageSize, dataSource)}
           >
             刷新
           </Button>
@@ -236,32 +246,32 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         </div>
       </div>
       <Row className={styles.header}>
-        <Col span={3}>名字</Col>
-        <Col span={3}>
+        <Col span={2}>名字</Col>
+        <Col span={1}>
           涨跌幅
           <Button size="small" type="text" icon={sortTypes.zdf == 1 ? <CaretUpOutlined /> : sortTypes.zdf == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('zdf')} />
         </Col>
-        <Col span={3}>
+        <Col span={1}>
           换手率
           <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
         </Col>
-        <Col span={3}>
+        <Col span={1}>
           上涨家数
           <Button size="small" type="text" icon={sortTypes.szs == 1 ? <CaretUpOutlined /> : sortTypes.szs == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szs')} />
         </Col>
-        <Col span={3}>
+        <Col span={1}>
           下跌家数
           <Button size="small" type="text" icon={sortTypes.xds == 1 ? <CaretUpOutlined /> : sortTypes.xds == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('xds')} />
         </Col>
-        <Col span={3}>
+        <Col span={1}>
           上涨比例
           <Button size="small" type="text" icon={sortTypes.szbl == 1 ? <CaretUpOutlined /> : sortTypes.szbl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szbl')} />
         </Col>
-        <Col span={3}>
+        <Col span={2}>
           今日主力净流入
           <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
         </Col>
-        <Col span={3}>
+        <Col span={2}>
           5日主力净流入
           <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
         </Col>
@@ -274,22 +284,22 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         <div className={styles.table}>
         {pageData.map((b, index) => (
           <Row key={`${b.code}-${index}`} className={styles.row}>
-            <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenBKStocks(type, b.secid)}>
+            <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenBKStocks(type, b.secid)}>
               {b.name}
             </Col>
-            <Col span={3} className={Utils.GetValueColor(b.zdf).textClass} onClick={() => onOpenBK(b.secid, b.name)}>
+            <Col span={1} style={{ cursor: 'pointer' }} className={Utils.GetValueColor(b.zdf).textClass} onClick={() => onOpenBK(b.secid, b.name)}>
               {!isNaN(b.zdf) ? b.zdf.toFixed(2) + '%' : '--'}
             </Col>
-            <Col span={3}>{isNaN(b.hsl) ? '--' : parseFloat(b.hsl).toFixed(2) + '%'}</Col>
-            <Col span={3} className="text-up">{b.szs}</Col>
-            <Col span={3} className="text-down">{b.xds}</Col>
-            <Col span={3} className={Utils.GetValueColor(b.szs - b.xds).textClass}>
+            <Col span={1}>{isNaN(b.hsl) ? '--' : parseFloat(b.hsl).toFixed(2) + '%'}</Col>
+            <Col span={1} className="text-up">{b.szs}</Col>
+            <Col span={1} className="text-down">{b.xds}</Col>
+            <Col span={1} className={Utils.GetValueColor(b.szs - b.xds).textClass}>
               {((b.szs / (b.szs + b.xds)) * 100).toFixed(2) + '%'}
             </Col>
-            <Col span={3} className={Utils.GetValueColor(b.mainIn).textClass}>
+            <Col span={2} className={Utils.GetValueColor(b.mainIn).textClass}>
               {formatMoneyFlow(b.mainIn)}
             </Col>
-            <Col span={3} className={Utils.GetValueColor(b.mainIn5d).textClass}>
+            <Col span={2} className={Utils.GetValueColor(b.mainIn5d).textClass}>
               {formatMoneyFlow(b.mainIn5d)}
             </Col>
             <Col span={2}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma20 ? '✓' : '✗') : ''}</Col>

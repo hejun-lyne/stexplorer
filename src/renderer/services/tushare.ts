@@ -321,10 +321,10 @@ export async function GetTrendFromTushare(secid: string): Promise<{ secid: strin
 
 // ==================== 板块数据 ====================
 
-export async function GetBanKuaisFromTushare(type: number, pageSize = 20): Promise<any> {
+export async function GetBanKuaisFromTushare(type: number, pageSize = 20, dataSource = 'dc'): Promise<any> {
   try {
     const bk_type = type === 0 ? 'industry' : 'concept';
-    const result = await callTushare('get_sector_boards', { bk_type });
+    const result = await callTushare('get_sector_boards', { bk_type, data_source: dataSource });
     
     if (result.error) {
       console.error('获取板块失败:', result.error);
@@ -364,9 +364,9 @@ export async function GetBanKuaisFromTushare(type: number, pageSize = 20): Promi
 
 // ==================== 板块成分股 ====================
 
-export async function GetBankuaiStocksFromTushare(secid: string, count = 20): Promise<any> {
+export async function GetBankuaiStocksFromTushare(secid: string): Promise<any> {
   try {
-    const result = await callTushare('get_board_stocks', { secid, count });
+    const result = await callTushare('get_board_stocks', { secid });
     
     if (result.error) {
       console.error('获取板块成分股失败:', result.error);

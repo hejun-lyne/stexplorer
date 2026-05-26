@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect } from 'react';
-import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input } from 'antd';
+import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -27,8 +27,8 @@ export interface STListProps {
 }
 
 const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, onChangeBK, onOpenStock, active }) => {
-  const [pageSize, setPageSize] = useState(40);
-  const [noMore, setNoMore] = useState(false);
+  const [pageSize, setPageSize] = useState(20);
+  const [currentPage, setCurrentPage] = useState(1);
   const [fdays, setFdays] = useState(8);
   const [filtering, setFiltering] = useState(false);
   const [ftypes, setFtypes] = useState<number[]>([]);
@@ -52,7 +52,6 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     throwOnError: true,
     manual: true,
     onSuccess: (data) => {
-      setNoMore(data.total == data.stocks.length);
       setStocks(data.stocks as Stock.DetailItem[]);
       if (ftypes.length > 0) {
         setFiltering(true);
@@ -76,15 +75,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   );
   useWorkDayTimeToDo(
     () => {
-      mayGetStocks(kLineApiSourceSetting, secid, pageSize);
+      mayGetStocks(kLineApiSourceSetting, secid, 200);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
   );
-  const loadMore = useCallback(() => {
-    const ps = pageSize + 40;
-    setPageSize(ps);
-    mayGetStocks(kLineApiSourceSetting, secid, ps);
-  }, [pageSize, secid, kLineApiSourceSetting]);
+  const onPageChange = useCallback((page: number) => {
+    setCurrentPage(page);
+  }, []);
 
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
@@ -92,21 +89,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         return;
       }
       // 刷新数据
-      setNoMore(false);
-      setPageSize(20);
+      setCurrentPage(1);
       // mayGetStocks(s, pageSize);
       onChangeBK(t, s);
     },
-    [secid, pageSize]
+    [secid]
   );
 
   useEffect(() => {
-    mayGetStocks(kLineApiSourceSetting, secid, pageSize);
+    mayGetStocks(kLineApiSourceSetting, secid, 200);
   }, [secid, kLineApiSourceSetting]);
 
   const updateFtypes = useCallback(
     (ts: any[]) => {
       setFtypes(ts);
+      setCurrentPage(1);
       if (ts.length && stocks.length) {
         setFiltering(true);
         runFilterStocks(
@@ -153,6 +150,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     setShowList(list);
+    setCurrentPage(1);
   }, [filterStocks, sortTypes, nameFilter, sortItems]);
   return (
     <>
@@ -225,7 +223,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         </Col>
       </Row>
       <div className={classNames(styles.table, styles.moreheader)}>
-        {showList.map((s) => (
+        {showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
           <Row key={s.code} className={styles.row}>
             <Col span={4} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
               {s.name}
@@ -243,11 +241,15 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             <Col span={4}>{(s.hsl).toFixed(2) + '%'}</Col>
           </Row>
         ))}
-        {!noMore && (
-          <div className={styles.loadmore} onClick={loadMore}>
-            <span>加载更多</span>
-          </div>
-        )}
+        <Pagination
+          current={currentPage}
+          pageSize={pageSize}
+          total={showList.length}
+          onChange={onPageChange}
+          showSizeChanger={false}
+          size="small"
+          style={{ padding: '10px 0', textAlign: 'center' }}
+        />
       </div>
     </>
   );

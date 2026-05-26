@@ -1770,7 +1770,7 @@ export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, 
   if (source === Enums.FundApiType.Akshare) {
     result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
   } else if (source === Enums.FundApiType.Tushare) {
-    result = await TushareAPI.GetBankuaiStocksFromTushare(secid, count);
+    result = await TushareAPI.GetBankuaiStocksFromTushare(secid);
   } else {
     result = await GetBankuaiStocksFromEastmoney(secid, count);
   }
@@ -4427,12 +4427,12 @@ export async function FromDataSource(source: Enums.FundApiType, secid: string) {
   return FromEastmoney(secid);
 }
 
-export async function GetBanKuaisFromDataSource(source: Enums.FundApiType, type: BKType, pageSize = 20) {
+export async function GetBanKuaisFromDataSource(source: Enums.FundApiType, type: BKType, pageSize = 20, dataSource = 'dc') {
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetBanKuaisFromAkshare(type, pageSize);
   }
   if (source === Enums.FundApiType.Tushare) {
-    return TushareAPI.GetBanKuaisFromTushare(type, pageSize);
+    return TushareAPI.GetBanKuaisFromTushare(type, pageSize, dataSource);
   }
   // 默认使用 Eastmoney
   return GetBanKuais(type, pageSize);

@@ -828,18 +828,77 @@ class TushareAPI:
 
 
     @staticmethod
-    def get_sector_boards(bk_type: str = "industry") -> List[Dict[str, Any]]:
-        """获取东财板块列表（dc_index，6000积分）
+    def get_sector_boards(bk_type: str = "industry", data_source: str = "dc") -> List[Dict[str, Any]]:
+        """获取板块列表
 
-        dc_index 返回字段：ts_code, name, idx_type, trade_date, open, close, high, low,
+        data_source: dc-东财数据, ths-同花顺数据
+
+        东财(dc_index) 返回字段：ts_code, name, idx_type, trade_date, open, close, high, low,
         pre_close, avg_price, change, pct_change, volume, amount, total_mv, float_mv,
         turnover_rate, up_num, down_num, flat_num
 
-        补充资金流向：moneyflow_ind_dc（行业）/ moneyflow_con_dc（概念）
+        同花顺(moneyflow_ind_ths/moneyflow_cnt_ths) 返回字段：
+        trade_date, ts_code, name/industry, lead_stock, close_price, pct_change,
+        company_num, net_buy_amount, net_sell_amount, net_amount(亿元)
+
+        补充资金流向：
+        - 东财：moneyflow_ind_dc（行业）/ moneyflow_con_dc（概念）
+        - 同花顺：moneyflow_ind_ths（行业）/ moneyflow_cnt_ths（概念）
         返回今日主力净流入(main_in) 和 最近5日主力净流入(main_in_5d)
         """
         try:
             pro = get_pro()
+            today = datetime.now().strftime('%Y%m%d')
+
+            if data_source == "ths":
+                # ========== 同花顺数据源 ==========
+                # 行业板块用 moneyflow_ind_ths，概念板块用 moneyflow_cnt_ths
+                if bk_type == "industry":
+                    df = safe_api_call(pro.moneyflow_ind_ths, trade_date=today)
+                else:
+                    df = safe_api_call(pro.moneyflow_cnt_ths, trade_date=today)
+
+                if isinstance(df, dict) and df.get("error"):
+                    return df
+                if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                    return {"error": "No data"}
+
+                boards = []
+                for _, row in df.iterrows():
+                    ts_code = str(row.get("ts_code", ""))
+                    # 同花顺板块代码格式如 885748.TI，去掉 .TI 后缀
+                    code = ts_code.replace(".TI", "").replace(".ti", "") if ".TI" in ts_code or ".ti" in ts_code else ts_code
+                    name = str(row.get("name", row.get("industry", "")))
+                    # net_amount 单位为亿元，转换为元
+                    net_amount = _to_float(row.get("net_amount", 0))
+                    # 安全处理：如果数值绝对值小于 1e6 且不为 0，视为亿元需要转换
+                    # 否则保持原值（元）
+                    if abs(net_amount) > 0 and abs(net_amount) < 1e6:
+                        net_amount = net_amount * 1e8
+
+                    boards.append({
+                        "code": code,
+                        "name": name,
+                        "zx": _to_float(row.get("close", row.get("close_price", 0))),
+                        "zdd": 0,
+                        "zdf": _to_float(row.get("pct_change", 0)),
+                        "hsl": 0,
+                        "zsz": 0,
+                        "lt": 0,
+                        "cje": 0,
+                        "cjl": 0,
+                        "szs": 0,
+                        "xds": 0,
+                        "main_in": net_amount,
+                        "main_in_5d": 0,
+                        "source": "ths",
+                    })
+                return {
+                    "boards": boards,
+                    "count": len(boards),
+                }
+
+            # ========== 东财数据源（默认） ==========
             idx_type = "行业板块" if bk_type == "industry" else "概念板块"
             df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
             if isinstance(df, dict) and df.get("error"):
@@ -851,7 +910,6 @@ class TushareAPI:
             df = df.drop_duplicates(subset=['ts_code'], keep='first')
 
             # 获取资金流向数据
-            today = datetime.now().strftime('%Y%m%d')
             start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
 
             # 行业板块用 moneyflow_ind_dc，概念板块用 moneyflow_con_dc
@@ -904,7 +962,7 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
-    def get_board_stocks(secid: str, count: int = 20) -> Dict[str, Any]:
+    def get_board_stocks(secid: str) -> Dict[str, Any]:
         """获取东财板块成分股（dc_member，6000积分）
         
         返回字段补全：通过 daily + daily_basic 获取最新行情
@@ -1013,8 +1071,8 @@ class TushareAPI:
                     "cs": 0,
                 })
 
-            if count > 0 and len(stocks) > count:
-                stocks = stocks[:count]
+            # if count > 0 and len(stocks) > count:
+            #     stocks = stocks[:count]
             return {"total": len(df), "stocks": stocks}
         except Exception as e:
             return {"error": str(e)}

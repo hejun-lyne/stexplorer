@@ -2364,7 +2364,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
               );
             }
             // firstQSAppear 黄色标记
-            if (firstQSAppear && typeIndex !== 0 && klineData.klines[typeIndex]?.length > 0) {
+            if (firstQSAppear && typeof firstQSAppear === 'string' && typeIndex !== 0 && klineData.klines[typeIndex]?.length > 0) {
               const day = firstQSAppear.substring(0, 10);
               const ks = klineData.klines[typeIndex];
               let idx = -1;
