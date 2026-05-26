@@ -253,6 +253,110 @@ def safe_api_call(func, *args, **kwargs):
         return {"error": err_msg}
 
 
+# ============ 同花顺板块成分股辅助函数 ============
+
+def _get_ths_cookie() -> str:
+    """获取同花顺 cookie v_code（从 akshare 的 ths.js）"""
+    try:
+        from py_mini_racer import MiniRacer
+        import os
+        ths_js_paths = [
+            os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages/akshare/data/ths.js"),
+            "/usr/local/lib/python3.9/site-packages/akshare/data/ths.js",
+            "/usr/lib/python3.9/site-packages/akshare/data/ths.js",
+        ]
+        js_content = None
+        for path in ths_js_paths:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    js_content = f.read()
+                break
+        if not js_content:
+            return ""
+        js_code = MiniRacer()
+        js_code.eval(js_content)
+        return js_code.call("v")
+    except Exception:
+        return ""
+
+
+def _get_board_stocks_from_ths(code: str) -> List[Dict[str, Any]]:
+    """从同花顺网页获取板块成分股"""
+    if requests is None:
+        return []
+    try:
+        v_code = _get_ths_cookie()
+        if not v_code:
+            return []
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Cookie": f"v={v_code}",
+        }
+        if code.startswith("88"):
+            url = f"https://q.10jqka.com.cn/thshy/detail/code/{code}/"
+            headers["Referer"] = "https://q.10jqka.com.cn/thshy/"
+        elif code.startswith("3"):
+            url = f"https://q.10jqka.com.cn/gn/detail/code/{code}/"
+            headers["Referer"] = "https://q.10jqka.com.cn/gn/"
+        else:
+            return []
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(response.text, "lxml")
+        table = soup.find("table")
+        if not table:
+            return []
+        stocks = []
+        rows = table.find_all("tr")
+        for row in rows[1:]:
+            cols = row.find_all("td")
+            if len(cols) < 5:
+                continue
+            stock_code = cols[1].text.strip()
+            name = cols[2].text.strip()
+            if not stock_code or not stock_code.isdigit():
+                continue
+            market = 1 if stock_code.startswith("6") else 0
+            try:
+                zx = float(cols[3].text.strip() or 0)
+            except ValueError:
+                zx = 0
+            try:
+                zdf = float(cols[4].text.strip().replace("%", "") or 0)
+            except ValueError:
+                zdf = 0
+            stocks.append({
+                "code": stock_code,
+                "name": name,
+                "secid": f"{market}.{stock_code}",
+                "zx": zx,
+                "zdf": zdf,
+                "zdd": 0,
+                "cjl": 0,
+                "cje": 0,
+                "zf": 0,
+                "zg": 0,
+                "zd": 0,
+                "jk": 0,
+                "zs": 0,
+                "lb": 0,
+                "hsl": 0,
+                "syl": 0,
+                "sjl": 0,
+                "sz": 0,
+                "lt": 0,
+                "cm5": 0,
+                "cd60": 0,
+                "cy1": 0,
+                "cs": 0,
+            })
+        return stocks
+    except Exception as e:
+        print(f"同花顺板块成分股获取失败: {code}, {e}")
+        return []
+
+
 # ============ API 封装类 ============
 
 class TushareAPI:
@@ -963,43 +1067,83 @@ class TushareAPI:
 
     @staticmethod
     def get_board_stocks(secid: str) -> Dict[str, Any]:
-        """获取东财板块成分股（dc_member，6000积分）
+        """获取板块成分股，支持东财和同花顺板块
+        
+        自动判断板块类型：
+        - BK 开头 → 东财板块（dc_member + moneyflow_dc + moneyflow）
+        - 88/3 开头 → 同花顺板块（网页抓取 + moneyflow_ths）
         
         返回字段补全：通过 daily + daily_basic 获取最新行情
+        新增主力资金：main_in（当日）, main_in_5d（5日）
         """
         try:
             pro = get_pro()
             code = convert_secid_to_pure_code(secid)
-            # dc_member 需要 BKxxxx.DC 格式
-            ts_code = f"{code}.DC" if not code.endswith(".DC") else code
             trade_date = datetime.now().strftime('%Y%m%d')
+            start_date_5d = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
 
-            df = cached_api_call(f"dc_member_{ts_code}", 24, pro.dc_member, ts_code=ts_code, trade_date=trade_date)
-            if isinstance(df, dict) and df.get("error"):
-                return df
-            if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+            # 判断板块类型
+            is_dc = code.startswith("BK")
+            is_ths = code.startswith("88") or code.startswith("3")
+            
+            member_map: Dict[str, Dict[str, Any]] = {}  # member_ts -> info
+
+            # ========== 获取成分股 ==========
+            if is_ths:
+                # 同花顺板块：从网页抓取
+                ths_stocks = _get_board_stocks_from_ths(code)
+                for s in ths_stocks:
+                    stock_code = s["code"]
+                    market = 1 if stock_code.startswith("6") else 0
+                    member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
+                    member_map[member_ts] = {
+                        "code": stock_code,
+                        "name": s["name"],
+                        "market": market,
+                        "secid": s["secid"],
+                    }
+            else:
+                # 东财板块：使用 dc_member
+                ts_code = f"{code}.DC" if not code.endswith(".DC") else code
+                df = cached_api_call(f"dc_member_{ts_code}", 24, pro.dc_member, ts_code=ts_code, trade_date=trade_date)
+                if isinstance(df, dict) and df.get("error"):
+                    return df
+                if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                    # dc_member 失败，尝试同花顺（如果代码看起来像同花顺）
+                    if is_ths or code.startswith("88") or code.startswith("3"):
+                        ths_stocks = _get_board_stocks_from_ths(code)
+                        for s in ths_stocks:
+                            stock_code = s["code"]
+                            market = 1 if stock_code.startswith("6") else 0
+                            member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
+                            member_map[member_ts] = {
+                                "code": stock_code,
+                                "name": s["name"],
+                                "market": market,
+                                "secid": s["secid"],
+                            }
+                    if not member_map:
+                        return {"total": 0, "stocks": []}
+                else:
+                    for _, row in df.iterrows():
+                        con_code = str(row.get("con_code", ""))
+                        stock_code = con_code.split(".")[0] if "." in con_code else con_code
+                        if not stock_code:
+                            continue
+                        market = 1 if stock_code.startswith("6") else 0
+                        member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
+                        member_map[member_ts] = {
+                            "code": stock_code,
+                            "name": str(row.get("name", "")),
+                            "market": market,
+                            "secid": f"{market}.{stock_code}",
+                        }
+
+            if not member_map:
                 return {"total": 0, "stocks": []}
 
-            # 提取成分股代码列表，并构造 ts_code
-            stock_ts_codes = []
-            member_map = {}  # ts_code -> {code, name, market, secid}
-            for _, row in df.iterrows():
-                con_code = str(row.get("con_code", ""))
-                stock_code = con_code.split(".")[0] if "." in con_code else con_code
-                if not stock_code:
-                    continue
-                market = 1 if stock_code.startswith("6") else 0
-                member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
-                stock_ts_codes.append(member_ts)
-                member_map[member_ts] = {
-                    "code": stock_code,
-                    "name": str(row.get("name", "")),
-                    "market": market,
-                    "secid": f"{market}.{stock_code}",
-                }
-
-            # 批量获取全市场当日行情（只传 trade_date，不传 ts_code）
-            market_data = {}
+            # ========== 批量获取全市场当日行情 ==========
+            market_data: Dict[str, Dict[str, Any]] = {}
             try:
                 daily_df = pro.daily(trade_date=trade_date)
                 if daily_df is not None and not daily_df.empty:
@@ -1020,7 +1164,7 @@ class TushareAPI:
             except Exception as e:
                 print(f"[daily 批量查询失败] {e}")
 
-            # 批量获取全市场当日基础指标（换手率、市盈率、市净率、市值）
+            # ========== 批量获取全市场当日基础指标 ==========
             try:
                 basic_df = pro.daily_basic(trade_date=trade_date)
                 if basic_df is not None and not basic_df.empty:
@@ -1031,20 +1175,63 @@ class TushareAPI:
                                 "hsl": _to_float(row.get("turnover_rate", 0)),
                                 "syl": _to_float(row.get("pe_ttm", row.get("pe", 0))),
                                 "sjl": _to_float(row.get("pb", 0)),
-                                "sz": round(_to_float(row.get("total_mv", 0)) / 10000, 2),   # 万元 → 亿元
-                                "lt": round(_to_float(row.get("circ_mv", 0)) / 10000, 2),   # 万元 → 亿元
+                                "sz": round(_to_float(row.get("total_mv", 0)) / 10000, 2),
+                                "lt": round(_to_float(row.get("circ_mv", 0)) / 10000, 2),
                             })
             except Exception as e:
                 print(f"[daily_basic 批量查询失败] {e}")
 
+            # ========== 获取主力资金数据 ==========
+            main_in_map: Dict[str, float] = {}
+            main_in_5d_map: Dict[str, float] = {}
+
+            if is_ths:
+                # 同花顺：使用 moneyflow_ths（含当日和5日）
+                try:
+                    ths_mf = safe_api_call(pro.moneyflow_ths, trade_date=trade_date)
+                    if ths_mf is not None and not (isinstance(ths_mf, dict) and ths_mf.get("error")) and not ths_mf.empty:
+                        for _, row in ths_mf.iterrows():
+                            tc = str(row.get("ts_code", ""))
+                            if tc in member_map:
+                                # 万元 → 元
+                                main_in_map[tc] = _to_float(row.get("net_amount", 0)) * 10000
+                                main_in_5d_map[tc] = _to_float(row.get("net_d5_amount", 0)) * 10000
+                except Exception as e:
+                    print(f"[moneyflow_ths 查询失败] {e}")
+            else:
+                # 东财：当日用 moneyflow_dc
+                try:
+                    dc_mf = safe_api_call(pro.moneyflow_dc, trade_date=trade_date)
+                    if dc_mf is not None and not (isinstance(dc_mf, dict) and dc_mf.get("error")) and not dc_mf.empty:
+                        for _, row in dc_mf.iterrows():
+                            tc = str(row.get("ts_code", ""))
+                            if tc in member_map:
+                                main_in_map[tc] = _to_float(row.get("net_amount", 0)) * 10000
+                except Exception as e:
+                    print(f"[moneyflow_dc 查询失败] {e}")
+
+                # 东财：5日用 moneyflow 标准接口累加
+                try:
+                    mf_5d = safe_api_call(pro.moneyflow, start_date=start_date_5d, end_date=trade_date)
+                    if mf_5d is not None and not (isinstance(mf_5d, dict) and mf_5d.get("error")) and not mf_5d.empty:
+                        temp_5d: Dict[str, float] = {}
+                        for _, row in mf_5d.iterrows():
+                            tc = str(row.get("ts_code", ""))
+                            if tc in member_map:
+                                # net_mf 单位：千元 → 元
+                                temp_5d[tc] = temp_5d.get(tc, 0) + _to_float(row.get("net_mf", 0)) * 1000
+                        for tc, val in temp_5d.items():
+                            main_in_5d_map[tc] = val
+                except Exception as e:
+                    print(f"[moneyflow 5日查询失败] {e}")
+
+            # ========== 组装结果 ==========
             stocks = []
             for member_ts, info in member_map.items():
                 md = market_data.get(member_ts, {})
                 zx = md.get("zx", 0)
                 zs = md.get("zs", 0)
-                # 振幅 = (high - low) / pre_close * 100
                 zf = round((md.get("zg", 0) - md.get("zd", 0)) / zs * 100, 2) if zs > 0 else 0
-                # 量比：daily_basic 才有，这里暂不计算，保持为 0
                 stocks.append({
                     "code": info["code"],
                     "name": info["name"],
@@ -1065,15 +1252,15 @@ class TushareAPI:
                     "sjl": md.get("sjl", 0),
                     "sz": md.get("sz", 0),
                     "lt": md.get("lt", 0),
+                    "main_in": main_in_map.get(member_ts, 0),
+                    "main_in_5d": main_in_5d_map.get(member_ts, 0),
                     "cm5": 0,
                     "cd60": 0,
                     "cy1": 0,
                     "cs": 0,
                 })
 
-            # if count > 0 and len(stocks) > count:
-            #     stocks = stocks[:count]
-            return {"total": len(df), "stocks": stocks}
+            return {"total": len(stocks), "stocks": stocks}
         except Exception as e:
             return {"error": str(e)}
 

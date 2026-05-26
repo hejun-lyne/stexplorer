@@ -117,6 +117,18 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   );
   const filterStocks = ftypes.length ? stocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : stocks;
 
+  // 格式化资金流向金额（元 -> 亿/万）
+  const formatMoneyFlow = (val: number) => {
+    const v = Number(val) || 0;
+    if (Math.abs(v) >= 1e8) {
+      return (v / 1e8).toFixed(2) + '亿';
+    }
+    if (Math.abs(v) >= 1e4) {
+      return (v / 1e4).toFixed(2) + '万';
+    }
+    return v.toFixed(0);
+  };
+
   const sortItems = useCallback((items: Stock.DetailItem[], key: string, t: number) => {
     if (t == 0) {
       return items;
@@ -206,39 +218,53 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         </div>
       </div>
       <Row className={styles.header}>
-        <Col span={4}>名字</Col>
-        <Col span={4}>最新价</Col>
-        <Col span={4}>涨跌额</Col>
-        <Col span={4}>
+        <Col span={3}>名字</Col>
+        <Col span={3}>最新价</Col>
+        <Col span={3}>涨跌额</Col>
+        <Col span={3}>
           涨跌幅
           <Button size="small" type="text" icon={sortTypes.zdf == 1 ? <CaretUpOutlined /> : sortTypes.zdf == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('zdf')} />
         </Col>
-        <Col span={4}>
+        <Col span={3}>
           流通市值
           <Button size="small" type="text" icon={sortTypes.lt == 1 ? <CaretUpOutlined /> : sortTypes.lt == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('lt')} />
         </Col>
-        <Col span={4}>
+        <Col span={3}>
           换手率
           <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
+        </Col>
+        <Col span={3}>
+          当日主力净流入
+          <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
+        </Col>
+        <Col span={3}>
+          5日主力净流入
+          <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
         </Col>
       </Row>
       <div className={classNames(styles.table, styles.moreheader)}>
         {showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
           <Row key={s.code} className={styles.row}>
-            <Col span={4} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
+            <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
               {s.name}
             </Col>
-            <Col span={4} className={Utils.GetValueColor(s.zdd).textClass}>
+            <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
               {s.zx.toFixed(2)}
             </Col>
-            <Col span={4} className={Utils.GetValueColor(s.zdd).textClass}>
+            <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
               {(s.zdd).toFixed(2)}
             </Col>
-            <Col span={4} className={Utils.GetValueColor(s.zdf).textClass}>
+            <Col span={3} className={Utils.GetValueColor(s.zdf).textClass}>
               {s.zdf.toFixed(2) + '%'}
             </Col>
-            <Col span={4}>{(s.lt).toFixed(2) + '亿'}</Col>
-            <Col span={4}>{(s.hsl).toFixed(2) + '%'}</Col>
+            <Col span={3}>{(s.lt).toFixed(2) + '亿'}</Col>
+            <Col span={3}>{(s.hsl).toFixed(2) + '%'}</Col>
+            <Col span={3} className={Utils.GetValueColor((s as any).mainIn).textClass}>
+              {formatMoneyFlow((s as any).mainIn)}
+            </Col>
+            <Col span={3} className={Utils.GetValueColor((s as any).mainIn5d).textClass}>
+              {formatMoneyFlow((s as any).mainIn5d)}
+            </Col>
           </Row>
         ))}
         <Pagination
