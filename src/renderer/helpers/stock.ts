@@ -7,6 +7,7 @@ import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import * as Indicators from '@/helpers/tech';
 import * as AkshareAPI from '@/services/akshare';
+import * as TushareAPI from '@/services/tushare';
 import dayjs from 'dayjs';
 import {
   setStockConfigAction,
@@ -27,8 +28,8 @@ const { saveString } = window.contextModules.electron;
 
 export async function GetStockDetail(source:Enums.FundApiType, secid: string) {
   // const setting = Helpers.Setting.GetSystemSetting();
-  const useAkshare = source === Enums.FundApiType.Akshare;
-  const detail = (await Services.Stock.GetDetailFromDataSource(useAkshare ? Enums.FundApiType.Akshare : Enums.FundApiType.Eastmoney, secid)) as unknown as Stock.DetailItem;
+  const usePythonSource = source === Enums.FundApiType.Akshare || source === Enums.FundApiType.Tushare;
+  const detail = (await Services.Stock.GetDetailFromDataSource(usePythonSource ? source : Enums.FundApiType.Eastmoney, secid)) as unknown as Stock.DetailItem;
   return detail;
 }
 
@@ -39,9 +40,9 @@ export async function GetFutureDetail(secid: string) {
 
 export async function GetStockDetails(source:Enums.FundApiType, secids: string[]) {
   // const setting = Helpers.Setting.GetSystemSetting();
-  const useAkshare = source === Enums.FundApiType.Akshare;
+  const usePythonSource = source === Enums.FundApiType.Akshare || source === Enums.FundApiType.Tushare;
   return Adapter.ChokeGroupAdapter(
-    secids.map((secid) => () => Services.Stock.GetDetailFromDataSource(useAkshare ? Enums.FundApiType.Akshare : Enums.FundApiType.Eastmoney, secid)),
+    secids.map((secid) => () => Services.Stock.GetDetailFromDataSource(usePythonSource ? source : Enums.FundApiType.Eastmoney, secid)),
     10
   );
 }
@@ -55,10 +56,10 @@ export async function GetFutureDetails(secids: string[]) {
 
 export async function GetStockDetailAndTrendsAndFlows(source:Enums.FundApiType, secid: string) {
   // const setting = Helpers.Setting.GetSystemSetting();
-  const useAkshare = source === Enums.FundApiType.Akshare;
+  const usePythonSource = source === Enums.FundApiType.Akshare || source === Enums.FundApiType.Tushare;
   const collectors = [
-    () => Services.Stock.GetDetailFromDataSource(useAkshare ? Enums.FundApiType.Akshare : Enums.FundApiType.Eastmoney, secid),
-    () => Services.Stock.GetTrendFromDataSource(useAkshare ? Enums.FundApiType.Akshare : Enums.FundApiType.Eastmoney, secid),
+    () => Services.Stock.GetDetailFromDataSource(usePythonSource ? source : Enums.FundApiType.Eastmoney, secid),
+    () => Services.Stock.GetTrendFromDataSource(usePythonSource ? source : Enums.FundApiType.Eastmoney, secid),
     () => Services.Stock.GetFlowTrendFromEastmoney(secid),
   ];
   return Adapter.ConCurrencyAllAdapter(collectors);
@@ -3228,9 +3229,18 @@ export async function FilterStocksByMA(secids: string[], threshold = 0.05, klimi
   return results.filter((r): r is string => r !== null);
 }
 
+// 辅助函数：根据当前数据源设置获取K线数据
+async function GetKLineFromPythonSource(secid: string, ktype: Enums.KLineType, klimit?: number) {
+  const source = store.getState().setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney;
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GetKFromTushare(secid, ktype, klimit);
+  }
+  return AkshareAPI.GetKFromAkshare(secid, ktype, klimit);
+}
+
 export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80) {
   try {
-    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 60) {
       return null;
     }
@@ -3265,7 +3275,7 @@ export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80)
  */
 export async function CheckStockRecentTrend(secid: string, maThreshold = 0.03, flatThreshold = 0.02, klimit = 80) {
   try {
-    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 50) {
       return null;
     }
@@ -3317,7 +3327,7 @@ export async function CheckStockRecentTrend(secid: string, maThreshold = 0.03, f
  */
 export async function CheckStockRSI(secid: string, threshold = 30, klimit = 80) {
   try {
-    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 20) {
       return null;
     }
@@ -3862,7 +3872,7 @@ export function BacktestRSIBounce(closes: number[], rsi: number[], currentIdx: n
 
 export async function CheckStockBacktestSignals(secid: string, klimit = 120) {
   try {
-    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 60) {
       return null;
     }
@@ -3985,7 +3995,7 @@ export async function CheckStockBacktestSignals(secid: string, klimit = 120) {
 
 export async function CheckStockMAAndRSI(secid: string, maThreshold = 0.05, rsiThreshold = 30, klimit = 120) {
   try {
-    const { ks } = await AkshareAPI.GetKFromAkshare(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 60) {
       return null;
     }

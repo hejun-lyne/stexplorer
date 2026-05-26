@@ -9,6 +9,7 @@ import { helper } from 'echarts';
 import * as Helpers from '../helpers';
 import * as Enums from '@/utils/enums';
 import * as AkshareAPI from './akshare';
+import * as TushareAPI from './tushare';
 import store from '@/store/configureStore';
 
 const { got } = window.contextModules;
@@ -32,6 +33,17 @@ function getCurrentDataSource(): Enums.FundApiType {
 // 判断是否使用 Akshare 数据源
 function useAkshare(): boolean {
   return getCurrentDataSource() === Enums.FundApiType.Akshare;
+}
+
+// 判断是否使用 Python 数据源（Akshare 或 Tushare）
+function usePythonDataSource(): boolean {
+  const source = getCurrentDataSource();
+  return source === Enums.FundApiType.Akshare || source === Enums.FundApiType.Tushare;
+}
+
+// 判断是否使用 Tushare 数据源
+function useTushare(): boolean {
+  return getCurrentDataSource() === Enums.FundApiType.Tushare;
 }
 
 
@@ -155,8 +167,12 @@ export async function SearchFromEastmoney(keyword: string) {
 }
 
 export async function GetTrendFromEastmoney(secid: string, zs?: number) {
-  // 如果设置了 Akshare 数据源，使用 Akshare 获取分时数据
-  if (useAkshare()) {
+  // 如果设置了 Python 数据源，使用对应接口获取分时数据
+  if (usePythonDataSource()) {
+    const source = getCurrentDataSource();
+    if (source === Enums.FundApiType.Tushare) {
+      return TushareAPI.GetTrendFromTushare(secid);
+    }
     return AkshareAPI.GetTrendFromAkshare(secid);
   }
   
@@ -353,8 +369,12 @@ export async function BatchGetBriefsFromEastmoney(secids: string[]) {
 }
 
 export async function GetDetailFromEastmoney(secid: string) {
-  // 如果设置了 Akshare 数据源，使用 Akshare 获取详情
-  if (useAkshare()) {
+  // 如果设置了 Python 数据源，使用对应接口获取详情
+  if (usePythonDataSource()) {
+    const source = getCurrentDataSource();
+    if (source === Enums.FundApiType.Tushare) {
+      return TushareAPI.GetDetailFromTushare(secid);
+    }
     return AkshareAPI.GetDetailFromAkshare(secid);
   }
   
@@ -558,8 +578,12 @@ export async function GetDetailFromEastmoney(secid: string) {
 }
 
 export async function FromEastmoney(secid: string) {
-  // 如果设置了 Akshare 数据源，使用 Akshare 获取综合数据
-  if (useAkshare()) {
+  // 如果设置了 Python 数据源，使用对应接口获取综合数据
+  if (usePythonDataSource()) {
+    const source = getCurrentDataSource();
+    if (source === Enums.FundApiType.Tushare) {
+      return TushareAPI.FromTushare(secid);
+    }
     return AkshareAPI.FromAkshare(secid);
   }
   
@@ -692,10 +716,19 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
     const today = now.format('YYYY-MM-DD');
     const year = now.format('YYYY');
 
-    let tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(year);
-    if (tradeDates.length === 0) {
-      const prevYear = (parseInt(year) - 1).toString();
-      tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(prevYear);
+    let tradeDates: string[] = [];
+    if (source === Enums.FundApiType.Tushare) {
+      tradeDates = await TushareAPI.GetTradeDatesFromTushare(year);
+      if (tradeDates.length === 0) {
+        const prevYear = (parseInt(year) - 1).toString();
+        tradeDates = await TushareAPI.GetTradeDatesFromTushare(prevYear);
+      }
+    } else {
+      tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(year);
+      if (tradeDates.length === 0) {
+        const prevYear = (parseInt(year) - 1).toString();
+        tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(prevYear);
+      }
     }
 
     const isTodayTradeDay = tradeDates.includes(today);
@@ -737,6 +770,18 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
     result = await GetKFromXTick(secid, code);
   } else if (source == Enums.FundApiType.Akshare) {
     result = await AkshareAPI.GetKFromAkshare(secid, code, limit);
+    // 板块代码获取失败时，尝试用成分股合成
+    if ((!result || result.ks.length === 0) && secid.startsWith('90.BK')) {
+      console.log('板块K线接口失败，尝试用成分股合成:', secid);
+      const synthesized = await synthesizeBoardKline(secid, code);
+      if (synthesized && synthesized.length > 0) {
+        result = { ks: synthesized, kt: code };
+      } else {
+        console.error('板块K线合成失败:', secid);
+      }
+    }
+  } else if (source == Enums.FundApiType.Tushare) {
+    result = await TushareAPI.GetKFromTushare(secid, code, limit);
     // 板块代码获取失败时，尝试用成分股合成
     if ((!result || result.ks.length === 0) && secid.startsWith('90.BK')) {
       console.log('板块K线接口失败，尝试用成分股合成:', secid);
@@ -1722,11 +1767,13 @@ export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, 
 
   // 2. 请求新数据
   let result: any;
-  // if (source === Enums.FundApiType.Akshare) {
-  //   result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
-  // } else {
+  if (source === Enums.FundApiType.Akshare) {
+    result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
+  } else if (source === Enums.FundApiType.Tushare) {
+    result = await TushareAPI.GetBankuaiStocksFromTushare(secid, count);
+  } else {
     result = await GetBankuaiStocksFromEastmoney(secid, count);
-  // }
+  }
 
   // 3. 写入磁盘缓存
   if (result && result.stocks) {
@@ -4338,6 +4385,9 @@ export async function SearchFromDataSource(source: Enums.FundApiType, keyword: s
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.SearchFromAkshare(keyword);
   }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.SearchFromTushare(keyword);
+  }
   // 默认使用 Eastmoney
   return SearchFromEastmoney(keyword);
 }
@@ -4345,6 +4395,9 @@ export async function SearchFromDataSource(source: Enums.FundApiType, keyword: s
 export async function GetDetailFromDataSource(source: Enums.FundApiType, secid: string) {
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetDetailFromAkshare(secid);
+  }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GetDetailFromTushare(secid);
   }
   // 默认使用 Eastmoney
   return GetDetailFromEastmoney(secid);
@@ -4354,6 +4407,9 @@ export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: s
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetTrendFromAkshare(secid);
   }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GetTrendFromTushare(secid);
+  }
   // 默认使用 Eastmoney
   return GetTrendFromEastmoney(secid);
 }
@@ -4361,6 +4417,9 @@ export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: s
 export async function FromDataSource(source: Enums.FundApiType, secid: string) {
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.FromAkshare(secid);
+  }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.FromTushare(secid);
   }
   // 默认使用 Eastmoney
   return FromEastmoney(secid);
@@ -4370,6 +4429,9 @@ export async function GetBanKuaisFromDataSource(source: Enums.FundApiType, type:
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetBanKuaisFromAkshare(type, pageSize);
   }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GetBanKuaisFromTushare(type, pageSize);
+  }
   // 默认使用 Eastmoney
   return GetBanKuais(type, pageSize);
 }
@@ -4377,6 +4439,9 @@ export async function GetBanKuaisFromDataSource(source: Enums.FundApiType, type:
 export async function GetCompanyFromDataSource(source: Enums.FundApiType, secid: string) {
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetCompanyFromAkshare(secid);
+  }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GetCompanyFromTushare(secid);
   }
   
   // 根据市场类型选择不同的接口
@@ -4407,6 +4472,9 @@ export async function GetNewsFromDataSource(source: Enums.FundApiType, secid: st
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetNewsFromAkshare(secid, pageIndex, pageSize);
   }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GetNewsFromTushare(secid, pageIndex, pageSize);
+  }
   // 默认使用 Eastmoney
   return GetNews(secid, pageIndex, pageSize);
 }
@@ -4414,6 +4482,9 @@ export async function GetNewsFromDataSource(source: Enums.FundApiType, secid: st
 export async function GetResearchesFromDataSource(source: Enums.FundApiType, secid: string, page: number = 1) {
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetResearchesFromAkshare(secid, page);
+  }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GetResearchesFromTushare(secid, page);
   }
   // 默认使用 Eastmoney
   return GetStockResearches(secid, page);
@@ -4423,6 +4494,9 @@ export async function GeZTStocksFromDataSource(source: Enums.FundApiType, pageSi
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GeZTStocksFromAkshare(pageSize, date);
   }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GeZTStocksFromTushare(pageSize, date);
+  }
   // 默认使用 Eastmoney
   return GeZTStocks(pageSize, date);
 }
@@ -4430,6 +4504,9 @@ export async function GeZTStocksFromDataSource(source: Enums.FundApiType, pageSi
 export async function GeDTStocksFromDataSource(source: Enums.FundApiType, pageSize = 20, date?: string) {
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GeDTStocksFromAkshare(pageSize, date);
+  }
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GeDTStocksFromTushare(pageSize, date);
   }
   // 默认使用 Eastmoney
   return GeDTStocks(pageSize, date);

@@ -292,6 +292,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
                   { label: 'XTick', value: Enums.FundApiType.XTick },
                   { label: 'ZiZai', value: Enums.FundApiType.ZiZai },
                   { label: 'Akshare', value: Enums.FundApiType.Akshare },
+                  { label: 'Tushare', value: Enums.FundApiType.Tushare },
                 ]}
                 onChange={(e) => setKLineApiSource(e.target.value)}
                 value={kLineApiSource}

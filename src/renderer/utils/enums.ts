@@ -10,6 +10,7 @@ export enum FundApiType {
   ZiZai, // 自在量化
   XTick, // XTick
   Akshare, // Akshare Python库
+  Tushare, // Tushare 数据源
 }
 
 export enum TrayContent {
