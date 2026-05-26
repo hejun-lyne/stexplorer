@@ -1755,7 +1755,7 @@ export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, 
   // 1. 尝试读取磁盘缓存（板块成分股一天内有效）
   try {
     const cached = await window.contextModules.electron.sqliteRead(cacheTable, cacheKey);
-    if (cached?.success && cached.data?.data?.stocks) {
+    if (cached?.success && cached.data?.data?.stocks && cached.data?.data?.stocks.length > 0) {
       const cachedAt = cached.data.data.cachedAt;
       if (cachedAt && dayjs().diff(dayjs(cachedAt), 'hour') < 24) {
         return cached.data.data;
@@ -4404,14 +4404,14 @@ export async function GetDetailFromDataSource(source: Enums.FundApiType, secid: 
 }
 
 export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: string) {
-  if (source === Enums.FundApiType.Akshare) {
-    return AkshareAPI.GetTrendFromAkshare(secid);
+  if (source === Enums.FundApiType.Eastmoney) {
+    return GetTrendFromEastmoney(secid);
   }
-  if (source === Enums.FundApiType.Tushare) {
-    return TushareAPI.GetTrendFromTushare(secid);
-  }
-  // 默认使用 Eastmoney
-  return GetTrendFromEastmoney(secid);
+  // if (source === Enums.FundApiType.Tushare) {
+  //   return TushareAPI.GetTrendFromTushare(secid);
+  // }
+  // 默认使用 Akshare
+  return AkshareAPI.GetTrendFromAkshare(secid);
 }
 
 export async function FromDataSource(source: Enums.FundApiType, secid: string) {

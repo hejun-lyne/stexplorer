@@ -250,7 +250,7 @@ export async function GetKFromTushare(secid: string, code: number, limit?: numbe
 
   try {
     let klines: any[] = [];
-    const result = await callTushare('get_kline_data', { secid, period });
+    const result = await callTushare('get_kline_data', { secid, period, limit: limit || 0 });
 
     if (result.error || !Array.isArray(result) || result.length === 0) {
       console.error('获取K线失败:', result.error || 'Empty data');
@@ -330,22 +330,30 @@ export async function GetBanKuaisFromTushare(type: number, pageSize = 20): Promi
       console.error('获取板块失败:', result.error);
       return {};
     }
+
+    // 打印 debug 信息到 Electron 控制台
+    if (result.debug) {
+      console.log('[Tushare dc_index debug]', result.debug);
+    }
     
-    const arr = result.slice(0, pageSize).map((item: any) => ({
+    const arr = result.boards.map((item: any) => ({
       code: item.code,
       name: item.name,
       market: 90,
       secid: `90.${item.code}`,
-      zx: 0,
-      zdd: 0,
-      zdf: item.zdf,
-      hsl: 0,
-      zsz: item.zsz,
-      szs: 0,
-      xds: 0,
+      // 修复后（从接口读取）
+      zx: item.zx || 0,
+      zdf: item.zdf || 0,
+      zdd: item.zdd || 0,
+      hsl: item.hsl || 0,
+      szs: item.szs || 0,
+      xds: item.xds || 0,
+      lt: item.lt || 0,
+      cje: item.cje || 0,
+      cjl: item.cjl || 0,
     }));
     
-    return { to: result.length, arr };
+    return { to: result.boards.length, arr };
   } catch (error) {
     logError(error, 'GetBanKuaisFromTushare', '获取板块数据失败');
     return {};

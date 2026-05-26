@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber } from 'antd';
+import React, { useEffect, useLayoutEffect } from 'react';
+import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -14,6 +14,7 @@ import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
 import classNames from 'classnames';
 import { batch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
+import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
 
 export interface STListProps {
   industries: Stock.BanKuaiItem[];
@@ -32,6 +33,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [filtering, setFiltering] = useState(false);
   const [ftypes, setFtypes] = useState<number[]>([]);
   const [filterSecids, setFilterSecids] = useState<string[]>([]);
+  const [nameFilter, setNameFilter] = useState('');
+  const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
+  const [showList, setShowList] = useState<Stock.DetailItem[]>([]);
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
@@ -115,6 +119,41 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     [stocks]
   );
   const filterStocks = ftypes.length ? stocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : stocks;
+
+  const sortItems = useCallback((items: Stock.DetailItem[], key: string, t: number) => {
+    if (t == 0) {
+      return items;
+    }
+    const arr = [...items];
+    arr.sort((a, b) => {
+      const left = (a as any)[key];
+      const right = (b as any)[key];
+      if (t == 1) {
+        return left - right;
+      } else {
+        return right - left;
+      }
+    });
+    return arr;
+  }, []);
+
+  const updateSortType = useCallback((key: string) => {
+    let type = sortTypes[key] || 0;
+    type = type == 0 ? 1 : type == 1 ? 2 : 0;
+    setSortTypes({ [key]: type });
+  }, [sortTypes]);
+
+  useLayoutEffect(() => {
+    let list = filterStocks.filter((s) => {
+      if (nameFilter && !s.name.includes(nameFilter)) return false;
+      return true;
+    });
+    const keys = Object.keys(sortTypes);
+    if (keys.length === 1) {
+      list = sortItems(list, keys[0], sortTypes[keys[0]]);
+    }
+    setShowList(list);
+  }, [filterStocks, sortTypes, nameFilter, sortItems]);
   return (
     <>
       <div className={classNames(styles.header, styles.actbar)}>
@@ -149,6 +188,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           )}
         </div>
         <div>
+          <Input size="small" placeholder="名字过滤" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} style={{ width: 100, marginRight: 8 }} />
           <InputNumber step={1} onChange={setFdays} min={1} defaultValue={8} style={{ width: 60 }} />
           <span>天</span>&nbsp;
           <Checkbox.Group
@@ -171,12 +211,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         <Col span={4}>名字</Col>
         <Col span={4}>最新价</Col>
         <Col span={4}>涨跌额</Col>
-        <Col span={4}>涨跌幅</Col>
-        <Col span={4}>流通市值</Col>
-        <Col span={4}>换手率</Col>
+        <Col span={4}>
+          涨跌幅
+          <Button size="small" type="text" icon={sortTypes.zdf == 1 ? <CaretUpOutlined /> : sortTypes.zdf == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('zdf')} />
+        </Col>
+        <Col span={4}>
+          流通市值
+          <Button size="small" type="text" icon={sortTypes.lt == 1 ? <CaretUpOutlined /> : sortTypes.lt == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('lt')} />
+        </Col>
+        <Col span={4}>
+          换手率
+          <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
+        </Col>
       </Row>
       <div className={classNames(styles.table, styles.moreheader)}>
-        {filterStocks.map((s) => (
+        {showList.map((s) => (
           <Row key={s.code} className={styles.row}>
             <Col span={4} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
               {s.name}
