@@ -40,6 +40,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [filterMA, setFilterMA] = useState(false);
   const [filterMACD, setFilterMACD] = useState(false);
   const [filterRSI, setFilterRSI] = useState(false);
+  const [techProgress, setTechProgress] = useState(0);
+  const isPausedRef = React.useRef(false);
+  const currentIndexRef = React.useRef(0);
 
   const [autoBackup, setAutoBackup] = useState(() => Utils.GetStorage('QSList_AUTO_BACKUP', false));
   const autoBackupRef = React.useRef(autoBackup);
@@ -259,6 +262,8 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const startQuery = useCallback(async () => {
     if (dates.length) {
       stocksRef.current = [];
+      currentIndexRef.current = 0;
+      setTechProgress(0);
 
       batch(() => {
         setNoMore(false);
@@ -401,20 +406,30 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     setDates([moment(dates[0], 'YYYYMMDD').add(1, 'd').format('YYYYMMDD')]);
   }, [dates]);
   const onCalcTechIndicators = useCallback(async () => {
-    if (stocks.length === 0) {
+    if (techFilterLoading) {
+      isPausedRef.current = true;
       return;
     }
-    setTechFilterLoading(true);
+    if (stocks.length === 0) return;
     const secids = stocks.map((s) => s.secid);
+
+    if (currentIndexRef.current === 0 || currentIndexRef.current >= secids.length) {
+      setMaResults({});
+      currentIndexRef.current = 0;
+    }
+
+    isPausedRef.current = false;
+    setTechFilterLoading(true);
+    setTechProgress(Math.round((currentIndexRef.current / secids.length) * 100));
+
     const pendingInit: Record<string, boolean> = {};
-    secids.forEach((id) => {
-      pendingInit[id] = true;
-    });
+    for (let j = currentIndexRef.current; j < secids.length; j++) {
+      pendingInit[secids[j]] = true;
+    }
     setTechPending(pendingInit);
-    setMaResults({});
 
     const batchSize = 5;
-    for (let i = 0; i < secids.length; i += batchSize) {
+    for (let i = currentIndexRef.current; i < secids.length; i += batchSize) {
       const batch = secids.slice(i, i + batchSize);
       const batchResults = await Promise.all(
         batch.map(async (secid) => {
@@ -439,10 +454,23 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         });
         return next;
       });
+      currentIndexRef.current = i + batch.length;
+      setTechProgress(Math.round((currentIndexRef.current / secids.length) * 100));
+
+      if (isPausedRef.current) {
+        break;
+      }
+    }
+
+    if (!isPausedRef.current) {
+      currentIndexRef.current = 0;
+      setTechProgress(100);
     }
     setTechFilterLoading(false);
-    setTechPending({});
-  }, [stocks]);
+    if (!isPausedRef.current) {
+      setTechPending({});
+    }
+  }, [stocks, maThreshold, techFilterLoading]);
 
   
   return (
@@ -484,9 +512,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         <Button
           size="small"
           onClick={onCalcTechIndicators}
-          loading={techFilterLoading}
+          loading={techFilterLoading && techProgress === 0}
         >
-          技术指标
+          {techFilterLoading ? `分析中 ${techProgress}%` : '技术指标'}
         </Button>
         <Checkbox
           checked={autoBackup}

@@ -36,6 +36,9 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [filterMA40, setFilterMA40] = useState(false);
   const [filterMA60, setFilterMA60] = useState(false);
   const [filterRSI, setFilterRSI] = useState(false);
+  const [techProgress, setTechProgress] = useState(0);
+  const isPausedRef = React.useRef(false);
+  const currentIndexRef = React.useRef(0);
   const [nameFilter, setNameFilter] = useState('');
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
   const [currentPage, setCurrentPage] = useState(1);
@@ -130,6 +133,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   // useWorkDayTimeToDo(() => mayGetBankuais(kLineApiSourceSetting, type, pageSize), active ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
   useEffect(() => {
     setCurrentPage(1);
+    currentIndexRef.current = 0;
+    setTechProgress(0);
     runGetBankuais(kLineApiSourceSetting, type, pageSize, dataSource);
   }, [kLineApiSourceSetting, type, dataSource]);
   const loadMore = useCallback(() => {
@@ -139,21 +144,31 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   }, [kLineApiSourceSetting, type, pageSize, dataSource]);
 
   const onCalcTechIndicators = useCallback(async () => {
-    if (bankuais.length === 0) {
+    if (techFilterLoading) {
+      isPausedRef.current = true;
       return;
     }
-    setTechFilterLoading(true);
+    if (bankuais.length === 0) return;
     const secids = bankuais.map((s) => s.secid);
+
+    if (currentIndexRef.current === 0 || currentIndexRef.current >= secids.length) {
+      setMaResults({});
+      setRsiResults({});
+      currentIndexRef.current = 0;
+    }
+
+    isPausedRef.current = false;
+    setTechFilterLoading(true);
+    setTechProgress(Math.round((currentIndexRef.current / secids.length) * 100));
+
     const pendingInit: Record<string, boolean> = {};
-    secids.forEach((id) => {
-      pendingInit[id] = true;
-    });
+    for (let j = currentIndexRef.current; j < secids.length; j++) {
+      pendingInit[secids[j]] = true;
+    }
     setTechPending(pendingInit);
-    setMaResults({});
-    setRsiResults({});
 
     const batchSize = 5;
-    for (let i = 0; i < secids.length; i += batchSize) {
+    for (let i = currentIndexRef.current; i < secids.length; i += batchSize) {
       const batch = secids.slice(i, i + batchSize);
       const batchResults = await Promise.all(
         batch.map(async (secid) => {
@@ -184,10 +199,23 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         });
         return next;
       });
+      currentIndexRef.current = i + batch.length;
+      setTechProgress(Math.round((currentIndexRef.current / secids.length) * 100));
+
+      if (isPausedRef.current) {
+        break;
+      }
+    }
+
+    if (!isPausedRef.current) {
+      currentIndexRef.current = 0;
+      setTechProgress(100);
     }
     setTechFilterLoading(false);
-    setTechPending({});
-  }, [bankuais, maThreshold]);
+    if (!isPausedRef.current) {
+      setTechPending({});
+    }
+  }, [bankuais, maThreshold, techFilterLoading]);
 
   return (
     <>
@@ -219,10 +247,10 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           <Button
             size="small"
             onClick={onCalcTechIndicators}
-            loading={techFilterLoading}
+            loading={techFilterLoading && techProgress === 0}
             style={{ marginLeft: 4 }}
           >
-            技术指标
+            {techFilterLoading ? `分析中 ${techProgress}%` : '技术指标'}
           </Button>
           <InputNumber
             size="small"
