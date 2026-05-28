@@ -2,8 +2,9 @@ import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { Button, Table, Tag, Row, Col, Alert, Checkbox } from 'antd';
 import { useDispatch } from 'react-redux';
 import { setStockTradePointsAction } from '@/actions/stock';
-import { backtestMABounce, optimizeRSIStrategy, MABacktestResult, RSIBacktestResult } from '@/helpers/stock';
-import { calculateMA, calculateRSI } from '@/helpers/tech';
+import { backtestMABounce, optimizeMACDStrategy, optimizeRSIStrategy, MABacktestResult, MACDStrategyResult, RSIBacktestResult } from '@/helpers/stock';
+import { calculateMA, calculateMACD, calculateRSI } from '@/helpers/tech';
+import { InputNumber } from 'antd';
 import { Stock } from '@/types/stock';
 import styles from './index.scss';
 
@@ -16,27 +17,38 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
   const dispatch = useDispatch();
   const [testResult, setTestResult] = useState<string>('');
   const [showMAPoints, setShowMAPoints] = useState(false);
+  const [showMACDPoints, setShowMACDPoints] = useState(false);
   const [showRSIPoints, setShowRSIPoints] = useState(false);
+  // 止损参数
+  const [fixedStopLossPct, setFixedStopLossPct] = useState(5);
+  const [trailingStopLossPct, setTrailingStopLossPct] = useState(5);
 
   const maResults = useMemo<MABacktestResult[]>(() => {
     if (!klines || klines.length < 60) return [];
-    return backtestMABounce(klines); // 仅测试最近200根，提升速度
-  }, [klines]);
+    return backtestMABounce(klines, [5, 10, 20, 30, 60], [5, 10, 20], fixedStopLossPct / 100, trailingStopLossPct / 100);
+  }, [klines, fixedStopLossPct, trailingStopLossPct]);
+
+  const macdResults = useMemo<MACDStrategyResult[]>(() => {
+    if (!klines || klines.length < 60) return [];
+    return optimizeMACDStrategy(klines, fixedStopLossPct / 100, trailingStopLossPct / 100);
+  }, [klines, fixedStopLossPct, trailingStopLossPct]);
 
   const rsiResults = useMemo<RSIBacktestResult[]>(() => {
     if (!klines || klines.length < 60) return [];
-    return optimizeRSIStrategy(klines); // 仅测试最近200根，提升速度
-  }, [klines]);
+    return optimizeRSIStrategy(klines, [6, 12, 24], fixedStopLossPct / 100, trailingStopLossPct / 100);
+  }, [klines, fixedStopLossPct, trailingStopLossPct]);
 
   const topMAResult = maResults[0];
+  const topMACDResult = macdResults[0];
   const topRSIResult = rsiResults[0];
 
   // 应用标记：根据勾选状态重新设置买卖点
   const applyMarks = useCallback(
-    (showMA: boolean, showRSI: boolean) => {
+    (showMA: boolean, showMACD: boolean, showRSI: boolean) => {
       if (!klines) return;
       const buyPoints: { x: string; y: number; t: string }[] = [];
       const sellPoints: { x: string; y: number; t: string }[] = [];
+      const tags: string[] = [];
 
       if (showMA && topMAResult) {
         topMAResult.trades.forEach((t) => {
@@ -45,6 +57,17 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
           if (buyK) buyPoints.push({ x: buyK.date, y: buyK.sp, t: 'ma' });
           if (sellK) sellPoints.push({ x: sellK.date, y: sellK.sp, t: 'ma' });
         });
+        tags.push('ma');
+      }
+
+      if (showMACD && topMACDResult) {
+        topMACDResult.trades.forEach((t) => {
+          const buyK = klines[t.buyIndex];
+          const sellK = klines[t.sellIndex];
+          if (buyK) buyPoints.push({ x: buyK.date, y: buyK.sp, t: 'macd' });
+          if (sellK) sellPoints.push({ x: sellK.date, y: sellK.sp, t: 'macd' });
+        });
+        tags.push('macd');
       }
 
       if (showRSI && topRSIResult) {
@@ -54,31 +77,42 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
           if (buyK) buyPoints.push({ x: buyK.date, y: buyK.sp, t: 'rsi' });
           if (sellK) sellPoints.push({ x: sellK.date, y: sellK.sp, t: 'rsi' });
         });
+        tags.push('rsi');
       }
 
-      dispatch(setStockTradePointsAction(secid, buyPoints, sellPoints, ['ma', 'rsi']));
+      dispatch(setStockTradePointsAction(secid, buyPoints, sellPoints, tags));
     },
-    [topMAResult, topRSIResult, klines, secid, dispatch]
+    [topMAResult, topMACDResult, topRSIResult, klines, secid, dispatch]
   );
 
   const onMAChange = useCallback(
     (e: any) => {
       const checked = e.target.checked;
       setShowMAPoints(checked);
-      applyMarks(checked, showRSIPoints);
+      applyMarks(checked, showMACDPoints, showRSIPoints);
       setTestResult(checked ? `已显示MA策略 ${topMAResult?.tradeCount || 0} 笔买卖点` : '已隐藏MA策略买卖点');
     },
-    [applyMarks, showRSIPoints, topMAResult]
+    [applyMarks, showMACDPoints, showRSIPoints, topMAResult]
+  );
+
+  const onMACDChange = useCallback(
+    (e: any) => {
+      const checked = e.target.checked;
+      setShowMACDPoints(checked);
+      applyMarks(showMAPoints, checked, showRSIPoints);
+      setTestResult(checked ? `已显示MACD策略 ${topMACDResult?.tradeCount || 0} 笔买卖点` : '已隐藏MACD策略买卖点');
+    },
+    [applyMarks, showMAPoints, showRSIPoints, topMACDResult]
   );
 
   const onRSIChange = useCallback(
     (e: any) => {
       const checked = e.target.checked;
       setShowRSIPoints(checked);
-      applyMarks(showMAPoints, checked);
+      applyMarks(showMAPoints, showMACDPoints, checked);
       setTestResult(checked ? `已显示RSI策略 ${topRSIResult?.tradeCount || 0} 笔买卖点` : '已隐藏RSI策略买卖点');
     },
-    [applyMarks, showMAPoints, topRSIResult]
+    [applyMarks, showMAPoints, showMACDPoints, topRSIResult]
   );
 
   // 测试最近5根K线 - MA回踩策略
@@ -150,7 +184,63 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
     } else {
       setTestResult('MA策略：最近20根K线未找到符合条件的买入信号');
     }
-  }, [topMAResult, klines, secid, dispatch, showMAPoints]);
+  }, [topMAResult, klines, secid, dispatch, showMAPoints, showMACDPoints]);
+
+  // 测试最近5根K线 - MACD策略
+  const testMACDRecent = useCallback(() => {
+    if (!topMACDResult || !klines || klines.length < 30) {
+      setTestResult('K线数据不足，无法测试');
+      return;
+    }
+    const closes = klines.map((k) => k.sp);
+    const macd = calculateMACD(closes, topMACDResult.slow, topMACDResult.fast, topMACDResult.signal);
+    const dif = macd.MACD;
+    const dea = macd.signal;
+    const hist = macd.histogram;
+
+    let foundBuy: { index: number; price: number } | null = null;
+
+    for (let i = Math.max(2, klines.length - 5); i < klines.length; i++) {
+      const goldenCross = dif[i] > dea[i] && dif[i - 1] <= dea[i - 1];
+      if (!goldenCross) continue;
+
+      if (topMACDResult.requireAboveZero && (dif[i] <= 0 || dea[i] <= 0)) continue;
+
+      if (topMACDResult.requirePriorNegative) {
+        let hadNegative = false;
+        for (let j = Math.max(0, i - 5); j < i; j++) {
+          if (hist[j] < 0) { hadNegative = true; break; }
+        }
+        if (!hadNegative) continue;
+      }
+
+      if (hist[i] <= 0 || hist[i] <= hist[i - 1]) continue;
+
+      foundBuy = { index: i, price: closes[i] };
+      break;
+    }
+
+    if (foundBuy) {
+      const buyK = klines[foundBuy.index];
+      const stopLoss = (buyK.sp * (1 - (topMACDResult.fixedStopLossPct || 0.05))).toFixed(2);
+      dispatch(
+        setStockTradePointsAction(
+          secid,
+          [{ x: buyK.date, y: buyK.sp, t: 'macd' }],
+          [],
+          ['macd']
+        )
+      );
+      setTestResult(
+        `MACD策略：最近5根发现买入信号！日期 ${buyK.date}，价格 ${buyK.sp.toFixed(2)}，止损 ${stopLoss}`
+      );
+      if (!showMACDPoints) {
+        setShowMACDPoints(true);
+      }
+    } else {
+      setTestResult('MACD策略：最近5根K线未找到符合条件的买入信号');
+    }
+  }, [topMACDResult, klines, secid, dispatch, showMACDPoints, showMAPoints]);
 
   // 测试最近5根K线 - RSI策略
   const testRSIRecent = useCallback(() => {
@@ -208,9 +298,14 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
     } else {
       setTestResult('RSI策略：最近20根K线未找到符合条件的买入信号');
     }
-  }, [topRSIResult, klines, secid, dispatch, showRSIPoints]);
+  }, [topRSIResult, klines, secid, dispatch, showRSIPoints, showMACDPoints]);
 
   const maColumns = [
+    { title: '参数', dataIndex: 'param', key: 'param' },
+    { title: '值', dataIndex: 'value', key: 'value' },
+  ];
+
+  const macdColumns = [
     { title: '参数', dataIndex: 'param', key: 'param' },
     { title: '值', dataIndex: 'value', key: 'value' },
   ];
@@ -235,6 +330,38 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
         { key: '11', param: '综合评分', value: topMAResult.score.toFixed(1) },
       ]
     : [];
+
+  const macdData = topMACDResult
+    ? [
+        { key: '1', param: '快线周期', value: topMACDResult.fast },
+        { key: '2', param: '慢线周期', value: topMACDResult.slow },
+        { key: '3', param: '信号周期', value: topMACDResult.signal },
+        { key: '4', param: '零轴上方', value: topMACDResult.requireAboveZero ? '是' : '否' },
+        { key: '5', param: '前负确认', value: topMACDResult.requirePriorNegative ? '是' : '否' },
+        { key: '6', param: '交易次数', value: topMACDResult.tradeCount },
+        { key: '7', param: '总收益', value: `${topMACDResult.totalReturn.toFixed(2)}%` },
+        { key: '8', param: '胜率', value: `${topMACDResult.winRate.toFixed(1)}%` },
+        { key: '9', param: '平均收益', value: `${topMACDResult.avgReturn.toFixed(2)}%` },
+        { key: '10', param: '平均持仓', value: `${topMACDResult.avgHoldDays.toFixed(1)}天` },
+        { key: '11', param: '最大回撤', value: `${topMACDResult.maxDrawdown.toFixed(2)}%` },
+        { key: '12', param: '盈亏比', value: topMACDResult.profitFactor.toFixed(2) },
+        { key: '13', param: '固定止损', value: `${((topMACDResult.fixedStopLossPct || 0.05) * 100).toFixed(0)}%` },
+        { key: '14', param: '移动止损', value: `${((topMACDResult.trailingStopLossPct || 0.06) * 100).toFixed(0)}%` },
+        { key: '15', param: '综合评分', value: topMACDResult.score.toFixed(1) },
+      ]
+    : [];
+
+  // 退出原因统计
+  const macdExitStats = topMACDResult
+    ? (() => {
+        const stats: Record<string, number> = {};
+        topMACDResult.trades.forEach((t) => {
+          const r = t.exitReason || 'macd_exit';
+          stats[r] = (stats[r] || 0) + 1;
+        });
+        return stats;
+      })()
+    : {};
 
   const rsiData = topRSIResult
     ? [
@@ -263,15 +390,53 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
 
   return (
     <div className={styles.container}>
+      {/* 止损参数设置 */}
+      <div className={styles.section} style={{ marginBottom: 12 }}>
+        <Row gutter={16} align="middle">
+          <Col>
+            <span style={{ fontSize: 12, color: 'var(--inner-text-color)' }}>止损参数：</span>
+          </Col>
+          <Col>
+            <InputNumber
+              size="small"
+              min={1}
+              max={20}
+              value={fixedStopLossPct}
+              onChange={(v) => setFixedStopLossPct(v || 5)}
+              formatter={(v) => `固定${v}%`}
+              parser={(v) => (v ? parseFloat(v.replace(/[^0-9]/g, '')) : 5)}
+              style={{ width: 75 }}
+            />
+          </Col>
+          <Col>
+            <InputNumber
+              size="small"
+              min={1}
+              max={20}
+              value={trailingStopLossPct}
+              onChange={(v) => setTrailingStopLossPct(v || 5)}
+              formatter={(v) => `移动${v}%`}
+              parser={(v) => (v ? parseFloat(v.replace(/[^0-9]/g, '')) : 5)}
+              style={{ width: 75 }}
+            />
+          </Col>
+          <Col>
+            <span style={{ fontSize: 11, color: 'var(--sec-text-color)' }}>
+              修改后自动重新回测
+            </span>
+          </Col>
+        </Row>
+      </div>
+
       <Row gutter={16}>
         {/* MA回踩策略 */}
-        <Col span={12}>
+        <Col span={8}>
           <div className={styles.section}>
             <div className={styles.title}>
-              <Tag color="blue">MA均线回踩策略</Tag>
+              <Tag color="blue">MA均线回踩</Tag>
               {topMAResult && (
-                <span style={{ marginLeft: 8, fontSize: 12 }}>
-                  最优: MA{topMAResult.maPeriod} / 持有{topMAResult.holdDays}天
+                <span style={{ marginLeft: 8, fontSize: 11 }}>
+                  MA{topMAResult.maPeriod} / {topMAResult.holdDays}天
                 </span>
               )}
             </div>
@@ -285,11 +450,54 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
             />
             {topMAResult && (
               <div className={styles.btnGroup}>
-                <Checkbox checked={showMAPoints} onChange={onMAChange}>
-                  显示MA买卖点
+                <Checkbox checked={showMAPoints} onChange={onMAChange} size="small">
+                  显示买卖点
                 </Checkbox>
                 <Button size="small" onClick={testMARecent}>
-                  测试最近5根
+                  测最近5根
+                </Button>
+              </div>
+            )}
+          </div>
+        </Col>
+
+        {/* MACD策略 */}
+        <Col span={8}>
+          <div className={styles.section}>
+            <div className={styles.title}>
+              <Tag color="green">MACD金叉策略</Tag>
+              {topMACDResult && (
+                <span style={{ marginLeft: 8, fontSize: 11 }}>
+                  {topMACDResult.fast}/{topMACDResult.slow}/{topMACDResult.signal}
+                </span>
+              )}
+            </div>
+            <Table
+              size="small"
+              bordered={false}
+              pagination={false}
+              columns={macdColumns}
+              dataSource={macdData}
+              rowKey="key"
+            />
+            {topMACDResult && Object.keys(macdExitStats).length > 0 && (
+              <div style={{ fontSize: 10, color: 'var(--sec-text-color)', marginTop: 4, padding: '0 4px' }}>
+                退出统计:{' '}
+                {Object.entries(macdExitStats).map(([reason, count]) => (
+                  <span key={reason} style={{ marginRight: 8 }}>
+                    {reason === 'macd_exit' ? '死叉' : reason === 'hist_shrink' ? '柱缩' : reason === 'stop_loss_fixed' ? '固损' : reason === 'stop_loss_trailing' ? '移损' : reason}
+                    :{count}
+                  </span>
+                ))}
+              </div>
+            )}
+            {topMACDResult && (
+              <div className={styles.btnGroup}>
+                <Checkbox checked={showMACDPoints} onChange={onMACDChange} size="small">
+                  显示买卖点
+                </Checkbox>
+                <Button size="small" onClick={testMACDRecent}>
+                  测最近5根
                 </Button>
               </div>
             )}
@@ -297,13 +505,13 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
         </Col>
 
         {/* RSI策略 */}
-        <Col span={12}>
+        <Col span={8}>
           <div className={styles.section}>
             <div className={styles.title}>
-              <Tag color="purple">RSI超卖反弹策略</Tag>
+              <Tag color="purple">RSI超卖反弹</Tag>
               {topRSIResult && (
-                <span style={{ marginLeft: 8, fontSize: 12 }}>
-                  最优: RSI{topRSIResult.rsiPeriod} / 买≤{topRSIResult.buyThreshold} 卖≥{topRSIResult.sellThreshold}
+                <span style={{ marginLeft: 8, fontSize: 11 }}>
+                  RSI{topRSIResult.rsiPeriod} / 买≤{topRSIResult.buyThreshold}
                 </span>
               )}
             </div>
@@ -317,11 +525,11 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
             />
             {topRSIResult && (
               <div className={styles.btnGroup}>
-                <Checkbox checked={showRSIPoints} onChange={onRSIChange}>
-                  显示RSI买卖点
+                <Checkbox checked={showRSIPoints} onChange={onRSIChange} size="small">
+                  显示买卖点
                 </Checkbox>
                 <Button size="small" onClick={testRSIRecent}>
-                  测试最近5根
+                  测最近5根
                 </Button>
               </div>
             )}
@@ -343,49 +551,68 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
       )}
 
       {/* 策略对比 */}
-      {topMAResult && topRSIResult && (
+      {topMAResult && topMACDResult && topRSIResult && (
         <div className={styles.section}>
           <div className={styles.title}>策略对比</div>
           <Row gutter={16}>
-            <Col span={8}>
+            <Col span={10}>
               <div className={styles.resultCard}>
                 <div className={styles.row}>
                   <span className={styles.label}>维度</span>
                   <span className={styles.value}>MA回踩</span>
+                  <span className={styles.value}>MACD</span>
                   <span className={styles.value}>RSI反弹</span>
                 </div>
                 <div className={styles.row}>
                   <span className={styles.label}>交易次数</span>
                   <span className={styles.value}>{topMAResult.tradeCount}</span>
+                  <span className={styles.value}>{topMACDResult.tradeCount}</span>
                   <span className={styles.value}>{topRSIResult.tradeCount}</span>
                 </div>
                 <div className={styles.row}>
                   <span className={styles.label}>总收益</span>
                   <span className={styles.value}>{topMAResult.totalReturn.toFixed(2)}%</span>
+                  <span className={styles.value}>{topMACDResult.totalReturn.toFixed(2)}%</span>
                   <span className={styles.value}>{topRSIResult.totalReturn.toFixed(2)}%</span>
                 </div>
                 <div className={styles.row}>
                   <span className={styles.label}>胜率</span>
                   <span className={styles.value}>{topMAResult.winRate.toFixed(1)}%</span>
+                  <span className={styles.value}>{topMACDResult.winRate.toFixed(1)}%</span>
                   <span className={styles.value}>{topRSIResult.winRate.toFixed(1)}%</span>
                 </div>
                 <div className={styles.row}>
                   <span className={styles.label}>盈亏比</span>
                   <span className={styles.value}>{topMAResult.profitFactor.toFixed(2)}</span>
+                  <span className={styles.value}>{topMACDResult.profitFactor.toFixed(2)}</span>
                   <span className={styles.value}>{topRSIResult.profitFactor.toFixed(2)}</span>
+                </div>
+                <div className={styles.row}>
+                  <span className={styles.label}>最大回撤</span>
+                  <span className={styles.value}>{topMAResult.maxDrawdown.toFixed(2)}%</span>
+                  <span className={styles.value}>{topMACDResult.maxDrawdown.toFixed(2)}%</span>
+                  <span className={styles.value}>{topRSIResult.maxDrawdown.toFixed(2)}%</span>
                 </div>
                 <div className={styles.row}>
                   <span className={styles.label}>综合评分</span>
                   <span className={styles.value}>{topMAResult.score.toFixed(1)}</span>
+                  <span className={styles.value}>{topMACDResult.score.toFixed(1)}</span>
                   <span className={styles.value}>{topRSIResult.score.toFixed(1)}</span>
                 </div>
               </div>
             </Col>
-            <Col span={16}>
+            <Col span={14}>
               <div className={styles.hint}>
                 说明：回测基于历史K线数据进行参数网格搜索，评分最高的参数组合被选为"最优策略"。
-                勾选"显示买卖点"可将回测产生的交易信号写入股票配置并在K线图上显示，取消勾选则隐藏。
-                点击"测试最近20根"会基于最优参数对最近20根K线进行实时验证，有信号则自动标记到K线图。
+                止损参数（固定止损 + 移动止损）可在上方调整，修改后自动重新回测。
+                勾选"显示买卖点"可将回测产生的交易信号写入股票配置并在K线图上显示。
+                点击"测最近5根"会基于最优参数对最近5根K线进行实时验证，有信号则自动标记到K线图并显示建议止损位。
+                <br /><br />
+                <b>退出原因说明：</b><br />
+                死叉 — MACD死叉卖出 &nbsp;|&nbsp;
+                柱缩 — 柱状线连续缩短卖出 &nbsp;|&nbsp;
+                固损 — 触发固定止损 &nbsp;|&nbsp;
+                移损 — 触发移动止损（从最高点回落）
               </div>
             </Col>
           </Row>

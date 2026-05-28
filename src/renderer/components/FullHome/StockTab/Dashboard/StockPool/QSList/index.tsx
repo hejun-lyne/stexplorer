@@ -35,12 +35,15 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [loading, setLoading] = useState(false);
   const [firstAppearMap, setFirstAppearMap] = useState<Record<string, string>>({});
   const [techFilterLoading, setTechFilterLoading] = useState(false);
-  const [maResults, setMaResults] = useState<Record<string, { ma: boolean; macd: boolean; rsi: boolean }>>({});
+  const [maResults, setMaResults] = useState<Record<string, { ma: boolean; macd: boolean; rsi: boolean; maSL?: number; macdSL?: number; rsiSL?: number }>>({});
   const [techPending, setTechPending] = useState<Record<string, boolean>>({});
   const [filterMA, setFilterMA] = useState(false);
   const [filterMACD, setFilterMACD] = useState(false);
   const [filterRSI, setFilterRSI] = useState(false);
   const [techProgress, setTechProgress] = useState(0);
+  // 止损参数
+  const [fixedStopLossPct, setFixedStopLossPct] = useState(5);   // 固定止损 %
+  const [trailingStopLossPct, setTrailingStopLossPct] = useState(5); // 移动止损 %
   const isPausedRef = React.useRef(false);
   const currentIndexRef = React.useRef(0);
 
@@ -433,7 +436,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
       const batch = secids.slice(i, i + batchSize);
       const batchResults = await Promise.all(
         batch.map(async (secid) => {
-          const res = await Helpers.Stock.CheckStockBacktestSignals(secid);
+          const res = await Helpers.Stock.CheckStockBacktestSignals(
+            secid, 120, fixedStopLossPct / 100, trailingStopLossPct / 100
+          );
           console.log('Backtest signals', secid, res);
           return { secid, res };
         })
@@ -445,7 +450,14 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           batchResults.forEach(({ secid, res }) => {
             delete pNext[secid];
             if (res) {
-              next[secid] = { ma: res.ma, macd: res.macd, rsi: res.rsi };
+              next[secid] = {
+                ma: res.ma,
+                macd: res.macd,
+                rsi: res.rsi,
+                maSL: res.maDetail?.suggestStopLoss,
+                macdSL: res.macdDetail?.suggestStopLoss,
+                rsiSL: res.rsiDetail?.suggestStopLoss,
+              };
             } else {
               next[secid] = { ma: false, macd: false, rsi: false };
             }
@@ -470,7 +482,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     if (!isPausedRef.current) {
       setTechPending({});
     }
-  }, [stocks, maThreshold, techFilterLoading]);
+  }, [stocks, fixedStopLossPct, trailingStopLossPct, techFilterLoading]);
 
   
   return (
@@ -516,6 +528,24 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         >
           {techFilterLoading ? `分析中 ${techProgress}%` : '技术指标'}
         </Button>
+        <InputNumber
+          size="small"
+          min={1}
+          max={20}
+          value={fixedStopLossPct}
+          onChange={(v) => setFixedStopLossPct(v || 5)}
+          formatter={(v) => `止损${v}%`}
+          style={{ width: 72, marginLeft: 6 }}
+        />
+        <InputNumber
+          size="small"
+          min={1}
+          max={20}
+          value={trailingStopLossPct}
+          onChange={(v) => setTrailingStopLossPct(v || 5)}
+          formatter={(v) => `移动${v}%`}
+          style={{ width: 72, marginLeft: 2 }}
+        />
         <Checkbox
           checked={autoBackup}
           onChange={(e) => setAutoBackup(e.target.checked)}
@@ -605,9 +635,27 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                   <Col span={2}>{s.nh ? '是' : '否'}</Col>
                   <Col span={2}>{s.zttj.days + '天' + s.zttj.ct + '板'}</Col> */}
                   <Col span={2}>{firstAppearMap[s.secid] ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天' : '-'}</Col>
-                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].ma ? '✓' : '✗') : ''}</Col>
-                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].macd ? '✓' : '✗') : ''}</Col>
-                  <Col span={2}>{techPending[s.secid] ? '分析中' : maResults[s.secid] ? (maResults[s.secid].rsi ? '✓' : '✗') : ''}</Col>
+                  <Col span={2}>
+                    {techPending[s.secid] ? '分析中' : maResults[s.secid] ? (
+                      maResults[s.secid].ma ? (
+                        <span>✓{maResults[s.secid].maSL ? <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].maSL}</span> : ''}</span>
+                      ) : '✗'
+                    ) : ''}
+                  </Col>
+                  <Col span={2}>
+                    {techPending[s.secid] ? '分析中' : maResults[s.secid] ? (
+                      maResults[s.secid].macd ? (
+                        <span>✓{maResults[s.secid].macdSL ? <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].macdSL}</span> : ''}</span>
+                      ) : '✗'
+                    ) : ''}
+                  </Col>
+                  <Col span={2}>
+                    {techPending[s.secid] ? '分析中' : maResults[s.secid] ? (
+                      maResults[s.secid].rsi ? (
+                        <span>✓{maResults[s.secid].rsiSL ? <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].rsiSL}</span> : ''}</span>
+                      ) : '✗'
+                    ) : ''}
+                  </Col>
                   <Col span={8}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
                 </Row>
               ))}
