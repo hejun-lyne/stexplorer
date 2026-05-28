@@ -10,8 +10,29 @@ import * as Tech from '@/helpers/tech';
 import moment from 'moment';
 import { PromiseWorker } from './promiseWorker';
 
-const { compileTS, makeWorkerExec } = window.contextModules.electron;
+async function rsiStrategyBacktest(startDate: string,
+  endDate: string, 
+  onStockList: (date:string) => Stock.DetailItem[],
+  onProgressLog: (text: string) => void,
+  initialAmount: number = 100000, 
+  commission: number = 0.001) {
+  //1. 获取回测时间周期内的交易日列表
+  //2. 遍历交易日列表，在每个交易日进行如下操作：
+  //  a. 获取当天的股票列表
+  //  b. 对每只股票，获取其历史K线数据，过滤到截止日期前的K线数据
+  //  c. 获取其关联板块的资金流数据，过滤到截止日期前的数据，并缓存下来以便重复使用
+  //  d. 判断关联板块的资金流是否满足条件（如连续3天净流入且最后一天净流入超过一定阈值）
+  //  e. 如果不满足条件，则跳过该股票；如果满足条件，则继续进行下一步判断
+  //  f. 获取关联板块的历史K线数据，过滤到截止日期前的数据，并缓存下来以便重复使用
+  //  g. 评估该股票的最近一段时间K线数据是否强于关联板块的K线数据（如RSI指标持续高于关联板块的RSI指标）
+  //  h. 如果不满足条件，则跳过该股票；如果满足条件，则继续进行下一步判断(需要考虑是否纳入概念板块评估)
+  //  i. 检查该股票k线数据是否处于上升趋势（如20日均线持续上升且股价在20日均线上方）
+  //  j. 如果不满足条件，则跳过该股票；如果满足条件，则继续进行下一步判断
+  //  k. 使用RSI6, RSI12, RSI24进行RSI策略回测(使用CheckStockBacktestSignals)，得到最佳策略并得到策略匹配评分，记录下来结果，将该股票纳入候选列表
+  //3. 对候选列表中的股票进行排序，选出评分最高的前N只股票纳入观察列表
+}
 
+const { compileTS, makeWorkerExec } = window.contextModules.electron;
 async function createWebWorker(source: string, onConsoleLog: (text: string | string[]) => void) {
   const logFunc = `
   let outterLogFunc = undefined;
