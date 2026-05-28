@@ -744,22 +744,66 @@ class TushareAPI:
         try:
             code = convert_secid_to_pure_code(secid)
             pro = get_pro()
-            end_date = datetime.now().strftime("%Y%m%d")
+            today = datetime.now().strftime("%Y%m%d")
+            # 用 trade_cal 获取最近交易日，避免非交易日导致 dc_daily 返回空
+            trade_date = today
+            try:
+                cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=30)).strftime('%Y%m%d'), end_date=today, is_open='1')
+                if cal_df is not None and not cal_df.empty:
+                    trade_date = str(cal_df['cal_date'].iloc[-1])
+            except Exception:
+                pass
             start_date = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
 
             # dc_daily 需要 BKxxxx.DC 格式
             ts_code = f"{code}.DC" if not code.endswith(".DC") else code
 
-            df = cached_api_call(f"dc_daily_{ts_code}", 24, pro.dc_daily,
-                                  ts_code=ts_code, start_date=start_date, end_date=end_date)
-            if isinstance(df, dict) and df.get("error"):
-                return df
-            if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-                return {"error": "No data available"}
+            # 先尝试带 start_date/end_date 查询
+            df = cached_api_call(f"dc_daily_{ts_code}_{start_date}_{trade_date}", 24, pro.dc_daily,
+                                  ts_code=ts_code, start_date=start_date, end_date=trade_date)
+            debug_info = {
+                "ts_code": ts_code,
+                "start_date": start_date,
+                "end_date": trade_date,
+                "query_type": "range",
+                "df_type": type(df).__name__,
+            }
+            if isinstance(df, pd.DataFrame):
+                debug_info["df_shape"] = df.shape
+                if not df.empty:
+                    debug_info["date_range"] = [str(df['trade_date'].min()), str(df['trade_date'].max())]
 
-            # 补充换手率：merge daily_basic
+            # 如果 range 查询返回空，尝试逐日查询最近5天
+            if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                debug_info["range_empty"] = True
+                range_dfs = []
+                try:
+                    cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=10)).strftime('%Y%m%d'), end_date=today, is_open='1')
+                    if cal_df is not None and not cal_df.empty:
+                        recent_dates = cal_df['cal_date'].astype(str).tolist()[-5:]
+                        for td in recent_dates:
+                            day_df = safe_api_call(pro.dc_daily, ts_code=ts_code, trade_date=td)
+                            if isinstance(day_df, pd.DataFrame) and not day_df.empty:
+                                range_dfs.append(day_df)
+                        if range_dfs:
+                            df = pd.concat(range_dfs, ignore_index=True)
+                            debug_info["query_type"] = "daily_concat"
+                            debug_info["concat_dates"] = recent_dates
+                            debug_info["df_shape"] = df.shape
+                except Exception as e:
+                    debug_info["daily_query_error"] = str(e)
+
+            if isinstance(df, dict) and df.get("error"):
+                return {"error": df.get("error"), "debug": debug_info}
+            if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                return {"error": "No data available", "debug": debug_info}
+
+            # 按日期升序排列
+            df = df.sort_values('trade_date', ascending=True).reset_index(drop=True)
+
+            # 补充换手率：merge daily_basic（板块代码可能不支持，忽略错误）
             try:
-                basic_df = pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                basic_df = pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=trade_date)
                 if basic_df is not None and not basic_df.empty:
                     df = df.merge(basic_df[['trade_date', 'turnover_rate']], on='trade_date', how='left')
             except Exception as e:
@@ -780,6 +824,7 @@ class TushareAPI:
                     "zde": _to_float(row.get('change', 0)),
                     "hsl": _to_float(row.get('turnover_rate', 0)),
                 })
+            print(f"[_get_board_kline debug] {debug_info}")
             return klines
         except Exception as e:
             return {"error": str(e)}
@@ -1079,7 +1124,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             code = convert_secid_to_pure_code(secid)
-            trade_date = datetime.now().strftime('%Y%m%d')
+            today = datetime.now().strftime('%Y%m%d')
             start_date_5d = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
 
             # 判断板块类型
@@ -1087,6 +1132,22 @@ class TushareAPI:
             is_ths = code.startswith("88") or code.startswith("3")
             
             member_map: Dict[str, Dict[str, Any]] = {}  # member_ts -> info
+            debug_info: Dict[str, Any] = {
+                "secid": secid,
+                "code": code,
+                "is_dc": is_dc,
+                "is_ths": is_ths,
+            }
+
+            # 获取最近交易日（dc_member/daily 等接口要求 trade_date 必须是交易日）
+            trade_date = today
+            try:
+                cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=today, is_open='1')
+                if cal_df is not None and not cal_df.empty:
+                    trade_date = str(cal_df['cal_date'].iloc[-1])
+            except Exception as e:
+                print(f"[trade_cal 失败] {e}")
+            debug_info["trade_date"] = trade_date
 
             # ========== 获取成分股 ==========
             if is_ths:
@@ -1102,29 +1163,52 @@ class TushareAPI:
                         "market": market,
                         "secid": s["secid"],
                     }
+                debug_info["source"] = "ths_web"
+                debug_info["ths_count"] = len(ths_stocks)
             else:
                 # 东财板块：使用 dc_member
                 ts_code = f"{code}.DC" if not code.endswith(".DC") else code
-                df = cached_api_call(f"dc_member_{ts_code}", 24, pro.dc_member, ts_code=ts_code, trade_date=trade_date)
+                debug_info["ts_code"] = ts_code
+
+                # 先尝试带 trade_date 查询
+                df = cached_api_call(f"dc_member_{ts_code}_{trade_date}", 24, pro.dc_member, ts_code=ts_code, trade_date=trade_date)
+                debug_info["dc_member_type"] = type(df).__name__
+                if isinstance(df, pd.DataFrame):
+                    debug_info["dc_member_shape"] = df.shape
+                    debug_info["dc_member_columns"] = df.columns.tolist() if not df.empty else []
+                
                 if isinstance(df, dict) and df.get("error"):
-                    return df
+                    debug_info["dc_member_error"] = df.get("error")
+                    return {"error": df.get("error"), "debug": debug_info}
+                
                 if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-                    # dc_member 失败，尝试同花顺（如果代码看起来像同花顺）
-                    if is_ths or code.startswith("88") or code.startswith("3"):
-                        ths_stocks = _get_board_stocks_from_ths(code)
-                        for s in ths_stocks:
-                            stock_code = s["code"]
-                            market = 1 if stock_code.startswith("6") else 0
-                            member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
-                            member_map[member_ts] = {
-                                "code": stock_code,
-                                "name": s["name"],
-                                "market": market,
-                                "secid": s["secid"],
-                            }
-                    if not member_map:
-                        return {"total": 0, "stocks": []}
-                else:
+                    # 带 trade_date 失败，尝试不带 trade_date（查询最新）
+                    debug_info["dc_member_empty"] = True
+                    df2 = safe_api_call(pro.dc_member, ts_code=ts_code)
+                    debug_info["dc_member2_type"] = type(df2).__name__
+                    if isinstance(df2, pd.DataFrame) and not df2.empty:
+                        df = df2
+                        debug_info["dc_member2_shape"] = df2.shape
+                    else:
+                        # dc_member 彻底失败，尝试同花顺（如果代码看起来像同花顺）
+                        if is_ths or code.startswith("88") or code.startswith("3"):
+                            ths_stocks = _get_board_stocks_from_ths(code)
+                            for s in ths_stocks:
+                                stock_code = s["code"]
+                                market = 1 if stock_code.startswith("6") else 0
+                                member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
+                                member_map[member_ts] = {
+                                    "code": stock_code,
+                                    "name": s["name"],
+                                    "market": market,
+                                    "secid": s["secid"],
+                                }
+                            debug_info["fallback"] = "ths_web"
+                        if not member_map:
+                            return {"total": 0, "stocks": [], "debug": debug_info}
+                
+                if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+                    debug_info["dc_member_rows"] = len(df)
                     for _, row in df.iterrows():
                         con_code = str(row.get("con_code", ""))
                         stock_code = con_code.split(".")[0] if "." in con_code else con_code
@@ -1138,9 +1222,10 @@ class TushareAPI:
                             "market": market,
                             "secid": f"{market}.{stock_code}",
                         }
+                    debug_info["member_count"] = len(member_map)
 
             if not member_map:
-                return {"total": 0, "stocks": []}
+                return {"total": 0, "stocks": [], "debug": debug_info}
 
             # ========== 批量获取全市场当日行情 ==========
             market_data: Dict[str, Dict[str, Any]] = {}
@@ -1226,46 +1311,400 @@ class TushareAPI:
                                     main_in_5d_map[tc] = main_in_5d_map.get(tc, 0) + net_amount
                     except Exception as e:
                         print(f"[moneyflow_dc {td} 查询失败] {e}")
+            # ========== 获取主力资金数据 ==========
+            main_in_map: Dict[str, float] = {}
+            main_in_5d_map: Dict[str, float] = {}
 
-            # ========== 组装结果 ==========
-            stocks = []
-            for member_ts, info in member_map.items():
-                md = market_data.get(member_ts, {})
-                zx = md.get("zx", 0)
-                zs = md.get("zs", 0)
-                zf = round((md.get("zg", 0) - md.get("zd", 0)) / zs * 100, 2) if zs > 0 else 0
-                stocks.append({
-                    "code": info["code"],
-                    "name": info["name"],
-                    "secid": info["secid"],
-                    "zx": zx,
-                    "zdf": md.get("zdf", 0),
-                    "zdd": md.get("zdd", 0),
-                    "cjl": md.get("cjl", 0),
-                    "cje": md.get("cje", 0),
-                    "zf": zf,
-                    "zg": md.get("zg", 0),
-                    "zd": md.get("zd", 0),
-                    "jk": md.get("jk", 0),
-                    "zs": zs,
-                    "lb": 0,
-                    "hsl": md.get("hsl", 0),
-                    "syl": md.get("syl", 0),
-                    "sjl": md.get("sjl", 0),
-                    "sz": md.get("sz", 0),
-                    "lt": md.get("lt", 0),
-                    "main_in": main_in_map.get(member_ts, 0),
-                    "main_in_5d": main_in_5d_map.get(member_ts, 0),
-                    "cm5": 0,
-                    "cd60": 0,
-                    "cy1": 0,
-                    "cs": 0,
-                })
+            if is_ths:
+                # 同花顺：使用 moneyflow_ths（含当日和5日）
+                try:
+                    ths_mf = safe_api_call(pro.moneyflow_ths, trade_date=trade_date)
+                    if ths_mf is not None and not (isinstance(ths_mf, dict) and ths_mf.get("error")) and not ths_mf.empty:
+                        for _, row in ths_mf.iterrows():
+                            tc = str(row.get("ts_code", ""))
+                            if tc in member_map:
+                                main_in_map[tc] = _to_float(row.get("net_amount", 0)) * 10000
+                                main_in_5d_map[tc] = _to_float(row.get("net_d5_amount", 0)) * 10000
+                except Exception as e:
+                    print(f"[moneyflow_ths 查询失败] {e}")
+            else:
+                # 东财板块个股：用 moneyflow_dc（6000积分，每日盘后更新）
+                # 先获取最近5个交易日
+                trade_dates: List[str] = []
+                try:
+                    cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=trade_date, is_open='1')
+                    if cal_df is not None and not cal_df.empty:
+                        trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
+                        print(f"[debug] trade_dates: {trade_dates}, count={len(trade_dates)}")
+                except Exception as e:
+                    print(f"[trade_cal 查询失败] {e}")
 
-            return {"total": len(stocks), "stocks": stocks}
+                # 逐日查询 moneyflow_dc 全市场数据，累加成分股
+                success_dates = 0
+                for td in trade_dates:
+                    try:
+                        dc_mf = safe_api_call(pro.moneyflow_dc, trade_date=td)
+                        if isinstance(dc_mf, dict) and dc_mf.get("error"):
+                            print(f"[moneyflow_dc {td}] API error: {dc_mf.get('error')}")
+                            continue
+                        if dc_mf is None or (isinstance(dc_mf, pd.DataFrame) and dc_mf.empty):
+                            print(f"[moneyflow_dc {td}] empty data")
+                            continue
+
+                        success_dates += 1
+                        matched = 0
+                        for _, row in dc_mf.iterrows():
+                            tc = str(row.get("ts_code", ""))
+                            if tc in member_map:
+                                net_amount = _to_float(row.get("net_amount", 0)) * 10000
+                                if td == trade_dates[-1]:
+                                    main_in_map[tc] = net_amount
+                                main_in_5d_map[tc] = main_in_5d_map.get(tc, 0) + net_amount
+                                matched += 1
+                        print(f"[moneyflow_dc {td}] matched {matched}/{len(member_map)} stocks")
+                    except Exception as e:
+                        print(f"[moneyflow_dc {td} 查询失败] {e}")
+
+                print(f"[debug] moneyflow_dc summary: success={success_dates}/{len(trade_dates)}, "
+                    f"main_in records={len(main_in_map)}, main_in_5d records={len(main_in_5d_map)}")
+
+                # 检查异常：两者相等且不为0的情况
+                for tc in list(member_map.keys())[:10]:
+                    mi = main_in_map.get(tc, 0)
+                    m5 = main_in_5d_map.get(tc, 0)
+                    if mi != 0 and abs(mi - m5) < 0.01:
+                        print(f"[debug] WARNING equal value: {tc} main_in={mi}, main_in_5d={m5}")
+                # ========== 组装结果 ==========
+                stocks = []
+                for member_ts, info in member_map.items():
+                    md = market_data.get(member_ts, {})
+                    zx = md.get("zx", 0)
+                    zs = md.get("zs", 0)
+                    zf = round((md.get("zg", 0) - md.get("zd", 0)) / zs * 100, 2) if zs > 0 else 0
+                    stocks.append({
+                        "code": info["code"],
+                        "name": info["name"],
+                        "secid": info["secid"],
+                        "zx": zx,
+                        "zdf": md.get("zdf", 0),
+                        "zdd": md.get("zdd", 0),
+                        "cjl": md.get("cjl", 0),
+                        "cje": md.get("cje", 0),
+                        "zf": zf,
+                        "zg": md.get("zg", 0),
+                        "zd": md.get("zd", 0),
+                        "jk": md.get("jk", 0),
+                        "zs": zs,
+                        "lb": 0,
+                        "hsl": md.get("hsl", 0),
+                        "syl": md.get("syl", 0),
+                        "sjl": md.get("sjl", 0),
+                        "sz": md.get("sz", 0),
+                        "lt": md.get("lt", 0),
+                        "main_in": main_in_map.get(member_ts, 0),
+                        "main_in_5d": main_in_5d_map.get(member_ts, 0),
+                        "cm5": 0,
+                        "cd60": 0,
+                        "cy1": 0,
+                        "cs": 0,
+                    })
+
+                return {"total": len(stocks), "stocks": stocks}
         except Exception as e:
             return {"error": str(e)}
 
+        # ------------------ 行业-概念关联分析（Tushare Pro 原生接口）------------------
+
+    @staticmethod
+    def _get_concept_stocks_simple(concept_code: str, concept_source: str = "dc") -> List[str]:
+        """轻量获取概念板块成分股代码列表（无行情，仅用于交集计算）"""
+        try:
+            pro = get_pro()
+            if concept_source == "dc":
+                # 东财概念：使用 dc_member（已有缓存机制）
+                ts_code = f"{concept_code}.DC" if not concept_code.endswith(".DC") else concept_code
+                trade_date = datetime.now().strftime('%Y%m%d')
+                df = cached_api_call(f"dc_member_{ts_code}", 24, pro.dc_member,
+                                      ts_code=ts_code, trade_date=trade_date)
+                if isinstance(df, dict) and df.get("error"):
+                    return []
+                if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                    return []
+                stocks = []
+                for _, row in df.iterrows():
+                    con_code = str(row.get("con_code", ""))
+                    stock_code = con_code.split(".")[0] if "." in con_code else con_code
+                    if stock_code and stock_code.isdigit():
+                        stocks.append(stock_code)
+                return stocks
+            else:
+                # 同花顺概念：使用 ths_member（6000积分）
+                # 统一编码格式为 885xxx.TI
+                if not concept_code.endswith(".TI"):
+                    ts_code = f"{concept_code}.TI"
+                else:
+                    ts_code = concept_code
+
+                df = cached_api_call(f"ths_member_{ts_code}", 24, pro.ths_member,
+                                      ts_code=ts_code)
+                if isinstance(df, dict) and df.get("error"):
+                    return []
+                if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                    return []
+                stocks = []
+                for _, row in df.iterrows():
+                    con_code = str(row.get("con_code", ""))
+                    stock_code = con_code.split(".")[0] if "." in con_code else con_code
+                    if stock_code and stock_code.isdigit():
+                        stocks.append(stock_code)
+                return stocks
+        except Exception as e:
+            print(f"[_get_concept_stocks_simple] {concept_source} {concept_code} failed: {e}")
+            return []
+
+
+    @staticmethod
+    def _get_all_concept_stocks_map(concept_source: str = "dc", max_concepts: int = 0) -> Dict[str, Dict[str, Any]]:
+        """获取全量概念板块及其成分股代码映射（带 24h 缓存）"""
+        cache_key = f"all_concept_stocks_map_{concept_source}_{max_concepts}"
+        cached = read_cache(cache_key, max_age_hours=24)
+        if cached is not None:
+            return cached
+
+        result = {}
+        try:
+            pro = get_pro()
+            if concept_source == "dc":
+                # 东财概念板块列表：dc_index
+                df = safe_api_call(pro.dc_index, idx_type="概念板块")
+                if isinstance(df, dict) and df.get("error"):
+                    return result
+                if df is None or df.empty:
+                    return result
+
+                df = df.drop_duplicates(subset=['ts_code'], keep='first')
+                boards = []
+                for _, row in df.iterrows():
+                    ts_code = str(row.get("ts_code", ""))
+                    name = str(row.get("name", ""))
+                    code = ts_code.replace(".DC", "") if ".DC" in ts_code else ts_code
+                    if code.startswith("BK"):
+                        boards.append({"code": code, "name": name, "ts_code": ts_code})
+
+                if max_concepts > 0:
+                    boards = boards[:max_concepts]
+
+                for board in boards:
+                    stocks = TushareAPI._get_concept_stocks_simple(board["code"], "dc")
+                    if stocks:
+                        result[board["code"]] = {"name": board["name"], "stocks": stocks, "count": len(stocks)}
+
+            else:
+                # 同花顺概念板块列表：ths_index(type='N')
+                df = safe_api_call(pro.ths_index, type='N')
+                if isinstance(df, dict) and df.get("error"):
+                    return result
+                if df is None or df.empty:
+                    return result
+
+                boards = []
+                for _, row in df.iterrows():
+                    ts_code = str(row.get("ts_code", ""))
+                    name = str(row.get("name", ""))
+                    exchange = str(row.get("exchange", ""))
+                    # 只取 A 股概念指数，且确保是 .TI 后缀
+                    if exchange == "A" and ts_code.endswith(".TI"):
+                        boards.append({"code": ts_code, "name": name, "ts_code": ts_code})
+
+                if max_concepts > 0:
+                    boards = boards[:max_concepts]
+
+                for board in boards:
+                    stocks = TushareAPI._get_concept_stocks_simple(board["code"], "ths")
+                    if stocks:
+                        result[board["code"]] = {"name": board["name"], "stocks": stocks, "count": len(stocks)}
+
+        except Exception as e:
+            print(f"[_get_all_concept_stocks_map] failed: {e}")
+
+        write_cache(cache_key, result)
+        return result
+
+
+    @staticmethod
+    def get_industry_related_concepts(industry_code: str, concept_source: str = "dc",
+                                       top_n: int = 15, threshold: float = 0.15,
+                                       max_concepts: int = 0) -> Dict[str, Any]:
+        """
+        根据行业板块代码，查找关联度最高的概念板块
+
+        关联度计算：
+        - ratio_in_concept: 概念成分股中属于该行业的比例（概念的行业纯度）
+        - ratio_in_industry: 行业成分股中属于该概念的比例（行业的概念覆盖率）
+        - score: 综合得分 = ratio_in_concept * 0.6 + ratio_in_industry * 0.4
+
+        Args:
+            industry_code: 行业板块代码
+                - 东财行业: BKxxxx（如 BK0428 电力行业）
+                - 同花顺行业: 88xxxx 网页端编码 或 885xxx.TI
+            concept_source: 概念板块数据源，"dc"(东财) 或 "ths"(同花顺)
+            top_n: 返回关联度最高的前 N 个概念
+            threshold: 综合得分阈值，低于此值过滤
+            max_concepts: 最多检查的概念板块数量，0 表示全部。
+                         首次查询或盘中调用建议设置上限（如 100）避免超时。
+
+        Returns:
+            {
+                "industry_code": "BK0428",
+                "industry_name": "",
+                "concept_source": "dc",
+                "industry_stock_count": 89,
+                "concept_checked": 342,
+                "concepts": [
+                    {
+                        "concept_code": "BK1013",
+                        "concept_name": "绿色电力",
+                        "overlap_count": 45,
+                        "concept_stock_count": 67,
+                        "industry_stock_count": 89,
+                        "ratio_in_concept": 0.6716,
+                        "ratio_in_industry": 0.5056,
+                        "score": 0.6052
+                    }
+                ]
+            }
+        """
+        try:
+            # 1. 获取行业板块成分股（复用已有接口）
+            industry_data = TushareAPI.get_board_stocks(industry_code)
+            if isinstance(industry_data, dict) and industry_data.get("error"):
+                return industry_data
+
+            industry_stocks = industry_data.get("stocks", [])
+            if not industry_stocks:
+                return {
+                    "industry_code": industry_code,
+                    "industry_name": "",
+                    "concept_source": concept_source,
+                    "industry_stock_count": 0,
+                    "concepts": [],
+                    "error": "行业板块无成分股或获取失败"
+                }
+
+            # 提取行业成分股纯代码集合
+            industry_codes = set()
+            for s in industry_stocks:
+                c = s.get("code", "")
+                if c and c.isdigit():
+                    industry_codes.add(c)
+
+            industry_count = len(industry_codes)
+            if industry_count == 0:
+                return {
+                    "industry_code": industry_code,
+                    "industry_name": "",
+                    "concept_source": concept_source,
+                    "industry_stock_count": 0,
+                    "concepts": [],
+                    "error": "行业板块成分股代码解析失败"
+                }
+
+            # 2. 获取全量概念板块成分股映射（带缓存）
+            all_concepts = TushareAPI._get_all_concept_stocks_map(
+                concept_source=concept_source,
+                max_concepts=max_concepts
+            )
+
+            if not all_concepts:
+                return {
+                    "industry_code": industry_code,
+                    "industry_name": "",
+                    "concept_source": concept_source,
+                    "industry_stock_count": industry_count,
+                    "concepts": [],
+                    "error": "概念板块数据获取失败"
+                }
+
+            # 3. 逐一遍历计算交集关联度
+            results = []
+            for concept_code, concept_info in all_concepts.items():
+                concept_stocks = set(concept_info.get("stocks", []))
+                concept_name = concept_info.get("name", "")
+                concept_count = concept_info.get("count", 0)
+
+                if concept_count < 3:  # 成分股太少，噪音大，跳过
+                    continue
+
+                overlap = industry_codes & concept_stocks
+                overlap_count = len(overlap)
+
+                if overlap_count == 0:
+                    continue
+
+                ratio_in_concept = overlap_count / concept_count if concept_count > 0 else 0
+                ratio_in_industry = overlap_count / industry_count if industry_count > 0 else 0
+
+                # 综合得分：偏向"概念的行业纯度"
+                score = ratio_in_concept * 0.6 + ratio_in_industry * 0.4
+
+                if score < threshold:
+                    continue
+
+                results.append({
+                    "concept_code": concept_code,
+                    "concept_name": concept_name,
+                    "overlap_count": overlap_count,
+                    "concept_stock_count": concept_count,
+                    "industry_stock_count": industry_count,
+                    "ratio_in_concept": round(ratio_in_concept, 4),
+                    "ratio_in_industry": round(ratio_in_industry, 4),
+                    "score": round(score, 4),
+                })
+
+            # 4. 按综合得分降序，取 top_n
+            results.sort(key=lambda x: x["score"], reverse=True)
+            if top_n > 0:
+                results = results[:top_n]
+
+            return {
+                "industry_code": industry_code,
+                "industry_name": "",
+                "concept_source": concept_source,
+                "industry_stock_count": industry_count,
+                "concept_checked": len(all_concepts),
+                "concepts": results,
+            }
+
+        except Exception as e:
+            return {"error": str(e)}
+
+
+    @staticmethod
+    def build_concept_stock_cache(concept_source: str = "dc", max_concepts: int = 0) -> Dict[str, Any]:
+        """
+        预构建概念板块成分股缓存，用于加速后续 get_industry_related_concepts 查询。
+        建议在每日收盘后或启动时调用一次。
+
+        Args:
+            concept_source: "dc" 或 "ths"
+            max_concepts: 最多缓存的概念数量，0 表示全部。ths 建议先设 100 测试稳定性。
+
+        Returns:
+            {"status": "ok", "cached_count": 123, "concept_source": "dc"}
+        """
+        try:
+            result = TushareAPI._get_all_concept_stocks_map(
+                concept_source=concept_source,
+                max_concepts=max_concepts
+            )
+            return {
+                "status": "ok",
+                "cached_count": len(result),
+                "concept_source": concept_source,
+                "max_concepts": max_concepts,
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
     # ------------------ 涨跌停数据 ------------------
 
     @staticmethod

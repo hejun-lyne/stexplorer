@@ -14,7 +14,7 @@ export interface CoreThemeProps {
   active: boolean;
   code: string;
   secid: string;
-  onOpenStock: (secid: string, name: string, change?: number) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
 }
 
 const CoreTheme: React.FC<CoreThemeProps> = React.memo(({ active, code, secid, onOpenStock }) => {
