@@ -1,6 +1,17 @@
 import { ChanTrendState, ChanType, KNoteType, MAType, PriceMAState, DayTrendType, StrategyType, ZLType, MRType, SingleKLineShape, MultiKlineShape, KLineEntitySize, KLineHatchType, MarkType, PeriodMarkType } from '@/utils/enums';
 
 declare namespace Stock {
+  export interface BoardData {
+    secid: string;
+    name: string;
+    zx: number;
+    zdf: number;
+    hsl: number;
+    moneyIn: number;
+    moneyIn3d: number;
+    moneyInRankInAll: number;
+  }
+
   export interface SettingItem {
     market: number;
     code: string;

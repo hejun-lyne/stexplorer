@@ -1,39 +1,6 @@
-/**
- * 东财强势股票回测框架
- * 针对"60天新高/涨停"型强势股票列表设计
- * 核心特性：
- * 1. 分段波动率（突破前120天 vs 突破后20天）
- * 2. 趋势型RSI策略（动能启动买入，顶背离/跌破卖出）
- * 3. 多因子评分系统
- * 4. 次日开盘价成交（T+1信号延迟执行）
- * 5. 固定止损 + 移动止盈
- */
-
-// ==================== 类型定义 ====================
-export interface KLine {
-    date: string;
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume: number;
-    amount: number; // 成交额
-}
-
-export interface BoardData {
-    code: string;
-    name: string;
-    moneyFlow3d: number;      // 近3日主力净流入
-    moneyFlowToday: number;   // 当日主力净流入
-    rankInAll: number;       // 板块涨幅排名（0-1，越小越强）
-    klines?: KLine[];
-}
-
-export interface StrongStock {
-    code: string;
-    name: string;
-    boardCode: string;
-}
+import { Stock } from '@/types/stock';
+import * as Services from '@/services';
+import * as Tech from '@/helpers/tech';
 
 export interface BreakoutMetrics {
     preVol: number;          // 突破前年化波动率
@@ -48,134 +15,14 @@ export interface TradeSignal {
     reason: string;
 }
 
-export interface Position {
-    code: string;
-    buyDate: string;
-    buyPrice: number;
-    quantity: number;
-    buyAmount: number;
-    highestPrice: number;
-    addCount: number;
-}
-
-export interface PendingOrder {
-    code: string;
-    type: 'buy' | 'sell';
-    reason: string;
-    signalDate: string;
-}
-
-export interface TradeRecord {
-    date: string;
-    code: string;
-    type: 'buy' | 'sell';
-    price: number;
-    quantity: number;
-    amount: number;
-    reason: string;
-    pnl?: number;
-}
-
-export interface DailyValue {
-    date: string;
-    totalValue: number;
-}
-
-export interface BacktestResult {
-    totalReturn: number;
-    annualizedReturn: number;
-    maxDrawdown: number;
-    winRate: number;
-    profitFactor: number;
-    sharpeRatio: number;
-    totalTrades: number;
-    avgHoldingDays: number;
-    trades: TradeRecord[];
-    dailyValues: DailyValue[];
-}
-
-export interface DataProvider {
-    getStrongStocks(date: string): StrongStock[];
-    getKLines(code: string, endDate: string, days?: number): KLine[] | null;
-    getBoardData(boardCode: string, endDate: string): BoardData | null;
-}
-
-export interface WatchItem {
-    addedDate: string;
-    score: number;
-}
-
-// ==================== 工具函数 ====================
-
-/**
- * 计算简单移动平均
- */
-export function calculateMA(values: number[], period: number): number[] {
-    const ma: number[] = [];
-    for (let i = 0; i < values.length; i++) {
-        if (i < period - 1) {
-            ma.push(0);
-        } else {
-            const sum = values.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
-            ma.push(sum / period);
-        }
-    }
-    return ma;
-}
-
-/**
- * 计算Wilder's RSI
- */
-export function calculateRSI(klines: KLine[], period: number = 6): number[] {
-    const rsi: number[] = new Array(klines.length).fill(0);
-    if (klines.length < period + 1) return rsi;
-
-    let avgGain = 0;
-    let avgLoss = 0;
-
-    // 初始平均涨跌
-    for (let i = 1; i <= period; i++) {
-        const change = klines[i].close - klines[i - 1].close;
-        if (change > 0) avgGain += change;
-        else avgLoss += Math.abs(change);
-    }
-    avgGain /= period;
-    avgLoss /= period;
-
-    // 第一个RSI值
-    if (avgLoss === 0) rsi[period] = 100;
-    else {
-        const rs = avgGain / avgLoss;
-        rsi[period] = 100 - (100 / (1 + rs));
-    }
-
-    // 后续RSI
-    for (let i = period + 1; i < klines.length; i++) {
-        const change = klines[i].close - klines[i - 1].close;
-        const gain = change > 0 ? change : 0;
-        const loss = change < 0 ? Math.abs(change) : 0;
-
-        avgGain = (avgGain * (period - 1) + gain) / period;
-        avgLoss = (avgLoss * (period - 1) + loss) / period;
-
-        if (avgLoss === 0) rsi[i] = 100;
-        else {
-            const rs = avgGain / avgLoss;
-            rsi[i] = 100 - (100 / (1 + rs));
-        }
-    }
-
-    return rsi;
-}
-
 /**
  * 计算年化波动率（对数收益率）
  */
-export function calculateVolatility(klines: KLine[]): number {
+function calculateVolatility(klines: Stock.KLineItem[]): number {
     if (klines.length < 5) return 0;
     const returns: number[] = [];
     for (let i = 1; i < klines.length; i++) {
-        returns.push(Math.log(klines[i].close / klines[i - 1].close));
+        returns.push(Math.log(klines[i].sp / klines[i - 1].sp));
     }
     const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
     const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
@@ -187,7 +34,7 @@ export function calculateVolatility(klines: KLine[]): number {
  * 针对东财强势股票（60天新高/涨停）设计
  */
 export function calculateBreakoutMetrics(
-    klines: KLine[],
+    klines: Stock.KLineItem[],
     tradeDay: string
 ): BreakoutMetrics | null {
     const tradeIndex = klines.findIndex(k => k.date === tradeDay);
@@ -209,7 +56,7 @@ export function calculateBreakoutMetrics(
     } else if (postKlines.length >= 1) {
         // 用当日振幅年化估计
         const day = postKlines[0];
-        const dailyRange = (day.high - day.low) / day.open;
+        const dailyRange = (day.zg - day.zd) / day.kp;
         postVol = dailyRange * Math.sqrt(252);
     } else {
         postVol = preVol * 1.5;
@@ -229,7 +76,7 @@ export function calculateBreakoutMetrics(
  * 针对强势股设计：不寻找"超卖反弹"，而是寻找"动能启动"和"趋势结束"
  */
 export function getTrendRSISignal(
-    klines: KLine[],
+    klines: Stock.KLineItem[],
     rsiValues: number[],
     lookback: number = 5
 ): TradeSignal {
@@ -272,22 +119,22 @@ export function getTrendRSISignal(
  * 多因子评分系统（针对强势股）
  */
 export function calculateScore(
-    stockKlines: KLine[],
-    boardData: BoardData | null,
+    stockKlines: Stock.KLineItem[],
+    boardData: Stock.BoardData | null,
     metrics: BreakoutMetrics
 ): number {
     let score = 0;
-    const closes = stockKlines.map(k => k.close);
-    const ma20 = calculateMA(closes, 20);
+    const closes = stockKlines.map(k => k.sp);
+    const ma20 = Tech.calculateMA(closes, 20);
     const currentPrice = closes[closes.length - 1];
     const currentMA20 = ma20[ma20.length - 1];
     const prevMA20 = ma20[ma20.length - 2];
 
     // 1. 板块协同 (30分)
     if (boardData) {
-        if (boardData.moneyFlow3d > 0) score += 10;
-        if (boardData.moneyFlowToday > 1000000) score += 10; // 1000万
-        if (boardData.rankInAll <= 0.05) score += 10; // 板块前5%
+        if (boardData.moneyIn3d > 0) score += 10;
+        if (boardData.moneyIn > 1000000) score += 10; // 1000万
+        if (boardData.moneyInRankInAll <= 0.05) score += 10; // 板块前5%
     } else {
         score += 15; // 无板块数据时给中性分
     }
@@ -303,8 +150,8 @@ export function calculateScore(
 
     // 4. 成交持续性 (20分)
     if (stockKlines.length >= 10) {
-        const recentAmounts = stockKlines.slice(-5).map(k => k.amount);
-        const prevAmounts = stockKlines.slice(-10, -5).map(k => k.amount);
+        const recentAmounts = stockKlines.slice(-5).map(k => k.cjl);
+        const prevAmounts = stockKlines.slice(-10, -5).map(k => k.cjl);
         const avgAmount = recentAmounts.reduce((a, b) => a + b, 0) / 5;
         const prevAvgAmount = prevAmounts.length > 0
             ? prevAmounts.reduce((a, b) => a + b, 0) / prevAmounts.length
@@ -315,6 +162,63 @@ export function calculateScore(
     }
 
     return score;
+}
+
+export interface Position {
+    code: string;
+    buyDate: string;
+    buyPrice: number;
+    quantity: number;
+    buyAmount: number;
+    highestPrice: number;
+    addCount: number;
+}
+
+export interface WatchItem {
+    addedDate: string;
+    score: number;
+}
+
+export interface PendingOrder {
+    code: string;
+    type: 'buy' | 'sell';
+    reason: string;
+    signalDate: string;
+}
+
+export interface TradeRecord {
+    date: string;
+    code: string;
+    type: 'buy' | 'sell';
+    price: number;
+    quantity: number;
+    amount: number;
+    reason: string;
+    pnl?: number;
+}
+
+export interface DailyValue {
+    date: string;
+    totalValue: number;
+}
+
+export interface BacktestResult {
+    totalReturn: number;
+    annualizedReturn: number;
+    maxDrawdown: number;
+    winRate: number;
+    profitFactor: number;
+    sharpeRatio: number;
+    totalTrades: number;
+    avgHoldingDays: number;
+    trades: TradeRecord[];
+    dailyValues: DailyValue[];
+}
+
+export interface DataProvider {
+    getStrongStocks(date: string): Stock.DetailItem[];
+    getKLines(code: string, endDate: string, days?: number): Stock.KLineItem[] | null;
+    getBoardData(boardCode: string, endDate: string): Stock.BoardData | null;
 }
 
 // ==================== 回测主类 ====================
@@ -384,7 +288,7 @@ export class StrongStockBacktest {
             const todayKLine = klines.find(k => k.date === today);
             if (!todayKLine) continue;
 
-            const openPrice = todayKLine.open;
+            const openPrice = todayKLine.kp;
 
             if (order.type === 'buy') {
                 this.executeBuy(order.code, today, openPrice, order.reason);
@@ -412,7 +316,7 @@ export class StrongStockBacktest {
             if (!klines || klines.length < 20) continue;
 
             const position = this.positions.get(code);
-            const currentPrice = klines[klines.length - 1].close;
+            const currentPrice = klines[klines.length - 1].sp;
 
             // 更新持仓最高价（用于移动止盈）
             if (position && currentPrice > position.highestPrice) {
@@ -446,7 +350,7 @@ export class StrongStockBacktest {
             }
 
             // RSI趋势信号判断
-            const rsiValues = calculateRSI(klines, this.RSI_PERIOD);
+            const rsiValues = Tech.calculateRSI(klines.map(k => k.sp), this.RSI_PERIOD);
             const signal = getTrendRSISignal(klines, rsiValues, this.RSI_LOOKBACK);
 
             if (signal.type === 'buy' && !position && this.positions.size < this.MAX_POSITIONS) {
@@ -484,7 +388,7 @@ export class StrongStockBacktest {
             if (this.positions.has(stock.code)) continue;
 
             const klines = dataProvider.getKLines(stock.code, today, 120);
-            const boardData = dataProvider.getBoardData(stock.boardCode, today);
+            const boardData = dataProvider.getBoardData(stock.bk, today);
             if (!klines || klines.length < 60) continue;
 
             // 计算分段波动率
@@ -497,7 +401,7 @@ export class StrongStockBacktest {
 
             // 计算RSI策略匹配度（固定参数下近60天信号胜率）
             const recentKlines = klines.slice(-60);
-            const rsiValues = calculateRSI(recentKlines, this.RSI_PERIOD);
+            const rsiValues = Tech.calculateRSI(recentKlines.map(k => k.sp), this.RSI_PERIOD);
             const matchScore = this.backtestRSIOnHistory(recentKlines, rsiValues);
 
             // 综合排序分：评分*0.7 + 匹配度*0.3
@@ -593,7 +497,7 @@ export class StrongStockBacktest {
         for (const [code, pos] of this.positions) {
             const klines = dataProvider.getKLines(code, date, 1);
             if (klines && klines.length > 0) {
-                const close = klines[klines.length - 1].close;
+                const close = klines[klines.length - 1].sp;
                 stockValue += close * pos.quantity;
             }
         }
@@ -674,7 +578,7 @@ export class StrongStockBacktest {
      * 回测RSI策略历史表现（固定参数下近N天信号胜率）
      * 用于评估"策略匹配度"，而非优化参数
      */
-    private backtestRSIOnHistory(klines: KLine[], rsiValues: number[]): number {
+    private backtestRSIOnHistory(klines: Stock.KLineItem[], rsiValues: number[]): number {
         if (klines.length < 25) return 50;
 
         let signals = 0;
@@ -687,11 +591,11 @@ export class StrongStockBacktest {
 
             if (signal.type === 'buy') {
                 signals++;
-                const entryPrice = klines[i].close;
+                const entryPrice = klines[i].sp;
                 const futurePrices = klines.slice(i + 1, Math.min(i + 6, klines.length));
                 if (futurePrices.length === 0) continue;
 
-                const maxPrice = Math.max(...futurePrices.map(k => k.high));
+                const maxPrice = Math.max(...futurePrices.map(k => k.zg));
                 // 5天内最高价超过买入价3%算成功
                 if (maxPrice > entryPrice * 1.03) wins++;
             }
@@ -710,97 +614,3 @@ export class StrongStockBacktest {
         return Math.abs(idx2 - idx1);
     }
 }
-
-// ==================== DataProvider Mock 示例 ====================
-
-export class MockDataProvider implements DataProvider {
-    private stockData: Map<string, KLine[]> = new Map();
-    private boardDataMap: Map<string, Map<string, BoardData>> = new Map(); // date -> boardCode -> data
-    private strongLists: Map<string, StrongStock[]> = new Map();
-
-    public loadStockData(code: string, klines: KLine[]) {
-        this.stockData.set(code, klines);
-    }
-
-    public loadBoardData(date: string, boardCode: string, data: BoardData) {
-        if (!this.boardDataMap.has(date)) {
-            this.boardDataMap.set(date, new Map());
-        }
-        this.boardDataMap.get(date)!.set(boardCode, data);
-    }
-
-    public loadStrongList(date: string, stocks: StrongStock[]) {
-        this.strongLists.set(date, stocks);
-    }
-
-    getStrongStocks(date: string): StrongStock[] {
-        return this.strongLists.get(date) || [];
-    }
-
-    getKLines(code: string, endDate: string, days: number = 120): KLine[] | null {
-        const data = this.stockData.get(code);
-        if (!data) return null;
-
-        const endIdx = data.findIndex(k => k.date === endDate);
-        if (endIdx < 0) return null;
-
-        const startIdx = Math.max(0, endIdx - days + 1);
-        return data.slice(startIdx, endIdx + 1);
-    }
-
-    getBoardData(boardCode: string, endDate: string): BoardData | null {
-        const dateMap = this.boardDataMap.get(endDate);
-        if (!dateMap) return null;
-        return dateMap.get(boardCode) || null;
-    }
-}
-
-// ==================== 使用示例 ====================
-
-/*
-import { StrongStockBacktest, MockDataProvider, KLine, BoardData, StrongStock } from './strong_stock_backtest';
-
-// 1. 准备交易日列表
-const tradeDays = ['2024-01-02', '2024-01-03', '2024-01-04', /* ... */ //];
-
-// 2. 准备数据提供者
-const dp = new MockDataProvider();
-
-// 加载股票K线数据
-const stockKLines: KLine[] = [
-    { date: '2024-01-02', open: 10, high: 10.5, low: 9.8, close: 10.2, volume: 10000, amount: 102000 },
-    // ... 更多数据
-];
-dp.loadStockData('000001.SZ', stockKLines);
-
-// 加载板块数据
-dp.loadBoardData('2024-01-02', 'BK0420', {
-    code: 'BK0420',
-    name: '证券',
-    moneyFlow3d: 5000000,
-    moneyFlowToday: 2000000,
-    rankInAll: 0.03
-});
-
-// 加载强势股票列表（东财每日返回的60天新高/涨停股票）
-dp.loadStrongList('2024-01-02', [
-    { code: '000001.SZ', name: '平安银行', boardCode: 'BK0420' }
-]);
-
-// 3. 执行回测
-const backtest = new StrongStockBacktest(tradeDays, 1000000);
-const result = backtest.run(dp);
-
-// 4. 输出结果
-console.log('========== 回测结果 ==========');
-console.log(`总收益率: ${(result.totalReturn * 100).toFixed(2)}%`);
-console.log(`年化收益率: ${(result.annualizedReturn * 100).toFixed(2)}%`);
-console.log(`最大回撤: ${(result.maxDrawdown * 100).toFixed(2)}%`);
-console.log(`胜率: ${(result.winRate * 100).toFixed(2)}%`);
-console.log(`盈亏比: ${result.profitFactor.toFixed(2)}`);
-console.log(`夏普比率: ${result.sharpeRatio.toFixed(2)}`);
-console.log(`总交易次数: ${result.totalTrades}`);
-console.log(`平均持仓天数: ${result.avgHoldingDays.toFixed(1)}`);
-
-// 5. 导出交易记录（可用于进一步分析或绘制净值曲线）
-// console.log(JSON.stringify(result.trades, null, 2));
