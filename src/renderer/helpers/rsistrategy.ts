@@ -99,9 +99,9 @@ export function getTrendRSISignal(
 
     // 卖出1：顶背离（价格新高，RSI未新高）
     const recentPrices = klines.slice(-lookback);
-    const priceHigh = Math.max(...recentPrices.map(k => k.high));
+    const priceHigh = Math.max(...recentPrices.map(k => k.zg));
     const rsiHigh = Math.max(...recentRSIs);
-    const currentPrice = klines[klines.length - 1].close;
+    const currentPrice = klines[klines.length - 1].sp;
 
     if (currentPrice >= priceHigh * 0.98 && currentRSI < rsiHigh * 0.95) {
         return { type: 'sell', reason: 'RSI顶背离' };
@@ -120,7 +120,7 @@ export function getTrendRSISignal(
  */
 export function calculateScore(
     stockKlines: Stock.KLineItem[],
-    boardData: Stock.BoardData | null,
+    boardData: Stock.BoardItem | null,
     metrics: BreakoutMetrics
 ): number {
     let score = 0;
@@ -132,7 +132,7 @@ export function calculateScore(
 
     // 1. 板块协同 (30分)
     if (boardData) {
-        if (boardData.moneyIn3d > 0) score += 10;
+        if (boardData.moneyIn5d > 0) score += 10;
         if (boardData.moneyIn > 1000000) score += 10; // 1000万
         if (boardData.moneyInRankInAll <= 0.05) score += 10; // 板块前5%
     } else {
@@ -165,7 +165,7 @@ export function calculateScore(
 }
 
 export interface Position {
-    code: string;
+    secid: string;
     buyDate: string;
     buyPrice: number;
     quantity: number;
@@ -175,12 +175,13 @@ export interface Position {
 }
 
 export interface WatchItem {
+    secid: string;
     addedDate: string;
     score: number;
 }
 
 export interface PendingOrder {
-    code: string;
+    secid: string;
     type: 'buy' | 'sell';
     reason: string;
     signalDate: string;
@@ -188,7 +189,7 @@ export interface PendingOrder {
 
 export interface TradeRecord {
     date: string;
-    code: string;
+    secid: string;
     type: 'buy' | 'sell';
     price: number;
     quantity: number;
@@ -216,9 +217,9 @@ export interface BacktestResult {
 }
 
 export interface DataProvider {
-    getStrongStocks(date: string): Stock.DetailItem[];
-    getKLines(code: string, endDate: string, days?: number): Stock.KLineItem[] | null;
-    getBoardData(boardCode: string, endDate: string): Stock.BoardData | null;
+    getStrongStocks(date: string): Promise<Stock.DetailItem[]>;
+    getKLines(secid: string, endDate: string, days?: number): Promise<Stock.KLineItem[] | null>;
+    getBoardData(secid: string, endDate: string): Promise<Stock.BoardItem | null>;
 }
 
 // ==================== 回测主类 ====================
@@ -252,50 +253,103 @@ export class StrongStockBacktest {
         this.initialCapital = initialCapital;
         this.capital = initialCapital;
         this.availableCash = initialCapital;
+        console.log(`[Backtest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length}`);
     }
 
     /**
      * 执行回测
      */
-    public run(dataProvider: DataProvider): BacktestResult {
-        for (let i = 0; i < this.tradeDays.length; i++) {
+    public async run(dataProvider: DataProvider, onProgress?: (message: string, percent?: number) => void): Promise<BacktestResult> {
+        const totalDays = this.tradeDays.length;
+        const dayPercentStep = totalDays > 0 ? 90 / totalDays : 0;
+
+        console.log(`[Backtest] ====== 回测开始 ======`);
+        console.log(`[Backtest] 参数配置:`, {
+            MAX_POSITIONS: this.MAX_POSITIONS,
+            POSITION_RATIO: this.POSITION_RATIO,
+            STOP_LOSS_PCT: this.STOP_LOSS_PCT,
+            TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
+            MIN_SCORE: this.MIN_SCORE,
+            MAX_WATCHLIST: this.MAX_WATCHLIST,
+            SLIPPAGE: this.SLIPPAGE,
+            COMMISSION: this.COMMISSION,
+            STAMP_TAX: this.STAMP_TAX,
+            RSI_PERIOD: this.RSI_PERIOD,
+            RSI_LOOKBACK: this.RSI_LOOKBACK
+        });
+
+        for (let i = 0; i < totalDays; i++) {
             const today = this.tradeDays[i];
+            const currentBase = Math.round(i * dayPercentStep);
+
+            console.log(`\n[Backtest] ---------- 第 ${i + 1}/${totalDays} 天 [${today}] ----------`);
+            console.log(`[Backtest] 当前持仓: ${this.positions.size} 只 | 观察列表: ${this.watchList.size} 只 | 可用资金: ${this.availableCash.toFixed(2)}`);
 
             // 1. 执行昨日产生的待执行订单（用今日开盘价）
-            this.executePendingOrders(today, dataProvider);
+            onProgress?.(`[${i + 1}/${totalDays}] ${today} 执行待处理订单...`, currentBase);
+            console.log(`[Backtest] [${today}] 阶段1: 执行待处理订单 ${this.pendingOrders.length} 笔`);
+            await this.executePendingOrders(today, dataProvider);
 
             // 2. 基于今日数据，处理观察列表并产生新订单（将在次日执行）
-            if (i < this.tradeDays.length - 1) {
+            if (i < totalDays - 1) {
                 const nextDay = this.tradeDays[i + 1];
-                this.generateSignals(today, nextDay, dataProvider);
+                onProgress?.(`[${i + 1}/${totalDays}] ${today} 生成交易信号...`, Math.round(currentBase + dayPercentStep * 0.3));
+                console.log(`[Backtest] [${today}] 阶段2: 生成交易信号 (次日执行: ${nextDay})`);
+                await this.generateSignals(today, nextDay, dataProvider, (msg) => {
+                    onProgress?.(msg, Math.round(currentBase + dayPercentStep * 0.6));
+                });
             }
 
             // 3. 记录今日净值（用收盘价）
-            this.recordDailyValue(today, dataProvider);
+            onProgress?.(`[${i + 1}/${totalDays}] ${today} 记录净值...`, Math.round(currentBase + dayPercentStep * 0.8));
+            console.log(`[Backtest] [${today}] 阶段3: 记录净值`);
+            await this.recordDailyValue(today, dataProvider);
+
+            console.log(`[Backtest] [${today}] 日终状态: 持仓 ${this.positions.size} 只 | 观察 ${this.watchList.size} 只 | 净值 ${this.dailyValues[this.dailyValues.length - 1]?.totalValue.toFixed(2)}`);
         }
 
-        return this.calculateResult();
+        onProgress?.('正在计算回测结果...', 95);
+        console.log(`\n[Backtest] ====== 计算最终结果 ======`);
+        const result = this.calculateResult();
+        onProgress?.('回测完成！', 100);
+        console.log(`[Backtest] ====== 回测结束 ======\n`);
+        return result;
     }
 
     /**
      * 执行待执行订单（次日开盘价成交）
      */
-    private executePendingOrders(today: string, dataProvider: DataProvider) {
+    private async executePendingOrders(today: string, dataProvider: DataProvider) {
+        if (this.pendingOrders.length === 0) {
+            console.log(`[Backtest] [${today}] 无待执行订单`);
+            return;
+        }
+
         for (const order of this.pendingOrders) {
-            const klines = dataProvider.getKLines(order.code, today, 1);
-            if (!klines || klines.length === 0) continue;
+            const klines = await dataProvider.getKLines(order.secid, today, 1);
+            if (!klines || klines.length === 0) {
+                console.log(`[Backtest] [${today}] 订单执行失败: ${order.secid} 未获取到K线数据`);
+                continue;
+            }
 
             const todayKLine = klines.find(k => k.date === today);
-            if (!todayKLine) continue;
+            if (!todayKLine) {
+                console.log(`[Backtest] [${today}] 订单执行失败: ${order.secid} 未找到当日K线`);
+                continue;
+            }
 
             const openPrice = todayKLine.kp;
 
             if (order.type === 'buy') {
-                this.executeBuy(order.code, today, openPrice, order.reason);
+                console.log(`[Backtest] [${today}] 执行买入: ${order.secid} | 开盘价: ${openPrice.toFixed(2)} | 原因: ${order.reason}`);
+                this.executeBuy(order.secid, today, openPrice, order.reason);
             } else if (order.type === 'sell') {
-                const position = this.positions.get(order.code);
+                const position = this.positions.get(order.secid);
                 if (position) {
-                    this.executeSell(order.code, today, openPrice, position.quantity, order.reason);
+                    console.log(`[Backtest] [${today}] 执行卖出: ${order.secid} | 开盘价: ${openPrice.toFixed(2)} | 持仓成本: ${position.buyPrice.toFixed(2)} | 原因: ${order.reason}`);
+                    this.executeSell(order.secid, today, openPrice, position.quantity, order.reason);
+                } else {
+                    console.log(`[Backtest] [${today}] 卖出订单忽略: ${order.secid} 无持仓`);
                 }
             }
         }
@@ -305,42 +359,55 @@ export class StrongStockBacktest {
     /**
      * 基于当日数据生成信号和订单
      */
-    private generateSignals(
+    private async generateSignals(
         today: string,
         nextDay: string,
-        dataProvider: DataProvider
+        dataProvider: DataProvider,
+        onProgress?: (message: string) => void
     ) {
         // ---- 阶段1：处理观察列表（交易逻辑）----
-        for (const [code, watchInfo] of this.watchList) {
-            const klines = dataProvider.getKLines(code, today, 60);
-            if (!klines || klines.length < 20) continue;
+        console.log(`[Backtest] [${today}] 阶段2-1: 处理观察列表 ${this.watchList.size} 只`);
+        onProgress?.(`[${today}] 处理观察列表 ${this.watchList.size} 只...`);
 
-            const position = this.positions.get(code);
+        for (const [secid, watchInfo] of this.watchList) {
+            const klines = await dataProvider.getKLines(secid, today, 60);
+            if (!klines || klines.length < 20) {
+                console.log(`[Backtest] [${today}] ${secid} 观察处理跳过: K线不足(${klines?.length || 0})`);
+                continue;
+            }
+
+            const position = this.positions.get(secid);
             const currentPrice = klines[klines.length - 1].sp;
 
             // 更新持仓最高价（用于移动止盈）
             if (position && currentPrice > position.highestPrice) {
+                const oldHigh = position.highestPrice;
                 position.highestPrice = currentPrice;
+                console.log(`[Backtest] [${today}] ${secid} 更新最高价: ${oldHigh.toFixed(2)} → ${currentPrice.toFixed(2)}`);
             }
 
             // 止损判断（优先级最高，产生次日卖出订单）
             if (position) {
+                const stopLossPrice = position.buyPrice * this.STOP_LOSS_PCT;
+                const trailingStopPrice = position.highestPrice * this.TRAILING_STOP_PCT;
+
                 // 固定止损
-                if (currentPrice < position.buyPrice * this.STOP_LOSS_PCT) {
+                if (currentPrice < stopLossPrice) {
+                    console.log(`[Backtest] [${today}] ${secid} 🔴 固定止损触发: 当前${currentPrice.toFixed(2)} < 止损价${stopLossPrice.toFixed(2)} (成本${position.buyPrice.toFixed(2)})`);
                     this.pendingOrders.push({
-                        code,
+                        secid: secid,
                         type: 'sell',
-                        reason: `固定止损(${currentPrice.toFixed(2)} < ${(position.buyPrice * this.STOP_LOSS_PCT).toFixed(2)})`,
+                        reason: `固定止损(${currentPrice.toFixed(2)} < ${stopLossPrice.toFixed(2)})`,
                         signalDate: today
                     });
                     continue;
                 }
 
                 // 移动止盈（仅当盈利时触发）
-                if (currentPrice > position.buyPrice &&
-                    currentPrice < position.highestPrice * this.TRAILING_STOP_PCT) {
+                if (currentPrice > position.buyPrice && currentPrice < trailingStopPrice) {
+                    console.log(`[Backtest] [${today}] ${secid} 🟡 移动止盈触发: 当前${currentPrice.toFixed(2)} < 止盈价${trailingStopPrice.toFixed(2)} (最高${position.highestPrice.toFixed(2)})`);
                     this.pendingOrders.push({
-                        code,
+                        secid: secid,
                         type: 'sell',
                         reason: `移动止盈(从最高${position.highestPrice.toFixed(2)}回撤至${currentPrice.toFixed(2)})`,
                         signalDate: today
@@ -353,16 +420,22 @@ export class StrongStockBacktest {
             const rsiValues = Tech.calculateRSI(klines.map(k => k.sp), this.RSI_PERIOD);
             const signal = getTrendRSISignal(klines, rsiValues, this.RSI_LOOKBACK);
 
+            if (signal.type !== 'hold') {
+                console.log(`[Backtest] [${today}] ${secid} RSI信号: ${signal.type.toUpperCase()} | ${signal.reason}`);
+            }
+
             if (signal.type === 'buy' && !position && this.positions.size < this.MAX_POSITIONS) {
+                console.log(`[Backtest] [${today}] ${secid} ✅ 生成买入订单 (次日${nextDay}执行)`);
                 this.pendingOrders.push({
-                    code,
+                    secid: secid,
                     type: 'buy',
                     reason: signal.reason,
                     signalDate: today
                 });
             } else if (signal.type === 'sell' && position) {
+                console.log(`[Backtest] [${today}] ${secid} ✅ 生成卖出订单 (次日${nextDay}执行)`);
                 this.pendingOrders.push({
-                    code,
+                    secid: secid,
                     type: 'sell',
                     reason: signal.reason,
                     signalDate: today
@@ -373,31 +446,55 @@ export class StrongStockBacktest {
             if (!position) {
                 const daysInWatch = this.getTradeDaysDiff(watchInfo.addedDate, today);
                 if (daysInWatch > 5) {
-                    this.watchList.delete(code);
+                    console.log(`[Backtest] [${today}] ${secid} 从观察列表移除: 超期${daysInWatch}天未买入`);
+                    this.watchList.delete(secid);
                 }
             }
         }
 
         // ---- 阶段2：补充观察列表（选股逻辑）----
-        const strongStocks = dataProvider.getStrongStocks(today);
-        const candidates: Array<{ code: string; score: number }> = [];
+        console.log(`[Backtest] [${today}] 阶段2-2: 获取强势股票补充观察列表`);
+        onProgress?.(`[${today}] 获取强势股票...`);
+        const strongStocks = await dataProvider.getStrongStocks(today);
+        console.log(`[Backtest] [${today}] 强势股票共 ${strongStocks.length} 只`);
 
-        for (const stock of strongStocks) {
+        if (strongStocks.length > 0) {
+            console.log(`[Backtest] [${today}] 强势股票前5:`, strongStocks.slice(0, 5).map(s => s.secid));
+        }
+
+        onProgress?.(`[${today}] 强势股票 ${strongStocks.length} 只，开始评分...`);
+        const candidates: Array<{ secid: string; score: number; rawScore: number; matchScore: number; expansionRatio: number }> = [];
+
+        for (let i = 0; i < strongStocks.length; i++) {
+            const stock = strongStocks[i];
+            if (i % 5 === 0) {
+                onProgress?.(`[${today}] 评分中 ${i}/${strongStocks.length}...`);
+            }
+
             // 已在观察列表或已持仓则跳过
-            if (this.watchList.has(stock.code)) continue;
-            if (this.positions.has(stock.code)) continue;
+            if (this.watchList.has(stock.secid)) continue;
+            if (this.positions.has(stock.secid)) continue;
 
-            const klines = dataProvider.getKLines(stock.code, today, 120);
-            const boardData = dataProvider.getBoardData(stock.bk, today);
-            if (!klines || klines.length < 60) continue;
+            const klines = await dataProvider.getKLines(stock.secid, today, 120);
+            const boardData = await dataProvider.getBoardData(stock.bk, today);
+            if (!klines || klines.length < 60) {
+                console.log(`[Backtest] [${today}] ${stock.secid} 选股跳过: K线不足(${klines?.length || 0})`);
+                continue;
+            }
 
             // 计算分段波动率
             const metrics = calculateBreakoutMetrics(klines, today);
-            if (!metrics || metrics.expansionRatio < 1.5) continue;
+            if (!metrics || metrics.expansionRatio < 1.5) {
+                console.log(`[Backtest] [${today}] ${stock.secid} 选股跳过: 波动率不达标(expansion=${metrics?.expansionRatio.toFixed(2) || 'N/A'})`);
+                continue;
+            }
 
             // 计算综合评分
             const score = calculateScore(klines, boardData, metrics);
-            if (score < this.MIN_SCORE) continue;
+            if (score < this.MIN_SCORE) {
+                console.log(`[Backtest] [${today}] ${stock.secid} 选股跳过: 评分不足(${score.toFixed(1)} < ${this.MIN_SCORE})`);
+                continue;
+            }
 
             // 计算RSI策略匹配度（固定参数下近60天信号胜率）
             const recentKlines = klines.slice(-60);
@@ -406,39 +503,60 @@ export class StrongStockBacktest {
 
             // 综合排序分：评分*0.7 + 匹配度*0.3
             const finalScore = score * 0.7 + matchScore * 0.3;
-            candidates.push({ code: stock.code, score: finalScore });
+            candidates.push({ secid: stock.secid, score: finalScore, rawScore: score, matchScore, expansionRatio: metrics.expansionRatio });
+
+            if (i < 3 || finalScore > 80) {
+                console.log(`[Backtest] [${today}] ${stock.secid} 评分详情: 综合=${finalScore.toFixed(1)} | 基础=${score.toFixed(1)} | 匹配度=${matchScore.toFixed(1)} | 波动率放大=${metrics.expansionRatio.toFixed(2)}`);
+            }
         }
 
         // 按分数排序，补充观察列表
         candidates.sort((a, b) => b.score - a.score);
         const needCount = this.MAX_WATCHLIST - this.watchList.size;
-        for (let i = 0; i < Math.min(needCount, candidates.length); i++) {
-            this.watchList.set(candidates[i].code, {
-                addedDate: today,
-                score: candidates[i].score
-            });
+        const addCount = Math.min(needCount, candidates.length);
+
+        if (candidates.length > 0) {
+            console.log(`[Backtest] [${today}] 候选股票排序前5:`, candidates.slice(0, 5).map(c => `${c.secid}(${c.score.toFixed(1)})`));
         }
+
+        for (let i = 0; i < addCount; i++) {
+            const candidate = candidates[i];
+            this.watchList.set(candidate.secid, {
+                secid: candidate.secid,
+                addedDate: today,
+                score: candidate.score
+            });
+            console.log(`[Backtest] [${today}] ${candidate.secid} 加入观察列表 | 综合评分: ${candidate.score.toFixed(1)}`);
+        }
+
+        console.log(`[Backtest] [${today}] 观察列表更新: 新增 ${addCount} 只, 当前共 ${this.watchList.size} 只`);
     }
 
     /**
      * 执行买入（内部）
      */
-    private executeBuy(code: string, date: string, price: number, reason: string) {
+    private executeBuy(secid: string, date: string, price: number, reason: string) {
         const adjustedPrice = price * (1 + this.SLIPPAGE);
         const buyAmount = this.capital * this.POSITION_RATIO;
         const quantity = Math.floor(buyAmount / adjustedPrice / 100) * 100;
 
-        if (quantity < 100) return;
+        if (quantity < 100) {
+            console.log(`[Backtest] [${date}] ${secid} 买入失败: 计算数量不足100股 (价格${adjustedPrice.toFixed(2)}, 计划金额${buyAmount.toFixed(2)})`);
+            return;
+        }
 
         const totalAmount = adjustedPrice * quantity;
         const commission = totalAmount * this.COMMISSION;
         const totalCost = totalAmount + commission;
 
-        if (this.availableCash < totalCost) return;
+        if (this.availableCash < totalCost) {
+            console.log(`[Backtest] [${date}] ${secid} 买入失败: 资金不足 (需${totalCost.toFixed(2)}, 余${this.availableCash.toFixed(2)})`);
+            return;
+        }
 
         this.availableCash -= totalCost;
-        this.positions.set(code, {
-            code,
+        this.positions.set(secid, {
+            secid: secid,
             buyDate: date,
             buyPrice: adjustedPrice,
             quantity,
@@ -447,9 +565,11 @@ export class StrongStockBacktest {
             addCount: 0
         });
 
+        console.log(`[Backtest] [${date}] ${secid} 买入成功: 价${adjustedPrice.toFixed(2)} | 量${quantity} | 总成本${totalCost.toFixed(2)} | 剩余资金${this.availableCash.toFixed(2)}`);
+
         this.tradeRecords.push({
             date,
-            code,
+            secid: secid,
             type: 'buy',
             price: adjustedPrice,
             quantity,
@@ -461,9 +581,12 @@ export class StrongStockBacktest {
     /**
      * 执行卖出（内部）
      */
-    private executeSell(code: string, date: string, price: number, quantity: number, reason: string) {
-        const position = this.positions.get(code);
-        if (!position) return;
+    private executeSell(secid: string, date: string, price: number, quantity: number, reason: string) {
+        const position = this.positions.get(secid);
+        if (!position) {
+            console.log(`[Backtest] [${date}] ${secid} 卖出失败: 无持仓`);
+            return;
+        }
 
         const adjustedPrice = price * (1 - this.SLIPPAGE);
         const totalAmount = adjustedPrice * quantity;
@@ -474,9 +597,11 @@ export class StrongStockBacktest {
         this.availableCash += netAmount;
         const pnl = netAmount - position.buyAmount;
 
+        console.log(`[Backtest] [${date}] ${secid} 卖出成功: 价${adjustedPrice.toFixed(2)} | 量${quantity} | 净额${netAmount.toFixed(2)} | 盈亏${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} | 剩余资金${this.availableCash.toFixed(2)}`);
+
         this.tradeRecords.push({
             date,
-            code,
+            secid: secid,
             type: 'sell',
             price: adjustedPrice,
             quantity,
@@ -485,26 +610,44 @@ export class StrongStockBacktest {
             pnl
         });
 
-        this.positions.delete(code);
-        this.watchList.delete(code); // 卖出后移出观察列表
+        this.positions.delete(secid);
+        this.watchList.delete(secid); // 卖出后移出观察列表
+        console.log(`[Backtest] [${date}] ${secid} 已从持仓和观察列表移除`);
     }
 
     /**
      * 记录每日净值
      */
-    private recordDailyValue(date: string, dataProvider: DataProvider) {
+    private async recordDailyValue(date: string, dataProvider: DataProvider) {
         let stockValue = 0;
-        for (const [code, pos] of this.positions) {
-            const klines = dataProvider.getKLines(code, date, 1);
+        let positionDetails: Array<{ secid: string; close: number; quantity: number; value: number }> = [];
+
+        for (const [secid, pos] of this.positions) {
+            const klines = await dataProvider.getKLines(secid, date, 1);
             if (klines && klines.length > 0) {
                 const close = klines[klines.length - 1].sp;
-                stockValue += close * pos.quantity;
+                const value = close * pos.quantity;
+                stockValue += value;
+                positionDetails.push({ secid, close, quantity: pos.quantity, value });
+            } else {
+                console.log(`[Backtest] [${date}] ${secid} 净值计算: 未获取到收盘价，按成本价估算`);
+                stockValue += pos.buyAmount;
+                positionDetails.push({ secid, close: pos.buyPrice, quantity: pos.quantity, value: pos.buyAmount });
             }
         }
+
+        const totalValue = this.availableCash + stockValue;
         this.dailyValues.push({
             date,
-            totalValue: this.availableCash + stockValue
+            totalValue
         });
+
+        if (positionDetails.length > 0) {
+            console.log(`[Backtest] [${date}] 净值明细: 现金${this.availableCash.toFixed(2)} + 股票市值${stockValue.toFixed(2)} = 总净值${totalValue.toFixed(2)}`);
+            console.table(positionDetails);
+        } else {
+            console.log(`[Backtest] [${date}] 净值: ${totalValue.toFixed(2)} (空仓)`);
+        }
     }
 
     /**
@@ -519,10 +662,19 @@ export class StrongStockBacktest {
         // 最大回撤
         let maxDrawdown = 0;
         let peak = this.initialCapital;
+        let peakDate = this.dailyValues[0]?.date || '';
+        let troughDate = this.dailyValues[0]?.date || '';
+
         for (const dv of this.dailyValues) {
-            if (dv.totalValue > peak) peak = dv.totalValue;
+            if (dv.totalValue > peak) {
+                peak = dv.totalValue;
+                peakDate = dv.date;
+            }
             const dd = (peak - dv.totalValue) / peak;
-            if (dd > maxDrawdown) maxDrawdown = dd;
+            if (dd > maxDrawdown) {
+                maxDrawdown = dd;
+                troughDate = dv.date;
+            }
         }
 
         // 交易统计
@@ -550,7 +702,7 @@ export class StrongStockBacktest {
         const holdingDays: number[] = [];
         for (const sell of sellTrades) {
             const buy = this.tradeRecords.find(
-                t => t.code === sell.code && t.type === 'buy' && t.date <= sell.date
+                t => t.secid === sell.secid && t.type === 'buy' && t.date <= sell.date
             );
             if (buy) {
                 holdingDays.push(this.getTradeDaysDiff(buy.date, sell.date));
@@ -560,7 +712,7 @@ export class StrongStockBacktest {
             ? holdingDays.reduce((a, b) => a + b, 0) / holdingDays.length
             : 0;
 
-        return {
+        const result: BacktestResult = {
             totalReturn,
             annualizedReturn,
             maxDrawdown,
@@ -572,6 +724,34 @@ export class StrongStockBacktest {
             trades: this.tradeRecords,
             dailyValues: this.dailyValues
         };
+
+        console.log(`[Backtest] 结果指标:`, {
+            初始资金: this.initialCapital,
+            最终资金: finalValue.toFixed(2),
+            总收益率: (totalReturn * 100).toFixed(2) + '%',
+            年化收益率: (annualizedReturn * 100).toFixed(2) + '%',
+            最大回撤: (maxDrawdown * 100).toFixed(2) + '%',
+            回撤区间: `${peakDate} → ${troughDate}`,
+            胜率: (winRate * 100).toFixed(2) + '%',
+            盈亏比: profitFactor.toFixed(2),
+            夏普比率: sharpeRatio.toFixed(2),
+            总交易次数: sellTrades.length,
+            平均持仓天数: avgHoldingDays.toFixed(1)
+        });
+
+        console.log(`[Backtest] 买卖记录汇总:`);
+        console.table(this.tradeRecords.map(t => ({
+            日期: t.date,
+            股票: t.secid,
+            方向: t.type,
+            价格: t.price.toFixed(2),
+            数量: t.quantity,
+            金额: t.amount.toFixed(2),
+            盈亏: t.pnl !== undefined ? (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) : '-',
+            原因: t.reason
+        })));
+
+        return result;
     }
 
     /**

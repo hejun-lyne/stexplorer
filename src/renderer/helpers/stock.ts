@@ -4271,3 +4271,156 @@ export async function CheckStockMAAndRSI(secid: string, maThreshold = 0.05, rsiT
   }
 }
 
+// ==================== QS 数据加载接口（新增） ====================
+
+/** 合并股票数据（去重：同一股票保留最新数据） */
+export function MergeQSStocks(existing: Record<string, Stock.QSItem[]>, date: string, incoming: Stock.QSItem[]) {
+  const uniqueArray: Stock.QSItem[] = [
+    ...new Map(
+      Object.values(existing)
+        .flat()
+        .map(item => [item.secid, item])
+    ).values()
+  ];
+  const map = new Map(uniqueArray.map((s) => [s.secid, s]));
+  incoming.forEach((s) => {
+    map.set(s.secid, s);
+  });
+  existing[date] = Array.from(map.values());
+}
+
+/** 计算板块统计 */
+export function CalcQSHybks(stockList: Stock.QSItem[]): Record<string, number> {
+  const bks: Record<string, number> = {};
+  stockList.forEach((s) => {
+    bks[s.hybk] = (bks[s.hybk] || 0) + 1;
+  });
+  return bks;
+}
+
+export interface LoadSingleDateQSResult {
+  stocks: Stock.QSItem[];
+  fromCache: boolean;
+}
+
+/** 加载单日期 QS 数据（自动处理分页 + 缓存优先） */
+export async function LoadSingleDateQS(
+  date: string,
+  signal?: AbortSignal,
+  limit = 100,
+  autoBackup = true
+): Promise<LoadSingleDateQSResult> {
+  // 阶段1：优先读本地缓存
+  if (autoBackup) {
+    try {
+      const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(date);
+      if (backup?.data?.stocks) {
+        return {
+          stocks: backup.data.stocks as Stock.QSItem[],
+          fromCache: true,
+        };
+      }
+    } catch (error) {
+      console.error(`[QSLoader] 加载备份失败: ${date}`, error);
+    }
+  }
+
+  // 阶段2：无缓存，发起网络请求
+  let pageSize = limit == -1 ? 100 : limit;
+  while (true) {
+    if (signal?.aborted) return { stocks: [], fromCache: false };
+    const data = await Services.Stock.GeQSStocks(pageSize, date);
+    if (!data.arr) return { stocks: [], fromCache: false };
+    const isComplete = data.to === data.arr.length;
+    if (isComplete || limit !== -1) {
+      const stocks = data.arr;
+      // 请求成功后自动保存到缓存
+      if (autoBackup && stocks.length > 0) {
+        try {
+          Helpers.Storage.StorageHelper.WriteQSListBackup(date, { stocks });
+        } catch (e) {
+          console.error(`[QSLoader] 保存备份失败: ${date}`, e);
+        }
+      }
+      return { stocks, fromCache: false };
+    }
+    pageSize += 100;
+  }
+}
+
+export interface QSLoaderResult {
+  stocks: Record<string, Stock.QSItem[]>;
+  hybks: Record<string, number>;
+  firstAppearMap: Record<string, string>;
+  loadedDates: string[];
+  fromCache: Set<string>;
+}
+
+export interface QSLoaderOptions {
+  dates: string[];
+  loadAll?: boolean;
+  filterRepeat: boolean;
+  autoBackup?: boolean;
+  signal?: AbortSignal;
+  onDateLoaded?: (date: string, stocks: Stock.QSItem[], source: 'cache' | 'network') => void;
+}
+
+/**
+ * 按日期数组加载 QS 数据
+ * 通过 LoadSingleDateQS 实现缓存优先，无需在外层处理缓存读写
+ */
+export async function LoadQSStocks(options: QSLoaderOptions): Promise<QSLoaderResult> {
+  const { dates, autoBackup = true, signal, onDateLoaded, filterRepeat, loadAll } = options;
+  let stocksMap: Record<string, Stock.QSItem[]> = {};
+  let currentFirstAppearMap: Record<string, string> = {};
+  const fromCache = new Set<string>();
+  const loadedDates: string[] = [];
+
+  for (const date of dates) {
+    if (signal?.aborted) break;
+    const { stocks: dateStocks, fromCache: isFromCache } = await LoadSingleDateQS(
+      date,
+      signal,
+      loadAll ? -1 : 100,
+      autoBackup
+    );
+    if (signal?.aborted) break;
+
+    stocksMap[date] = dateStocks;
+    dateStocks.forEach((s) => {
+      if (!currentFirstAppearMap[s.secid]) {
+        currentFirstAppearMap[s.secid] = date;
+        s.firstAppear = date;
+      }
+    });
+
+    if (isFromCache) {
+      fromCache.add(date);
+    }
+    loadedDates.push(date);
+    onDateLoaded?.(date, dateStocks, isFromCache ? 'cache' : 'network');
+  }
+
+  if (filterRepeat) {
+    const seen = new Set<string>();
+    const currentStocks: Stock.QSItem[] = [];
+    dates.forEach((date) => {
+      const stocks = stocksMap[date] || [];
+      stocks.forEach((s) => {
+        if (!seen.has(s.secid)) {
+          seen.add(s.secid);
+          currentStocks.push(s);
+        }
+      });
+    });
+    stocksMap['merged'] = currentStocks;
+  }
+
+  return {
+    stocks: stocksMap,
+    hybks: filterRepeat ? CalcQSHybks(stocksMap['merged'] || []) : {},
+    firstAppearMap: currentFirstAppearMap,
+    loadedDates,
+    fromCache,
+  };
+}

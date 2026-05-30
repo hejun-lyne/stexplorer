@@ -1,18 +1,11 @@
-import React from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Row, Col, DatePicker, Select, Button, InputNumber, Checkbox, message } from 'antd';
 import styles from '../index.scss';
-import * as Services from '@/services';
-import * as CONST from '@/constants';
 import * as Utils from '@/utils';
 import * as Helpers from '@/helpers';
-import { useState } from 'react';
 import { Stock } from '@/types/stock';
-import { useRequest, useThrottleFn } from 'ahooks';
-import { useCallback } from 'react';
-import { useWorkDayTimeToDo } from '@/utils/hooks';
 import moment from 'moment';
 import classNames from 'classnames';
-import { batch } from 'react-redux';
 import { SlidersOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import CheckableTag from 'antd/lib/tag/CheckableTag';
 import STMonitor from '../STMonitor';
@@ -24,43 +17,37 @@ export interface QSListProps {
 }
 
 const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
-  const [date, setDate] = useState(moment(new Date()).format('YYYYMMDD'));
   const [dates, setDates] = useState([moment(new Date()).format('YYYYMMDD')]);
-  const [pageSize, setPageSize] = useState(100);
-  const [noMore, setNoMore] = useState(false);
   const [stocks, setStocks] = useState<Stock.QSItem[]>([]);
   const [filterIndustry, setFilterIndustry] = useState<string>('');
   const [hybks, setHybks] = useState<Record<string, number>>({});
   const [sBks, setSBks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [noMore, setNoMore] = useState(false);
   const [firstAppearMap, setFirstAppearMap] = useState<Record<string, string>>({});
   const [techFilterLoading, setTechFilterLoading] = useState(false);
-  const [maResults, setMaResults] = useState<Record<string, { ma: boolean; macd: boolean; rsi: boolean; maSL?: number; macdSL?: number; rsiSL?: number }>>({});
+  const [maResults, setMaResults] = useState<
+    Record<string, { ma: boolean; macd: boolean; rsi: boolean; maSL?: number; macdSL?: number; rsiSL?: number }>
+  >({});
   const [techPending, setTechPending] = useState<Record<string, boolean>>({});
   const [filterMA, setFilterMA] = useState(false);
   const [filterMACD, setFilterMACD] = useState(false);
   const [filterRSI, setFilterRSI] = useState(false);
   const [techProgress, setTechProgress] = useState(0);
-  // 止损参数
-  const [fixedStopLossPct, setFixedStopLossPct] = useState(5);   // 固定止损 %
-  const [trailingStopLossPct, setTrailingStopLossPct] = useState(5); // 移动止损 %
-  const isPausedRef = React.useRef(false);
-  const currentIndexRef = React.useRef(0);
-
+  const [fixedStopLossPct, setFixedStopLossPct] = useState(5);
+  const [trailingStopLossPct, setTrailingStopLossPct] = useState(5);
   const [autoBackup, setAutoBackup] = useState(() => Utils.GetStorage('QSList_AUTO_BACKUP', false));
-  const autoBackupRef = React.useRef(autoBackup);
-  const stocksRef = React.useRef<Stock.QSItem[]>([]);
-  const loadedBackupDates = React.useRef(new Set<string>());
+  const [kview, setKView] = useState(false);
 
-  React.useEffect(() => {
-    autoBackupRef.current = autoBackup;
+  const isPausedRef = useRef(false);
+  const currentIndexRef = useRef(0);
+
+  // 自动备份持久化
+  useEffect(() => {
     Utils.SetStorage('QSList_AUTO_BACKUP', autoBackup);
   }, [autoBackup]);
 
-  React.useEffect(() => {
-    stocksRef.current = stocks;
-  }, [stocks]);
-
+  // 计算入选天数
   const getTradingDays = useCallback((start: string, end: string) => {
     let count = 0;
     let d = moment(start, 'YYYYMMDD');
@@ -75,273 +62,57 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     return count;
   }, []);
 
-  // 自动获取下一个日期的数据
-  const fetchNext = useCallback(
-    (nextDate: string, nextPageSize: number) => {
-      setTimeout(() => {
-        runGetStocks(nextPageSize, nextDate);
-      }, 200);
-    },
-    []
-  );
-
-  const { run: runGetStocks } = useRequest(Services.Stock.GeQSStocks, {
-    throwOnError: true,
-    manual: true,
-    onSuccess: (data, params) => {
-      const currentPageSize = params[0] as number;
-      const currentDate = params[1] as string;
-      
-      if (data.arr) {
-        const isComplete = data.to == data.arr.length;
-        const dateIdx = dates.indexOf(currentDate);
-        
-        // 合并数据（去重：同一股票保留最新数据）
-        let mergedStocks = data.arr;
-        if (stocksRef.current.length > 0) {
-          mergedStocks = [...stocksRef.current];
-          const secids = mergedStocks.map((s) => s.secid);
-          data.arr.forEach((s) => {
-            const existIdx = secids.indexOf(s.secid);
-            if (existIdx != -1) {
-              // 替换为最新数据
-              mergedStocks.splice(existIdx, 1, s);
-            } else {
-              mergedStocks.push(s);
-            }
-          });
-        }
-        
-        // 重新计算板块统计
-        const bks = {} as Record<string, number>;
-        mergedStocks.forEach((s) => {
-          if (bks[s.hybk]) {
-            bks[s.hybk] = bks[s.hybk] + 1;
-          } else {
-            bks[s.hybk] = 1;
-          }
-        });
-        const nsBks = sBks.filter((s) => Object.keys(bks).indexOf(s) != -1);
-        
-        // 更新首次出现日期
-        setFirstAppearMap((prev) => {
-          const next = { ...prev };
-          data.arr.forEach((s) => {
-            if (!next[s.secid]) {
-              next[s.secid] = currentDate;
-              s.firstAppear = currentDate;
-            }
-          });
-          return next;
-        });
-
-        batch(() => {
-          setHybks({ ...bks });
-          setSBks(nsBks);
-          setStocks(mergedStocks);
-        });
-        stocksRef.current = mergedStocks;
-
-        // 判断是否继续获取
-        if (isComplete) {
-          // 自动备份：保存当前日期的完整数据
-          if (autoBackupRef.current) {
-            Helpers.Storage.StorageHelper.WriteQSListBackup(currentDate, { stocks: data.arr });
-          }
-
-          if (dateIdx == dates.length - 1) {
-            // 所有日期都已获取完成
-            setNoMore(true);
-            setLoading(false);
-          } else {
-            // 当前日期获取完成，继续处理后续日期（检查备份）
-            proceedFromIndex(dateIdx + 1);
-          }
-        } else {
-          // 当前日期还有更多数据，增加 pageSize 继续获取
-          const nextPageSize = currentPageSize + 20;
-          setPageSize(nextPageSize);
-          fetchNext(currentDate, nextPageSize);
-        }
-      }
-    },
-  });
-
-  // 合并股票数据（去重：同一股票保留最新数据）
-  const mergeStocks = useCallback((existing: Stock.QSItem[], incoming: Stock.QSItem[]): Stock.QSItem[] => {
-    const result = [...existing];
-    const secids = result.map((s) => s.secid);
-    incoming.forEach((s) => {
-      const existIdx = secids.indexOf(s.secid);
-      if (existIdx != -1) {
-        result.splice(existIdx, 1, s);
-      } else {
-        result.push(s);
-      }
-    });
-    return result;
-  }, []);
-
-  // 计算板块统计
-  const calcHybks = useCallback((stockList: Stock.QSItem[]): Record<string, number> => {
-    const bks = {} as Record<string, number>;
-    stockList.forEach((s) => {
-      if (bks[s.hybk]) {
-        bks[s.hybk] = bks[s.hybk] + 1;
-      } else {
-        bks[s.hybk] = 1;
-      }
-    });
-    return bks;
-  }, []);
-
-  // 应用备份数据到当前状态
-  const applyBackupData = useCallback((backupStocks: Stock.QSItem[], backupDate: string) => {
-    if (loadedBackupDates.current.has(backupDate)) {
-      return;
-    }
-    loadedBackupDates.current.add(backupDate);
-    stocksRef.current = mergeStocks(stocksRef.current, backupStocks);
-    const bks = calcHybks(stocksRef.current);
-    setFirstAppearMap((prev) => {
-      const next = { ...prev };
-      backupStocks.forEach((s) => {
-        if (!next[s.secid]) {
-          next[s.secid] = backupDate;
-        }
-      });
-      return next;
-    });
-    batch(() => {
-      setStocks(stocksRef.current);
-      setHybks(bks);
-    });
-  }, [mergeStocks, calcHybks]);
-
-  // 从指定索引开始，加载连续有备份的日期，遇到没有备份的则走网络请求
-  const proceedFromIndex = useCallback(async (fromIdx: number) => {
-    for (let i = fromIdx; i < dates.length; i++) {
-      console.log(`[QSList] proceedFromIndex: 检查日期 ${dates[i]} (${i + 1}/${dates.length})`);
-      try {
-        const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(dates[i]);
-        console.log(`[QSList] proceedFromIndex: 日期 ${dates[i]} 读取结果`, {
-          hasBackup: !!backup,
-          hasData: backup && backup.data,
-          stocksLength: backup && backup.data ? backup.data.stocks?.length : undefined,
-          isAlreadyLoaded: loadedBackupDates.current.has(dates[i]),
-        });
-        if (backup && backup.data && backup.data.stocks !== undefined) {
-          console.log(`[QSList] proceedFromIndex: 日期 ${dates[i]} 从缓存加载 (stocks.length=${backup.data.stocks.length})`);
-          applyBackupData(backup.data.stocks as Stock.QSItem[], dates[i]);
-        } else {
-          console.log(`[QSList] proceedFromIndex: 日期 ${dates[i]} 无缓存，走网络请求`);
-          // 遇到没有备份的日期，网络请求
-          setDate(dates[i]);
-          setPageSize(60);
-          setTimeout(() => {
-            runGetStocks(60, dates[i]);
-          }, 100);
-          return;
-        }
-      } catch (error) {
-        console.error(`[QSList] proceedFromIndex: 日期 ${dates[i]} 加载备份失败`, error);
-        // 出错时网络请求
-        setDate(dates[i]);
-        setPageSize(60);
-        setTimeout(() => {
-          runGetStocks(60, dates[i]);
-        }, 100);
-        return;
-      }
-    }
-    // 所有日期都处理完了
-    console.log('[QSList] proceedFromIndex: 所有日期处理完毕');
-    batch(() => {
-      setNoMore(true);
-      setLoading(false);
-    });
-  }, [dates, runGetStocks, applyBackupData]);
-
+  // 核心查询：使用抽离的接口加载数据
   const startQuery = useCallback(async () => {
-    if (dates.length) {
-      stocksRef.current = [];
-      currentIndexRef.current = 0;
-      setTechProgress(0);
+    if (!dates.length) return;
 
-      batch(() => {
-        setNoMore(false);
-        setStocks([]);
-        setDate(dates[0]);
-        setPageSize(60);
-        setLoading(true);
-        setFirstAppearMap({});
-        setMaResults({});
-        setTechPending({});
-        setFilterMA(false);
-        setFilterMACD(false);
-        setFilterRSI(false);
+    // 重置状态
+    setLoading(true);
+    setNoMore(false);
+    setStocks([]);
+    setHybks({});
+    setFirstAppearMap({});
+    setTechProgress(0);
+    currentIndexRef.current = 0;
+    setMaResults({});
+    setTechPending({});
+    setFilterMA(false);
+    setFilterMACD(false);
+    setFilterRSI(false);
 
+    try {
+      const result = await Helpers.Stock.LoadQSStocks({
+        dates,
+        loadAll: true,
+        filterRepeat: true,
+        autoBackup,
+        onDateLoaded: (date, dateStocks, source) => {
+          console.log(`[QSList] ${date} 加载完成，来源: ${source}, 数量: ${dateStocks.length}`);
+        },
       });
 
-      // 如果启用了自动备份，逐日尝试从备份加载（只要有缓存就加载，不连续的也加载）
-      if (autoBackupRef.current) {
-        loadedBackupDates.current.clear();
-        console.log('[QSList] startQuery: 开始加载备份，日期列表', dates);
+      setStocks(result.stocks['merged'] || []);
+      setHybks(result.hybks);
+      setFirstAppearMap(result.firstAppearMap);
+      setNoMore(true);
 
-        for (let i = 0; i < dates.length; i++) {
-          console.log(`[QSList] startQuery: 检查日期 ${dates[i]} (${i + 1}/${dates.length})`);
-          try {
-            const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(dates[i]);
-            console.log(`[QSList] startQuery: 日期 ${dates[i]} 读取结果`, {
-              hasBackup: !!backup,
-              hasData: backup && backup.data,
-              stocksLength: backup && backup.data ? backup.data.stocks?.length : undefined,
-            });
-            if (backup && backup.data && backup.data.stocks !== undefined) {
-              console.log(`[QSList] startQuery: 日期 ${dates[i]} 从缓存加载 (stocks.length=${backup.data.stocks.length})`);
-              applyBackupData(backup.data.stocks as Stock.QSItem[], dates[i]);
-            } else {
-              console.log(`[QSList] startQuery: 日期 ${dates[i]} 无缓存`);
-            }
-          } catch (error) {
-            console.error(`[QSList] startQuery: 日期 ${dates[i]} 加载备份失败`, error);
-          }
-        }
-
-        const loadedCount = loadedBackupDates.current.size;
-        console.log('[QSList] startQuery: 备份加载完成', { loadedCount, totalDates: dates.length, loadedDates: Array.from(loadedBackupDates.current) });
-        if (loadedCount > 0) {
-          if (loadedCount === dates.length) {
-            // 所有日期都有备份
-            batch(() => {
-              setNoMore(true);
-              setLoading(false);
-            });
-            message.success(`已从本地备份加载 ${dates.length} 天数据`);
-            return;
-          } else {
-            // 部分有备份，从第一个没有备份的日期开始处理
-            const firstMissingIdx = dates.findIndex((d) => !loadedBackupDates.current.has(d));
-            message.success(`已从本地备份加载 ${loadedCount} 天数据，继续获取剩余数据`);
-            console.log('[QSList] startQuery: 从第一个无缓存日期继续', { firstMissingIdx, missingDate: dates[firstMissingIdx] });
-            proceedFromIndex(firstMissingIdx >= 0 ? firstMissingIdx : loadedCount);
-            return;
-          }
-        }
+      if (result.fromCache.size === result.loadedDates.length) {
+        message.success(`已从本地备份加载 ${result.loadedDates.length} 天数据`);
+      } else if (result.fromCache.size > 0) {
+        message.success(`已从本地备份加载 ${result.fromCache.size} 天数据，剩余从网络获取`);
       }
-
-      // 延迟执行，确保 state 更新完成
-      setTimeout(() => {
-        runGetStocks(60, dates[0]);
-      }, 100);
+    } catch (error) {
+      console.error('[QSList] 加载失败', error);
+      message.error('数据加载失败');
+    } finally {
+      setLoading(false);
     }
-  }, [dates, runGetStocks, applyBackupData, proceedFromIndex]);
+  }, [dates, autoBackup]);
 
+  // 日期选择
   const onChangeDate = useCallback(
     (d: moment.Moment | null, isStart = true) => {
-      if (!d) {
-        return;
-      }
+      if (!d) return;
       const nd = d.format('YYYYMMDD');
       if (dates.length) {
         if (isStart) {
@@ -389,7 +160,14 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     [dates]
   );
 
-  const [kview, setKView] = useState(false);
+  const prevDate = useCallback(() => {
+    setDates([moment(dates[0], 'YYYYMMDD').add(-1, 'd').format('YYYYMMDD')]);
+  }, [dates]);
+
+  const nextDate = useCallback(() => {
+    setDates([moment(dates[0], 'YYYYMMDD').add(1, 'd').format('YYYYMMDD')]);
+  }, [dates]);
+
   const toggleBK = useCallback(
     (c, b) => {
       const idx = sBks.indexOf(b);
@@ -402,12 +180,8 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     },
     [sBks]
   );
-  const prevDate = useCallback(() => {
-    setDates([moment(dates[0], 'YYYYMMDD').add(-1, 'd').format('YYYYMMDD')]);
-  }, [dates]);
-  const nextDate = useCallback(() => {
-    setDates([moment(dates[0], 'YYYYMMDD').add(1, 'd').format('YYYYMMDD')]);
-  }, [dates]);
+
+  // 技术指标计算（逻辑不变）
   const onCalcTechIndicators = useCallback(async () => {
     if (techFilterLoading) {
       isPausedRef.current = true;
@@ -437,7 +211,10 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
       const batchResults = await Promise.all(
         batch.map(async (secid) => {
           const res = await Helpers.Stock.CheckStockBacktestSignals(
-            secid, 120, fixedStopLossPct / 100, trailingStopLossPct / 100
+            secid,
+            120,
+            fixedStopLossPct / 100,
+            trailingStopLossPct / 100
           );
           console.log('Backtest signals', secid, res);
           return { secid, res };
@@ -484,7 +261,6 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     }
   }, [stocks, fixedStopLossPct, trailingStopLossPct, techFilterLoading]);
 
-  
   return (
     <>
       <div className={styles.header}>
@@ -575,7 +351,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
       )}
       {kview ? (
         <STMonitor
-          details={stocks.filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1)) as Stock.DetailItem[]}
+          details={
+            stocks.filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1)) as Stock.DetailItem[]
+          }
           active={active}
           noMore={noMore}
           onLoadMore={() => {}}
@@ -587,21 +365,22 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
             <Col span={2}>名字</Col>
             <Col span={2}>板块</Col>
             <Col span={2}>最新价</Col>
-            {/* <Col span={2}>涨跌幅</Col> */}
             <Col span={2}>流通市值</Col>
-            {/* <Col span={2}>换手率</Col> */}
-            {/* <Col span={2}>量比</Col> */}
-            {/* <Col span={2}>是否新高</Col> */}
-            {/* <Col span={2}>连板统计</Col> */}
             <Col span={2}>入选天数</Col>
             <Col span={2}>
-              <Checkbox checked={filterMA} onChange={(e) => setFilterMA(e.target.checked)} style={{ color: '#fff' }}>MA</Checkbox>
+              <Checkbox checked={filterMA} onChange={(e) => setFilterMA(e.target.checked)} style={{ color: '#fff' }}>
+                MA
+              </Checkbox>
             </Col>
             <Col span={2}>
-              <Checkbox checked={filterMACD} onChange={(e) => setFilterMACD(e.target.checked)} style={{ color: '#fff' }}>MACD</Checkbox>
+              <Checkbox checked={filterMACD} onChange={(e) => setFilterMACD(e.target.checked)} style={{ color: '#fff' }}>
+                MACD
+              </Checkbox>
             </Col>
             <Col span={2}>
-              <Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>RSI</Checkbox>
+              <Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>
+                RSI
+              </Checkbox>
             </Col>
             <Col span={8}>理由</Col>
           </Row>
@@ -616,47 +395,82 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                 if (filterRSI && maResults[s.secid] && !maResults[s.secid].rsi) return false;
                 return true;
               })
-
               .map((s) => (
                 <Row key={s.code} className={styles.row}>
-                  <Col span={2} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name, firstAppearMap[s.secid])}>
+                  <Col
+                    span={2}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => onOpenStock(s.secid, s.name, firstAppearMap[s.secid])}
+                  >
                     {s.name}
                   </Col>
                   <Col span={2}>{s.hybk}</Col>
                   <Col span={2} className={Utils.GetValueColor(s.zdf).textClass}>
                     {(s.zx / 1000).toFixed(2)}
                   </Col>
-                  {/* <Col span={2} className={Utils.GetValueColor(s.zdf).textClass}>
-                    {s.zdf.toFixed(2) + '%'}
-                  </Col> */}
                   <Col span={2}>{(s.ltsz / 100000000).toFixed(2) + '亿'}</Col>
-                  {/* <Col span={2}>{(s.hsl / 100).toFixed(2) + '%'}</Col>
-                  <Col span={2}>{s.lb.toFixed(2)}</Col>
-                  <Col span={2}>{s.nh ? '是' : '否'}</Col>
-                  <Col span={2}>{s.zttj.days + '天' + s.zttj.ct + '板'}</Col> */}
-                  <Col span={2}>{firstAppearMap[s.secid] ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天' : '-'}</Col>
                   <Col span={2}>
-                    {techPending[s.secid] ? '分析中' : maResults[s.secid] ? (
-                      maResults[s.secid].ma ? (
-                        <span>✓{maResults[s.secid].maSL ? <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].maSL}</span> : ''}</span>
-                      ) : '✗'
-                    ) : ''}
+                    {firstAppearMap[s.secid]
+                      ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天'
+                      : '-'}
                   </Col>
                   <Col span={2}>
-                    {techPending[s.secid] ? '分析中' : maResults[s.secid] ? (
-                      maResults[s.secid].macd ? (
-                        <span>✓{maResults[s.secid].macdSL ? <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].macdSL}</span> : ''}</span>
-                      ) : '✗'
-                    ) : ''}
+                    {techPending[s.secid]
+                      ? '分析中'
+                      : maResults[s.secid]
+                      ? maResults[s.secid].ma
+                        ? (
+                          <span>
+                            ✓
+                            {maResults[s.secid].maSL ? (
+                              <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].maSL}</span>
+                            ) : (
+                              ''
+                            )}
+                          </span>
+                        )
+                        : '✗'
+                      : ''}
                   </Col>
                   <Col span={2}>
-                    {techPending[s.secid] ? '分析中' : maResults[s.secid] ? (
-                      maResults[s.secid].rsi ? (
-                        <span>✓{maResults[s.secid].rsiSL ? <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].rsiSL}</span> : ''}</span>
-                      ) : '✗'
-                    ) : ''}
+                    {techPending[s.secid]
+                      ? '分析中'
+                      : maResults[s.secid]
+                      ? maResults[s.secid].macd
+                        ? (
+                          <span>
+                            ✓
+                            {maResults[s.secid].macdSL ? (
+                              <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].macdSL}</span>
+                            ) : (
+                              ''
+                            )}
+                          </span>
+                        )
+                        : '✗'
+                      : ''}
                   </Col>
-                  <Col span={8}>{s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}</Col>
+                  <Col span={2}>
+                    {techPending[s.secid]
+                      ? '分析中'
+                      : maResults[s.secid]
+                      ? maResults[s.secid].rsi
+                        ? (
+                          <span>
+                            ✓
+                            {maResults[s.secid].rsiSL ? (
+                              <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].rsiSL}</span>
+                            ) : (
+                              ''
+                            )}
+                          </span>
+                        )
+                        : '✗'
+                      : ''}
+                  </Col>
+                  <Col span={8}>
+                    {s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}
+                  </Col>
                 </Row>
               ))}
             {!noMore && !loading && (

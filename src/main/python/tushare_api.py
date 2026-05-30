@@ -1111,6 +1111,182 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
+    def get_board_detail(secid: str, date: Optional[str] = None) -> Dict[str, Any]:
+        """获取单个板块详情（含指定交易日资金流入在全板块的排名 + 最近5日累计资金流入）
+
+        Args:
+            secid: 板块ID，如 "90.BK0428" 或 "90.885748"
+            date: 指定交易日(YYYYMMDD)，默认今天
+
+        Returns:
+            兼容 GetBanKuaisFromTushare 的单条格式，增加 mainInRank / mainInTotal / mainIn / mainIn5d
+        """
+        try:
+            code = convert_secid_to_pure_code(secid)
+            is_dc = code.startswith("BK")
+            data_source = "dc" if is_dc else "ths"
+            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+
+            pro = get_pro()
+
+            # ---------- 0. 获取最近5个交易日（含 target_date）----------
+            trade_dates: List[str] = []
+            try:
+                cal_start = (datetime.strptime(target_date, '%Y%m%d') - timedelta(days=15)).strftime('%Y%m%d')
+                cal_df = pro.trade_cal(exchange='SSE', start_date=cal_start, end_date=target_date, is_open='1')
+                if cal_df is not None and not cal_df.empty:
+                    trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
+            except Exception as e:
+                print(f"[trade_cal 失败] {e}")
+
+            # ---------- 1. 获取目标日期所有板块的资金流向（用于当日排名）----------
+            all_boards: List[Dict[str, Any]] = []
+
+            if data_source == "dc":
+                # 东财：行业 + 概念
+                flow_ind = safe_api_call(pro.moneyflow_ind_dc, trade_date=target_date)
+                flow_con = safe_api_call(pro.moneyflow_con_dc, trade_date=target_date)
+
+                if isinstance(flow_ind, pd.DataFrame) and not flow_ind.empty:
+                    for _, row in flow_ind.iterrows():
+                        ts_code = str(row.get("ts_code", ""))
+                        net_amount = _to_float(row.get("net_amount", 0))
+                        if abs(net_amount) > 0 and abs(net_amount) < 1e6:
+                            net_amount = net_amount * 1e8
+                        all_boards.append({
+                            "code": ts_code.replace(".DC", ""),
+                            "name": str(row.get("name", "")),
+                            "main_in": net_amount,
+                            "type": "industry",
+                        })
+
+                if isinstance(flow_con, pd.DataFrame) and not flow_con.empty:
+                    for _, row in flow_con.iterrows():
+                        ts_code = str(row.get("ts_code", ""))
+                        net_amount = _to_float(row.get("net_amount", 0))
+                        if abs(net_amount) > 0 and abs(net_amount) < 1e6:
+                            net_amount = net_amount * 1e8
+                        all_boards.append({
+                            "code": ts_code.replace(".DC", ""),
+                            "name": str(row.get("name", "")),
+                            "main_in": net_amount,
+                            "type": "concept",
+                        })
+            else:
+                # 同花顺：行业 + 概念
+                flow_ind = safe_api_call(pro.moneyflow_ind_ths, trade_date=target_date)
+                flow_con = safe_api_call(pro.moneyflow_cnt_ths, trade_date=target_date)
+
+                if isinstance(flow_ind, pd.DataFrame) and not flow_ind.empty:
+                    for _, row in flow_ind.iterrows():
+                        ts_code = str(row.get("ts_code", ""))
+                        code_clean = ts_code.replace(".TI", "").replace(".ti", "")
+                        net_amount = _to_float(row.get("net_amount", 0))
+                        if abs(net_amount) > 0 and abs(net_amount) < 1e6:
+                            net_amount = net_amount * 1e8
+                        all_boards.append({
+                            "code": code_clean,
+                            "name": str(row.get("name", row.get("industry", ""))),
+                            "main_in": net_amount,
+                            "type": "industry",
+                        })
+
+                if isinstance(flow_con, pd.DataFrame) and not flow_con.empty:
+                    for _, row in flow_con.iterrows():
+                        ts_code = str(row.get("ts_code", ""))
+                        code_clean = ts_code.replace(".TI", "").replace(".ti", "")
+                        net_amount = _to_float(row.get("net_amount", 0))
+                        if abs(net_amount) > 0 and abs(net_amount) < 1e6:
+                            net_amount = net_amount * 1e8
+                        all_boards.append({
+                            "code": code_clean,
+                            "name": str(row.get("name", row.get("industry", ""))),
+                            "main_in": net_amount,
+                            "type": "concept",
+                        })
+
+            if not all_boards:
+                return {"error": f"No flow data available for date {target_date}"}
+
+            # ---------- 2. 计算当日排名（按 main_in 降序）----------
+            all_boards.sort(key=lambda x: x["main_in"], reverse=True)
+
+            target = None
+            rank = 0
+            total = len(all_boards)
+            for i, b in enumerate(all_boards):
+                if b["code"] == code:
+                    target = b
+                    rank = i + 1
+                    break
+
+            if target is None:
+                return {"error": f"Board {secid} not found in flow data for date {target_date}"}
+
+            # ---------- 3. 计算最近5日资金流入累计 ----------
+            main_in_5d = 0.0
+
+            if trade_dates and data_source == "dc":
+                # 东财：范围查询，一次获取5天数据
+                start_5d = trade_dates[0]
+                end_5d = trade_dates[-1]
+                flow_5d_ind = safe_api_call(pro.moneyflow_ind_dc, start_date=start_5d, end_date=end_5d)
+                flow_5d_con = safe_api_call(pro.moneyflow_con_dc, start_date=start_5d, end_date=end_5d)
+
+                for flow_df in [flow_5d_ind, flow_5d_con]:
+                    if isinstance(flow_df, pd.DataFrame) and not flow_df.empty:
+                        mask = flow_df['ts_code'].astype(str).str.replace(".DC", "", regex=False) == code
+                        for _, row in flow_df[mask].iterrows():
+                            net_amount = _to_float(row.get("net_amount", 0))
+                            if abs(net_amount) > 0 and abs(net_amount) < 1e6:
+                                net_amount = net_amount * 1e8
+                            main_in_5d += net_amount
+
+            elif trade_dates and data_source == "ths":
+                # 同花顺：逐日查询（单日接口）
+                for td in trade_dates:
+                    for flow_func, is_industry in [(pro.moneyflow_ind_ths, True), (pro.moneyflow_cnt_ths, False)]:
+                        flow_df = safe_api_call(flow_func, trade_date=td)
+                        if isinstance(flow_df, pd.DataFrame) and not flow_df.empty:
+                            mask = flow_df['ts_code'].astype(str).str.replace(".TI", "", regex=False).str.replace(".ti", "", regex=False) == code
+                            for _, row in flow_df[mask].iterrows():
+                                net_amount = _to_float(row.get("net_amount", 0))
+                                if abs(net_amount) > 0 and abs(net_amount) < 1e6:
+                                    net_amount = net_amount * 1e8
+                                main_in_5d += net_amount
+
+            # ---------- 4. 获取板块最新行情（复用 _get_board_realtime）----------
+            realtime = TushareAPI._get_board_realtime(secid)
+            if isinstance(realtime, dict) and realtime.get("error"):
+                realtime = {}
+
+            # ---------- 5. 组装返回（兼容 GetBanKuaisFromTushare 单条格式）----------
+            return {
+                "code": code,
+                "name": realtime.get("name", target.get("name", "")),
+                "market": 90,
+                "secid": secid,
+                "zx": realtime.get("zx", 0),
+                "zdf": realtime.get("zdf", 0),
+                "zdd": realtime.get("zdd", 0),
+                "hsl": realtime.get("hsl", 0),
+                "szs": realtime.get("szs", 0),
+                "xds": realtime.get("xds", 0),
+                "lt": realtime.get("lt", 0),
+                "cje": realtime.get("cje", 0),
+                "cjl": realtime.get("cjl", 0),
+                "mainIn": target["main_in"],
+                "mainIn5d": round(main_in_5d, 2),
+                "mainInRank": rank,
+                "mainInTotal": total,
+                "date": target_date,
+                "source": data_source,
+            }
+
+        except Exception as e:
+            return {"error": str(e)}
+        
+    @staticmethod
     def get_board_stocks(secid: str) -> Dict[str, Any]:
         """获取板块成分股，支持东财和同花顺板块
         

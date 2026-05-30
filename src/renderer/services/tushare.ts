@@ -278,7 +278,7 @@ export async function GetKFromTushare(secid: string, code: number, limit?: numbe
       zde: item.zde,
       hsl: item.hsl,
       chan: 0, // ChanType.Unknow
-    }));
+    } as Stock.KLineItem));
 
     return { ks, kt: code };
   } catch (error) {
@@ -359,6 +359,51 @@ export async function GetBanKuaisFromTushare(type: number, pageSize = 20, dataSo
   } catch (error) {
     logError(error, 'GetBanKuaisFromTushare', '获取板块数据失败');
     return {};
+  }
+}
+
+/**
+ * 获取单个板块详情（含指定交易日资金流入全板块排名）
+ * @param secid 板块ID，如 "90.BK0428"
+ * @param date 指定交易日(YYYYMMDD)，不传则默认今天
+ * @returns 兼容 GetBanKuaisFromTushare 的单条格式，增加 mainInRank / mainInTotal
+ */
+export async function GetBoardDetailFromTushare(secid: string, date?: string): Promise<any> {
+  try {
+    const params: Record<string, any> = { secid };
+    if (date) params.date = date;
+
+    const result = await callTushare('get_board_detail', params);
+
+    if (result.error) {
+      console.error('获取板块详情失败:', result.error);
+      return null;
+    }
+
+    return {
+      code: result.code,
+      name: result.name,
+      market: 90,
+      secid: result.secid,
+      zx: result.zx || 0,
+      zdf: result.zdf || 0,
+      zdd: result.zdd || 0,
+      hsl: result.hsl || 0,
+      szs: result.szs || 0,
+      xds: result.xds || 0,
+      lt: result.lt || 0,
+      cje: result.cje || 0,
+      cjl: result.cjl || 0,
+      mainIn: result.mainIn || 0,
+      mainIn5d: result.mainIn5d || 0,
+      mainInRank: result.mainInRank || 0,
+      mainInTotal: result.mainInTotal || 0,
+      date: result.date,
+      source: result.source,
+    };
+  } catch (error) {
+    logError(error, 'GetBoardDetailFromTushare', '获取板块详情失败');
+    return null;
   }
 }
 

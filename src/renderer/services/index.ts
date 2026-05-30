@@ -3,3 +3,5 @@ export * as Time from './time';
 export * as GitHub from './github';
 export * as Baidu from './baidu';
 export * as KimiAnalysis from './kimiAnalysis';
+export * as Tushare from './tushare';
+export * as Akshare from './akshare';
