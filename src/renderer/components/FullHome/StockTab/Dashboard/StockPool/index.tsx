@@ -19,6 +19,7 @@ import * as Utils from '@/utils';
 import CLList from './CLList';
 import ZZList from './ZZList';
 import KTrain from './KTrain';
+import Backtest from './Backtest';
 
 export interface StockPoolProps {
   onOpenStock: (secid: string, name: string, firstQSAppear?: string) => void;
@@ -135,8 +136,8 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
         <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>优选股票</span>} key={'stocks'}>
           <CLList onOpenStock={onOpenStock} active={activeKey === 'stocks'} />
         </Tabs.TabPane>
-        <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>K线训练</span>} key={'ktrain'}>
-          <KTrain onOpenStock={onOpenStock} active={activeKey === 'ktrain'} />
+        <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>策略回测</span>} key={'backtest'}>
+          <Backtest onOpenStock={onOpenStock} active={activeKey === 'backtest'} />
         </Tabs.TabPane>
         <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易管理</span>} key={'holds'}>
           <HoldView onOpenStock={onOpenStock} />

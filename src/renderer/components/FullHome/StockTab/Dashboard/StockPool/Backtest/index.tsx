@@ -1,6 +1,5 @@
 import React, { useCallback, useState, useEffect } from 'react';
 import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress } from 'antd';
-import { useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
 import * as Services from '@/services';
@@ -66,9 +65,7 @@ class StrongStocksDataProvider implements RSIStrategy.DataProvider {
 
 function getNetValueBaseOptions(darkMode: boolean, initialCapital: number) {
   return {
-    title: {
-      show: false,
-    },
+    title: { show: false },
     animation: true,
     grid: {
       top: '10%',
@@ -81,9 +78,7 @@ function getNetValueBaseOptions(darkMode: boolean, initialCapital: number) {
       trigger: 'axis',
       axisPointer: {
         type: 'cross',
-        label: {
-          backgroundColor: '#6a7985',
-        },
+        label: { backgroundColor: '#6a7985' },
       },
       formatter: (params: any[]) => {
         const date = params[0]?.axisValue || '';
@@ -97,23 +92,13 @@ function getNetValueBaseOptions(darkMode: boolean, initialCapital: number) {
       type: 'category',
       boundaryGap: false,
       data: [],
-      axisLine: {
-        lineStyle: {
-          color: darkMode ? '#b1afb3' : '#666',
-        },
-      },
-      axisLabel: {
-        color: darkMode ? '#b1afb3' : '#666',
-      },
+      axisLine: { lineStyle: { color: darkMode ? '#b1afb3' : '#666' } },
+      axisLabel: { color: darkMode ? '#b1afb3' : '#666' },
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLine: {
-        lineStyle: {
-          color: darkMode ? '#b1afb3' : '#666',
-        },
-      },
+      axisLine: { lineStyle: { color: darkMode ? '#b1afb3' : '#666' } },
       axisLabel: {
         color: darkMode ? '#b1afb3' : '#666',
         formatter: (value: number) => value.toFixed(0),
@@ -131,18 +116,12 @@ function getNetValueBaseOptions(darkMode: boolean, initialCapital: number) {
         type: 'line',
         smooth: true,
         symbol: 'none',
-        lineStyle: {
-          width: 2,
-          color: '#1890ff',
-        },
+        lineStyle: { width: 2, color: '#1890ff' },
         areaStyle: {
           opacity: 0.2,
           color: {
             type: 'linear',
-            x: 0,
-            y: 0,
-            x2: 0,
-            y2: 1,
+            x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
               { offset: 0, color: 'rgba(24,144,255,0.4)' },
               { offset: 1, color: 'rgba(24,144,255,0.05)' },
@@ -153,31 +132,18 @@ function getNetValueBaseOptions(darkMode: boolean, initialCapital: number) {
         markLine: {
           silent: true,
           symbol: 'none',
-          lineStyle: {
-            type: 'dashed',
-            color: '#999',
-            width: 1,
-          },
+          lineStyle: { type: 'dashed', color: '#999', width: 1 },
           data: [
             {
               yAxis: initialCapital,
-              label: {
-                formatter: '初始资金',
-                position: 'end',
-                color: '#999',
-              },
+              label: { formatter: '初始资金', position: 'end', color: '#999' },
             },
           ],
         },
         markPoint: {
           data: [],
-          label: {
-            color: '#fff',
-            fontSize: 10,
-          },
-          itemStyle: {
-            color: '#52c41a',
-          },
+          label: { color: '#fff', fontSize: 10 },
+          itemStyle: { color: '#52c41a' },
         },
       },
     ],
@@ -219,7 +185,6 @@ function updateNetValueOptions(
   opts.xAxis.axisLine.lineStyle.color = darkMode ? '#b1afb3' : '#666';
   opts.xAxis.axisLabel.color = darkMode ? '#b1afb3' : '#666';
 
-  // 更新最大回撤标记
   const markPoints = [];
   if (peakIndex !== troughIndex && values[troughIndex] !== undefined) {
     markPoints.push({
@@ -229,7 +194,6 @@ function updateNetValueOptions(
       itemStyle: { color: '#f5222d' },
     });
   }
-  // 标记最终净值
   if (values.length > 0) {
     markPoints.push({
       name: '最终净值',
@@ -254,15 +218,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [progressPercent, setProgressPercent] = useState(0);
     const [result, setResult] = useState<RSIStrategy.BacktestResult | null>(null);
 
-    // 图表相关
+    // 图表相关：参照 MarketMood，chartRef 必须始终绑定到 DOM
     const { ref: chartRef, chartInstance: chart } = useResizeEchart(-1);
     const [chartOption, setChartOption] = useState<any>(undefined);
 
     const onChangeDate = useCallback(
         (d: moment.Moment | null, isStart = true) => {
-          if (!d) {
-            return;
-          }
+          if (!d) return;
           const nd = d.format('YYYYMMDD');
           if (dates.length) {
             if (isStart) {
@@ -436,12 +398,24 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 </div>
             )}
 
+            {/* 
+              关键修复：chartRef 必须始终绑定到真实 DOM，不能放在条件渲染中。
+              参照 MarketMood 的做法，通过 style 控制显隐，而不是条件渲染。
+            */}
+            <div style={{ 
+              visibility: (!running && result) ? 'visible' : 'hidden',
+              height: (!running && result) ? 'auto' : 0,
+              overflow: 'hidden',
+              padding: (!running && result) ? '0 16px' : 0,
+              marginBottom: (!running && result) ? 16 : 0
+            }}>
+              <Card title="📈 每日净值曲线" size="small">
+                <div ref={chartRef} style={{ width: '100%', height: 320 }} />
+              </Card>
+            </div>
+
             {!running && result && (
                 <div style={{ padding: 16 }}>
-                    <Card title="📈 每日净值曲线" size="small" style={{ marginBottom: 16 }}>
-                        <div ref={chartRef} style={{ width: '100%', height: 320 }} />
-                    </Card>
-
                     <Card title="📊 回测结果汇总" size="small" style={{ marginBottom: 16 }}>
                         <Row gutter={[16, 16]}>
                             <Col span={6}>
