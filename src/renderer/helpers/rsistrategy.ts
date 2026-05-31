@@ -250,7 +250,7 @@ export interface BacktestResult {
 export interface DataProvider {
     getStrongStocks(date: string): Promise<Stock.DetailItem[]>;
     getKLines(secid: string, endDate: string, days?: number): Promise<Stock.KLineItem[] | null>;
-    getBoardData(secid: string, endDate: string): Promise<Stock.BoardItem | null>;
+    getBoardData(name: string, endDate: string): Promise<Stock.BoardItem | null>;
 }
 
 // ==================== 回测主类 ====================

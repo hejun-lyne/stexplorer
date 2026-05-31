@@ -407,6 +407,54 @@ export async function GetBoardDetailFromTushare(secid: string, date?: string): P
   }
 }
 
+/**
+ * 根据板块名字反查板块代码（Tushare 数据源）
+ * @param name 板块名称
+ * @param fuzzy 是否启用模糊匹配（默认 true）
+ * @returns 匹配板块的 secid（如 90.BK0474），未找到返回 null
+ */
+export async function GetBankuaiCodeByNameFromTushare(name: string, fuzzy = true): Promise<string | null> {
+  if (!name) {
+    return null;
+  }
+  try {
+    const [industryResult, gainianResult] = await Promise.all([
+      GetBanKuaisFromTushare(0, 500),
+      GetBanKuaisFromTushare(1, 500),
+    ]);
+    const allBks: Stock.BanKuaiItem[] = [
+      ...(industryResult?.arr || []),
+      ...(gainianResult?.arr || []),
+    ];
+    const trimmedName = name.trim();
+    // 1. 精确匹配
+    let match = allBks.find((bk) => bk.name === trimmedName);
+    if (match) {
+      return match.secid;
+    }
+    // 2. 忽略大小写精确匹配
+    match = allBks.find((bk) => bk.name.toLowerCase() === trimmedName.toLowerCase());
+    if (match) {
+      return match.secid;
+    }
+    // 3. 模糊匹配（包含关系）
+    if (fuzzy) {
+      match = allBks.find((bk) => bk.name.includes(trimmedName));
+      if (match) {
+        return match.secid;
+      }
+      match = allBks.find((bk) => trimmedName.includes(bk.name));
+      if (match) {
+        return match.secid;
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error('根据板块名字反查板块代码失败 (Tushare):', name, error);
+    return null;
+  }
+}
+
 // ==================== 板块成分股 ====================
 
 export async function GetBankuaiStocksFromTushare(secid: string): Promise<any> {

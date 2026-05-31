@@ -23,7 +23,7 @@ class StrongStocksDataProvider implements RSIStrategy.DataProvider {
         console.log(`[DataProvider] 获取强势股票: ${date}`);
         const result = await Helpers.Stock.LoadSingleDateQS(date, undefined,-1);
         console.log(`[DataProvider] 强势股票 ${date} 返回: ${result.stocks?.length || 0} 只`);
-        return result.stocks ? Promise.resolve(result.stocks as Stock.DetailItem[]) : Promise.reject('数据未准备好');
+        return result.stocks ? Promise.resolve(result.stocks.map((s: any) => ({ secid: s.secid, name: s.name, bk: s.hybk } as Stock.DetailItem))) : Promise.reject('数据未准备好');
       } catch (e) {
         console.error(`[DataProvider] 获取强势股票失败 ${date}:`, e);
         return [];
@@ -48,14 +48,19 @@ class StrongStocksDataProvider implements RSIStrategy.DataProvider {
       }
     }
 
-    async getBoardData(boardCode: string, endDate: string): Promise<Stock.BoardItem | null> {
+    async getBoardData(name: string, endDate: string): Promise<Stock.BoardItem | null> {
       try {
-        console.log(`[DataProvider] 获取板块数据: ${boardCode} ${endDate}`);
-        const bResult = await Services.Tushare.GetBoardDetailFromTushare(boardCode, endDate);
-        console.log(`[DataProvider] 板块 ${boardCode} 返回:`, bResult ? '有数据' : '无数据');
+        console.log(`[DataProvider] 获取板块数据: ${name} ${endDate}`);
+        const boardSecid= await Services.Tushare.GetBankuaiCodeByNameFromTushare(name);
+        if (!boardSecid) {
+          console.log(`[DataProvider] 未找到板块: ${name}`);
+          return null;
+        }
+        const bResult = await Services.Tushare.GetBoardDetailFromTushare(boardSecid, endDate);
+        console.log(`[DataProvider] 板块 ${boardSecid} 返回:`, bResult ? '有数据' : '无数据');
         return bResult ? Promise.resolve(bResult) : Promise.reject('数据未准备好');
       } catch (e) {
-        console.error(`[DataProvider] 获取板块数据失败 ${boardCode}:`, e);
+        console.error(`[DataProvider] 获取板块数据失败 ${name}:`, e);
         return null;
       }
     }
