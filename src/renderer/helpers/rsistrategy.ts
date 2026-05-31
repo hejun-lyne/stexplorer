@@ -3,9 +3,9 @@ import * as Services from '@/services';
 import * as Tech from '@/helpers/tech';
 
 export interface BreakoutMetrics {
-    preVol: number;          // 突破前年化波动率
-    postVol: number;         // 突破后年化波动率
-    expansionRatio: number;  // 波动率放大倍数
+    preVol: number;
+    postVol: number;
+    expansionRatio: number;
     breakoutDate: string;
     breakoutIndex: number;
 }
@@ -31,7 +31,6 @@ function calculateVolatility(klines: Stock.KLineItem[]): number {
 
 /**
  * 计算分段波动率（突破前 vs 突破后）
- * 针对东财强势股票（60天新高/涨停）设计
  */
 export function calculateBreakoutMetrics(
     klines: Stock.KLineItem[],
@@ -40,21 +39,17 @@ export function calculateBreakoutMetrics(
     const tradeIndex = klines.findIndex(k => k.date === tradeDay);
     if (tradeIndex < 0) return null;
 
-    // 突破前：tradeIndex之前的120天（不含突破日）
     const preStart = Math.max(0, tradeIndex - 120);
     const preKlines = klines.slice(preStart, tradeIndex);
     const preVol = preKlines.length >= 5 ? calculateVolatility(preKlines) : 0.2;
 
-    // 突破后：从突破日到当前（最多20天）
     const postEnd = Math.min(klines.length, tradeIndex + 20);
     const postKlines = klines.slice(tradeIndex, postEnd);
 
-    // 如果突破后数据不足5天，用preVol * 1.5作为估计（突破日常伴随波动率跃升）
     let postVol: number;
     if (postKlines.length >= 5) {
         postVol = calculateVolatility(postKlines);
     } else if (postKlines.length >= 1) {
-        // 用当日振幅年化估计
         const day = postKlines[0];
         const dailyRange = (day.zg - day.zd) / day.kp;
         postVol = dailyRange * Math.sqrt(252);
@@ -72,15 +67,66 @@ export function calculateBreakoutMetrics(
 }
 
 /**
+ * 硬过滤条件（一票否决，不进入评分）
+ * 针对东财每日返回上百只强势股票的优化
+ */
+export function hardFilter(
+    stock: Stock.DetailItem,
+    klines: Stock.KLineItem[]
+): { pass: boolean; reason?: string } {
+    if (klines.length < 2) return { pass: false, reason: 'K线不足' };
+
+    const currentPrice = klines[klines.length - 1].sp;
+    const prevPrice = klines[klines.length - 2].sp;
+    const changePct = (currentPrice - prevPrice) / prevPrice;
+
+    // 1. 涨幅不足：必须>=5%才算真正突破
+    if (changePct < 0.05) {
+        return { pass: false, reason: `涨幅不足(${(changePct * 100).toFixed(2)}% < 5%)` };
+    }
+
+    // 2. 成交额不足：5日均成交额<5000万剔除
+    if (klines.length >= 5) {
+        const avgAmount5d = klines.slice(-5).reduce((sum, k) => sum + k.cjl, 0) / 5;
+        if (avgAmount5d < 50_000_000) {
+            return { pass: false, reason: `成交额不足(${(avgAmount5d / 1e6).toFixed(0)}M < 50M)` };
+        }
+    }
+
+    // 3. 股价太低：低于5元容易操纵，且1手金额太小
+    if (currentPrice < 5) {
+        return { pass: false, reason: `股价太低(${currentPrice.toFixed(2)} < 5)` };
+    }
+
+    // 4. 流通市值太小或太大
+    const marketCap = (stock as Stock.DetailItem).lt;
+    if (marketCap !== undefined && (marketCap < 20 || marketCap > 2000)) {
+        return { pass: false, reason: `市值不符(${marketCap}亿, 需20-2000亿)` };
+    }
+
+    // 5. 已经连板太多（5连板以上风险极高）
+    let consecutiveUp = 0;
+    for (let i = klines.length - 1; i > 0; i--) {
+        if (klines[i].sp > klines[i - 1].sp) consecutiveUp++;
+        else break;
+        if (consecutiveUp >= 5) break;
+    }
+    if (consecutiveUp >= 5) {
+        return { pass: false, reason: `连板过多(${consecutiveUp}连板)` };
+    }
+
+    return { pass: true };
+}
+
+/**
  * 趋势型RSI信号 —— 统一为"二次启动"策略
- * 针对强势股设计：不是追高，而是等突破后回调、再次启动时介入
  */
 export function getTrendRSISignal(
     klines: Stock.KLineItem[],
     rsiValues: number[],
-    lookback: number = 5
+    lookback: number = 5,
+    peakRSI?: number
 ): TradeSignal {
-    // 需要至少20天数据计算MA20
     if (rsiValues.length < lookback + 2 || klines.length < 20) {
         return { type: 'hold', reason: '数据不足' };
     }
@@ -90,36 +136,40 @@ export function getTrendRSISignal(
     const recentRSIs = rsiValues.slice(-lookback);
     const minRecentRSI = Math.min(...recentRSIs);
     const currentPrice = klines[klines.length - 1].sp;
-
-    // ========== 买入条件：强势回调后的二次启动 ==========
-    
-    // 条件1：RSI从50下方突破60（动能重启）
-    const condition1 = prevRSI < 60 && currentRSI >= 60;
-    
-    // 条件2：近lookback天内RSI曾经低于50（确认经历过回调）
-    const condition2 = minRecentRSI < 50;
-    
-    // 条件3：近3天内RSI曾经高于65（确认之前是强势状态，而非弱势震荡）
-    const veryRecentRSIs = rsiValues.slice(-3);
-    const condition3 = Math.max(...veryRecentRSIs) > 65;
-    
-    // 条件4：股价仍在20日均线上方（趋势未破坏）
     const closes = klines.map(k => k.sp);
     const ma20 = Tech.calculateMA(closes, 20);
     const currentMA20 = ma20[ma20.length - 1];
+
+    // 买入信号1：强势回调二次启动
+    const condition1 = prevRSI < 60 && currentRSI >= 60;
+    const condition2 = minRecentRSI < 50;
+    const recent10RSIs = rsiValues.slice(-10);
+    const hasBeenStrong = peakRSI !== undefined ? peakRSI > 65 : Math.max(...recent10RSIs) > 65;
     const condition4 = currentPrice > currentMA20;
 
-    // 四个条件同时满足 = 二次启动确认
-    if (condition1 && condition2 && condition3 && condition4) {
+    if (condition1 && condition2 && hasBeenStrong && condition4) {
         return {
             type: 'buy',
-            reason: `RSI二次启动(${prevRSI.toFixed(1)}→${currentRSI.toFixed(1)})`
+            reason: `RSI二次启动(${prevRSI.toFixed(1)}→${currentRSI.toFixed(1)},峰值${(peakRSI || Math.max(...recent10RSIs)).toFixed(1)})`
         };
     }
 
-    // ========== 卖出条件 ==========
-    
-    // 卖出1：顶背离（价格新高，RSI未新高）
+    // 买入信号2：温和启动
+    const condition1b = prevRSI < 55 && currentRSI >= 55 && currentRSI < 65;
+    const condition2b = minRecentRSI < 45;
+    const condition3b = currentPrice > currentMA20 * 1.02;
+    const volumes = klines.slice(-6).map(k => k.cjl);
+    const avgVol5 = volumes.slice(0, 5).reduce((a, b) => a + b, 0) / 5;
+    const condition4b = volumes[volumes.length - 1] > avgVol5 * 1.1;
+
+    if (condition1b && condition2b && condition3b && condition4b) {
+        return {
+            type: 'buy',
+            reason: `RSI温和启动(${prevRSI.toFixed(1)}→${currentRSI.toFixed(1)})`
+        };
+    }
+
+    // 卖出条件
     const recentPrices = klines.slice(-lookback);
     const priceHigh = Math.max(...recentPrices.map(k => k.zg));
     const rsiHigh = Math.max(...recentRSIs);
@@ -128,7 +178,6 @@ export function getTrendRSISignal(
         return { type: 'sell', reason: 'RSI顶背离' };
     }
 
-    // 卖出2：RSI跌破60（趋势结束）
     if (prevRSI >= 60 && currentRSI < 60) {
         return { type: 'sell', reason: `RSI跌破60(${currentRSI.toFixed(1)})` };
     }
@@ -138,7 +187,7 @@ export function getTrendRSISignal(
 
 /**
  * 多因子评分系统（针对强势股）
- * @param marketCap 流通市值（亿元），可选
+ * 优化：提高突破质量权重到35分，总分100，拉开差距
  */
 export function calculateScore(
     stockKlines: Stock.KLineItem[],
@@ -153,25 +202,39 @@ export function calculateScore(
     const currentMA20 = ma20[ma20.length - 1];
     const prevMA20 = ma20[ma20.length - 2];
 
-    // 1. 板块协同 (30分)
+    // 1. 突破质量 (35分) —— 核心权重最高
+    if (metrics.expansionRatio > 3.0) score += 35;
+    else if (metrics.expansionRatio > 2.0) score += 25;
+    else if (metrics.expansionRatio > 1.5) score += 15;
+    else score += 5;
+
+    // 2. 板块协同 (25分) —— 放宽到前50%
     if (boardData) {
+        const moneyIn = boardData.moneyIn || 0;
+        const rank = boardData.moneyInRankInAll ?? 1;
+
+        // 资金方向 (10分)
         if (boardData.moneyIn5d > 0) score += 10;
-        if (boardData.moneyIn > 1000000) score += 10; // 1000万
-        if (boardData.moneyInRankInAll <= 0.05) score += 10; // 板块前5%
+
+        // 资金强度 (10分) —— 分档
+        if (moneyIn > 50_000_000) score += 10;
+        else if (moneyIn > 10_000_000) score += 7;
+        else if (moneyIn > 0) score += 3;
+
+        // 板块排名 (5分) —— 前50%都有分
+        if (rank <= 0.05) score += 5;
+        else if (rank <= 0.15) score += 3;
+        else if (rank <= 0.30) score += 2;
+        else if (rank <= 0.50) score += 1;
     } else {
-        score += 15; // 无板块数据时给中性分
+        score += 12; // 无板块数据时给中性分
     }
 
-    // 2. 突破质量 (25分) - 针对东财强势列表的核心因子
-    if (metrics.expansionRatio > 2.0) score += 25;
-    else if (metrics.expansionRatio > 1.5) score += 15;
-    else if (metrics.expansionRatio > 1.2) score += 5;
+    // 3. 趋势质量 (20分)
+    if (currentPrice > currentMA20 && currentMA20 > prevMA20) score += 12;
+    if (currentPrice > currentMA20 * 1.05) score += 8;
 
-    // 3. 趋势质量 (25分)
-    if (currentPrice > currentMA20 && currentMA20 > prevMA20) score += 15;
-    if (currentPrice > currentMA20 * 1.05) score += 10; // 偏离5%以上，确认强势
-
-    // 4. 成交持续性 (20分)
+    // 4. 成交持续性 (15分)
     if (stockKlines.length >= 10) {
         const recentAmounts = stockKlines.slice(-5).map(k => k.cjl);
         const prevAmounts = stockKlines.slice(-10, -5).map(k => k.cjl);
@@ -180,15 +243,15 @@ export function calculateScore(
             ? prevAmounts.reduce((a, b) => a + b, 0) / prevAmounts.length
             : avgAmount;
 
-        if (avgAmount > 100000000) score += 10; // 1亿
-        if (prevAvgAmount > 0 && avgAmount > prevAvgAmount * 1.2) score += 10; // 放量20%
+        if (avgAmount > 100_000_000) score += 8;
+        if (prevAvgAmount > 0 && avgAmount > prevAvgAmount * 1.2) score += 7;
     }
 
-    // 5. 流通市值 (10分) - 适中市值最优
+    // 5. 流通市值 (5分)
     if (marketCap !== undefined) {
-        if (marketCap >= 50 && marketCap <= 300) score += 10;
-        else if (marketCap > 300 && marketCap <= 1000) score += 5;
-        else if (marketCap < 50) score += 3;
+        if (marketCap >= 50 && marketCap <= 300) score += 5;
+        else if (marketCap > 300 && marketCap <= 1000) score += 3;
+        else if (marketCap < 50) score += 1;
     }
 
     return score;
@@ -196,7 +259,7 @@ export function calculateScore(
 
 export interface Position {
     secid: string;
-    boardCode: string;       // 所属板块，用于板块集中度控制
+    boardCode: string;
     buyDate: string;
     buyPrice: number;
     quantity: number;
@@ -208,7 +271,9 @@ export interface WatchItem {
     secid: string;
     addedDate: string;
     score: number;
-    boardCode: string;       // 记录板块，便于后续买入时做板块分散
+    boardCode: string;
+    maxRSI: number;
+    maxPrice: number;
 }
 
 export interface PendingOrder {
@@ -250,14 +315,14 @@ export interface BacktestResult {
 export interface DataProvider {
     getStrongStocks(date: string): Promise<Stock.DetailItem[]>;
     getKLines(secid: string, endDate: string, days?: number): Promise<Stock.KLineItem[] | null>;
-    getBoardData(name: string, endDate: string): Promise<Stock.BoardItem | null>;
+    getBoardData(secid: string, endDate: string): Promise<Stock.BoardItem | null>;
 }
 
 // ==================== 回测主类 ====================
 
 export class StrongStockBacktest {
     private initialCapital: number;
-    private capital: number;        // 总资金（用于计算仓位基准）
+    private capital: number;
     private availableCash: number;
     private positions: Map<string, Position> = new Map();
     private watchList: Map<string, WatchItem> = new Map();
@@ -266,32 +331,32 @@ export class StrongStockBacktest {
     private dailyValues: DailyValue[] = [];
     private tradeDays: string[];
 
-    // 参数配置 —— 趋势二次启动策略
-    private readonly MAX_POSITIONS = 8;       // 最大持仓数（多分仓）
-    private readonly POSITION_RATIO = 0.125;  // 每只仓位占比（12.5%）
-    private readonly MAX_SAME_BOARD = 2;      // 同板块最多持仓2只
-    private readonly MIN_POSITION_RATIO = 0.05; // 最小有意义仓位（总资金5%）
-    private readonly STOP_LOSS_PCT = 0.93;    // 固定止损 -7%
-    private readonly TRAILING_STOP_PCT = 0.90; // 移动止盈（从最高点回撤10%）
-    private readonly MIN_SCORE = 60;          // 观察列表入选阈值
-    private readonly MAX_WATCHLIST = 10;      // 观察列表上限
-    private readonly SLIPPAGE = 0.001;        // 滑点 0.1%
-    private readonly COMMISSION = 0.0003;     // 佣金 万3
-    private readonly STAMP_TAX = 0.001;       // 印花税 千1（仅卖出）
-    private readonly RSI_PERIOD = 6;           // 固定RSI周期（不每天优化）
-    private readonly RSI_LOOKBACK = 5;        // RSI信号回看天数
+    // 参数配置 —— 针对上百只候选的优化
+    private readonly MAX_POSITIONS = 8;
+    private readonly POSITION_RATIO = 0.125;
+    private readonly MAX_SAME_BOARD = 2;
+    private readonly MIN_POSITION_RATIO = 0.05;
+    private readonly STOP_LOSS_PCT = 0.93;
+    private readonly TRAILING_STOP_PCT = 0.90;
+    private readonly MIN_SCORE = 75;          // 从60提高到75
+    private readonly MAX_WATCHLIST = 20;      // 从10提高到20
+    private readonly WATCHLIST_SCORE_DECAY = 2; // 每天衰减2分
+    private readonly WATCHLIST_MAX_AGE = 15;    // 从5天延长到15天
+    private readonly SLIPPAGE = 0.001;
+    private readonly COMMISSION = 0.0003;
+    private readonly STAMP_TAX = 0.001;
+    private readonly RSI_PERIOD = 6;
+    private readonly RSI_LOOKBACK = 5;
+    private readonly BATCH_SIZE = 10;         // 并行评分批次大小
 
     constructor(tradeDays: string[], initialCapital: number = 1000000) {
-        this.tradeDays = tradeDays;
+        this.tradeDays = tradeDays.map(d => this.normalizeDate(d));
         this.initialCapital = initialCapital;
         this.capital = initialCapital;
         this.availableCash = initialCapital;
         console.log(`[Backtest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length}`);
     }
 
-    /**
-     * 执行回测
-     */
     public async run(dataProvider: DataProvider, onProgress?: (message: string, percent?: number) => void): Promise<BacktestResult> {
         const totalDays = this.tradeDays.length;
         const dayPercentStep = totalDays > 0 ? 90 / totalDays : 0;
@@ -306,11 +371,14 @@ export class StrongStockBacktest {
             TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
             MIN_SCORE: this.MIN_SCORE,
             MAX_WATCHLIST: this.MAX_WATCHLIST,
+            WATCHLIST_SCORE_DECAY: this.WATCHLIST_SCORE_DECAY,
+            WATCHLIST_MAX_AGE: this.WATCHLIST_MAX_AGE,
             SLIPPAGE: this.SLIPPAGE,
             COMMISSION: this.COMMISSION,
             STAMP_TAX: this.STAMP_TAX,
             RSI_PERIOD: this.RSI_PERIOD,
-            RSI_LOOKBACK: this.RSI_LOOKBACK
+            RSI_LOOKBACK: this.RSI_LOOKBACK,
+            BATCH_SIZE: this.BATCH_SIZE
         });
 
         for (let i = 0; i < totalDays; i++) {
@@ -320,12 +388,10 @@ export class StrongStockBacktest {
             console.log(`\n[Backtest] ---------- 第 ${i + 1}/${totalDays} 天 [${today}] ----------`);
             console.log(`[Backtest] 当前持仓: ${this.positions.size} 只 | 观察列表: ${this.watchList.size} 只 | 可用资金: ${this.availableCash.toFixed(2)}`);
 
-            // 1. 执行昨日产生的待执行订单（用今日开盘价）
             onProgress?.(`[${i + 1}/${totalDays}] ${today} 执行待处理订单...`, currentBase);
             console.log(`[Backtest] [${today}] 阶段1: 执行待处理订单 ${this.pendingOrders.length} 笔`);
             await this.executePendingOrders(today, dataProvider);
 
-            // 2. 基于今日数据，处理观察列表并产生新订单（将在次日执行）
             if (i < totalDays - 1) {
                 const nextDay = this.tradeDays[i + 1];
                 onProgress?.(`[${i + 1}/${totalDays}] ${today} 生成交易信号...`, Math.round(currentBase + dayPercentStep * 0.3));
@@ -335,7 +401,6 @@ export class StrongStockBacktest {
                 });
             }
 
-            // 3. 记录今日净值（用收盘价）
             onProgress?.(`[${i + 1}/${totalDays}] ${today} 记录净值...`, Math.round(currentBase + dayPercentStep * 0.8));
             console.log(`[Backtest] [${today}] 阶段3: 记录净值`);
             await this.recordDailyValue(today, dataProvider);
@@ -351,9 +416,6 @@ export class StrongStockBacktest {
         return result;
     }
 
-    /**
-     * 执行待执行订单（次日开盘价成交）
-     */
     private async executePendingOrders(today: string, dataProvider: DataProvider) {
         if (this.pendingOrders.length === 0) {
             console.log(`[Backtest] [${today}] 无待执行订单`);
@@ -391,20 +453,15 @@ export class StrongStockBacktest {
         this.pendingOrders = [];
     }
 
-    /**
-     * 基于当日数据生成信号和订单
-     */
     private async generateSignals(
         today: string,
         nextDay: string,
         dataProvider: DataProvider,
         onProgress?: (message: string) => void
     ) {
-        // ---- 阶段1：处理观察列表（交易逻辑）----
         console.log(`[Backtest] [${today}] 阶段2-1: 处理观察列表 ${this.watchList.size} 只`);
         onProgress?.(`[${today}] 处理观察列表 ${this.watchList.size} 只...`);
 
-        // 收集所有触发买入信号的候选股
         const buyCandidates: Array<{
             secid: string;
             score: number;
@@ -423,23 +480,30 @@ export class StrongStockBacktest {
             const position = this.positions.get(secid);
             const currentPrice = klines[klines.length - 1].sp;
 
-            // 更新持仓最高价（用于移动止盈）
+            // 更新持仓最高价
             if (position && currentPrice > position.highestPrice) {
                 const oldHigh = position.highestPrice;
                 position.highestPrice = currentPrice;
                 console.log(`[Backtest] [${today}] ${secid} 更新最高价: ${oldHigh.toFixed(2)} → ${currentPrice.toFixed(2)}`);
             }
 
-            // 计算RSI（后续多处需要用到）
+            // 计算RSI
             const rsiValues = Tech.calculateRSI(klines.map(k => k.sp), this.RSI_PERIOD);
             const currentRSI = rsiValues[rsiValues.length - 1];
 
-            // 止损判断（优先级最高，产生次日卖出订单）
+            // 更新观察期峰值
+            if (currentRSI > watchInfo.maxRSI) {
+                watchInfo.maxRSI = currentRSI;
+            }
+            if (currentPrice > watchInfo.maxPrice) {
+                watchInfo.maxPrice = currentPrice;
+            }
+
+            // 止损判断
             if (position) {
                 const stopLossPrice = position.buyPrice * this.STOP_LOSS_PCT;
                 const trailingStopPrice = position.highestPrice * this.TRAILING_STOP_PCT;
 
-                // 固定止损
                 if (currentPrice < stopLossPrice) {
                     console.log(`[Backtest] [${today}] ${secid} 🔴 固定止损触发: 当前${currentPrice.toFixed(2)} < 止损价${stopLossPrice.toFixed(2)} (成本${position.buyPrice.toFixed(2)})`);
                     this.pendingOrders.push({
@@ -451,7 +515,6 @@ export class StrongStockBacktest {
                     continue;
                 }
 
-                // 移动止盈（仅当盈利时触发）
                 if (currentPrice > position.buyPrice && currentPrice < trailingStopPrice) {
                     console.log(`[Backtest] [${today}] ${secid} 🟡 移动止盈触发: 当前${currentPrice.toFixed(2)} < 止盈价${trailingStopPrice.toFixed(2)} (最高${position.highestPrice.toFixed(2)})`);
                     this.pendingOrders.push({
@@ -464,21 +527,58 @@ export class StrongStockBacktest {
                 }
             }
 
-            // 未持仓且RSI跌破40：回调过深，趋势可能已死，直接剔除
-            if (!position && currentRSI < 40) {
-                console.log(`[Backtest] [${today}] ${secid} 从观察列表移除: RSI回调过深(${currentRSI.toFixed(1)} < 40)`);
-                this.watchList.delete(secid);
-                continue;
+            // 未持仓股票的动态移除检查
+            if (!position) {
+                const daysInWatch = this.getTradeDaysDiff(watchInfo.addedDate, today);
+                const closes = klines.map(k => k.sp);
+                const ma20 = Tech.calculateMA(closes, 20);
+                const currentMA20 = ma20[ma20.length - 1];
+                const recent3RSI = rsiValues.slice(-3);
+                const decayedScore = watchInfo.score - daysInWatch * this.WATCHLIST_SCORE_DECAY;
+
+                // 优先级1: RSI回调过深
+                if (currentRSI < 35) {
+                    console.log(`[Backtest] [${today}] ${secid} 从观察列表移除: RSI回调过深(${currentRSI.toFixed(1)} < 35)`);
+                    this.watchList.delete(secid);
+                    continue;
+                }
+
+                // 优先级2: 跌破MA20
+                if (currentPrice < currentMA20) {
+                    console.log(`[Backtest] [${today}] ${secid} 从观察列表移除: 跌破MA20(${currentPrice.toFixed(2)} < ${currentMA20.toFixed(2)})`);
+                    this.watchList.delete(secid);
+                    continue;
+                }
+
+                // 优先级3: RSI连续3天<<40
+                if (recent3RSI.length >= 3 && recent3RSI.every(r => r < 40)) {
+                    console.log(`[Backtest] [${today}] ${secid} 从观察列表移除: RSI连续3天<<40`);
+                    this.watchList.delete(secid);
+                    continue;
+                }
+
+                // 优先级4: 评分衰减至<<50
+                if (decayedScore < 50) {
+                    console.log(`[Backtest] [${today}] ${secid} 从观察列表移除: 评分衰减至${decayedScore.toFixed(1)}`);
+                    this.watchList.delete(secid);
+                    continue;
+                }
+
+                // 兜底: 超期15天
+                if (daysInWatch > this.WATCHLIST_MAX_AGE) {
+                    console.log(`[Backtest] [${today}] ${secid} 从观察列表移除: 超期${daysInWatch}天未触发`);
+                    this.watchList.delete(secid);
+                    continue;
+                }
             }
 
             // RSI趋势信号判断
-            const signal = getTrendRSISignal(klines, rsiValues, this.RSI_LOOKBACK);
+            const signal = getTrendRSISignal(klines, rsiValues, this.RSI_LOOKBACK, watchInfo.maxRSI);
 
             if (signal.type !== 'hold') {
-                console.log(`[Backtest] [${today}] ${secid} RSI信号: ${signal.type.toUpperCase()} | ${signal.reason}`);
+                console.log(`[Backtest] [${today}] ${secid} RSI信号: ${signal.type.toUpperCase()} | ${signal.reason} | 观察期峰值RSI=${watchInfo.maxRSI.toFixed(1)}`);
             }
 
-            // 卖出信号
             if (signal.type === 'sell' && position) {
                 console.log(`[Backtest] [${today}] ${secid} ✅ 生成卖出订单 (次日${nextDay}执行)`);
                 this.pendingOrders.push({
@@ -489,34 +589,22 @@ export class StrongStockBacktest {
                 });
             }
 
-            // 收集买入候选
             if (signal.type === 'buy' && !position) {
                 buyCandidates.push({
                     secid,
-                    score: watchInfo.score,
+                    score: watchInfo.score - this.getTradeDaysDiff(watchInfo.addedDate, today) * this.WATCHLIST_SCORE_DECAY,
                     boardCode: watchInfo.boardCode,
                     price: currentPrice,
                     reason: signal.reason
                 });
             }
-
-            // 剔除超期未持仓股票
-            if (!position) {
-                const daysInWatch = this.getTradeDaysDiff(watchInfo.addedDate, today);
-                if (daysInWatch > 5) {
-                    console.log(`[Backtest] [${today}] ${secid} 从观察列表移除: 超期${daysInWatch}天未买入`);
-                    this.watchList.delete(secid);
-                }
-            }
         }
 
-        // ---- 阶段1b：按优先级选择买入候选 ----
+        // 按优先级选择买入候选
         if (buyCandidates.length > 0) {
-            // 按评分降序
             buyCandidates.sort((a, b) => b.score - a.score);
             console.log(`[Backtest] [${today}] 买入候选共 ${buyCandidates.length} 只，排序前5:`, buyCandidates.slice(0, 5).map(c => `${c.secid}(${c.score.toFixed(1)})`));
 
-            // 统计当前板块持仓
             const boardHoldings = new Map<string, number>();
             for (const pos of this.positions.values()) {
                 boardHoldings.set(pos.boardCode, (boardHoldings.get(pos.boardCode) || 0) + 1);
@@ -528,14 +616,12 @@ export class StrongStockBacktest {
                     break;
                 }
 
-                // 板块集中度检查
                 const boardCount = boardHoldings.get(candidate.boardCode) || 0;
                 if (boardCount >= this.MAX_SAME_BOARD) {
                     console.log(`[Backtest] [${today}] ${candidate.secid} 买入跳过: 板块${candidate.boardCode}已有${boardCount}只持仓`);
                     continue;
                 }
 
-                // 资金利用率检查：最小有意义仓位
                 const standardAmount = this.capital * this.POSITION_RATIO;
                 const maxBuyAmount = Math.min(standardAmount, this.availableCash);
                 const adjustedPrice = candidate.price * (1 + this.SLIPPAGE);
@@ -544,7 +630,7 @@ export class StrongStockBacktest {
 
                 if (actualAmount < this.capital * this.MIN_POSITION_RATIO || quantity < 100) {
                     console.log(`[Backtest] [${today}] ${candidate.secid} 买入跳过: 资金不足或低于最小仓位 (计划金额${actualAmount.toFixed(2)}, 可用${this.availableCash.toFixed(2)}, 最小要求${(this.capital * this.MIN_POSITION_RATIO).toFixed(2)})`);
-                    break; // 评分已排序，资金不够买这只，后面的更买不起
+                    break;
                 }
 
                 this.pendingOrders.push({
@@ -554,102 +640,198 @@ export class StrongStockBacktest {
                     signalDate: today
                 });
                 boardHoldings.set(candidate.boardCode, boardCount + 1);
-                console.log(`[Backtest] [${today}] ${candidate.secid} ✅ 生成买入订单 (次日${nextDay}执行) | 评分${candidate.score.toFixed(1)} | 板块${candidate.boardCode}`);
+                console.log(`[Backtest] [${today}] ${candidate.secid} ✅ 生成买入订单 (次日${nextDay}执行) | 衰减后评分${candidate.score.toFixed(1)} | 板块${candidate.boardCode}`);
             }
         }
 
-        // ---- 阶段2：补充观察列表（选股逻辑）----
-        console.log(`[Backtest] [${today}] 阶段2-2: 获取强势股票补充观察列表`);
+        // ---- 阶段2: 补充观察列表（动态排行榜机制）----
+        console.log(`[Backtest] [${today}] 阶段2-2: 获取强势股票并动态更新观察列表`);
         onProgress?.(`[${today}] 获取强势股票...`);
         const strongStocks = await dataProvider.getStrongStocks(today);
-        console.log(`[Backtest] [${today}] 强势股票共 ${strongStocks.length} 只`);
+        console.log(`[Backtest] [${today}] 东财强势股票共 ${strongStocks.length} 只`);
 
-        if (strongStocks.length > 0) {
-            console.log(`[Backtest] [${today}] 强势股票前5:`, strongStocks.slice(0, 5).map(s => s.secid));
+        // 并行评分处理（批次控制）
+        onProgress?.(`[${today}] 硬过滤+评分中...`);
+        const newCandidates: Array<{
+            secid: string;
+            score: number;
+            rawScore: number;
+            matchScore: number;
+            expansionRatio: number;
+            boardCode: string;
+            initialRSI: number;
+            initialPrice: number;
+        }> = [];
+
+        // 先过滤掉已在观察列表或已持仓的
+        const filteredStocks = strongStocks.filter(s => !this.watchList.has(s.secid) && !this.positions.has(s.secid));
+        console.log(`[Backtest] [${today}] 排除已监控/已持仓后剩余 ${filteredStocks.length} 只`);
+
+        // 批次并行处理
+        for (let batchStart = 0; batchStart < filteredStocks.length; batchStart += this.BATCH_SIZE) {
+            const batch = filteredStocks.slice(batchStart, batchStart + this.BATCH_SIZE);
+            onProgress?.(`[${today}] 评分中 ${Math.min(batchStart + this.BATCH_SIZE, filteredStocks.length)}/${filteredStocks.length}...`);
+
+            const batchResults = await Promise.allSettled(
+                batch.map(async (stock) => {
+                    const klines = await dataProvider.getKLines(stock.secid, today, 120);
+                    if (!klines || klines.length < 60) {
+                        return { pass: false, reason: 'K线不足' };
+                    }
+
+                    // 硬过滤
+                    const filterResult = hardFilter(stock, klines);
+                    if (!filterResult.pass) {
+                        return { pass: false, reason: filterResult.reason };
+                    }
+
+                    // 分段波动率
+                    const metrics = calculateBreakoutMetrics(klines, today);
+                    if (!metrics || metrics.expansionRatio < 1.5) {
+                        return { pass: false, reason: `波动率不达标(${metrics?.expansionRatio.toFixed(2) || 'N/A'})` };
+                    }
+
+                    // 综合评分
+                    const boardData = await dataProvider.getBoardData(stock.bk, today);
+                    const marketCap = (stock as Stock.DetailItem).lt;
+                    const score = calculateScore(klines, boardData, metrics, marketCap);
+                    if (score < this.MIN_SCORE) {
+                        return { pass: false, reason: `评分不足(${score.toFixed(1)} < ${this.MIN_SCORE})` };
+                    }
+
+                    // RSI匹配度
+                    const recentKlines = klines.slice(-60);
+                    const rsiValues = Tech.calculateRSI(recentKlines.map(k => k.sp), this.RSI_PERIOD);
+                    const matchScore = this.backtestRSIOnHistory(recentKlines, rsiValues);
+                    const finalScore = score * 0.7 + matchScore * 0.3;
+
+                    // 初始RSI和价格用于观察列表峰值追踪
+                    const initialRSI = rsiValues[rsiValues.length - 1] || 50;
+                    const initialPrice = klines[klines.length - 1].sp;
+
+                    return {
+                        pass: true,
+                        secid: stock.secid,
+                        score: finalScore,
+                        rawScore: score,
+                        matchScore,
+                        expansionRatio: metrics.expansionRatio,
+                        boardCode: stock.bk,
+                        initialRSI,
+                        initialPrice
+                    };
+                })
+            );
+
+            for (const result of batchResults) {
+                if (result.status === 'fulfilled') {
+                    const value = result.value as any;
+                    if (value.pass) {
+                        newCandidates.push({
+                            secid: value.secid,
+                            score: value.score,
+                            rawScore: value.rawScore,
+                            matchScore: value.matchScore,
+                            expansionRatio: value.expansionRatio,
+                            boardCode: value.boardCode,
+                            initialRSI: value.initialRSI,
+                            initialPrice: value.initialPrice
+                        });
+                    } else if (value.reason && batchStart < 30) {
+                        // 只打印前几个过滤原因，避免日志爆炸
+                        // console.log(`[Backtest] [${today}] 过滤: ${value.reason}`);
+                    }
+                }
+            }
         }
 
-        onProgress?.(`[${today}] 强势股票 ${strongStocks.length} 只，开始评分...`);
-        const candidates: Array<{ secid: string; score: number; rawScore: number; matchScore: number; expansionRatio: number; boardCode: string }> = [];
+        console.log(`[Backtest] [${today}] 硬过滤后剩余 ${newCandidates.length} 只进入候选池`);
 
-        for (let i = 0; i < strongStocks.length; i++) {
-            const stock = strongStocks[i];
-            if (i % 5 === 0) {
-                onProgress?.(`[${today}] 评分中 ${i}/${strongStocks.length}...`);
+        // 动态排行榜：现有未持仓观察列表 + 新候选一起竞争
+        const combined: Array<{
+            secid: string;
+            score: number;
+            boardCode: string;
+            source: 'existing' | 'new';
+            initialRSI?: number;
+            initialPrice?: number;
+        }> = [];
+
+        // 现有未持仓的观察列表（评分衰减后）
+        for (const [secid, item] of this.watchList) {
+            if (!this.positions.has(secid)) {
+                const daysInWatch = this.getTradeDaysDiff(item.addedDate, today);
+                const decayedScore = item.score - daysInWatch * this.WATCHLIST_SCORE_DECAY;
+                combined.push({
+                    secid,
+                    score: decayedScore,
+                    boardCode: item.boardCode,
+                    source: 'existing'
+                });
             }
+        }
 
-            // 已在观察列表或已持仓则跳过
-            if (this.watchList.has(stock.secid)) continue;
-            if (this.positions.has(stock.secid)) continue;
-
-            const klines = await dataProvider.getKLines(stock.secid, today, 120);
-            const boardData = await dataProvider.getBoardData(stock.bk, today);
-            if (!klines || klines.length < 60) {
-                console.log(`[Backtest] [${today}] ${stock.secid} 选股跳过: K线不足(${klines?.length || 0})`);
-                continue;
-            }
-
-            // 计算分段波动率
-            const metrics = calculateBreakoutMetrics(klines, today);
-            if (!metrics || metrics.expansionRatio < 1.5) {
-                console.log(`[Backtest] [${today}] ${stock.secid} 选股跳过: 波动率不达标(expansion=${metrics?.expansionRatio.toFixed(2) || 'N/A'})`);
-                continue;
-            }
-
-            // 计算综合评分（传入市值，如果数据中有）
-            const marketCap = (stock as any).marketCap;
-            const score = calculateScore(klines, boardData, metrics, marketCap);
-            if (score < this.MIN_SCORE) {
-                console.log(`[Backtest] [${today}] ${stock.secid} 选股跳过: 评分不足(${score.toFixed(1)} < ${this.MIN_SCORE})`);
-                continue;
-            }
-
-            // 计算RSI策略匹配度（固定参数下近60天信号胜率）
-            const recentKlines = klines.slice(-60);
-            const rsiValues = Tech.calculateRSI(recentKlines.map(k => k.sp), this.RSI_PERIOD);
-            const matchScore = this.backtestRSIOnHistory(recentKlines, rsiValues);
-
-            // 综合排序分：评分*0.7 + 匹配度*0.3
-            const finalScore = score * 0.7 + matchScore * 0.3;
-            candidates.push({
-                secid: stock.secid,
-                score: finalScore,
-                rawScore: score,
-                matchScore,
-                expansionRatio: metrics.expansionRatio,
-                boardCode: stock.bk
+        // 新候选
+        for (const c of newCandidates) {
+            combined.push({
+                secid: c.secid,
+                score: c.score,
+                boardCode: c.boardCode,
+                source: 'new',
+                initialRSI: c.initialRSI,
+                initialPrice: c.initialPrice
             });
+        }
 
-            if (i < 3 || finalScore > 80) {
-                console.log(`[Backtest] [${today}] ${stock.secid} 评分详情: 综合=${finalScore.toFixed(1)} | 基础=${score.toFixed(1)} | 匹配度=${matchScore.toFixed(1)} | 波动率放大=${metrics.expansionRatio.toFixed(2)}`);
+        // 按评分降序，取前20名
+        combined.sort((a, b) => b.score - a.score);
+        const topN = combined.slice(0, this.MAX_WATCHLIST);
+
+        // 重建观察列表（保留已持仓的，因为它们不在combined中）
+        const newWatchList = new Map<string, WatchItem>();
+
+        // 先保留已持仓的（不参与竞争，但保留监控）
+        for (const [secid, item] of this.watchList) {
+            if (this.positions.has(secid)) {
+                newWatchList.set(secid, item);
             }
         }
 
-        // 按分数排序，补充观察列表
-        candidates.sort((a, b) => b.score - a.score);
-        const needCount = this.MAX_WATCHLIST - this.watchList.size;
-        const addCount = Math.min(needCount, candidates.length);
-
-        if (candidates.length > 0) {
-            console.log(`[Backtest] [${today}] 候选股票排序前5:`, candidates.slice(0, 5).map(c => `${c.secid}(${c.score.toFixed(1)})`));
+        // 再加入竞争胜出的
+        let addCount = 0;
+        for (const c of topN) {
+            if (c.source === 'new') {
+                newWatchList.set(c.secid, {
+                    secid: c.secid,
+                    addedDate: today,
+                    score: c.score,
+                    boardCode: c.boardCode,
+                    maxRSI: c.initialRSI || 50,
+                    maxPrice: c.initialPrice || 0
+                });
+                addCount++;
+                if (addCount <= 5 || c.score > 80) {
+                    console.log(`[Backtest] [${today}] ${c.secid} 新加入观察列表 | 评分: ${c.score.toFixed(1)} | 板块: ${c.boardCode}`);
+                }
+            } else {
+                // 保留老的
+                const oldItem = this.watchList.get(c.secid)!;
+                newWatchList.set(c.secid, oldItem);
+            }
         }
 
-        for (let i = 0; i < addCount; i++) {
-            const candidate = candidates[i];
-            this.watchList.set(candidate.secid, {
-                secid: candidate.secid,
-                addedDate: today,
-                score: candidate.score,
-                boardCode: candidate.boardCode
-            });
-            console.log(`[Backtest] [${today}] ${candidate.secid} 加入观察列表 | 综合评分: ${candidate.score.toFixed(1)} | 板块: ${candidate.boardCode}`);
+        // 统计被踢出的
+        let removedCount = 0;
+        for (const [secid, item] of this.watchList) {
+            if (!this.positions.has(secid) && !newWatchList.has(secid)) {
+                removedCount++;
+            }
         }
 
-        console.log(`[Backtest] [${today}] 观察列表更新: 新增 ${addCount} 只, 当前共 ${this.watchList.size} 只`);
+        this.watchList = newWatchList;
+        console.log(`[Backtest] [${today}] 观察列表动态更新: 新增 ${addCount} 只, 淘汰 ${removedCount} 只, 当前共 ${this.watchList.size} 只 (含持仓)`);
     }
 
-    /**
-     * 执行买入（内部）—— 趋势策略不加仓，固定仓位
-     */
     private executeBuy(secid: string, date: string, price: number, reason: string) {
         const adjustedPrice = price * (1 + this.SLIPPAGE);
         const standardAmount = this.capital * this.POSITION_RATIO;
@@ -657,7 +839,6 @@ export class StrongStockBacktest {
         const quantity = Math.floor(maxBuyAmount / adjustedPrice / 100) * 100;
         const actualAmount = adjustedPrice * quantity;
 
-        // 最小有意义仓位检查
         if (actualAmount < this.capital * this.MIN_POSITION_RATIO || quantity < 100) {
             console.log(`[Backtest] [${date}] ${secid} 买入失败: 低于最小仓位或数量不足 (计划金额${actualAmount.toFixed(2)}, 最小要求${(this.capital * this.MIN_POSITION_RATIO).toFixed(2)}, 可用${this.availableCash.toFixed(2)})`);
             return;
@@ -673,7 +854,6 @@ export class StrongStockBacktest {
 
         this.availableCash -= totalCost;
 
-        // 从 watchList 获取板块代码（买入时一定在观察列表中）
         const watchItem = this.watchList.get(secid);
         const boardCode = watchItem?.boardCode || '';
 
@@ -700,9 +880,6 @@ export class StrongStockBacktest {
         });
     }
 
-    /**
-     * 执行卖出（内部）
-     */
     private executeSell(secid: string, date: string, price: number, quantity: number, reason: string) {
         const position = this.positions.get(secid);
         if (!position) {
@@ -733,13 +910,10 @@ export class StrongStockBacktest {
         });
 
         this.positions.delete(secid);
-        this.watchList.delete(secid); // 卖出后移出观察列表
+        this.watchList.delete(secid);
         console.log(`[Backtest] [${date}] ${secid} 已从持仓和观察列表移除`);
     }
 
-    /**
-     * 记录每日净值
-     */
     private async recordDailyValue(date: string, dataProvider: DataProvider) {
         let stockValue = 0;
         let positionDetails: Array<{ secid: string; close: number; quantity: number; value: number }> = [];
@@ -772,16 +946,12 @@ export class StrongStockBacktest {
         }
     }
 
-    /**
-     * 计算回测结果指标
-     */
     private calculateResult(): BacktestResult {
         const finalValue = this.dailyValues[this.dailyValues.length - 1]?.totalValue || this.initialCapital;
         const totalReturn = (finalValue - this.initialCapital) / this.initialCapital;
         const days = this.dailyValues.length;
         const annualizedReturn = days > 0 ? Math.pow(1 + totalReturn, 252 / days) - 1 : 0;
 
-        // 最大回撤
         let maxDrawdown = 0;
         let peak = this.initialCapital;
         let peakDate = this.dailyValues[0]?.date || '';
@@ -799,7 +969,6 @@ export class StrongStockBacktest {
             }
         }
 
-        // 交易统计
         const sellTrades = this.tradeRecords.filter(t => t.type === 'sell');
         const winTrades = sellTrades.filter(t => (t.pnl || 0) > 0);
         const winRate = sellTrades.length > 0 ? winTrades.length / sellTrades.length : 0;
@@ -809,7 +978,6 @@ export class StrongStockBacktest {
         const totalLoss = lossTrades.reduce((sum, t) => sum + Math.abs(t.pnl || 0), 0);
         const profitFactor = totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? Infinity : 0);
 
-        // 夏普比率（简化，假设无风险利率为0）
         const returns: number[] = [];
         for (let i = 1; i < this.dailyValues.length; i++) {
             returns.push((this.dailyValues[i].totalValue - this.dailyValues[i - 1].totalValue) / this.dailyValues[i - 1].totalValue);
@@ -820,7 +988,6 @@ export class StrongStockBacktest {
             : 0;
         const sharpeRatio = stdReturn > 0 ? (avgReturn / stdReturn) * Math.sqrt(252) : 0;
 
-        // 平均持仓天数
         const holdingDays: number[] = [];
         for (const sell of sellTrades) {
             const buy = this.tradeRecords.find(
@@ -876,10 +1043,6 @@ export class StrongStockBacktest {
         return result;
     }
 
-    /**
-     * 回测RSI策略历史表现（固定参数下近N天信号胜率）
-     * 用于评估"策略匹配度"，而非优化参数
-     */
     private backtestRSIOnHistory(klines: Stock.KLineItem[], rsiValues: number[]): number {
         if (klines.length < 25) return 50;
 
@@ -898,7 +1061,6 @@ export class StrongStockBacktest {
                 if (futurePrices.length === 0) continue;
 
                 const maxPrice = Math.max(...futurePrices.map(k => k.zg));
-                // 5天内最高价超过买入价3%算成功
                 if (maxPrice > entryPrice * 1.03) wins++;
             }
         }
@@ -906,13 +1068,17 @@ export class StrongStockBacktest {
         return signals > 0 ? (wins / signals) * 100 : 50;
     }
 
-    /**
-     * 计算两个交易日之间的天数差
-     */
     private getTradeDaysDiff(date1: string, date2: string): number {
         const idx1 = this.tradeDays.indexOf(date1);
         const idx2 = this.tradeDays.indexOf(date2);
         if (idx1 < 0 || idx2 < 0) return 0;
         return Math.abs(idx2 - idx1);
+    }
+
+    private normalizeDate(date: string): string {
+        if (date.length === 8 && date.includes('-') === false) {
+            return `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
+        }
+        return date;
     }
 }

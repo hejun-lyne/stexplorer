@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useEffect } from 'react';
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress } from 'antd';
 import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
@@ -17,13 +17,45 @@ export interface BacktestProps {
 }
 
 class StrongStocksDataProvider implements RSIStrategy.DataProvider {
-    
+    // 板块数据内存缓存：key = "name|endDate"，避免相同参数重复请求
+    private boardCache: Map<string, Stock.BoardItem | null> = new Map();
+
+    private getBoardCacheKey(name: string, endDate: string): string {
+        return `${name}|${endDate}`;
+    }
+
     async getStrongStocks(date: string): Promise<Stock.DetailItem[]> {
       try {
-        console.log(`[DataProvider] 获取强势股票: ${date}`);
-        const result = await Helpers.Stock.LoadSingleDateQS(date, undefined,-1);
+        // LoadSingleDateQS 要求 YYYYMMDD 格式，将 YYYY-MM-DD 转换
+        const queryDate = date.replace(/-/g, '');
+        console.log(`[DataProvider] 获取强势股票: ${date} -> ${queryDate}`);
+        const result = await Helpers.Stock.LoadSingleDateQS(queryDate, undefined,-1);
         console.log(`[DataProvider] 强势股票 ${date} 返回: ${result.stocks?.length || 0} 只`);
-        return result.stocks ? Promise.resolve(result.stocks.map((s: any) => ({ secid: s.secid, name: s.name, bk: s.hybk } as Stock.DetailItem))) : Promise.reject('数据未准备好');
+        if (!result.stocks) {
+          return Promise.reject('数据未准备好');
+        }
+        // 按板块分组，每个板块最多取前10只，总数最多30只
+        const bkCount = new Map<string, number>();
+        const filteredStocks = result.stocks.filter((s: any) => {
+          const code = s.secid?.split('.')[1] || '';
+          // 排除科创板 (688/689 开头)
+          if (code.startsWith('688') || code.startsWith('689')) return false;
+          // 排除北交所 (8/9 开头)
+          if (code.startsWith('8') || code.startsWith('9')) return false;
+          // 同一板块最多取5只
+          const bk = s.hybk || '';
+          const count = bkCount.get(bk) || 0;
+          if (count >= 5) return false;
+          bkCount.set(bk, count + 1);
+          return true;
+        });//.slice(0, 20); // 取前20只，避免数据过多导致后续处理缓慢
+        console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${filteredStocks.length} 只`);
+        return Promise.resolve(filteredStocks.map((s: any) => ({ 
+          secid: s.secid, 
+          name: s.name,
+          zdf: s.zdf,
+          zx: s.zx,
+          bk: s.hybk, lt: (s.ltsz / 100000000) } as Stock.DetailItem)));
       } catch (e) {
         console.error(`[DataProvider] 获取强势股票失败 ${date}:`, e);
         return [];
@@ -50,14 +82,38 @@ class StrongStocksDataProvider implements RSIStrategy.DataProvider {
 
     async getBoardData(name: string, endDate: string): Promise<Stock.BoardItem | null> {
       try {
+        const cacheKey = this.getBoardCacheKey(name, endDate);
+        const cached = this.boardCache.get(cacheKey);
+        if (cached !== undefined) {
+          console.log(`[DataProvider] 板块缓存命中: ${name} ${endDate}`);
+          return cached;
+        }
+
         console.log(`[DataProvider] 获取板块数据: ${name} ${endDate}`);
-        const boardSecid= await Services.Tushare.GetBankuaiCodeByNameFromTushare(name);
+        const boardSecid = await Services.Tushare.GetBankuaiCodeByNameFromTushare(name);
         if (!boardSecid) {
           console.log(`[DataProvider] 未找到板块: ${name}`);
+          this.boardCache.set(cacheKey, null);
           return null;
         }
         const bResult = await Services.Tushare.GetBoardDetailFromTushare(boardSecid, endDate);
-        console.log(`[DataProvider] 板块 ${boardSecid} 返回:`, bResult ? '有数据' : '无数据');
+        if (bResult) {
+          console.log(`[DataProvider] 板块 ${boardSecid} 返回:`, {
+            name: bResult.name,
+            zx: bResult.zx,
+            zdf: bResult.zdf,
+            moneyIn: bResult.moneyIn,
+            moneyIn5d: bResult.moneyIn5d,
+            moneyInRankInAll: bResult.moneyInRankInAll,
+            mainIn: bResult.mainIn,
+            mainIn5d: bResult.mainIn5d,
+            cje: bResult.cje,
+            cjl: bResult.cjl,
+          });
+        } else {
+          console.log(`[DataProvider] 板块 ${boardSecid} 返回: 无数据`);
+        }
+        this.boardCache.set(cacheKey, bResult || null);
         return bResult ? Promise.resolve(bResult) : Promise.reject('数据未准备好');
       } catch (e) {
         console.error(`[DataProvider] 获取板块数据失败 ${name}:`, e);
@@ -218,10 +274,15 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const { darkMode, lowKey } = useHomeContext();
     const [dates, setDates] = useState([moment(new Date()).format('YYYYMMDD')]);
     const [running, setRunning] = useState(false);
+    const [paused, setPaused] = useState(false);
     const [strongStocksProvider] = useState<StrongStocksDataProvider>(new StrongStocksDataProvider());
     const [progress, setProgress] = useState("正在准备数据...");
     const [progressPercent, setProgressPercent] = useState(0);
     const [result, setResult] = useState<RSIStrategy.BacktestResult | null>(null);
+
+    // 使用 ref 保存最新状态，供异步回测循环读取
+    const cancelledRef = useRef(false);
+    const pausedRef = useRef(false);
 
     // 图表相关：参照 MarketMood，chartRef 必须始终绑定到 DOM
     const { ref: chartRef, chartInstance: chart } = useResizeEchart(-1);
@@ -291,17 +352,31 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       setResult(null);
       setChartOption(undefined);
       setRunning(true);
+      setPaused(false);
+      cancelledRef.current = false;
+      pausedRef.current = false;
 
       try {
         const strategy = new RSIStrategy.StrongStockBacktest(dates);
-        const backtestResult = await strategy.run(strongStocksProvider, (msg, pct) => {
+        const backtestResult = await strategy.run(
+          strongStocksProvider,
+          (msg, pct) => {
             setProgress(msg);
             if (pct !== undefined) setProgressPercent(pct);
-        });
+          },
+          {
+            onShouldCancel: () => cancelledRef.current,
+            onShouldPause: () => pausedRef.current,
+          }
+        );
         setResult(backtestResult);
-        setProgress("回测完成！");
+        if (cancelledRef.current) {
+          setProgress("回测已取消");
+        } else {
+          setProgress("回测完成！");
+        }
 
-        // 初始化图表
+        // 初始化图表（即使取消也展示已计算的部分结果）
         const initialCapital = 1000000;
         const baseOpts = getNetValueBaseOptions(darkMode, initialCapital);
         const finalOpts = updateNetValueOptions(baseOpts, darkMode, backtestResult.dailyValues, initialCapital);
@@ -314,9 +389,27 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         console.error(`[UI] 回测异常:`, e);
       } finally {
         setRunning(false);
+        setPaused(false);
+        cancelledRef.current = false;
+        pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
     }, [dates, strongStocksProvider, darkMode]);
+
+    const togglePause = useCallback(() => {
+      const next = !paused;
+      setPaused(next);
+      pausedRef.current = next;
+      console.log(`[UI] 回测${next ? '暂停' : '继续'}`);
+    }, [paused]);
+
+    const cancelBacktest = useCallback(() => {
+      cancelledRef.current = true;
+      pausedRef.current = false;
+      setPaused(false);
+      setProgress("正在取消回测...");
+      console.log(`[UI] 用户请求取消回测`);
+    }, []);
 
     // 渲染图表
     useRenderEcharts(
@@ -387,7 +480,19 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     value={moment(dates[dates.length - 1], 'YYYYMMDD')}
                     style={{ marginRight: 10 }}
                 />
-              <a className={styles.abtn} onClick={startStrongStockRSIBacktest}>RSI策略回测强势股票</a>
+              {!running && (
+                <a className={styles.abtn} onClick={startStrongStockRSIBacktest}>RSI策略回测强势股票</a>
+              )}
+              {running && (
+                <>
+                  <a className={styles.abtn} onClick={togglePause} style={{ marginRight: 10 }}>
+                    {paused ? '继续回测' : '暂停回测'}
+                  </a>
+                  <a className={styles.abtn} onClick={cancelBacktest} style={{ color: '#ff4d4f' }}>
+                    取消回测
+                  </a>
+                </>
+              )}
             </div>
           </div>
           
@@ -396,10 +501,12 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 <div style={{ padding: '40px 20px', textAlign: 'center' }}>
                     <Progress 
                         percent={progressPercent} 
-                        status="active" 
+                        status={paused ? 'normal' : 'active'} 
                         strokeColor={{ from: '#108ee9', to: '#87d068' }} 
                     />
-                    <div style={{ marginTop: 12, color: '#666', fontSize: 14 }}>{progress}</div>
+                    <div style={{ marginTop: 12, color: '#666', fontSize: 14 }}>
+                        {progress}{paused ? ' (已暂停)' : ''}
+                    </div>
                 </div>
             )}
 

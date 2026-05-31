@@ -15,6 +15,7 @@ declare namespace Stock {
     cjl: number;
     moneyIn: number;
     moneyIn5d: number;
+    moneyIn10d: number;
     moneyInRankInAll: number;
   } 
 

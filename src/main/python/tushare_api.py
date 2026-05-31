@@ -189,6 +189,13 @@ def df_to_records(df) -> List[Dict[str, Any]]:
 
 _CACHE_DIR = os.path.join(os.path.expanduser("~"), ".stexplorer", "tushare_cache")
 
+def set_cache_dir(storage_path: str):
+    """设置缓存根目录，使用应用本地存储路径下的 tushare_cache 子目录"""
+    global _CACHE_DIR
+    if storage_path:
+        _CACHE_DIR = os.path.join(storage_path, "tushare_cache")
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+
 def _cache_key(func_name: str, **kwargs) -> str:
     """生成缓存 key"""
     param_str = "_".join(f"{k}={v}" for k, v in sorted(kwargs.items()) if v is not None)
@@ -226,6 +233,43 @@ def write_cache(cache_key: str, data: Any):
             json.dump(data, f, ensure_ascii=False, cls=DateTimeEncoder)
     except Exception:
         pass
+
+
+def _get_expected_last_trade_date(period: str = "daily") -> str:
+    """获取各周期K线数据期望包含的最新日期（用于缓存有效性判断）
+
+    日线：最近一个交易日
+    周线：最近一个交易周的起始（最近5个交易日中的第一个）
+    月线：最近一个交易月的起始（最近22个交易日中的第一个）
+    """
+    try:
+        today = datetime.now()
+        cal_start = (today - timedelta(days=90)).strftime('%Y%m%d')
+        cal_end = today.strftime('%Y%m%d')
+        pro = get_pro()
+        cal_df = pro.trade_cal(exchange='SSE', start_date=cal_start, end_date=cal_end, is_open='1')
+        if cal_df is None or cal_df.empty:
+            return today.strftime('%Y-%m-%d')
+
+        trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())
+
+        if period == 'daily':
+            return _standardize_date(trade_dates[-1])
+        elif period == 'weekly':
+            if len(trade_dates) >= 5:
+                return _standardize_date(trade_dates[-5])
+            else:
+                return _standardize_date(trade_dates[0])
+        elif period == 'monthly':
+            if len(trade_dates) >= 22:
+                return _standardize_date(trade_dates[-22])
+            else:
+                return _standardize_date(trade_dates[0])
+        else:
+            return _standardize_date(trade_dates[-1])
+    except Exception as e:
+        print(f"[_get_expected_last_trade_date 失败] {period}: {e}")
+        return datetime.now().strftime('%Y-%m-%d')
 
 
 def cached_api_call(func_name: str, max_age_hours: int, api_func, **kwargs):
@@ -569,13 +613,32 @@ class TushareAPI:
         - Tushare daily/weekly/monthly 接口的 amount 单位是"千元"，需×1000 转为元
         - 返回数据按日期升序排列（最早日期在前），与东财接口保持一致
         - pro_bar 优先调用，失败则 fallback 到 daily + adj_factor 手动复权
+        - 支持磁盘缓存：除非缓存没有最后一个交易日/周/月，否则直接返回缓存
         """
+        cache_key = f"kline_{secid}_{period}_{adjust}_{limit}"
+        cached = read_cache(cache_key, max_age_hours=168 * 4)  # 缓存最长4周
+
+        # 检查缓存是否包含最新数据
+        if isinstance(cached, list) and cached:
+            last_date = cached[-1].get('date', '')
+            expected_last = _get_expected_last_trade_date(period)
+            if last_date and expected_last and last_date >= expected_last:
+                print(f"[K线缓存命中] {secid} {period} 最后日期={last_date} >= 期望={expected_last}")
+                return cached
+            print(f"[K线缓存过期] {secid} {period} 最后日期={last_date} < 期望={expected_last}")
+
         try:
             if is_board_code(secid):
-                return TushareAPI._get_board_kline(secid, period)
+                result = TushareAPI._get_board_kline(secid, period)
+                if isinstance(result, list) and result:
+                    write_cache(cache_key, result)
+                return result
 
             if is_index_code(secid):
-                return TushareAPI._get_index_kline(secid, period, limit)
+                result = TushareAPI._get_index_kline(secid, period, limit)
+                if isinstance(result, list) and result:
+                    write_cache(cache_key, result)
+                return result
 
             code = convert_secid_to_pure_code(secid)
             ts_code = convert_secid_to_ts_code(secid)
@@ -634,6 +697,10 @@ class TushareAPI:
                         print(f"[手动复权失败] {ts_code}: {e}")
 
             if df is None or df.empty:
+                # 请求无数据时，如果有缓存则返回过期缓存（降级）
+                if isinstance(cached, list) and cached:
+                    print(f"[K线请求无数据，返回过期缓存] {secid} {period}")
+                    return cached
                 return {"error": "No data available"}
 
             # Tushare 默认返回降序（最新日期在前），需转为升序（最早日期在前）
@@ -671,8 +738,16 @@ class TushareAPI:
             if limit > 0 and len(klines) > limit:
                 klines = klines[-limit:]
 
+            # 写入缓存
+            if isinstance(klines, list) and klines:
+                write_cache(cache_key, klines)
+
             return klines
         except Exception as e:
+            # 请求失败时，如果有缓存则返回过期缓存（降级）
+            if isinstance(cached, list) and cached:
+                print(f"[K线请求失败，返回过期缓存] {secid} {period}: {e}")
+                return cached
             return {"error": str(e)}
 
     @staticmethod
@@ -1129,13 +1204,13 @@ class TushareAPI:
 
             pro = get_pro()
 
-            # ---------- 0. 获取最近5个交易日（含 target_date）----------
+            # ---------- 0. 获取最近10个交易日（含 target_date）----------
             trade_dates: List[str] = []
             try:
-                cal_start = (datetime.strptime(target_date, '%Y%m%d') - timedelta(days=15)).strftime('%Y%m%d')
+                cal_start = (datetime.strptime(target_date, '%Y%m%d') - timedelta(days=30)).strftime('%Y%m%d')
                 cal_df = pro.trade_cal(exchange='SSE', start_date=cal_start, end_date=target_date, is_open='1')
                 if cal_df is not None and not cal_df.empty:
-                    trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
+                    trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-10:]
             except Exception as e:
                 print(f"[trade_cal 失败] {e}")
 
@@ -1208,39 +1283,52 @@ class TushareAPI:
             if not all_boards:
                 return {"error": f"No flow data available for date {target_date}"}
 
-            # ---------- 2. 计算当日排名（按 main_in 降序）----------
-            all_boards.sort(key=lambda x: x["main_in"], reverse=True)
-
+            # ---------- 2. 计算当日排名（按板块类型分别排序）----------
+            # 先找到目标板块及其类型
             target = None
-            rank = 0
-            total = len(all_boards)
-            for i, b in enumerate(all_boards):
+            for b in all_boards:
                 if b["code"] == code:
                     target = b
-                    rank = i + 1
                     break
 
             if target is None:
                 return {"error": f"Board {secid} not found in flow data for date {target_date}"}
 
-            # ---------- 3. 计算最近5日资金流入累计 ----------
+            # 只在同一类型的板块中计算排名（行业板块只在行业板块中排名，概念板块只在概念板块中排名）
+            board_type = target.get("type", "")
+            same_type_boards = [b for b in all_boards if b.get("type") == board_type]
+            same_type_boards.sort(key=lambda x: x["main_in"], reverse=True)
+
+            rank = 0
+            total = len(same_type_boards)
+            for i, b in enumerate(same_type_boards):
+                if b["code"] == code:
+                    rank = i + 1
+                    break
+
+            # ---------- 3. 计算最近5日/10日资金流入累计 ----------
             main_in_5d = 0.0
+            main_in_10d = 0.0
+            trade_dates_5d = trade_dates[-5:] if len(trade_dates) >= 5 else trade_dates
 
             if trade_dates and data_source == "dc":
-                # 东财：范围查询，一次获取5天数据
-                start_5d = trade_dates[0]
-                end_5d = trade_dates[-1]
-                flow_5d_ind = safe_api_call(pro.moneyflow_ind_dc, start_date=start_5d, end_date=end_5d)
-                flow_5d_con = safe_api_call(pro.moneyflow_con_dc, start_date=start_5d, end_date=end_5d)
+                # 东财：范围查询，一次获取10天数据
+                start_10d = trade_dates[0]
+                end_10d = trade_dates[-1]
+                flow_10d_ind = safe_api_call(pro.moneyflow_ind_dc, start_date=start_10d, end_date=end_10d)
+                flow_10d_con = safe_api_call(pro.moneyflow_con_dc, start_date=start_10d, end_date=end_10d)
 
-                for flow_df in [flow_5d_ind, flow_5d_con]:
+                for flow_df in [flow_10d_ind, flow_10d_con]:
                     if isinstance(flow_df, pd.DataFrame) and not flow_df.empty:
                         mask = flow_df['ts_code'].astype(str).str.replace(".DC", "", regex=False) == code
                         for _, row in flow_df[mask].iterrows():
                             net_amount = _to_float(row.get("net_amount", 0))
                             if abs(net_amount) > 0 and abs(net_amount) < 1e6:
                                 net_amount = net_amount * 1e8
-                            main_in_5d += net_amount
+                            trade_date = str(row.get("trade_date", ""))
+                            main_in_10d += net_amount
+                            if trade_date in trade_dates_5d:
+                                main_in_5d += net_amount
 
             elif trade_dates and data_source == "ths":
                 # 同花顺：逐日查询（单日接口）
@@ -1253,7 +1341,9 @@ class TushareAPI:
                                 net_amount = _to_float(row.get("net_amount", 0))
                                 if abs(net_amount) > 0 and abs(net_amount) < 1e6:
                                     net_amount = net_amount * 1e8
-                                main_in_5d += net_amount
+                                main_in_10d += net_amount
+                                if td in trade_dates_5d:
+                                    main_in_5d += net_amount
 
             # ---------- 4. 获取板块最新行情（复用 _get_board_realtime）----------
             realtime = TushareAPI._get_board_realtime(secid)
@@ -1277,6 +1367,7 @@ class TushareAPI:
                 "cjl": realtime.get("cjl", 0),
                 "mainIn": target["main_in"],
                 "mainIn5d": round(main_in_5d, 2),
+                "mainIn10d": round(main_in_10d, 2),
                 "mainInRank": rank,
                 "mainInTotal": total,
                 "date": target_date,
@@ -2550,6 +2641,7 @@ def main():
     parser.add_argument("method", help="方法名")
     parser.add_argument("--params", "-p", help="JSON格式的参数", default="{}")
     parser.add_argument("--token", "-t", help="Tushare Pro Token", default=None)
+    parser.add_argument("--storage-path", "-s", help="本地存储根目录路径（用于缓存）", default=None)
 
     args = parser.parse_args()
 
@@ -2558,6 +2650,10 @@ def main():
     except json.JSONDecodeError:
         print(json.dumps({"error": "Invalid JSON params"}, ensure_ascii=False))
         sys.exit(1)
+
+    # 设置缓存目录
+    if args.storage_path:
+        set_cache_dir(args.storage_path)
 
     # 初始化
     if args.token:

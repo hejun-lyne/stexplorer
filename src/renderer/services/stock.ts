@@ -4480,7 +4480,7 @@ export async function GetBanKuaisFromDataSource(source: Enums.FundApiType, type:
     return AkshareAPI.GetBanKuaisFromAkshare(type, pageSize);
   }
   if (source === Enums.FundApiType.Tushare) {
-    return TushareAPI.GetBanKuaisFromTushare(type, pageSize, dataSource);
+    return TushareAPI.GetBanKuaisFromTushare(type, dataSource);
   }
   // 默认使用 Eastmoney
   return GetBanKuais(type, pageSize);

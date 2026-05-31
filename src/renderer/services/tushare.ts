@@ -14,10 +14,28 @@ import { Stock } from '@/types/stock';
 import * as Helpers from '../helpers';
 import store from '@/store/configureStore';
 
-const { execPyScript } = window.contextModules.electron;
+const { execPyScript, getLocalStoragePath } = window.contextModules.electron;
 
 // Python 脚本路径
 const TUSHARE_SCRIPT = 'tushare_api.py';
+
+// 缓存本地存储路径，避免每次 IPC 调用
+let cachedStoragePath: string | null = null;
+
+async function getStoragePath(): Promise<string> {
+  if (cachedStoragePath !== null) return cachedStoragePath;
+  try {
+    const result = await getLocalStoragePath();
+    if (result?.success && result.path) {
+      cachedStoragePath = result.path;
+      return cachedStoragePath;
+    }
+  } catch (e) {
+    console.error('[Tushare] 获取存储路径失败:', e);
+  }
+  cachedStoragePath = '';
+  return '';
+}
 
 // 日志辅助函数
 function logError(error: any, method: string, extraInfo?: string) {
@@ -42,6 +60,10 @@ async function callTushare(method: string, params: Record<string, any> = {}): Pr
     const args = [method, '--params', JSON.stringify(params)];
     if (token) {
       args.push('--token', token);
+    }
+    const storagePath = await getStoragePath();
+    if (storagePath) {
+      args.push('--storage-path', storagePath);
     }
     const result = await execPyScript(TUSHARE_SCRIPT, args);
     // Python 脚本会输出 JSON 字符串
@@ -321,7 +343,7 @@ export async function GetTrendFromTushare(secid: string): Promise<{ secid: strin
 
 // ==================== 板块数据 ====================
 
-export async function GetBanKuaisFromTushare(type: number, pageSize = 20, dataSource = 'dc'): Promise<any> {
+export async function GetBanKuaisFromTushare(type: number, dataSource = 'dc'): Promise<any> {
   try {
     const bk_type = type === 0 ? 'industry' : 'concept';
     const result = await callTushare('get_sector_boards', { bk_type, data_source: dataSource });
@@ -380,6 +402,12 @@ export async function GetBoardDetailFromTushare(secid: string, date?: string): P
       return null;
     }
 
+    // mainInRank 是绝对排名(如第3名)，mainInTotal 是总板块数(如100)
+    // moneyInRankInAll 需要是排名比例(如 0.03 表示前3%)
+    const rank = result.mainInRank || 0;
+    const total = result.mainInTotal || 1;
+    const moneyInRankInAll = total > 0 ? rank / total : 0;
+
     return {
       code: result.code,
       name: result.name,
@@ -394,10 +422,10 @@ export async function GetBoardDetailFromTushare(secid: string, date?: string): P
       lt: result.lt || 0,
       cje: result.cje || 0,
       cjl: result.cjl || 0,
-      mainIn: result.mainIn || 0,
-      mainIn5d: result.mainIn5d || 0,
-      mainInRank: result.mainInRank || 0,
-      mainInTotal: result.mainInTotal || 0,
+      moneyIn: result.mainIn || 0,
+      moneyIn5d: result.mainIn5d || 0,
+      moneyIn10d: result.mainIn10d || 0,
+      moneyInRankInAll,
       date: result.date,
       source: result.source,
     };
@@ -419,8 +447,8 @@ export async function GetBankuaiCodeByNameFromTushare(name: string, fuzzy = true
   }
   try {
     const [industryResult, gainianResult] = await Promise.all([
-      GetBanKuaisFromTushare(0, 500),
-      GetBanKuaisFromTushare(1, 500),
+      GetBanKuaisFromTushare(0, 'dc'),
+      GetBanKuaisFromTushare(1, 'dc'),
     ]);
     const allBks: Stock.BanKuaiItem[] = [
       ...(industryResult?.arr || []),
