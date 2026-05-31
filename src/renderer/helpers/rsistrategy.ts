@@ -144,7 +144,8 @@ export function getTrendRSISignal(
     const condition1 = prevRSI < 60 && currentRSI >= 60;
     const condition2 = minRecentRSI < 50;
     const recent10RSIs = rsiValues.slice(-10);
-    const hasBeenStrong = peakRSI !== undefined ? peakRSI > 65 : Math.max(...recent10RSIs) > 65;
+    const effectivePeakRSI = (peakRSI && peakRSI > 0) ? peakRSI : Math.max(...recent10RSIs);
+    const hasBeenStrong = effectivePeakRSI > 65;
     const condition4 = currentPrice > currentMA20;
 
     const shouldLog = condition1 || condition2 || hasBeenStrong || condition4 || (prevRSI >= 60 && currentRSI < 60);
@@ -395,7 +396,7 @@ export class StrongStockBacktest {
     private readonly MIN_POSITION_RATIO = 0.05;
     private readonly STOP_LOSS_PCT = 0.93;
     private readonly TRAILING_STOP_PCT = 0.90;
-    private readonly MIN_SCORE = 60;          // 从75降低到60
+    private readonly MIN_SCORE = 75;
     private readonly MAX_WATCHLIST = 20;
     private readonly WATCHLIST_SCORE_DECAY = 2;
     private readonly WATCHLIST_MAX_AGE = 15;
@@ -585,6 +586,10 @@ export class StrongStockBacktest {
             const rsiValues = Tech.calculateRSI(klines.map(k => k.sp), this.RSI_PERIOD);
             const currentRSI = rsiValues[rsiValues.length - 1];
 
+            if (watchInfo.maxRSI <= 0) {
+                watchInfo.maxRSI = currentRSI;
+                console.log(`[Backtest] [${today}] ${secid} maxRSI从0修复为${currentRSI.toFixed(1)}`);
+            }
             console.log(`[Backtest] [${today}] ${secid} 观察列表RSI: currentRSI=${currentRSI.toFixed(2)}, prevRSI=${rsiValues[rsiValues.length-2]?.toFixed(2)}, minRecentRSI=${Math.min(...rsiValues.slice(-this.RSI_LOOKBACK)).toFixed(2)}, 最新价=${currentPrice.toFixed(2)}`);
 
             if (currentRSI > watchInfo.maxRSI) {
@@ -783,7 +788,7 @@ export class StrongStockBacktest {
 
                     // 分段波动率
                     const metrics = calculateBreakoutMetrics(klines, today);
-                    if (!metrics || metrics.expansionRatio < 1.2) {
+                    if (!metrics || metrics.expansionRatio < 1.5) {
                         return { pass: false, reason: `波动率不达标(${metrics?.expansionRatio.toFixed(2) || 'N/A'})`, stage: 'expansion' };
                     }
 
@@ -909,7 +914,7 @@ export class StrongStockBacktest {
                     addedDate: today,
                     score: c.score,
                     boardCode: c.boardCode,
-                    maxRSI: c.initialRSI || 50,
+                    maxRSI: (c.initialRSI && c.initialRSI > 0) ? c.initialRSI : 50,
                     maxPrice: c.initialPrice || 0
                 });
                 addCount++;
