@@ -3372,582 +3372,30 @@ export async function CheckStockRSI(secid: string, threshold = 30, klimit = 80) 
   }
 }
 
-// ===== 均线回踩买入策略参数优化 =====
-export interface MABacktestTrade {
-  buyIndex: number;
-  sellIndex: number;
-  returnPct: number;
-  maxDrawdownPct: number;
-  // 止损相关
-  stopLossPrice: number;
-  exitReason: 'take_profit' | 'stop_loss_fixed' | 'stop_loss_trailing' | 'stop_loss_ma' | 'hold_end';
-}
 
-export interface MABacktestResult {
-  maPeriod: number;
-  holdDays: number;
-  trendDays: number;
-  threshold: number;
-  totalReturn: number;
-  winRate: number;
-  tradeCount: number;
-  avgReturn: number;
-  maxDrawdown: number;
-  profitFactor: number;
-  score: number;
-  trades: MABacktestTrade[];
-  // 止损参数
-  fixedStopLossPct: number;
-  trailingStopLossPct: number;
-  maStopLossPct: number;
-}
+import {
+  MABacktestTrade,
+  MABacktestResult,
+  MACDTrade,
+  MACDStrategyResult,
+  RSIBacktestTrade,
+  RSIBacktestResult,
+  backtestMABounce,
+  optimizeMACDStrategy,
+  optimizeRSIStrategy,
+} from './backtestEngine';
 
-// 通用止损引擎 —— 被 MA/MACD/RSI 三个策略复用
-type ExitReason = MABacktestTrade['exitReason'] | MACDTrade['exitReason'] | RSIBacktestTrade['exitReason'];
-
-/**
- * 检查是否需要止损
- * @param currentPrice   当前价格
- * @param buyPrice       买入价格
- * @param maxPrice       持仓期间最高价（用于移动止损）
- * @param maValue        当前均线值（用于均线止损，可选）
- * @param fixedStopPct   固定止损比例（如 0.05 表示 5%）
- * @param trailingStopPct 移动止损比例（如 0.05 表示从最高点回落 5%）
- * @param maStopPct      均线偏离止损比例（可选）
- */
-function checkStopLoss(
-  currentPrice: number,
-  buyPrice: number,
-  maxPrice: number,
-  maValue: number | undefined,
-  fixedStopPct: number,
-  trailingStopPct: number,
-  maStopPct?: number
-): [boolean, ExitReason, number] {
-  // 1. 固定止损：买入价下跌 fixedStopPct
-  const fixedStopPrice = buyPrice * (1 - fixedStopPct);
-  if (currentPrice <= fixedStopPrice) {
-    return [true, 'stop_loss_fixed', fixedStopPrice];
-  }
-
-  // 2. 移动止损：从最高点回落 trailingStopPct
-  if (maxPrice > buyPrice) {
-    const trailingStopPrice = maxPrice * (1 - trailingStopPct);
-    if (currentPrice <= trailingStopPrice) {
-      return [true, 'stop_loss_trailing', trailingStopPrice];
-    }
-  }
-
-  // 3. 均线止损：价格跌破均线 maStopPct（仅当提供均线值时）
-  if (maValue !== undefined && maStopPct !== undefined && maValue > 0) {
-    const maStopPrice = maValue * (1 - maStopPct);
-    if (currentPrice <= maStopPrice) {
-      return [true, 'stop_loss_ma', maStopPrice];
-    }
-  }
-
-  return [false, 'hold_end', fixedStopPrice];
-}
-
-export function backtestMABounce(
-  klines: Stock.KLineItem[],
-  maPeriods: number[] = [5, 10, 20, 30, 60],
-  holdDaysOptions: number[] = [5, 10, 20],
-  // 止损参数（带默认值）
-  fixedStopLossPct: number = 0.05,
-  trailingStopLossPct: number = 0.05,
-  maStopLossPct: number = 0.03
-): MABacktestResult[] {
-  const testKlines = klines.slice(-120); // 取最近200天数据进行回测
-  const startIndex = klines.length - testKlines.length;
-  const closes = testKlines.map((k) => k.sp);
-  const allResults: MABacktestResult[] = [];
-
-  // 参数网格
-  const trendDaysOptions = [3, 5, 10]; // 趋势确认：连续N天收盘价在均线上方
-  const bounceThresholds = [0.01, 0.02, 0.03, 0.05]; // 回踩阈值：收盘价在均线 ±X% 内
-
-  for (const period of maPeriods) {
-    const ma =  Indicators.calculateMA(closes, period);
-
-    for (const holdDays of holdDaysOptions) {
-      for (const trendDays of trendDaysOptions) {
-        for (const threshold of bounceThresholds) {
-          const trades: MABacktestTrade[] = [];
-
-          // 从有足够数据的位置开始
-          const startIdx = Math.max(period, period + trendDays);
-          for (let i = startIdx; i < closes.length - holdDays; i++) {
-            if (isNaN(ma[i]) || ma[i] === 0) continue;
-
-            // 1. 趋势确认：前 trendDays 天收盘价在均线上方，且均线本身向上
-            let trendValid = true;
-            for (let j = i - trendDays; j < i; j++) {
-              if (j < 1 || isNaN(ma[j]) || isNaN(ma[j - 1])) {
-                trendValid = false;
-                break;
-              }
-              if (closes[j] <= ma[j] || ma[j] <= ma[j - 1]) {
-                trendValid = false;
-                break;
-              }
-            }
-            if (!trendValid) continue;
-
-            // 2. 回踩信号：最低价触及/接近均线，收盘价收回且在均线 ±threshold 范围内
-            const maVal = ma[i];
-            const close = closes[i];
-            const low = testKlines[i].zd;
-            const open = testKlines[i].kp;
-
-            const touchedMA = low <= maVal * 1.005; // 最低价触碰或轻微跌破均线
-            const recovered = close >= maVal * 0.98; // 收盘收回在均线上方附近
-            const nearMA = Math.abs(close - maVal) / maVal <= threshold; // 收盘在均线阈值范围内
-
-            if (touchedMA && recovered && nearMA) {
-              // 3. 反弹确认：当日收阳 或 次日收盘高于当日
-              const todayUp = close > open;
-              const nextDayUp = i + 1 < closes.length && closes[i + 1] > close;
-
-              if (todayUp || nextDayUp) {
-                // 计算持有期收益和最大回撤（含止损检查）
-                let maxPrice = close;
-                let maxDD = 0;
-                let sellIdx = Math.min(i + holdDays, closes.length - 1);
-                let exitReason: MABacktestTrade['exitReason'] = 'hold_end';
-                let finalStopLossPrice = close * (1 - fixedStopLossPct);
-
-                for (let d = i + 1; d <= sellIdx && d < closes.length; d++) {
-                  if (closes[d] > maxPrice) maxPrice = closes[d];
-                  const dd = (maxPrice - closes[d]) / maxPrice * 100;
-                  if (dd > maxDD) maxDD = dd;
-
-                  // 止损检查
-                  const [shouldStop, reason, slPrice] = checkStopLoss(
-                    closes[d], close, maxPrice, ma[d],
-                    fixedStopLossPct, trailingStopLossPct, maStopLossPct
-                  );
-                  if (shouldStop) {
-                    sellIdx = d;
-                    exitReason = reason as MABacktestTrade['exitReason'];
-                    finalStopLossPrice = slPrice;
-                    break;
-                  }
-                }
-
-                const sellPrice = closes[sellIdx];
-                const ret = (sellPrice - close) / close * 100;
-
-                trades.push({
-                  buyIndex: i + startIndex,
-                  sellIndex: sellIdx + startIndex,
-                  returnPct: ret,
-                  maxDrawdownPct: maxDD,
-                  stopLossPrice: finalStopLossPrice,
-                  exitReason,
-                });
-              }
-            }
-          }
-
-          // 过滤：至少交易 3 次才有统计意义
-          if (trades.length >= 3) {
-            const returns = trades.map((t) => t.returnPct);
-            const wins = returns.filter((r) => r > 0);
-            const totalReturn = returns.reduce((a, b) => a + b, 0);
-            const winRate = (wins.length / returns.length) * 100;
-            const avgReturn = totalReturn / returns.length;
-            const maxDrawdown = Math.min(...returns);
-
-            const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
-            const losses = returns.filter((r) => r <= 0);
-            const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
-            const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
-
-            // 综合评分：收益 × 胜率 × 交易次数系数 / (1 + |回撤|/10)
-            const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) / (1 + Math.abs(maxDrawdown) / 10);
-
-            allResults.push({
-              maPeriod: period,
-              holdDays,
-              trendDays,
-              threshold,
-              totalReturn,
-              winRate,
-              tradeCount: trades.length,
-              avgReturn,
-              maxDrawdown,
-              profitFactor,
-              score,
-              trades: [...trades],
-              fixedStopLossPct,
-              trailingStopLossPct,
-              maStopLossPct,
-            });
-          }
-        }
-      }
-    }
-  }
-
-  // 按综合评分降序
-  allResults.sort((a, b) => b.score - a.score);
-  return allResults;
+export {
+  MABacktestTrade,
+  MABacktestResult,
+  MACDTrade,
+  MACDStrategyResult,
+  RSIBacktestTrade,
+  RSIBacktestResult,
+  backtestMABounce,
+  optimizeMACDStrategy,
+  optimizeRSIStrategy,
 };
-
-import { calculateMACD } from '@/helpers/tech';
-
-export interface MACDTrade {
-  buyIndex: number;
-  sellIndex: number;
-  returnPct: number;
-  maxDrawdownPct: number;
-  holdDays: number;
-  // 止损相关
-  stopLossPrice: number;
-  exitReason: 'macd_exit' | 'stop_loss_fixed' | 'stop_loss_trailing' | 'hist_shrink';
-}
-
-export interface MACDStrategyResult {
-  fast: number;
-  slow: number;
-  signal: number;
-  requireAboveZero: boolean;
-  requirePriorNegative: boolean;
-  trades: MACDTrade[];
-  totalReturn: number;
-  winRate: number;
-  tradeCount: number;
-  avgReturn: number;
-  avgHoldDays: number;
-  maxDrawdown: number;
-  profitFactor: number;
-  score: number;
-  // 止损参数
-  fixedStopLossPct: number;
-  trailingStopLossPct: number;
-}
-
-export function optimizeMACDStrategy(
-  klines: Stock.KLineItem[],
-  // 止损参数
-  fixedStopLossPct: number = 0.05,
-  trailingStopLossPct: number = 0.06
-): MACDStrategyResult[] {
-  const closes = klines.map(k => k.sp);
-  const allResults: MACDStrategyResult[] = [];
-
-  // 参数网格
-  const fastPeriods = [8, 12, 15];
-  const slowPeriods = [21, 26, 30];
-  const signalPeriods = [7, 9, 12];
-  const aboveZeroOptions = [true, false];      // 是否要求零轴上方金叉
-  const priorNegOptions = [true, false];      // 是否要求金叉前 MACD 曾为负
-
-  for (const fast of fastPeriods) {
-    for (const slow of slowPeriods) {
-      if (fast >= slow) continue;
-      for (const signal of signalPeriods) {
-        for (const requireAboveZero of aboveZeroOptions) {
-          for (const requirePriorNegative of priorNegOptions) {
-            const macd = calculateMACD(closes, slow, fast, signal);
-            const dif = macd.MACD;
-            const dea = macd.signal;
-            const hist = macd.histogram;
-
-            const trades: MACDTrade[] = [];
-            let holding = false;
-            let buyPrice = 0;
-            let buyIndex = -1;
-            let maxPrice = 0;
-
-            for (let i = 2; i < closes.length - 1; i++) {
-              if (!holding) {
-                // 金叉判断
-                const goldenCross = dif[i] > dea[i] && dif[i - 1] <= dea[i - 1];
-                if (!goldenCross) continue;
-
-                // 零轴过滤
-                if (requireAboveZero && (dif[i] <= 0 || dea[i] <= 0)) continue;
-
-                // 金叉前必须有负 MACD（确保从空头区域恢复）
-                let hadNegative = false;
-                if (requirePriorNegative) {
-                  for (let j = Math.max(0, i - 5); j < i; j++) {
-                    if (hist[j] < 0) { hadNegative = true; break; }
-                  }
-                  if (!hadNegative) continue;
-                }
-
-                // 柱状线确认：当前柱 > 0 且比前一天大（动能增强）
-                if (hist[i] <= 0 || hist[i] <= hist[i - 1]) continue;
-
-                holding = true;
-                buyPrice = closes[i];
-                buyIndex = i;
-                maxPrice = buyPrice;
-              } else {
-                if (closes[i] > maxPrice) maxPrice = closes[i];
-
-                // 优先检查止损
-                const [shouldStop, stopReason] = checkStopLoss(
-                  closes[i], buyPrice, maxPrice, undefined,
-                  fixedStopLossPct, trailingStopLossPct
-                );
-
-                // 卖出条件 1：死叉
-                const deadCross = dif[i] < dea[i] && dif[i - 1] >= dea[i - 1];
-                // 卖出条件 2：柱状线连续 2 天显著缩短（止盈）
-                const histShrink = hist[i] > 0 && hist[i] < hist[i - 1] && hist[i - 1] < hist[i - 2];
-                const sharpShrink = histShrink && hist[i] < hist[i - 1] * 0.7;
-
-                let sellPrice: number;
-                let exitReason: MACDTrade['exitReason'];
-
-                if (shouldStop) {
-                  sellPrice = closes[i];
-                  exitReason = stopReason as MACDTrade['exitReason'];
-                } else if (deadCross) {
-                  sellPrice = closes[i];
-                  exitReason = 'macd_exit';
-                } else if (sharpShrink) {
-                  sellPrice = closes[i];
-                  exitReason = 'hist_shrink';
-                } else {
-                  continue;
-                }
-
-                const ret = (sellPrice - buyPrice) / buyPrice * 100;
-                const dd = maxPrice > buyPrice 
-                  ? (maxPrice - Math.min(...closes.slice(buyIndex, i + 1))) / maxPrice * 100 
-                  : 0;
-
-                trades.push({
-                  buyIndex,
-                  sellIndex: i,
-                  returnPct: ret,
-                  maxDrawdownPct: dd,
-                  holdDays: i - buyIndex,
-                  stopLossPrice: buyPrice * (1 - fixedStopLossPct),
-                  exitReason,
-                });
-
-                holding = false;
-                buyPrice = 0;
-                buyIndex = -1;
-                maxPrice = 0;
-              }
-            }
-
-            if (trades.length >= 3) {
-              const returns = trades.map(t => t.returnPct);
-              const wins = returns.filter(r => r > 0);
-              const totalReturn = returns.reduce((a, b) => a + b, 0);
-              const avgReturn = totalReturn / returns.length;
-              const winRate = (wins.length / returns.length) * 100;
-              const maxDrawdown = Math.min(...returns);
-              const avgHold = trades.reduce((s, t) => s + t.holdDays, 0) / trades.length;
-
-              const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
-              const losses = returns.filter(r => r <= 0);
-              const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
-              const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
-
-              // 评分：收益 × 胜率 × 交易次数系数 / (1 + |回撤|/10) / (1 + 持仓天数/20)
-              // 偏好：高收益、高胜率、低回撤、适中持仓天数
-              const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) 
-                / (1 + Math.abs(maxDrawdown) / 10) 
-                / (1 + Math.abs(avgHold - 5) / 10);
-
-              allResults.push({
-                fast, slow, signal,
-                requireAboveZero,
-                requirePriorNegative,
-                trades,
-                totalReturn,
-                winRate,
-                tradeCount: trades.length,
-                avgReturn,
-                avgHoldDays: avgHold,
-                maxDrawdown,
-                profitFactor,
-                score,
-                fixedStopLossPct,
-                trailingStopLossPct,
-              });
-            }
-          }
-        }
-      }
-    }
-  }
-
-  allResults.sort((a, b) => b.score - a.score);
-  return allResults;
-};
-
-// ===== RSI 策略参数优化回测 =====
-export interface RSIBacktestTrade {
-  buyIndex: number;
-  sellIndex: number;
-  buyPrice: number;
-  sellPrice: number;
-  returnPct: number;
-  maxDrawdownPct: number; // 持仓期最大回撤
-  // 止损相关
-  stopLossPrice: number;
-  exitReason: 'rsi_overbought' | 'stop_loss_fixed' | 'stop_loss_trailing';
-}
-
-export interface RSIBacktestResult {
-  rsiPeriod: number;      // 6 / 12 / 24
-  buyThreshold: number;     // 超卖反弹买入阈值
-  sellThreshold: number;    // 超买卖出阈值
-  trades: RSIBacktestTrade[];
-  totalReturn: number;      // 累加收益率（非复利）
-  winRate: number;
-  tradeCount: number;
-  avgReturn: number;
-  maxDrawdown: number;     // 单笔最大亏损
-  profitFactor: number;     // 盈亏比
-  score: number;            // 综合评分
-  // 止损参数
-  fixedStopLossPct: number;
-  trailingStopLossPct: number;
-}
-
-export function optimizeRSIStrategy(
-  klines: Stock.KLineItem[],
-  rsiPeriods: number[] = [6, 12, 24],
-  // 止损参数
-  fixedStopLossPct: number = 0.05,
-  trailingStopLossPct: number = 0.06
-): RSIBacktestResult[] {
-  const testKlines = klines.slice(-120);
-  const startIndex = klines.length - testKlines.length;
-  const closes = testKlines.map(k => k.sp);
-  const allResults: RSIBacktestResult[] = [];
-
-  // 参数网格：超卖买点 15-35，超买卖点 65-85
-  const buyThresholds = [15, 20, 25, 28, 30, 35];
-  const sellThresholds = [65, 70, 72, 75, 80, 85];
-
-  for (const period of rsiPeriods) {
-    const rsi = Indicators.calculateRSI(closes, period);
-
-    for (const buyTh of buyThresholds) {
-      for (const sellTh of sellThresholds) {
-        if (buyTh >= sellTh) continue; // 买入阈值必须低于卖出阈值
-
-        const trades: RSIBacktestTrade[] = [];
-        let inOversold = false;   // 是否曾进入超卖区（确保是"反弹"而非高位回落）
-        let holding = false;
-        let buyPrice = 0;
-        let buyIndex = -1;
-        let maxPriceSinceBuy = 0;
-
-        for (let i = 1; i < closes.length; i++) {
-          // 跟踪是否进入超卖区
-          if (rsi[i] <= buyTh) inOversold = true;
-
-          if (!holding) {
-            // 买入信号：曾进入超卖区，且 RSI 从下方上穿 buyTh（确认反弹）
-            if (inOversold && rsi[i - 1] <= buyTh && rsi[i] > buyTh) {
-              holding = true;
-              buyPrice = closes[i];
-              buyIndex = i;
-              maxPriceSinceBuy = buyPrice;
-              inOversold = false;
-            }
-          } else {
-            // 更新持仓期最高价（计算回撤）
-            if (closes[i] > maxPriceSinceBuy) maxPriceSinceBuy = closes[i];
-
-            // 优先检查止损
-            const [shouldStop, stopReason] = checkStopLoss(
-              closes[i], buyPrice, maxPriceSinceBuy, undefined,
-              fixedStopLossPct, trailingStopLossPct
-            );
-
-            // 卖出信号：RSI 进入超买区（≥ sellTh）
-            // 用"进入即卖"比"下穿卖"更及时，避免利润回吐
-            let sellPrice: number;
-            let exitReason: RSIBacktestTrade['exitReason'];
-
-            if (shouldStop) {
-              sellPrice = closes[i];
-              exitReason = stopReason as RSIBacktestTrade['exitReason'];
-            } else if (rsi[i] >= sellTh) {
-              sellPrice = closes[i];
-              exitReason = 'rsi_overbought';
-            } else {
-              continue;
-            }
-
-            const ret = (sellPrice - buyPrice) / buyPrice * 100;
-            const dd = (maxPriceSinceBuy - sellPrice) / maxPriceSinceBuy * 100; // 从高点回撤
-
-            trades.push({
-              buyIndex: buyIndex + startIndex,
-              sellIndex: i + startIndex,
-              buyPrice,
-              sellPrice,
-              returnPct: ret,
-              maxDrawdownPct: dd,
-              stopLossPrice: buyPrice * (1 - fixedStopLossPct),
-              exitReason,
-            });
-
-            holding = false;
-            buyPrice = 0;
-            buyIndex = -1;
-            maxPriceSinceBuy = 0;
-          }
-        }
-
-        // 过滤：至少交易 3 次才有统计意义
-        if (trades.length >= 3) {
-          const returns = trades.map(t => t.returnPct);
-          const wins = returns.filter(r => r > 0);
-          const losses = returns.filter(r => r <= 0);
-
-          const totalReturn = returns.reduce((a, b) => a + b, 0);
-          const winRate = (wins.length / returns.length) * 100;
-          const avgReturn = totalReturn / returns.length;
-          const maxDrawdown = Math.min(...returns);
-          const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
-          const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
-          const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
-
-          // 综合评分：收益 × 胜率 × 交易次数系数 / (1 + |回撤|/10)
-          // 避免"押中一次大行情"的极端策略胜出
-          const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) / (1 + Math.abs(maxDrawdown) / 10);
-
-          allResults.push({
-            rsiPeriod: period,
-            buyThreshold: buyTh,
-            sellThreshold: sellTh,
-            trades,
-            totalReturn,
-            winRate,
-            tradeCount: trades.length,
-            avgReturn,
-            maxDrawdown,
-            profitFactor,
-            score,
-            fixedStopLossPct,
-            trailingStopLossPct,
-          });
-        }
-      }
-    }
-  }
-
-  // 按综合评分降序
-  allResults.sort((a, b) => b.score - a.score);
-  return allResults;
-};
-
 export function BacktestRSIBounce(closes: number[], rsi: number[], currentIdx: number, oversoldThreshold: number = 30, holdDays: number = 5) {
   const signals: Array<{
     buyIndex: number;
@@ -4039,13 +3487,16 @@ export interface BacktestSignalResult {
   ma: boolean;
   macd: boolean;
   rsi: boolean;
-  // 信号详情与止损位
+  // 最佳策略评分
+  maScore?: number;
+  macdScore?: number;
+  rsiScore?: number;
+  // 信号详情
   maDetail?: {
     signal: boolean;
     maPeriod: number;
     threshold: number;
     trendDays: number;
-    suggestStopLoss: number;
     stopLossType: string;
     entryPriceHint: number;
   };
@@ -4054,7 +3505,6 @@ export interface BacktestSignalResult {
     fast: number;
     slow: number;
     signalPeriod: number;
-    suggestStopLoss: number;
     stopLossType: string;
     entryPriceHint: number;
   };
@@ -4063,7 +3513,6 @@ export interface BacktestSignalResult {
     rsiPeriod: number;
     buyThreshold: number;
     currentRSI: number;
-    suggestStopLoss: number;
     stopLossType: string;
     entryPriceHint: number;
   };
@@ -4097,12 +3546,12 @@ export async function CheckStockBacktestSignals(
     const rsiResults = optimizeRSIStrategy(ks, [6, 12, 24], fixedStopLossPct, trailingStopLossPct);
     const bestRSI = rsiResults[0];
 
-    // 验证MA最近5根K线
+    // 验证MA最近3根K线
     let maSignal = false;
     let maStopLossPrice = latestClose * (1 - fixedStopLossPct);
     if (bestMA) {
       const ma = Indicators.calculateMA(closes, bestMA.maPeriod);
-      for (let i = len - 5; i < len - bestMA.holdDays; i++) {
+      for (let i = len - 3; i < len - bestMA.holdDays; i++) {
         if (i < bestMA.maPeriod + bestMA.trendDays) continue;
         if (isNaN(ma[i]) || ma[i] === 0) continue;
 
@@ -4140,7 +3589,7 @@ export async function CheckStockBacktestSignals(
       }
     }
 
-    // 验证MACD最近5根K线
+    // 验证MACD最近3根K线
     let macdSignal = false;
     let macdStopLossPrice = latestClose * (1 - fixedStopLossPct);
     if (bestMACD) {
@@ -4149,7 +3598,7 @@ export async function CheckStockBacktestSignals(
       const dea = macd.signal;
       const hist = macd.histogram;
 
-      for (let i = Math.max(2, len - 5); i < len; i++) {
+      for (let i = Math.max(2, len - 3); i < len; i++) {
         const goldenCross = dif[i] > dea[i] && dif[i - 1] <= dea[i - 1];
         if (!goldenCross) continue;
 
@@ -4157,7 +3606,7 @@ export async function CheckStockBacktestSignals(
 
         if (bestMACD.requirePriorNegative) {
           let hadNegative = false;
-          for (let j = Math.max(0, i - 5); j < i; j++) {
+          for (let j = Math.max(0, i - 3); j < i; j++) {
             if (hist[j] < 0) {
               hadNegative = true;
               break;
@@ -4174,7 +3623,7 @@ export async function CheckStockBacktestSignals(
       }
     }
 
-    // 验证RSI最近5根K线
+    // 验证RSI最近3根K线
     let rsiSignal = false;
     let currentRSI = 50;
     let rsiStopLossPrice = latestClose * (1 - fixedStopLossPct);
@@ -4186,7 +3635,7 @@ export async function CheckStockBacktestSignals(
         if (rsi[i] <= bestRSI.buyThreshold) inOversold = true;
 
         if (inOversold && rsi[i - 1] <= bestRSI.buyThreshold && rsi[i] > bestRSI.buyThreshold) {
-          if (i >= len - 5) {
+          if (i >= len - 3) {
             rsiSignal = true;
             rsiStopLossPrice = closes[i] * (1 - fixedStopLossPct);
             break;
@@ -4201,12 +3650,14 @@ export async function CheckStockBacktestSignals(
       ma: maSignal,
       macd: macdSignal,
       rsi: rsiSignal,
+      maScore: bestMA?.score,
+      macdScore: bestMACD?.score,
+      rsiScore: bestRSI?.score,
       maDetail: bestMA ? {
         signal: maSignal,
         maPeriod: bestMA.maPeriod,
         threshold: bestMA.threshold,
         trendDays: bestMA.trendDays,
-        suggestStopLoss: Math.round(maStopLossPrice * 100) / 100,
         stopLossType: `固定止损${(fixedStopLossPct * 100).toFixed(0)}%`,
         entryPriceHint: Math.round(latestClose * 100) / 100,
       } : undefined,
@@ -4215,7 +3666,6 @@ export async function CheckStockBacktestSignals(
         fast: bestMACD.fast,
         slow: bestMACD.slow,
         signalPeriod: bestMACD.signal,
-        suggestStopLoss: Math.round(macdStopLossPrice * 100) / 100,
         stopLossType: `固定止损${(fixedStopLossPct * 100).toFixed(0)}%+移动止损${(trailingStopLossPct * 100).toFixed(0)}%`,
         entryPriceHint: Math.round(latestClose * 100) / 100,
       } : undefined,
@@ -4224,7 +3674,6 @@ export async function CheckStockBacktestSignals(
         rsiPeriod: bestRSI.rsiPeriod,
         buyThreshold: bestRSI.buyThreshold,
         currentRSI: Math.round(currentRSI * 100) / 100,
-        suggestStopLoss: Math.round(rsiStopLossPrice * 100) / 100,
         stopLossType: `固定止损${(fixedStopLossPct * 100).toFixed(0)}%+移动止损${(trailingStopLossPct * 100).toFixed(0)}%`,
         entryPriceHint: Math.round(latestClose * 100) / 100,
       } : undefined,

@@ -27,7 +27,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [firstAppearMap, setFirstAppearMap] = useState<Record<string, string>>({});
   const [techFilterLoading, setTechFilterLoading] = useState(false);
   const [maResults, setMaResults] = useState<
-    Record<string, { ma: boolean; macd: boolean; rsi: boolean; maSL?: number; macdSL?: number; rsiSL?: number }>
+    Record<string, { ma: boolean; macd: boolean; rsi: boolean; maScore?: number; macdScore?: number; rsiScore?: number }>
   >({});
   const [techPending, setTechPending] = useState<Record<string, boolean>>({});
   const [filterMA, setFilterMA] = useState(false);
@@ -91,7 +91,15 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         },
       });
 
-      setStocks(result.stocks['merged'] || []);
+      const filteredStocks = result.stocks['merged']?.filter((s: any) => {
+          const code = s.secid?.split('.')[1] || '';
+          // 排除科创板 (688/689 开头)
+          if (code.startsWith('688') || code.startsWith('689')) return false;
+          // 排除北交所 (8/9 开头)
+          if (code.startsWith('8') || code.startsWith('9')) return false;
+          return true;
+        });//.slice(0, 20); // 取前20只，避免数据过多导致后续处理缓慢
+      setStocks(filteredStocks || []);
       setHybks(result.hybks);
       setFirstAppearMap(result.firstAppearMap);
       setNoMore(true);
@@ -205,7 +213,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     }
     setTechPending(pendingInit);
 
-    const batchSize = 5;
+    const batchSize = 10;
     for (let i = currentIndexRef.current; i < secids.length; i += batchSize) {
       const batch = secids.slice(i, i + batchSize);
       const batchResults = await Promise.all(
@@ -231,9 +239,9 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                 ma: res.ma,
                 macd: res.macd,
                 rsi: res.rsi,
-                maSL: res.maDetail?.suggestStopLoss,
-                macdSL: res.macdDetail?.suggestStopLoss,
-                rsiSL: res.rsiDetail?.suggestStopLoss,
+                maScore: res.maScore,
+                macdScore: res.macdScore,
+                rsiScore: res.rsiScore,
               };
             } else {
               next[secid] = { ma: false, macd: false, rsi: false };
@@ -422,8 +430,8 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                         ? (
                           <span>
                             ✓
-                            {maResults[s.secid].maSL ? (
-                              <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].maSL}</span>
+                            {typeof maResults[s.secid].maScore === 'number' ? (
+                              <span style={{ fontSize: 10, color: '#52c41a' }}> {maResults[s.secid].maScore!.toFixed(1)}</span>
                             ) : (
                               ''
                             )}
@@ -440,8 +448,8 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                         ? (
                           <span>
                             ✓
-                            {maResults[s.secid].macdSL ? (
-                              <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].macdSL}</span>
+                            {typeof maResults[s.secid].macdScore === 'number' ? (
+                              <span style={{ fontSize: 10, color: '#52c41a' }}> {maResults[s.secid].macdScore!.toFixed(1)}</span>
                             ) : (
                               ''
                             )}
@@ -458,8 +466,8 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                         ? (
                           <span>
                             ✓
-                            {maResults[s.secid].rsiSL ? (
-                              <span style={{ fontSize: 10, color: '#ff4d4f' }}> {maResults[s.secid].rsiSL}</span>
+                            {typeof maResults[s.secid].rsiScore === 'number' ? (
+                              <span style={{ fontSize: 10, color: '#52c41a' }}> {maResults[s.secid].rsiScore!.toFixed(1)}</span>
                             ) : (
                               ''
                             )}

@@ -1805,6 +1805,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           updateKChart(chartOptions[kIndex][0], data.klines[kIndex], toDate, bkks);
           updateCChart(chartOptions[kIndex][1], data.chans[kIndex], data.clines[kIndex]);
           runCalculateTech(data.klines[kIndex], kIndex, techType);
+          // 🔧 关键修复：K线数据变了必须触发 React 重渲染，
+          // 否则 useRenderEcharts 不会执行，markPoint 不会被重新附加
+          setChartOptions({ ...chartOptions });
         } else {
           // const kcm = alignChouma(data.klines[typeIndex], data.choumas[typeIndex][0], outRange || range);
           chartOptions[kIndex] = [

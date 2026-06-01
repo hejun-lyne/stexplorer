@@ -4,6 +4,7 @@ import { BKType, KLineType, MAPeriodType, TechIndicatorType } from '@/utils/enum
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import * as Tech from '@/helpers/tech';
+import * as BacktestEngine from '@/helpers/backtestEngine';
 import { Stock } from '@/types/stock';
 import * as Enums from '@/utils/enums';
 const { ipcRenderer } = window.contextModules.electron;
@@ -427,4 +428,43 @@ export async function getFilteredStocks(financeThreshold: number) {
   }
   bridgeProgressLog('[info] techFilter 执行完成，length = ' + techFilterSts.length);
   return techFilterSts;
+}
+
+/** MA 均线回踩回测（Worker 代理） */
+export function backtestMABounce(
+  klines: Stock.KLineItem[],
+  maPeriods: number[],
+  trendDays: number[],
+  fixedStopLossPct: number,
+  trailingStopLossPct: number
+) {
+  bridgeProgressLog('[info] Worker 开始执行 MA 回踩回测...');
+  const result = BacktestEngine.backtestMABounce(klines, maPeriods, trendDays, fixedStopLossPct, trailingStopLossPct);
+  bridgeProgressLog(`[info] MA 回踩回测完成，共 ${result.length} 组参数`);
+  return result;
+}
+
+/** MACD 金叉回测（Worker 代理） */
+export function optimizeMACDStrategy(
+  klines: Stock.KLineItem[],
+  fixedStopLossPct: number,
+  trailingStopLossPct: number
+) {
+  bridgeProgressLog('[info] Worker 开始执行 MACD 回测...');
+  const result = BacktestEngine.optimizeMACDStrategy(klines, fixedStopLossPct, trailingStopLossPct);
+  bridgeProgressLog(`[info] MACD 回测完成，共 ${result.length} 组参数`);
+  return result;
+}
+
+/** RSI 超卖反弹回测（Worker 代理） */
+export function optimizeRSIStrategy(
+  klines: Stock.KLineItem[],
+  rsiPeriods: number[],
+  fixedStopLossPct: number,
+  trailingStopLossPct: number
+) {
+  bridgeProgressLog('[info] Worker 开始执行 RSI 回测...');
+  const result = BacktestEngine.optimizeRSIStrategy(klines, rsiPeriods, fixedStopLossPct, trailingStopLossPct);
+  bridgeProgressLog(`[info] RSI 回测完成，共 ${result.length} 组参数`);
+  return result;
 }

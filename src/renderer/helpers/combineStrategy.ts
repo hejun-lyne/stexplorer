@@ -15,51 +15,6 @@ export interface TradeSignal {
     reason: string;
 }
 
-function calculateVolatility(klines: Stock.KLineItem[]): number {
-    if (klines.length < 5) return 0;
-    const returns: number[] = [];
-    for (let i = 1; i < klines.length; i++) {
-        returns.push(Math.log(klines[i].sp / klines[i - 1].sp));
-    }
-    const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-    const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / (returns.length - 1);
-    return Math.sqrt(variance) * Math.sqrt(252);
-}
-
-export function calculateBreakoutMetrics(
-    klines: Stock.KLineItem[],
-    tradeDay: string
-): BreakoutMetrics | null {
-    const tradeIndex = klines.findIndex(k => k.date === tradeDay);
-    if (tradeIndex < 0) return null;
-
-    const preStart = Math.max(0, tradeIndex - 120);
-    const preKlines = klines.slice(preStart, tradeIndex);
-    const preVol = preKlines.length >= 5 ? calculateVolatility(preKlines) : 0.2;
-
-    const postEnd = Math.min(klines.length, tradeIndex + 20);
-    const postKlines = klines.slice(tradeIndex, postEnd);
-
-    let postVol: number;
-    if (postKlines.length >= 5) {
-        postVol = calculateVolatility(postKlines);
-    } else if (postKlines.length >= 1) {
-        const day = postKlines[0];
-        const dailyRange = (day.zg - day.zd) / day.kp;
-        postVol = dailyRange * Math.sqrt(252);
-    } else {
-        postVol = preVol * 1.5;
-    }
-
-    return {
-        preVol,
-        postVol,
-        expansionRatio: preVol > 0 ? postVol / preVol : 1,
-        breakoutDate: tradeDay,
-        breakoutIndex: tradeIndex
-    };
-}
-
 export function hardFilter(
     stock: Stock.DetailItem,
     klines: Stock.KLineItem[]
@@ -85,19 +40,9 @@ export function hardFilter(
         return { pass: false, reason: `股价太低(${currentPrice.toFixed(2)} < 3)` };
     }
 
-    const marketCap = (stock as Stock.DetailItem).lt;
+    const marketCap = (stock as Stock.DetailItem).lt / 100_000_000;
     if (marketCap !== undefined && (marketCap < 10 || marketCap > 3000)) {
         return { pass: false, reason: `市值不符(${marketCap}亿, 需10-3000亿)` };
-    }
-
-    let consecutiveUp = 0;
-    for (let i = klines.length - 1; i > 0; i--) {
-        if (klines[i].sp > klines[i - 1].sp) consecutiveUp++;
-        else break;
-        if (consecutiveUp >= 6) break;
-    }
-    if (consecutiveUp >= 6) {
-        return { pass: false, reason: `连板过多(${consecutiveUp}连板)` };
     }
 
     return { pass: true };
