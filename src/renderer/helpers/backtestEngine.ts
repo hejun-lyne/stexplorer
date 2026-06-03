@@ -1104,7 +1104,10 @@ export class OptimizedStrategyBacktest {
               console.log(`[OptBacktest] [${today}] ${stock.secid} 板块排名: ${boardRank >= 0 ? boardRank + 1 : '未找到'}/${boards.length}，未进前10%`);
             }
           }
-            
+          
+          if (!boardPass) {
+            return { pass: false, reason: '板块未进全市场前10%', secid: stock.secid };
+          }
           if (strongType === 'limit_up') {
               boardRankPass = true;
           } else {
@@ -1126,8 +1129,8 @@ export class OptimizedStrategyBacktest {
               }
           }
 
-          if (!boardPass || !boardRankPass) {
-            const reason = !boardPass ? '板块未进全市场前10%' : '股票未进板块内前10%';
+          if (!boardRankPass) {
+            const reason = '股票未进板块内前10%';
             return { pass: false, reason, secid: stock.secid };
           }
 
