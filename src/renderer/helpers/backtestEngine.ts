@@ -1023,7 +1023,6 @@ export class OptimizedStrategyBacktest {
             return { pass: false, reason: 'K线不足', secid: stock.secid };
           }
 
-
           // 策略优化
           const macdResults = optimizeMACDStrategy(klines);
           const rsiResults = optimizeRSIStrategy(klines);
@@ -1081,58 +1080,51 @@ export class OptimizedStrategyBacktest {
               }
             }
           }
-
+                    // 板块驱动条件
+          let boardPass = false;      // 板块在所有板块中排名前10%
+          let boardRankPass = false;  // 股票在板块内排名前10%
+          
           // 确定T-Day
-          const strongType = (stock as any).strongType || this.detectStrongType(klines, mDayIndex);
-          const tDayIndex = this.findTDay(klines, strongType, mDayIndex, 10);
+          const strongType = (stock as any).strongType || this.detectStrongType(klines, klines.length - 1);
+          const tDayIndex = this.findTDay(klines, strongType, klines.length - 1, 10);
           if (tDayIndex < 0) {
             return { pass: false, reason: '未找到T-Day', secid: stock.secid };
           }
           const tDayDate = klines[tDayIndex].date;
 
-                    // 板块驱动条件
-          let boardPass = false;      // 板块在所有板块中排名前10%
-          let boardRankPass = false;  // 股票在板块内排名前10%
-
-        //   if (strongType === 'limit_up') {
-        //     boardPass = true;
-        //     boardRankPass = true;
-        //     console.log(`[OptBacktest] [${today}] ${stock.secid} 涨停入选，板块驱动默认通过`);
-        //   } else {
-            // 条件1：T-Day 板块在所有板块涨幅排名前10%
-            let boardCode = null;
-            const boards = await dataProvider.getAllBoards(stock.bk, tDayDate);
-            if (boards && boards.length > 0) {
-              const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
-              const boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
-              if (boardRank >= 0) {
-                boardPass = (boardRank + 1) <= boards.length * 0.1;
-                boardCode = boards[boardRank].code;
-              } else {
-                console.log(`[OptBacktest] [${today}] ${stock.secid} 板块排名: ${boardRank >= 0 ? boardRank + 1 : '未找到'}/${boards.length}，未进前10%`);
-              }
-            }
-            if (strongType === 'limit_up') {
-                boardRankPass = true;
+          let boardCode = null;
+          const boards = await dataProvider.getAllBoards(stock.bk, tDayDate);
+          if (boards && boards.length > 0) {
+            const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
+            const boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
+            if (boardRank >= 0) {
+              boardPass = (boardRank + 1) <= boards.length * 0.1;
+              boardCode = boards[boardRank].code;
             } else {
-                // 条件2：T-Day 股票在所属板块内涨幅排名前10%
-                const boardStocks = await dataProvider.getBoardStocks(tDayDate, boardCode, stock.bk);
-                if (boardStocks && boardStocks.length > 0) {
-                    const sortedStocks = boardStocks.sort((a, b) => b.zf - a.zf);
-                    const stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
-                    if (stockRank >= 0 && (stockRank + 1) <= boardStocks.length * 0.1) {
-                        boardRankPass = true;
-                        console.log(`[OptBacktest] [${today}] ${stock.secid} 板块内排名: ${stockRank + 1}/${boardStocks.length} (前10%)`);
-                    } else {
-                        console.log(`[OptBacktest] [${today}] ${stock.secid} 板块内排名: ${stockRank >= 0 ? stockRank + 1 : '未找到'}/${boardStocks.length}，未进前10%`);
-                    }
-                } else {
-                    // 如果无法获取板块成分股，默认通过（避免数据缺失导致全部失败）
-                    console.log(`[OptBacktest] [${today}] ${stock.secid} 无法获取板块成分股，默认通过板块内排名检查`);
-                    boardRankPass = true;
-                }
+              console.log(`[OptBacktest] [${today}] ${stock.secid} 板块排名: ${boardRank >= 0 ? boardRank + 1 : '未找到'}/${boards.length}，未进前10%`);
             }
-        //   }
+          }
+            
+          if (strongType === 'limit_up') {
+              boardRankPass = true;
+          } else {
+              // 条件2：T-Day 股票在所属板块内涨幅排名前10%
+              const boardStocks = await dataProvider.getBoardStocks(tDayDate, boardCode, stock.bk);
+              if (boardStocks && boardStocks.length > 0) {
+                  const sortedStocks = boardStocks.sort((a, b) => b.zf - a.zf);
+                  const stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
+                  if (stockRank >= 0 && (stockRank + 1) <= boardStocks.length * 0.1) {
+                      boardRankPass = true;
+                      console.log(`[OptBacktest] [${today}] ${stock.secid} 板块内排名: ${stockRank + 1}/${boardStocks.length} (前10%)`);
+                  } else {
+                      console.log(`[OptBacktest] [${today}] ${stock.secid} 板块内排名: ${stockRank >= 0 ? stockRank + 1 : '未找到'}/${boardStocks.length}，未进前10%`);
+                  }
+              } else {
+                  // 如果无法获取板块成分股，默认通过（避免数据缺失导致全部失败）
+                  console.log(`[OptBacktest] [${today}] ${stock.secid} 无法获取板块成分股，默认通过板块内排名检查`);
+                  boardRankPass = true;
+              }
+          }
 
           if (!boardPass || !boardRankPass) {
             const reason = !boardPass ? '板块未进全市场前10%' : '股票未进板块内前10%';
@@ -1478,18 +1470,10 @@ export class OptimizedStrategyBacktest {
     return (upperShadow / range > 0.5) && (upperShadow / kline.kp > 0.02);
   }
 
-  private detectStrongType(klines: Stock.KLineItem[], endIndex: number): 'limit_up' | 'new_high_60' {
-    const lookbackStart = Math.max(1, endIndex - 10);
-    for (let i = lookbackStart; i <= endIndex; i++) {
-      const prevClose = klines[i - 1].sp;
-      if (this.isLimitUp(klines[i], prevClose)) {
-        return 'limit_up';
-      }
-    }
-    for (let i = lookbackStart; i <= endIndex; i++) {
-      if (this.isNewHigh60(klines, i)) {
-        return 'new_high_60';
-      }
+  private detectStrongType(klines: Stock.KLineItem[], index: number): 'limit_up' | 'new_high_60' {
+    const prevClose = klines[index - 1].sp;
+    if (this.isLimitUp(klines[index], prevClose)) {
+      return 'limit_up';
     }
     return 'new_high_60';
   }
