@@ -677,7 +677,7 @@ export class OptimizedStrategyBacktest {
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
   private readonly BATCH_SIZE = 10;
-  private readonly KLINE_DAYS = 120;
+  private readonly KLINE_DAYS = 150; // 要预留30天用于计算指标
 
   constructor(tradeDays: string[], initialCapital: number = 1000000, workerExecutor?: (method: string, args?: any[]) => Promise<any>) {
     this.tradeDays = tradeDays;
