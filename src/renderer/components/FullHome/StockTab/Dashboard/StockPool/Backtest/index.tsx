@@ -115,15 +115,15 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
     }
 
     private processStrongStocks(rawStocks: any[]): Stock.DetailItem[] {
-      const bkCount = new Map<string, number>();
+      // const bkCount = new Map<string, number>();
       const filteredStocks = rawStocks.filter((s: any) => {
         const code = s.secid?.split('.')[1] || '';
         if (code.startsWith('688') || code.startsWith('689')) return false;
         if (code.startsWith('8') || code.startsWith('9')) return false;
-        const bk = s.hybk || '';
-        const count = bkCount.get(bk) || 0;
-        if (count >= 5) return false;
-        bkCount.set(bk, count + 1);
+        // const bk = s.hybk || '';
+        // const count = bkCount.get(bk) || 0;
+        // if (count >= 5) return false;
+        // bkCount.set(bk, count + 1);
         return true;
       });
       return filteredStocks.map((s: any) => ({
@@ -142,9 +142,9 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
         const cachedRaw = this.strongStocksRawCache.get(date);
         if (cachedRaw !== undefined) {
           console.log(`[DataProvider] 强势股票缓存命中: ${date}, 原始 ${cachedRaw.length} 只`);
-          const processed = this.processStrongStocks(cachedRaw);
-          console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${processed.length} 只 (缓存)`);
-          return processed;
+          // const processed = this.processStrongStocks(cachedRaw);
+          // console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${processed.length} 只 (缓存)`);
+          return cachedRaw;
         }
 
         const queryDate = date.replace(/-/g, '');
