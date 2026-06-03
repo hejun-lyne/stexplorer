@@ -907,6 +907,11 @@ export class OptimizedStrategyBacktest {
       await this.waitIfPaused();
       if (this.isCancelled()) return true;
 
+      // A股是T+1交易，今天买入的不能今天卖出，所以应该过滤掉今天买入的股票 （即持仓时间必须≥1天）
+      if (position.buyDate === today) {
+        console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: 今日买入的股票`);
+        continue;
+      }
       const klines = await dataProvider.getKLines(secid, today, 60);
       if (!klines || klines.length === 0) {
         console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: K线不足`);
