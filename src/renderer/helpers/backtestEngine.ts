@@ -904,17 +904,25 @@ export class OptimizedStrategyBacktest {
     console.log(`[OptBacktest] [${today}] 阶段2-1: 处理持仓卖出信号 ${this.positions.size} 只`);
     onProgress?.(`[${today}] 处理持仓卖出信号...`);
 
-    for (const [secid, position] of this.positions) {
-      if (this.isCancelled()) return true;
-      await this.waitIfPaused();
-      if (this.isCancelled()) return true;
+    if (this.isCancelled()) return true;
+    await this.waitIfPaused();
+    if (this.isCancelled()) return true;
+
+    // 并行获取所有持仓的K线
+    const positionEntries = Array.from(this.positions.entries());
+    const klinesResults = await Promise.all(
+      positionEntries.map(([secid]) => dataProvider.getKLines(secid, today, 60))
+    );
+
+    for (let i = 0; i < positionEntries.length; i++) {
+      const [secid, position] = positionEntries[i];
+      const klines = klinesResults[i];
 
       // A股是T+1交易，今天买入的不能今天卖出，所以应该过滤掉今天买入的股票 （即持仓时间必须≥1天）
       if (position.buyDate === today) {
         console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: 今日买入的股票`);
         continue;
       }
-      const klines = await dataProvider.getKLines(secid, today, 60);
       if (!klines || klines.length === 0) {
         console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: K线不足`);
         continue;
@@ -1268,15 +1276,22 @@ export class OptimizedStrategyBacktest {
 
   // ===== 阶段3: 记录净值 =====
   private async recordDailyValue(date: string, dataProvider: StrategyDataProvider): Promise<boolean> {
+    if (this.isCancelled()) return true;
+    await this.waitIfPaused();
+    if (this.isCancelled()) return true;
+
+    // 并行获取所有持仓的当日K线
+    const positionList = Array.from(this.positions.entries());
+    const klinesResults = await Promise.all(
+      positionList.map(([secid]) => dataProvider.getKLines(secid, date, 1))
+    );
+
     let stockValue = 0;
     let positionDetails: Array<{ secid: string; close: number; quantity: number; value: number }> = [];
 
-    for (const [secid, pos] of this.positions) {
-      if (this.isCancelled()) return true;
-      await this.waitIfPaused();
-      if (this.isCancelled()) return true;
-
-      const klines = await dataProvider.getKLines(secid, date, 1);
+    for (let i = 0; i < positionList.length; i++) {
+      const [secid, pos] = positionList[i];
+      const klines = klinesResults[i];
       if (klines && klines.length > 0) {
         const close = klines[klines.length - 1].sp;
         const value = close * pos.quantity;
