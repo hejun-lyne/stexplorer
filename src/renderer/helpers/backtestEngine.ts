@@ -959,10 +959,10 @@ export class OptimizedStrategyBacktest {
 
     // 2-2: 获取today往前5-10个交易日的强势股票
     const rawDates: string[] = [];
-    const base = dayjs(today, 'YYYYMMDD');
+    const base = dayjs(today, 'YYYY-MM-DD');
     // 生成足够多的自然日（留40天余量应对长假），再过滤出交易日
     for (let d = 1; d <= 40; d++) {
-      rawDates.push(base.subtract(d, 'day').format('YYYYMMDD'));
+      rawDates.push(base.subtract(d, 'day').format('YYYY-MM-DD'));
     }
     const tradeDays = await dataProvider.filterTradeDays(rawDates);
     // 取往前第5-10个交易日（rawDates从近到远，tradeDays也保持此顺序）
