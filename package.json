@@ -59,13 +59,7 @@
         "LSUIElement": "true"
       },
       "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        }
+        "dmg"
       ],
       "type": "distribution",
       "hardenedRuntime": true,
