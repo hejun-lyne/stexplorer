@@ -20,9 +20,19 @@ export interface BacktestProps {
 // 统一的数据提供者，同时兼容 RSI 策略和优化策略
 class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.StrategyDataProvider {
     private boardCache: Map<string, Stock.BoardItem | null> = new Map();
+    private allBoardsCache: Map<string, Array<{ code: string; name: string; zf: number }>> = new Map();
+    private boardStocksCache: Map<string, Array<{ secid: string; zf: number }>> = new Map();
 
     private getBoardCacheKey(name: string, endDate: string): string {
         return `${name}|${endDate}`;
+    }
+
+    private getAllBoardsCacheKey(associateBoardName: string, date: string): string {
+        return `${associateBoardName}|${date}`;
+    }
+
+    private getBoardStocksCacheKey(boardCode: string, date: string): string {
+        return `${boardCode}|${date}`;
     }
 
     async getStrongStocks(date: string): Promise<Stock.DetailItem[]> {
@@ -125,46 +135,66 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
 
     // 优化策略需要的接口：获取所有板块涨幅排名
     async getAllBoards(associateBoardName: string, date: string): Promise<Array<{ code: string; name: string; zf: number }>> {
+      const cacheKey = this.getAllBoardsCacheKey(associateBoardName, date);
+      const cached = this.allBoardsCache.get(cacheKey);
+      if (cached !== undefined) {
+        console.log(`[DataProvider] 全板块缓存命中: ${associateBoardName} ${date}`);
+        return cached;
+      }
+
       // 将 YYYY-MM-DD 转为 YYYYMMDD
       const queryDate = date.replace(/-/g, '');
       const boardInfo = await Services.Tushare.GetBankuaiCodeByNameFromTushare(associateBoardName);
       if (!boardInfo) {
         console.log(`[DataProvider] 未找到板块: ${associateBoardName}`);
+        this.allBoardsCache.set(cacheKey, []);
         return [];
       }
       // 根据板块类型（行业/概念）调用不同接口获取当日所有板块的涨幅排名
       const result = await Services.Tushare.GetBoardsByDateFromTushare(boardInfo.type, queryDate);
       if (!result || !result.arr || result.arr.length === 0) {
         console.log(`[DataProvider] ${boardInfo.type} 板块数据为空: ${queryDate}`);
+        this.allBoardsCache.set(cacheKey, []);
         return [];
       }
       console.log(`[DataProvider] 获取全板块数据: ${boardInfo.type} ${queryDate}, 共 ${result.arr.length} 个板块`);
-      return result.arr.map((item: any) => ({
+      const mapped = result.arr.map((item: any) => ({
         code: item.code,
         name: item.name,
         zf: item.zdf || 0,
       }));
+      this.allBoardsCache.set(cacheKey, mapped);
+      return mapped;
     }
 
     async getBoardStocks(date: string, boardCode: string | null, boardName: string): Promise<Array<{ secid: string; zf: number }>> {
       try {
         // 将 YYYY-MM-DD 转为 YYYYMMDD
         const queryDate = date.replace(/-/g, '');
-        if (!boardCode) {
+        let effectiveBoardCode = boardCode;
+        if (!effectiveBoardCode) {
           const boardInfo = await Services.Tushare.GetBankuaiCodeByNameFromTushare(boardName);
           if (!boardInfo) {
             console.log(`[DataProvider] 无板块代码，无法获取成分股: ${boardName} ${date}`);
             return [];
           }
-          boardCode = boardInfo.secid;
+          effectiveBoardCode = boardInfo.secid;
         }
         // 构造板块 secid（你的板块代码如果是纯 BK 开头，需要加 90. 前缀）
-        const boardSecid = boardCode?.startsWith('90.') ? boardCode : `90.${boardCode}`;
+        const boardSecid = effectiveBoardCode?.startsWith('90.') ? effectiveBoardCode : `90.${effectiveBoardCode}`;
+
+        const cacheKey = this.getBoardStocksCacheKey(boardSecid, date);
+        const cached = this.boardStocksCache.get(cacheKey);
+        if (cached !== undefined) {
+          console.log(`[DataProvider] 板块成分股缓存命中: ${boardSecid} ${date}`);
+          return cached;
+        }
         
         console.log(`[DataProvider] 获取板块成分股: ${boardSecid} ${queryDate}`);
         const stocks = await Services.Tushare.GetBoardStocksByDateFromTushare(boardSecid, queryDate);
         
         console.log(`[DataProvider] 板块成分股返回: ${stocks.length} 只`);
+        this.boardStocksCache.set(cacheKey, stocks);
         return stocks;
       } catch (e) {
         console.error(`[DataProvider] 获取板块成分股失败 ${boardCode} ${date}:`, e);
