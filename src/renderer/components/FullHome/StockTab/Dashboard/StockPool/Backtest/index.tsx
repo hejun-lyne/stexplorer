@@ -146,12 +146,20 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
       }));
     }
 
-    async getBoardStocks(date: string, boardCode: string): Promise<Array<{ secid: string; zf: number }>> {
+    async getBoardStocks(date: string, boardCode: string | null, boardName: string): Promise<Array<{ secid: string; zf: number }>> {
       try {
         // 将 YYYY-MM-DD 转为 YYYYMMDD
         const queryDate = date.replace(/-/g, '');
+        if (!boardCode) {
+          const boardInfo = await Services.Tushare.GetBankuaiCodeByNameFromTushare(boardName);
+          if (!boardInfo) {
+            console.log(`[DataProvider] 无板块代码，无法获取成分股: ${boardName} ${date}`);
+            return [];
+          }
+          boardCode = boardInfo.secid;
+        }
         // 构造板块 secid（你的板块代码如果是纯 BK 开头，需要加 90. 前缀）
-        const boardSecid = boardCode.startsWith('90.') ? boardCode : `90.${boardCode}`;
+        const boardSecid = boardCode?.startsWith('90.') ? boardCode : `90.${boardCode}`;
         
         console.log(`[DataProvider] 获取板块成分股: ${boardSecid} ${queryDate}`);
         const stocks = await Services.Tushare.GetBoardStocksByDateFromTushare(boardSecid, queryDate);

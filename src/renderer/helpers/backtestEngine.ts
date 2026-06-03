@@ -647,7 +647,7 @@ export interface StrategyDataProvider {
   getStrongStocks(date: string): Promise<Stock.DetailItem[]>;
   getKLines(secid: string, endDate: string, days?: number): Promise<Stock.KLineItem[] | null>;
   getAllBoards(associateBoardName: string, date: string): Promise<Array<{ code: string; name: string; zf: number }>>;
-  getBoardStocks(date: string, boardCode: string): Promise<Array<{ secid: string; zf: number }>>;
+  getBoardStocks(date: string, boardCode: string | null, boardName: string): Promise<Array<{ secid: string; zf: number }>>;
   filterTradeDays(dates: string[]): Promise<string[]>;
 }
 
@@ -1100,13 +1100,14 @@ export class OptimizedStrategyBacktest {
         //     console.log(`[OptBacktest] [${today}] ${stock.secid} 涨停入选，板块驱动默认通过`);
         //   } else {
             // 条件1：T-Day 板块在所有板块涨幅排名前10%
+            let boardCode = null;
             const boards = await dataProvider.getAllBoards(stock.bk, tDayDate);
             if (boards && boards.length > 0) {
               const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
-              const boardRank = sortedBoards.findIndex(b => b.code === stock.bk);
-              if (boardRank >= 0 && (boardRank + 1) <= boards.length * 0.1) {
-                boardPass = true;
-                console.log(`[OptBacktest] [${today}] ${stock.secid} 板块排名: ${boardRank + 1}/${boards.length} (前10%)`);
+              const boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
+              if (boardRank >= 0) {
+                boardPass = (boardRank + 1) <= boards.length * 0.1;
+                boardCode = boards[boardRank].code;
               } else {
                 console.log(`[OptBacktest] [${today}] ${stock.secid} 板块排名: ${boardRank >= 0 ? boardRank + 1 : '未找到'}/${boards.length}，未进前10%`);
               }
@@ -1115,7 +1116,7 @@ export class OptimizedStrategyBacktest {
                 boardRankPass = true;
             } else {
                 // 条件2：T-Day 股票在所属板块内涨幅排名前10%
-                const boardStocks = await dataProvider.getBoardStocks(tDayDate, stock.bk);
+                const boardStocks = await dataProvider.getBoardStocks(tDayDate, boardCode, stock.bk);
                 if (boardStocks && boardStocks.length > 0) {
                     const sortedStocks = boardStocks.sort((a, b) => b.zf - a.zf);
                     const stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
