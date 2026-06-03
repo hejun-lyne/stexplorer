@@ -12,6 +12,8 @@ import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import { useRenderEcharts, useResizeEchart } from '@/utils/hooks';
 
+const { makeWorkerExec } = window.contextModules.electron;
+
 export interface BacktestProps {
   onOpenStock: (secid: string, name: string) => void;
   active: boolean;
@@ -459,7 +461,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             }
           );
         } else {
-          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates);
+          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, 1000000, makeWorkerExec);
           backtestResult = await strategy.run(
             dataProvider,
             (msg, pct) => {

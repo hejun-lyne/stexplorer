@@ -468,3 +468,16 @@ export function optimizeRSIStrategy(
   bridgeProgressLog(`[info] RSI 回测完成，共 ${result.length} 组参数`);
   return result;
 }
+
+/** 批量策略优化（用于 OptimizedStrategyBacktest，避免阻塞主线程） */
+export function batchBacktestOptimize(klinesBatch: Stock.KLineItem[][]) {
+  bridgeProgressLog(`[info] Worker 批量策略优化开始，共 ${klinesBatch.length} 只股票`);
+  const results = klinesBatch.map((klines, i) => {
+    const macdResults = BacktestEngine.optimizeMACDStrategy(klines);
+    const rsiResults = BacktestEngine.optimizeRSIStrategy(klines, [6, 12, 24]);
+    bridgeProgressLog(`[info] Worker 批量策略优化进度: ${i + 1}/${klinesBatch.length}`);
+    return { macdResults, rsiResults };
+  });
+  bridgeProgressLog(`[info] Worker 批量策略优化完成`);
+  return results;
+}
