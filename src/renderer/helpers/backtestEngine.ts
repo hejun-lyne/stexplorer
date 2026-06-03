@@ -1094,11 +1094,11 @@ export class OptimizedStrategyBacktest {
           let boardPass = false;      // 板块在所有板块中排名前10%
           let boardRankPass = false;  // 股票在板块内排名前10%
 
-          if (strongType === 'limit_up') {
-            boardPass = true;
-            boardRankPass = true;
-            console.log(`[OptBacktest] [${today}] ${stock.secid} 涨停入选，板块驱动默认通过`);
-          } else {
+        //   if (strongType === 'limit_up') {
+        //     boardPass = true;
+        //     boardRankPass = true;
+        //     console.log(`[OptBacktest] [${today}] ${stock.secid} 涨停入选，板块驱动默认通过`);
+        //   } else {
             // 条件1：T-Day 板块在所有板块涨幅排名前10%
             const boards = await dataProvider.getAllBoards(stock.bk, tDayDate);
             if (boards && boards.length > 0) {
@@ -1111,24 +1111,27 @@ export class OptimizedStrategyBacktest {
                 console.log(`[OptBacktest] [${today}] ${stock.secid} 板块排名: ${boardRank >= 0 ? boardRank + 1 : '未找到'}/${boards.length}，未进前10%`);
               }
             }
-
-            // 条件2：T-Day 股票在所属板块内涨幅排名前10%
-            const boardStocks = await dataProvider.getBoardStocks(tDayDate, stock.bk);
-            if (boardStocks && boardStocks.length > 0) {
-              const sortedStocks = boardStocks.sort((a, b) => b.zf - a.zf);
-              const stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
-              if (stockRank >= 0 && (stockRank + 1) <= boardStocks.length * 0.1) {
+            if (strongType === 'limit_up') {
                 boardRankPass = true;
-                console.log(`[OptBacktest] [${today}] ${stock.secid} 板块内排名: ${stockRank + 1}/${boardStocks.length} (前10%)`);
-              } else {
-                console.log(`[OptBacktest] [${today}] ${stock.secid} 板块内排名: ${stockRank >= 0 ? stockRank + 1 : '未找到'}/${boardStocks.length}，未进前10%`);
-              }
             } else {
-              // 如果无法获取板块成分股，默认通过（避免数据缺失导致全部失败）
-              console.log(`[OptBacktest] [${today}] ${stock.secid} 无法获取板块成分股，默认通过板块内排名检查`);
-              boardRankPass = true;
+                // 条件2：T-Day 股票在所属板块内涨幅排名前10%
+                const boardStocks = await dataProvider.getBoardStocks(tDayDate, stock.bk);
+                if (boardStocks && boardStocks.length > 0) {
+                    const sortedStocks = boardStocks.sort((a, b) => b.zf - a.zf);
+                    const stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
+                    if (stockRank >= 0 && (stockRank + 1) <= boardStocks.length * 0.1) {
+                        boardRankPass = true;
+                        console.log(`[OptBacktest] [${today}] ${stock.secid} 板块内排名: ${stockRank + 1}/${boardStocks.length} (前10%)`);
+                    } else {
+                        console.log(`[OptBacktest] [${today}] ${stock.secid} 板块内排名: ${stockRank >= 0 ? stockRank + 1 : '未找到'}/${boardStocks.length}，未进前10%`);
+                    }
+                } else {
+                    // 如果无法获取板块成分股，默认通过（避免数据缺失导致全部失败）
+                    console.log(`[OptBacktest] [${today}] ${stock.secid} 无法获取板块成分股，默认通过板块内排名检查`);
+                    boardRankPass = true;
+                }
             }
-          }
+        //   }
 
           if (!boardPass || !boardRankPass) {
             const reason = !boardPass ? '板块未进全市场前10%' : '股票未进板块内前10%';
