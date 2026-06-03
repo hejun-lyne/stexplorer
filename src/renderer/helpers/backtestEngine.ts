@@ -674,8 +674,8 @@ export class OptimizedStrategyBacktest {
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
-  private readonly BATCH_SIZE = 5;
-  private readonly KLINE_DAYS = 150;
+  private readonly BATCH_SIZE = 10;
+  private readonly KLINE_DAYS = 120;
 
   constructor(tradeDays: string[], initialCapital: number = 1000000) {
     this.tradeDays = tradeDays;
@@ -1022,6 +1022,7 @@ export class OptimizedStrategyBacktest {
           if (!klines || klines.length < 60) {
             return { pass: false, reason: 'K线不足', secid: stock.secid };
           }
+
 
           // 策略优化
           const macdResults = optimizeMACDStrategy(klines);

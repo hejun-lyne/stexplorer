@@ -70,6 +70,9 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
           return null;
         }
         const sliced = kResult.ks.slice(0, index + 1);
+        if (sliced.length > days) {
+          sliced.splice(0, sliced.length - days);
+        }
         console.log(`[DataProvider] ${secid} K线返回: ${sliced.length} 条 (截止${endDate})`);
         return kResult.ks ? Promise.resolve(sliced) : Promise.reject('数据未准备好');
       } catch (e) {
@@ -317,7 +320,7 @@ type StrategyType = 'rsi' | 'optimized';
 
 const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const { darkMode, lowKey } = useHomeContext();
-    const [dates, setDates] = useState([moment(new Date()).format('YYYYMMDD')]);
+    const [dates, setDates] = useState([moment(new Date()).format('YYYY-MM-DD')]);
     const [running, setRunning] = useState(false);
     const [paused, setPaused] = useState(false);
     const [dataProvider] = useState<UnifiedDataProvider>(new UnifiedDataProvider());
@@ -335,7 +338,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const onChangeDate = useCallback(
         (d: moment.Moment | null, isStart = true) => {
           if (!d) return;
-          const nd = d.format('YYYYMMDD');
+          const nd = d.format('YYYY-MM-DD');
           if (dates.length) {
             if (isStart) {
               const ed = dates[dates.length - 1];
@@ -344,12 +347,12 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 return;
               }
               const newDates = [nd];
-              const edm = moment(ed, 'YYYYMMDD');
+              const edm = moment(ed, 'YYYY-MM-DD');
               let i = 1;
               while (true) {
                 const next = d.add(i++, 'days');
                 if (next.isBefore(edm)) {
-                  newDates.push(next.format('YYYYMMDD'));
+                  newDates.push(next.format('YYYY-MM-DD'));
                 } else {
                   break;
                 }
@@ -362,12 +365,12 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 return;
               }
               const newDates = [sd];
-              const sdm = moment(sd, 'YYYYMMDD');
+              const sdm = moment(sd, 'YYYY-MM-DD');
               let i = 1;
               while (true) {
                 const next = sdm.add(i++, 'days');
                 if (next.isBefore(d)) {
-                  newDates.push(next.format('YYYYMMDD'));
+                  newDates.push(next.format('YYYY-MM-DD'));
                 } else {
                   break;
                 }
@@ -534,10 +537,10 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               <span>当前进度 </span>
             </div>
             <div className={styles.actions}>
-                <DatePicker onChange={onChangeDate} value={moment(dates[0], 'YYYYMMDD')} style={{ marginRight: 10 }} />
+                <DatePicker onChange={onChangeDate} value={moment(dates[0], 'YYYY-MM-DD')} style={{ marginRight: 10 }} />
                 <DatePicker
                     onChange={(d) => onChangeDate(d, false)}
-                    value={moment(dates[dates.length - 1], 'YYYYMMDD')}
+                    value={moment(dates[dates.length - 1], 'YYYY-MM-DD')}
                     style={{ marginRight: 10 }}
                 />
                 <Radio.Group
