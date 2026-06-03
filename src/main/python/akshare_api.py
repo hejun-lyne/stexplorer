@@ -293,7 +293,7 @@ class AkshareAPI:
             filtered = df.loc[mask].copy().sort_values("trade_date")
             
             dates = filtered["trade_date"].dt.strftime("%Y-%m-%d").tolist()
-            return dates
+            return {"dates": dates}
         except Exception as e:
             return {"error": str(e)}
 

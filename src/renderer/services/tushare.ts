@@ -105,16 +105,15 @@ export async function GetTradeDatesFromTushare(year?: string): Promise<string[]>
  * 判断某天是否为交易日（带本地缓存）
  */
 export async function IsTradeDay(date?: string): Promise<boolean> {
-  const checkDate = date || dayjs().format('YYYYMMDD');
-  const cleanDate = checkDate.replace(/-/g, '');
-  const year = cleanDate.substring(0, 4);
+  const checkDate = date || dayjs().format('YYYY-MM-DD');
+  const year = checkDate.substring(0, 4);
   
   // 1. 先读本地缓存
   try {
     const cached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
     if (cached?.success && cached.data?.data?.dates) {
       const dates: string[] = cached.data.data.dates;
-      return dates.includes(cleanDate);
+      return dates.includes(checkDate);
     }
   } catch (e) {
     // 缓存不存在，继续往下
@@ -139,7 +138,7 @@ export async function IsTradeDay(date?: string): Promise<boolean> {
     console.error('缓存交易日历失败:', e);
   }
   
-  return dates.includes(cleanDate);
+  return dates.includes(checkDate);
 }
 
 /**
@@ -151,10 +150,9 @@ export async function FilterTradeDays(dates: string[]): Promise<string[]> {
   // 按年份分组，减少缓存查询次数
   const yearMap: Record<string, string[]> = {};
   dates.forEach(d => {
-    const clean = d.replace(/-/g, '');
-    const year = clean.substring(0, 4);
+    const year = d.substring(0, 4);
     if (!yearMap[year]) yearMap[year] = [];
-    yearMap[year].push(clean);
+    yearMap[year].push(d);
   });
   
   const tradeDays: string[] = [];
@@ -343,6 +341,79 @@ export async function GetTrendFromTushare(secid: string): Promise<{ secid: strin
 
 // ==================== 板块数据 ====================
 
+/**
+ * 获取特定交易日全板块数据
+ * @param bk_type 板块类型: "industry"(行业板块) 或 "concept"(概念板块)
+ * @param date 交易日期(YYYYMMDD)，不传则默认最近交易日
+ * @returns 板块列表，包含代码、名字、涨跌幅等
+ */
+export async function GetBoardsByDateFromTushare(bk_type: string = 'industry', date?: string): Promise<any> {
+  try {
+    const params: Record<string, any> = { bk_type };
+    if (date) params.date = date;
+
+    const result = await callTushare('get_boards_by_date', params);
+
+    if (result.error) {
+      console.error('获取特定交易日板块数据失败:', result.error);
+      return {};
+    }
+
+    const arr = result.boards.map((item: any) => ({
+      code: item.code,
+      name: item.name,
+      market: 90,
+      secid: `90.${item.code}`,
+      zx: item.zx || 0,
+      zdf: item.zdf || 0,
+      zdd: item.zdd || 0,
+      hsl: item.hsl || 0,
+      szs: item.szs || 0,
+      xds: item.xds || 0,
+      lt: item.lt || 0,
+      cje: item.cje || 0,
+      cjl: item.cjl || 0,
+      mainIn: item.main_in || 0,
+      mainIn5d: item.main_in_5d || 0,
+      date: result.date,
+      source: item.source || 'dc',
+    }));
+
+    return { to: result.count || arr.length, arr, date: result.date };
+  } catch (error) {
+    logError(error, 'GetBoardsByDateFromTushare', '获取特定交易日板块数据失败');
+    return {};
+  }
+}
+
+/**
+ * 获取板块指定交易日的成分股及涨幅（用于回测板块内排名）
+ * @param secid 板块ID，如 "90.BK0428"
+ * @param date 交易日期(YYYYMMDD)
+ * @returns 成分股列表，含 secid 和 zf（涨跌幅%）
+ */
+export async function GetBoardStocksByDateFromTushare(
+  secid: string, 
+  date: string
+): Promise<Array<{ secid: string; zf: number }>> {
+  try {
+    const result = await callTushare('get_board_stocks', { secid, date });
+    
+    if (result.error || !result.stocks) {
+      console.error('获取板块成分股失败:', result.error);
+      return [];
+    }
+    
+    return result.stocks.map((s: any) => ({
+      secid: s.secid,
+      zf: s.zdf || 0,
+    }));
+  } catch (error) {
+    logError(error, 'GetBoardStocksByDateFromTushare', '获取板块成分股失败');
+    return [];
+  }
+}
+
 export async function GetBanKuaisFromTushare(type: number, dataSource = 'dc'): Promise<any> {
   try {
     const bk_type = type === 0 ? 'industry' : 'concept';
@@ -435,46 +506,55 @@ export async function GetBoardDetailFromTushare(secid: string, date?: string): P
   }
 }
 
+ }
+}
+export interface BankuaiMatchResult {
+  secid: string;
+  type: 'industry' | 'concept';
+}
 /**
  * 根据板块名字反查板块代码（Tushare 数据源）
  * @param name 板块名称
  * @param fuzzy 是否启用模糊匹配（默认 true）
- * @returns 匹配板块的 secid（如 90.BK0474），未找到返回 null
+ * @returns 匹配板块的 secid 和类型（行业/概念），未找到返回 null
  */
-export async function GetBankuaiCodeByNameFromTushare(name: string, fuzzy = true): Promise<string | null> {
+export async function GetBankuaiCodeByNameFromTushare(name: string, fuzzy = true): Promise<BankuaiMatchResult | null> {
   if (!name) {
     return null;
   }
   try {
     const [industryResult, gainianResult] = await Promise.all([
-      GetBanKuaisFromTushare(0, 'dc'),
+           GetBanKuaisFromTushare(0, 'dc'),
       GetBanKuaisFromTushare(1, 'dc'),
     ]);
-    const allBks: Stock.BanKuaiItem[] = [
-      ...(industryResult?.arr || []),
-      ...(gainianResult?.arr || []),
-    ];
+    const industryBks: Stock.BanKuaiItem[] = industryResult?.arr || [];
+    const conceptBks: Stock.BanKuaiItem[] = gainianResult?.arr || [];
     const trimmedName = name.trim();
-    // 1. 精确匹配
-    let match = allBks.find((bk) => bk.name === trimmedName);
-    if (match) {
-      return match.secid;
-    }
-    // 2. 忽略大小写精确匹配
-    match = allBks.find((bk) => bk.name.toLowerCase() === trimmedName.toLowerCase());
-    if (match) {
-      return match.secid;
-    }
-    // 3. 模糊匹配（包含关系）
-    if (fuzzy) {
-      match = allBks.find((bk) => bk.name.includes(trimmedName));
-      if (match) {
-        return match.secid;
+    const findMatch = (list: Stock.BanKuaiItem[]): Stock.BanKuaiItem | undefined => {
+      // 1. 精确匹配
+      let match = list.find((bk) => bk.name === trimmedName);
+      if (match) return match;
+      // 2. 忽略大小写精确匹配
+      match = list.find((bk) => bk.name.toLowerCase() === trimmedName.toLowerCase());
+      if (match) return match;
+      // 3. 模糊匹配（包含关系）
+      if (fuzzy) {
+        match = list.find((bk) => bk.name.includes(trimmedName));
+        if (match) return match;
+        match = list.find((bk) => trimmedName.includes(bk.name));
+        if (match) return match;
       }
-      match = allBks.find((bk) => trimmedName.includes(bk.name));
-      if (match) {
-        return match.secid;
-      }
+      return undefined;
+    };
+    // 优先在行业板块中查找
+    let match = findMatch(industryBks);
+    if (match) {
+      return { secid: match.secid, type: 'industry' };
+    }
+    // 再在概念板块中查找
+    match = findMatch(conceptBks);
+    if (match) {
+      return { secid: match.secid, type: 'concept' };
     }
     return null;
   } catch (error) {

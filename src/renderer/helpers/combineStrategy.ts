@@ -435,6 +435,9 @@ export class StrongStockBacktest {
             reason: string;
         }> = [];
 
+        // 不用观察列表，直接取强势股票，增加板块数据，直接评分排序选出买入候选（核心改动）
+        // 1. 获取5-10个交易日前的强势股票集合（去重）
+        // 2. 对每只强势股票，调用接口
         for (const [secid, watchInfo] of this.watchList) {
             if (this.isCancelled()) return true;
             await this.waitIfPaused();

@@ -419,7 +419,7 @@ class TushareAPI:
             if df is None or df.empty:
                 return []
             df['cal_date'] = pd.to_datetime(df['cal_date'])
-            return df['cal_date'].dt.strftime('%Y-%m-%d').tolist()
+            return {"dates": df['cal_date'].dt.strftime('%Y-%m-%d').tolist()}
         except Exception as e:
             return {"error": str(e)}
 
@@ -1186,6 +1186,102 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
+    def get_boards_by_date(bk_type: str = "industry", date: Optional[str] = None) -> Dict[str, Any]:
+        """获取特定交易日全板块数据
+
+        Args:
+            bk_type: 板块类型，"industry"(行业板块) 或 "concept"(概念板块)
+            date: 交易日期(YYYYMMDD)，不传则默认最近交易日
+
+        Returns:
+            {
+                "boards": [
+                    {
+                        "code": "BK0428",
+                        "name": "电力行业",
+                        "zx": 1234.56,      # 最新价（收盘价）
+                        "zdf": 1.23,        # 涨跌幅%
+                        "zdd": 15.0,        # 涨跌额
+                        "hsl": 0.85,        # 换手率%
+                        "szs": 45,          # 上涨家数
+                        "xds": 12,          # 下跌家数
+                        "cje": 1234567.8,   # 成交额
+                        "cjl": 9876543,     # 成交量
+                        "lt": 8900.5,       # 流通市值
+                        "zsz": 12000.3,     # 总市值
+                    }
+                ],
+                "count": 100,
+                "date": "20240101"
+            }
+        """
+        try:
+            pro = get_pro()
+            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+            idx_type = "行业板块" if bk_type == "industry" else "概念板块"
+
+            # 1. 获取板块行情（dc_index 支持 trade_date 参数）
+            df = safe_api_call(pro.dc_index, idx_type=idx_type, trade_date=target_date)
+            if isinstance(df, dict) and df.get("error"):
+                return df
+            if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                return {"error": f"No data available for date {target_date}"}
+
+            # 去重
+            df = df.drop_duplicates(subset=['ts_code'], keep='first')
+
+            # 2. 获取资金流向数据作为补充
+            start_date = (datetime.strptime(target_date, '%Y%m%d') - timedelta(days=10)).strftime('%Y%m%d')
+            if bk_type == "industry":
+                flow_df = safe_api_call(pro.moneyflow_ind_dc, start_date=start_date, end_date=target_date)
+            else:
+                flow_df = safe_api_call(pro.moneyflow_con_dc, start_date=start_date, end_date=target_date)
+
+            today_flow_map: Dict[str, float] = {}
+            flow_5d_map: Dict[str, float] = {}
+
+            if flow_df is not None and not (isinstance(flow_df, dict) and flow_df.get("error")) and not flow_df.empty:
+                dates = sorted(flow_df['trade_date'].astype(str).unique(), reverse=True)[:5]
+                for _, row in flow_df.iterrows():
+                    ts_code = str(row.get("ts_code", ""))
+                    d = str(row.get("trade_date", ""))
+                    net_amount = _to_float(row.get("net_amount", 0))
+                    if d == dates[0]:
+                        today_flow_map[ts_code] = net_amount
+                    if d in dates:
+                        flow_5d_map[ts_code] = flow_5d_map.get(ts_code, 0) + net_amount
+
+            boards = []
+            for _, row in df.iterrows():
+                ts_code = str(row.get("ts_code", ""))
+                code = ts_code.replace(".DC", "") if ".DC" in ts_code else ts_code
+                boards.append({
+                    "code": code,
+                    "name": str(row.get("name", "")),
+                    "zx": _to_float(row.get("close", 0)),
+                    "zdd": _to_float(row.get("change", 0)),
+                    "zdf": _to_float(row.get("pct_change", 0)),
+                    "hsl": _to_float(row.get("turnover_rate", 0)),
+                    "szs": _to_int(row.get("up_num", 0)),
+                    "xds": _to_int(row.get("down_num", 0)),
+                    "cje": _to_float(row.get("amount", 0)),
+                    "cjl": _to_int(row.get("volume", 0)),
+                    "lt": _to_float(row.get("float_mv", 0)),
+                    "zsz": _to_float(row.get("total_mv", 0)),
+                    "main_in": today_flow_map.get(ts_code, 0),
+                    "main_in_5d": flow_5d_map.get(ts_code, 0),
+                    "source": "dc",
+                })
+
+            return {
+                "boards": boards,
+                "count": len(boards),
+                "date": target_date,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
     def get_board_detail(secid: str, date: Optional[str] = None) -> Dict[str, Any]:
         """获取单个板块详情（含指定交易日资金流入在全板块的排名 + 最近5日累计资金流入）
 
@@ -1378,38 +1474,43 @@ class TushareAPI:
             return {"error": str(e)}
         
     @staticmethod
-    def get_board_stocks(secid: str) -> Dict[str, Any]:
+    def get_board_stocks(secid: str, date: Optional[str] = None) -> Dict[str, Any]:
         """获取板块成分股，支持东财和同花顺板块
-        
+
+        Args:
+            secid: 板块ID，如 "90.BK0428"
+            date: 指定查询日期(YYYYMMDD)，不传则默认最近交易日
+
         自动判断板块类型：
         - BK 开头 → 东财板块（dc_member + moneyflow_dc）
         - 88/3 开头 → 同花顺板块（网页抓取 + moneyflow_ths）
-        
-        返回字段补全：通过 daily + daily_basic 获取最新行情
+
+        返回字段补全：通过 daily + daily_basic 获取指定日期行情
         新增主力资金：main_in（当日）, main_in_5d（5日）
         """
         try:
             pro = get_pro()
             code = convert_secid_to_pure_code(secid)
-            today = datetime.now().strftime('%Y%m%d')
-            start_date_5d = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+            start_date_5d = (datetime.strptime(target_date, '%Y%m%d') - timedelta(days=10)).strftime('%Y%m%d')
 
             # 判断板块类型
             is_dc = code.startswith("BK")
             is_ths = code.startswith("88") or code.startswith("3")
-            
+
             member_map: Dict[str, Dict[str, Any]] = {}  # member_ts -> info
             debug_info: Dict[str, Any] = {
                 "secid": secid,
                 "code": code,
                 "is_dc": is_dc,
                 "is_ths": is_ths,
+                "query_date": target_date,
             }
 
             # 获取最近交易日（dc_member/daily 等接口要求 trade_date 必须是交易日）
-            trade_date = today
+            trade_date = target_date
             try:
-                cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=today, is_open='1')
+                cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=target_date, is_open='1')
                 if cal_df is not None and not cal_df.empty:
                     trade_date = str(cal_df['cal_date'].iloc[-1])
             except Exception as e:

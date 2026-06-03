@@ -1,11 +1,12 @@
 import React, { useCallback, useState, useEffect, useRef } from 'react';
-import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress } from 'antd';
+import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio } from 'antd';
 import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import moment from 'moment';
 import { useHomeContext } from '@/components/FullHome';
 import * as RSIStrategy from '@/helpers/rsistrategy';
+import * as BacktestEngine from '@/helpers/backtestEngine';
 import { Stock } from '@/types/stock';
 import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
@@ -16,8 +17,8 @@ export interface BacktestProps {
   active: boolean;
 }
 
-class StrongStocksDataProvider implements RSIStrategy.DataProvider {
-    // 板块数据内存缓存：key = "name|endDate"，避免相同参数重复请求
+// 统一的数据提供者，同时兼容 RSI 策略和优化策略
+class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.StrategyDataProvider {
     private boardCache: Map<string, Stock.BoardItem | null> = new Map();
 
     private getBoardCacheKey(name: string, endDate: string): string {
@@ -26,36 +27,33 @@ class StrongStocksDataProvider implements RSIStrategy.DataProvider {
 
     async getStrongStocks(date: string): Promise<Stock.DetailItem[]> {
       try {
-        // LoadSingleDateQS 要求 YYYYMMDD 格式，将 YYYY-MM-DD 转换
         const queryDate = date.replace(/-/g, '');
         console.log(`[DataProvider] 获取强势股票: ${date} -> ${queryDate}`);
-        const result = await Helpers.Stock.LoadSingleDateQS(queryDate, undefined,-1);
+        const result = await Helpers.Stock.LoadSingleDateQS(queryDate, undefined, -1);
         console.log(`[DataProvider] 强势股票 ${date} 返回: ${result.stocks?.length || 0} 只`);
         if (!result.stocks) {
           return Promise.reject('数据未准备好');
         }
-        // 按板块分组，每个板块最多取前10只，总数最多30只
         const bkCount = new Map<string, number>();
         const filteredStocks = result.stocks.filter((s: any) => {
           const code = s.secid?.split('.')[1] || '';
-          // 排除科创板 (688/689 开头)
           if (code.startsWith('688') || code.startsWith('689')) return false;
-          // 排除北交所 (8/9 开头)
           if (code.startsWith('8') || code.startsWith('9')) return false;
-          // 同一板块最多取5只
           const bk = s.hybk || '';
           const count = bkCount.get(bk) || 0;
           if (count >= 5) return false;
           bkCount.set(bk, count + 1);
           return true;
-        });//.slice(0, 20); // 取前20只，避免数据过多导致后续处理缓慢
+        });
         console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${filteredStocks.length} 只`);
         return Promise.resolve(filteredStocks.map((s: any) => ({ 
           secid: s.secid, 
           name: s.name,
           zdf: s.zdf,
           zx: s.zx,
-          bk: s.hybk, lt: (s.ltsz / 100000000) } as Stock.DetailItem)));
+          bk: s.hybk, 
+          lt: (s.ltsz / 100000000) 
+        } as Stock.DetailItem)));
       } catch (e) {
         console.error(`[DataProvider] 获取强势股票失败 ${date}:`, e);
         return [];
@@ -90,15 +88,16 @@ class StrongStocksDataProvider implements RSIStrategy.DataProvider {
         }
 
         console.log(`[DataProvider] 获取板块数据: ${name} ${endDate}`);
-        const boardSecid = await Services.Tushare.GetBankuaiCodeByNameFromTushare(name);
-        if (!boardSecid) {
+        const boardInfo = await Services.Tushare.GetBankuaiCodeByNameFromTushare(name);
+        if (!boardInfo) {
           console.log(`[DataProvider] 未找到板块: ${name}`);
           this.boardCache.set(cacheKey, null);
           return null;
         }
-        const bResult = await Services.Tushare.GetBoardDetailFromTushare(boardSecid, endDate);
+        const queryDate = endDate.replace(/-/g, '');
+        const bResult = await Services.Tushare.GetBoardDetailFromTushare(boardInfo.secid, queryDate);
         if (bResult) {
-          console.log(`[DataProvider] 板块 ${boardSecid} 返回:`, {
+          console.log(`[DataProvider] 板块 ${boardInfo.secid} 返回:`, {
             name: bResult.name,
             zx: bResult.zx,
             zdf: bResult.zdf,
@@ -111,7 +110,7 @@ class StrongStocksDataProvider implements RSIStrategy.DataProvider {
             cjl: bResult.cjl,
           });
         } else {
-          console.log(`[DataProvider] 板块 ${boardSecid} 返回: 无数据`);
+          console.log(`[DataProvider] 板块 ${boardInfo.secid} 返回: 无数据`);
         }
         this.boardCache.set(cacheKey, bResult || null);
         return bResult ? Promise.resolve(bResult) : Promise.reject('数据未准备好');
@@ -119,6 +118,51 @@ class StrongStocksDataProvider implements RSIStrategy.DataProvider {
         console.error(`[DataProvider] 获取板块数据失败 ${name}:`, e);
         return null;
       }
+    }
+
+    // 优化策略需要的接口：获取所有板块涨幅排名
+    async getAllBoards(associateBoardName: string, date: string): Promise<Array<{ code: string; name: string; zf: number }>> {
+      // 将 YYYY-MM-DD 转为 YYYYMMDD
+      const queryDate = date.replace(/-/g, '');
+      const boardInfo = await Services.Tushare.GetBankuaiCodeByNameFromTushare(associateBoardName);
+      if (!boardInfo) {
+        console.log(`[DataProvider] 未找到板块: ${associateBoardName}`);
+        return [];
+      }
+      // 根据板块类型（行业/概念）调用不同接口获取当日所有板块的涨幅排名
+      const result = await Services.Tushare.GetBoardsByDateFromTushare(boardInfo.type, queryDate);
+      if (!result || !result.arr || result.arr.length === 0) {
+        console.log(`[DataProvider] ${boardInfo.type} 板块数据为空: ${queryDate}`);
+        return [];
+      }
+      console.log(`[DataProvider] 获取全板块数据: ${boardInfo.type} ${queryDate}, 共 ${result.arr.length} 个板块`);
+      return result.arr.map((item: any) => ({
+        code: item.code,
+        name: item.name,
+        zf: item.zdf || 0,
+      }));
+    }
+
+    async getBoardStocks(date: string, boardCode: string): Promise<Array<{ secid: string; zf: number }>> {
+      try {
+        // 将 YYYY-MM-DD 转为 YYYYMMDD
+        const queryDate = date.replace(/-/g, '');
+        // 构造板块 secid（你的板块代码如果是纯 BK 开头，需要加 90. 前缀）
+        const boardSecid = boardCode.startsWith('90.') ? boardCode : `90.${boardCode}`;
+        
+        console.log(`[DataProvider] 获取板块成分股: ${boardSecid} ${queryDate}`);
+        const stocks = await Services.Tushare.GetBoardStocksByDateFromTushare(boardSecid, queryDate);
+        
+        console.log(`[DataProvider] 板块成分股返回: ${stocks.length} 只`);
+        return stocks;
+      } catch (e) {
+        console.error(`[DataProvider] 获取板块成分股失败 ${boardCode} ${date}:`, e);
+        return [];
+      }
+    }
+
+    async filterTradeDays(dates: string[]): Promise<string[]> {
+      return Services.Tushare.FilterTradeDays(dates);
     }
 }
 
@@ -214,13 +258,12 @@ function getNetValueBaseOptions(darkMode: boolean, initialCapital: number) {
 function updateNetValueOptions(
   opts: any,
   darkMode: boolean,
-  dailyValues: RSIStrategy.DailyValue[],
+  dailyValues: Array<{ date: string; totalValue: number }>,
   initialCapital: number
 ) {
   const dates = dailyValues.map(d => d.date);
   const values = dailyValues.map(d => d.totalValue);
 
-  // 计算最大回撤点
   let peak = initialCapital;
   let peakIndex = 0;
   let maxDrawdown = 0;
@@ -270,21 +313,22 @@ function updateNetValueOptions(
 
 // ==================== 主组件 ====================
 
+type StrategyType = 'rsi' | 'optimized';
+
 const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const { darkMode, lowKey } = useHomeContext();
     const [dates, setDates] = useState([moment(new Date()).format('YYYYMMDD')]);
     const [running, setRunning] = useState(false);
     const [paused, setPaused] = useState(false);
-    const [strongStocksProvider] = useState<StrongStocksDataProvider>(new StrongStocksDataProvider());
+    const [dataProvider] = useState<UnifiedDataProvider>(new UnifiedDataProvider());
+    const [strategyType, setStrategyType] = useState<StrategyType>('rsi');
     const [progress, setProgress] = useState("正在准备数据...");
     const [progressPercent, setProgressPercent] = useState(0);
-    const [result, setResult] = useState<RSIStrategy.BacktestResult | null>(null);
+    const [result, setResult] = useState<any>(null);
 
-    // 使用 ref 保存最新状态，供异步回测循环读取
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
 
-    // 图表相关：参照 MarketMood，chartRef 必须始终绑定到 DOM
     const { ref: chartRef, chartInstance: chart } = useResizeEchart(-1);
     const [chartOption, setChartOption] = useState<any>(undefined);
 
@@ -338,13 +382,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         [dates]
       );
     
-    const startStrongStockRSIBacktest = useCallback(async () => {
+    const startBacktest = useCallback(async () => {
       if (!dates.length) {
         console.warn('[UI] 未选择日期，无法启动回测');
         return;
       }
 
-      console.log(`[UI] ====== 启动回测 ======`);
+      const strategyName = strategyType === 'rsi' ? 'RSI策略' : '优化策略';
+      console.log(`[UI] ====== 启动${strategyName}回测 ======`);
       console.log(`[UI] 日期范围: ${dates[0]} ~ ${dates[dates.length - 1]} (${dates.length} 天)`);
 
       setProgress("开始执行回测...");
@@ -357,18 +402,36 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       pausedRef.current = false;
 
       try {
-        const strategy = new RSIStrategy.StrongStockBacktest(dates);
-        const backtestResult = await strategy.run(
-          strongStocksProvider,
-          (msg, pct) => {
-            setProgress(msg);
-            if (pct !== undefined) setProgressPercent(pct);
-          },
-          {
-            onShouldCancel: () => cancelledRef.current,
-            onShouldPause: () => pausedRef.current,
-          }
-        );
+        let backtestResult: any;
+
+        if (strategyType === 'rsi') {
+          const strategy = new RSIStrategy.StrongStockBacktest(dates);
+          backtestResult = await strategy.run(
+            dataProvider,
+            (msg, pct) => {
+              setProgress(msg);
+              if (pct !== undefined) setProgressPercent(pct);
+            },
+            {
+              onShouldCancel: () => cancelledRef.current,
+              onShouldPause: () => pausedRef.current,
+            }
+          );
+        } else {
+          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates);
+          backtestResult = await strategy.run(
+            dataProvider,
+            (msg, pct) => {
+              setProgress(msg);
+              if (pct !== undefined) setProgressPercent(pct);
+            },
+            {
+              onShouldCancel: () => cancelledRef.current,
+              onShouldPause: () => pausedRef.current,
+            }
+          );
+        }
+
         setResult(backtestResult);
         if (cancelledRef.current) {
           setProgress("回测已取消");
@@ -376,13 +439,12 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           setProgress("回测完成！");
         }
 
-        // 初始化图表（即使取消也展示已计算的部分结果）
         const initialCapital = 1000000;
         const baseOpts = getNetValueBaseOptions(darkMode, initialCapital);
         const finalOpts = updateNetValueOptions(baseOpts, darkMode, backtestResult.dailyValues, initialCapital);
         setChartOption(finalOpts);
 
-        console.log(`[UI] 回测结果已接收，图表已生成`);
+        console.log(`[UI] ${strategyName}回测结果已接收，图表已生成`);
       } catch (e) {
         const errorMsg = e instanceof Error ? e.message : String(e);
         setProgress(`回测出错: ${errorMsg}`);
@@ -394,7 +456,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, strongStocksProvider, darkMode]);
+    }, [dates, dataProvider, darkMode, strategyType]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -411,7 +473,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       console.log(`[UI] 用户请求取消回测`);
     }, []);
 
-    // 渲染图表
     useRenderEcharts(
       () => {
         if (chartOption) {
@@ -423,14 +484,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       [darkMode, lowKey, chartOption]
     );
 
-    // 暗黑模式切换时更新图表
     useEffect(() => {
       if (chartOption && result) {
         const initialCapital = 1000000;
         const updated = updateNetValueOptions(chartOption, darkMode, result.dailyValues, initialCapital);
         setChartOption({ ...updated });
       }
-    }, [darkMode]);
+    }, [darkMode, result, chartOption]);
 
     const tradeColumns = [
         { title: '日期', dataIndex: 'date', key: 'date', width: 100 },
@@ -480,8 +540,19 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     value={moment(dates[dates.length - 1], 'YYYYMMDD')}
                     style={{ marginRight: 10 }}
                 />
+                <Radio.Group
+                    value={strategyType}
+                    onChange={(e) => setStrategyType(e.target.value)}
+                    style={{ marginRight: 10 }}
+                    disabled={running}
+                >
+                    <Radio.Button value="rsi">RSI策略</Radio.Button>
+                    <Radio.Button value="optimized">优化策略</Radio.Button>
+                </Radio.Group>
               {!running && (
-                <a className={styles.abtn} onClick={startStrongStockRSIBacktest}>RSI策略回测强势股票</a>
+                <a className={styles.abtn} onClick={startBacktest}>
+                  {strategyType === 'rsi' ? 'RSI策略回测强势股票' : '优化策略回测强势股票'}
+                </a>
               )}
               {running && (
                 <>
@@ -510,10 +581,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 </div>
             )}
 
-            {/* 
-              关键修复：chartRef 必须始终绑定到真实 DOM，不能放在条件渲染中。
-              参照 MarketMood 的做法，通过 style 控制显隐，而不是条件渲染。
-            */}
             <div style={{ 
               visibility: (!running && result) ? 'visible' : 'hidden',
               height: (!running && result) ? 'auto' : 0,
@@ -599,7 +666,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <Card title="📝 交易明细" size="small" style={{ marginBottom: 16 }}>
                         <Table 
                             columns={tradeColumns} 
-                            dataSource={result.trades.map((t, i) => ({ ...t, key: i }))}
+                            dataSource={result.trades.map((t: any, i: number) => ({ ...t, key: i }))}
                             pagination={{ pageSize: 20, showSizeChanger: true }}
                             scroll={{ x: 800 }}
                             size="small"
@@ -609,7 +676,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <Card title="📋 每日净值" size="small">
                         <Table 
                             columns={dailyColumns} 
-                            dataSource={result.dailyValues.map((d, i) => ({ ...d, key: i }))}
+                            dataSource={result.dailyValues.map((d: any, i: number) => ({ ...d, key: i }))}
                             pagination={{ pageSize: 20, showSizeChanger: true }}
                             size="small"
                         />
@@ -619,7 +686,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
             {!running && !result && (
                 <div style={{ padding: 40, textAlign: 'center', color: '#999' }}>
-                    选择日期范围后点击"RSI策略回测强势股票"开始回测
+                    选择日期范围后点击回测按钮开始
                 </div>
             )}
           </div>
