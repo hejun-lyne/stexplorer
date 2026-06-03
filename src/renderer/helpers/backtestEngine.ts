@@ -662,6 +662,7 @@ export class OptimizedStrategyBacktest {
   private tradeDays: string[];
   private cancelOptions?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean };
   private workerExecutor?: (method: string, args?: any[]) => Promise<any>;
+  private filterTradeDaysCache: Map<string, string[]> = new Map();
 
   private readonly MAX_POSITIONS = 8;
   private readonly POSITION_RATIO = 0.125;
@@ -979,29 +980,43 @@ export class OptimizedStrategyBacktest {
     for (let d = 1; d <= 40; d++) {
       rawDates.push(base.subtract(d, 'day').format('YYYY-MM-DD'));
     }
-    const tradeDays = await dataProvider.filterTradeDays(rawDates);
+
+    // filterTradeDays 结果缓存（key 为 rawDates 逗号拼接）
+    const rawDatesKey = rawDates.join(',');
+    let tradeDays = this.filterTradeDaysCache.get(rawDatesKey);
+    if (!tradeDays) {
+      tradeDays = await dataProvider.filterTradeDays(rawDates);
+      this.filterTradeDaysCache.set(rawDatesKey, tradeDays);
+    }
     // 取往前第5-10个交易日（rawDates从近到远，tradeDays也保持此顺序）
     const strongStockDays = tradeDays.slice(4, 10);
 
     console.log(`[OptBacktest] [${today}] 阶段2-2: 获取强势股票 ${strongStockDays.join(', ')}`);
     onProgress?.(`[${today}] 获取强势股票...`);
 
-    const strongStocksMap = new Map<string, Stock.DetailItem>();
-    for (const day of strongStockDays) {
-      if (this.isCancelled()) return true;
-      await this.waitIfPaused();
-      if (this.isCancelled()) return true;
+    if (this.isCancelled()) return true;
+    await this.waitIfPaused();
+    if (this.isCancelled()) return true;
 
-      try {
-        const stocks = await dataProvider.getStrongStocks(day);
+    // 并行获取所有日期的强势股票
+    const strongStocksMap = new Map<string, Stock.DetailItem>();
+    const strongResults = await Promise.allSettled(
+      strongStockDays.map(day => dataProvider.getStrongStocks(day))
+    );
+
+    for (let i = 0; i < strongResults.length; i++) {
+      const result = strongResults[i];
+      const day = strongStockDays[i];
+      if (result.status === 'fulfilled') {
+        const stocks = result.value;
         console.log(`[OptBacktest] [${today}] ${day} 强势股票: ${stocks.length} 只`);
         for (const stock of stocks) {
           if (!strongStocksMap.has(stock.secid)) {
             strongStocksMap.set(stock.secid, stock);
           }
         }
-      } catch (err) {
-        console.log(`[OptBacktest] [${today}] 获取 ${day} 强势股票失败:`, err);
+      } else {
+        console.log(`[OptBacktest] [${today}] 获取 ${day} 强势股票失败:`, result.reason);
       }
     }
 
