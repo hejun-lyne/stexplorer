@@ -668,24 +668,48 @@ export class OptimizedStrategyBacktest {
   private readonly POSITION_RATIO = 0.125;
   private readonly MAX_SAME_BOARD = 2;
   private readonly MIN_POSITION_RATIO = 0.05;
-  private readonly STOP_LOSS_INIT_PCT = 0.95;
-  private readonly TRAILING_STOP_PCT = 0.90;
-  private readonly MIN_STRATEGY_SCORE = 100;
-  private readonly STRONG_LOOKBACK_START = 10;
-  private readonly STRONG_LOOKBACK_END = 5;
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
   private readonly BATCH_SIZE = 5; // 每批处理的股票数量，控制并发请求量
   private readonly KLINE_DAYS = 150; // 要预留30天用于计算指标
 
-  constructor(tradeDays: string[], initialCapital: number = 1000000, workerExecutor?: (method: string, args?: any[]) => Promise<any>) {
+  private STOP_LOSS_INIT_PCT = 0.95;
+  private TRAILING_STOP_PCT = 0.90;
+  private MIN_STRATEGY_SCORE = 100;
+  private STRONG_LOOKBACK_START = 10;
+  private STRONG_LOOKBACK_END = 5;
+
+  constructor(
+    tradeDays: string[],
+    initialCapital: number = 1000000,
+    workerExecutor?: (method: string, args?: any[]) => Promise<any>,
+    options?: {
+      stopLossInitPct?: number;
+      trailingStopPct?: number;
+      minStrategyScore?: number;
+      strongLookbackStart?: number;
+      strongLookbackEnd?: number;
+    }
+  ) {
     this.tradeDays = tradeDays;
     this.initialCapital = initialCapital;
     this.capital = initialCapital;
     this.availableCash = initialCapital;
     this.workerExecutor = workerExecutor;
+    if (options?.stopLossInitPct !== undefined) this.STOP_LOSS_INIT_PCT = options.stopLossInitPct;
+    if (options?.trailingStopPct !== undefined) this.TRAILING_STOP_PCT = options.trailingStopPct;
+    if (options?.minStrategyScore !== undefined) this.MIN_STRATEGY_SCORE = options.minStrategyScore;
+    if (options?.strongLookbackStart !== undefined) this.STRONG_LOOKBACK_START = options.strongLookbackStart;
+    if (options?.strongLookbackEnd !== undefined) this.STRONG_LOOKBACK_END = options.strongLookbackEnd;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'}`);
+    console.log(`[OptBacktest] 动态参数:`, {
+      STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
+      TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
+      MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
+      STRONG_LOOKBACK_START: this.STRONG_LOOKBACK_START,
+      STRONG_LOOKBACK_END: this.STRONG_LOOKBACK_END,
+    });
   }
 
   public async run(
@@ -982,8 +1006,8 @@ export class OptimizedStrategyBacktest {
       tradeDays = await dataProvider.filterTradeDays(rawDates);
       this.filterTradeDaysCache.set(rawDatesKey, tradeDays);
     }
-    // 取往前第5-10个交易日（rawDates从近到远，tradeDays也保持此顺序）
-    const strongStockDays = tradeDays.slice(4, 10);
+    // 取往前第N-M个交易日（rawDates从近到远，tradeDays也保持此顺序）
+    const strongStockDays = tradeDays.slice(this.STRONG_LOOKBACK_END - 1, this.STRONG_LOOKBACK_START);
 
     console.log(`[OptBacktest] [${today}] 阶段2-2: 获取强势股票 ${strongStockDays.join(', ')}`);
     onProgress?.(`[${today}] 获取强势股票...`);

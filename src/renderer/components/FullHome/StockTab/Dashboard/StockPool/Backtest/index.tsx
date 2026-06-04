@@ -1,5 +1,5 @@
 import React, { useCallback, useState, useEffect, useRef } from 'react';
-import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio } from 'antd';
+import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio, InputNumber } from 'antd';
 import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
 import * as Services from '@/services';
@@ -364,6 +364,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [progressPercent, setProgressPercent] = useState(0);
     const [result, setResult] = useState<any>(null);
 
+    // 优化策略参数
+    const [stopLossInitPct, setStopLossInitPct] = useState(0.95);
+    const [trailingStopPct, setTrailingStopPct] = useState(0.90);
+    const [minStrategyScore, setMinStrategyScore] = useState(100);
+    const [strongLookbackStart, setStrongLookbackStart] = useState(10);
+    const [strongLookbackEnd, setStrongLookbackEnd] = useState(5);
+
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
 
@@ -460,7 +467,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           const parallelWorkerExecutor = (method: string, args?: any[]) =>  ipcRenderer.invoke('worker-pool-execute', method, args);
 
           // 传入回测引擎（替换原来的单workerExecutor）
-          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, 1000000, parallelWorkerExecutor);
+          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, 1000000, parallelWorkerExecutor, {
+            stopLossInitPct,
+            trailingStopPct,
+            minStrategyScore,
+            strongLookbackStart,
+            strongLookbackEnd,
+          });
           backtestResult = await strategy.run(
             dataProvider,
             (msg, pct) => {
@@ -498,7 +511,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType]);
+    }, [dates, dataProvider, darkMode, strategyType, stopLossInitPct, trailingStopPct, minStrategyScore, strongLookbackStart, strongLookbackEnd]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -591,6 +604,28 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <Radio.Button value="rsi">RSI策略</Radio.Button>
                     <Radio.Button value="optimized">优化策略</Radio.Button>
                 </Radio.Group>
+                {strategyType === 'optimized' && (
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 10, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>止损:</span>
+                      <InputNumber size="small" min={0.5} max={0.99} step={0.01} value={stopLossInitPct} onChange={(v) => setStopLossInitPct(v ?? 0.95)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>追踪:</span>
+                      <InputNumber size="small" min={0.5} max={0.99} step={0.01} value={trailingStopPct} onChange={(v) => setTrailingStopPct(v ?? 0.90)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>分数:</span>
+                      <InputNumber size="small" min={0} max={500} step={1} value={minStrategyScore} onChange={(v) => setMinStrategyScore(v ?? 100)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>回看:</span>
+                      <InputNumber size="small" min={2} max={30} step={1} value={strongLookbackStart} onChange={(v) => setStrongLookbackStart(v ?? 10)} disabled={running} style={{ width: 50 }} />
+                      <span style={{ fontSize: 12 }}>-</span>
+                      <InputNumber size="small" min={1} max={29} step={1} value={strongLookbackEnd} onChange={(v) => setStrongLookbackEnd(v ?? 5)} disabled={running} style={{ width: 50 }} />
+                    </div>
+                  </div>
+                )}
               {!running && (
                 <a className={styles.abtn} onClick={startBacktest}>
                   {strategyType === 'rsi' ? 'RSI策略回测强势股票' : '优化策略回测强势股票'}
