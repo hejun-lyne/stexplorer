@@ -506,8 +506,6 @@ export async function GetBoardDetailFromTushare(secid: string, date?: string): P
   }
 }
 
- }
-}
 export interface BankuaiMatchResult {
   secid: string;
   type: 'industry' | 'concept';
@@ -807,11 +805,16 @@ export async function FromTushare(secid: string): Promise<any> {
       return null;
     }
     
-    return {
-      secid,
+    const result: any = {
       ...detailResult,
       trends: trendResult.trends,
     };
+
+    if (!result.secid) {
+      result.secid = secid;
+    }
+
+    return result;
   } catch (error) {
     logError(error, 'FromTushare', '获取股票综合数据失败');
     return null;

@@ -31,6 +31,102 @@ import * as localFileStorage from './localFileStorage';
 
 let willQuitApp = false;
 
+// ===== WorkerPool：多Worker并行计算池 =====
+class WorkerPool {
+  private workers: Electron.BrowserWindow[] = [];
+  private queue: Array<{
+    id: number;
+    method: string;
+    args?: any[];
+    resolve: (value: any) => void;
+    reject: (reason?: any) => void;
+  }> = [];
+  private busy = new Set<Electron.BrowserWindow>();
+  private taskId = 0;
+  private pending = new Map<number, any>();
+  private onLog: (text: string) => void;
+  private onProgress: (progress: string) => void;
+
+  constructor(
+    workers: Electron.BrowserWindow[],
+    onLog: (text: string) => void,
+    onProgress: (progress: string) => void
+  ) {
+    this.workers = workers;
+    this.onLog = onLog;
+    this.onProgress = onProgress;
+
+    // 监听Worker返回结果（与 win.worker.ts 的 postMessageOut 对应）
+    ipcMain.on('message-from-worker', (event, payload) => {
+      const [msgId, error, result] = payload;
+
+      // 日志消息（msgId=1）—— 批量日志数组
+      if (msgId === 1) {
+        if (Array.isArray(result)) {
+          result.forEach((log: string) => this.onLog(log));
+        }
+        return;
+      }
+      // 进度消息（msgId=2）
+      if (msgId === 2) {
+        this.onProgress(result);
+        return;
+      }
+
+      // 任务结果
+      const task = this.pending.get(msgId);
+      if (!task) return;
+
+      this.pending.delete(msgId);
+      const worker = this.workers.find(w => w.webContents === event.sender);
+      if (worker) {
+        this.busy.delete(worker);
+        // 异步触发队列，让空闲Worker立即领取新任务
+        setImmediate(() => this.processQueue());
+      }
+
+      if (error) {
+        task.reject(new Error(error.message || 'Worker execution failed'));
+      } else {
+        task.resolve(result);
+      }
+    });
+  }
+
+  execute(method: string, args?: any[]): Promise<any> {
+    return new Promise((resolve, reject) => {
+      this.taskId++;
+      const id = this.taskId;
+      const task = { id, method, args, resolve, reject };
+      this.pending.set(id, task);
+      this.queue.push(task);
+      this.processQueue();
+    });
+  }
+
+  private processQueue() {
+    while (this.queue.length > 0) {
+      const worker = this.workers.find(w => !this.busy.has(w));
+      if (!worker) break; // 全部繁忙，等待
+
+      const task = this.queue.shift()!;
+      this.busy.add(worker);
+
+      worker.webContents.send('execute-worker-task', {
+        taskId: task.id,
+        method: task.method,
+        args: task.args
+      });
+    }
+  }
+
+  destroy() {
+    this.workers.forEach(w => {
+      if (!w.isDestroyed()) w.close();
+    });
+  }
+}
+
 // ===== 辅助函数：健壮地解析 Kimi API 错误 =====
 function parseKimiError(e: any): string {
   // 1. 优先尝试解析 response body（JSON 或纯文本）
@@ -165,11 +261,28 @@ async function init() {
   if (process.platform === 'darwin') {
     app.dock.hide();
   }
-  new PromiseWorker(
-    worker(),
-    (error, text) => mainWindow.webContents.send('on-console-log', text),
-    (error, progress) => mainWindow.webContents.send('on-progress-log', progress)
+  // ===== 创建多Worker并行池（替换原来的单Worker PromiseWorker）=====
+  const os = require('os');
+  const workerCount = Math.min(Math.max(2, os.cpus().length - 1), 6);
+  
+  console.log(`[Main] 启动 ${workerCount} 个并行Worker窗口`);
+  
+  const workerWindows: Electron.BrowserWindow[] = [];
+  for (let i = 0; i < workerCount; i++) {
+    const w = creatWorkerWindow(false);
+    workerWindows.push(w);
+  }
+
+  const workerPool = new WorkerPool(
+    workerWindows,
+    (text) => mainWindow.webContents.send('on-console-log', text),
+    (progress) => mainWindow.webContents.send('on-progress-log', progress)
   );
+
+  // 暴露并行Worker接口给Renderer
+  ipcMain.handle('worker-pool-execute', async (event, method: string, args: any[]) => {
+    return workerPool.execute(method, args);
+  });
 
   const mb = mini();
   ipcMain.handle('show-current-window', () => {

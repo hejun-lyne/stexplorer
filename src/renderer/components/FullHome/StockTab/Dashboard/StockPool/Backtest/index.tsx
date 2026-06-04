@@ -12,7 +12,7 @@ import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import { useRenderEcharts, useResizeEchart } from '@/utils/hooks';
 
-const { makeWorkerExec } = window.contextModules.electron;
+const { ipcRenderer, makeWorkerExec } = window.contextModules.electron;
 
 export interface BacktestProps {
   onOpenStock: (secid: string, name: string) => void;
@@ -46,15 +46,10 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
         if (!result.stocks) {
           return Promise.reject('数据未准备好');
         }
-        const bkCount = new Map<string, number>();
         const filteredStocks = result.stocks.filter((s: any) => {
           const code = s.secid?.split('.')[1] || '';
           if (code.startsWith('688') || code.startsWith('689')) return false;
           if (code.startsWith('8') || code.startsWith('9')) return false;
-          const bk = s.hybk || '';
-          const count = bkCount.get(bk) || 0;
-          if (count >= 5) return false;
-          bkCount.set(bk, count + 1);
           return true;
         });
         console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${filteredStocks.length} 只`);
@@ -461,7 +456,11 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             }
           );
         } else {
-          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, 1000000, makeWorkerExec);
+          // 并行Worker执行器：自动分发到空闲Worker窗口
+          const parallelWorkerExecutor = (method: string, args?: any[]) =>  ipcRenderer.invoke('worker-pool-execute', method, args);
+
+          // 传入回测引擎（替换原来的单workerExecutor）
+          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, 1000000, parallelWorkerExecutor);
           backtestResult = await strategy.run(
             dataProvider,
             (msg, pct) => {

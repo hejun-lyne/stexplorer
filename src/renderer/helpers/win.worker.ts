@@ -481,3 +481,41 @@ export function batchBacktestOptimize(klinesBatch: Stock.KLineItem[][]) {
   bridgeProgressLog(`[info] Worker 批量策略优化完成`);
   return results;
 }
+
+// ==================== 多Worker并行任务监听 ====================
+// 主进程通过此通道分发计算任务到多个Worker窗口
+ipcRenderer.on('execute-worker-task', async (event, payload: { taskId: number; method: string; args: any[] }) => {
+  const { taskId, method, args } = payload;
+  
+  // 方法映射：将主进程传来的方法名映射到本文件导出的函数
+  const methodMap: Record<string, (...args: any[]) => any> = {
+    batchBacktestOptimize,
+    optimizeMACDStrategy,
+    optimizeRSIStrategy,
+    backtestMABounce,
+    calculateIndicators,
+    getAllBks,
+    getAllBkSts,
+    getAllStDetails,
+    getAllStFinances,
+    getAllStKlines,
+    getAllStLHBs,
+    getAllStZJCs,
+    getDateDeals,
+    getDatesDeal,
+    getAllStocks,
+    getFilteredStocks,
+  };
+  
+  try {
+    const fn = methodMap[method];
+    if (typeof fn !== 'function') {
+      throw new Error(`Worker method "${method}" not found. Available: ${Object.keys(methodMap).join(', ')}`);
+    }
+    const result = await fn(...(args || []));
+    postMessageOut(taskId, null, result);
+  } catch (e: any) {
+    console.error(`[Worker] Task ${taskId} (${method}) failed:`, e);
+    postMessageOut(taskId, { message: e.message + '\n' + e.stack });
+  }
+});
