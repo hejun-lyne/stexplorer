@@ -153,9 +153,11 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
   );
   const [timelineDate, setTimelineDate] = useState<string | undefined>();
   const [initWidth, setInitWidth] = useState(500);
-  if (initWidth == 500 && rightRef.current) {
-    setInitWidth(rightRef.current.offsetWidth);
-  }
+  useEffect(() => {
+    if (initWidth === 500 && rightRef.current) {
+      setInitWidth(rightRef.current.offsetWidth);
+    }
+  }, [initWidth]);
   const nDetails = stock?.detail || tDetail;
   const [noteChanged, setNoteChanged] = useState<boolean|undefined>(false);
   const [activePeriod, setActivePeriond] = useState<Stock.PeriodMarkItem | null>(null);
