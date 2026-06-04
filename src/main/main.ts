@@ -1243,6 +1243,26 @@ async function init() {
     }
   });
 
+  ipcMain.handle('backtest-cache-read', (event, { key }) => {
+    try {
+      const result = localFileStorage.readCache(key);
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('[Main] Error reading backtest cache:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('backtest-cache-write', (event, { key, data }) => {
+    try {
+      const result = localFileStorage.writeCache(key, data);
+      return { success: result };
+    } catch (error: any) {
+      console.error('[Main] Error writing backtest cache:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
   ipcMain.handle('qslist-backup-list', () => {
     try {
       const result = localFileStorage.listQSListBackups();

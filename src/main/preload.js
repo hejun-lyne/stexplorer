@@ -436,6 +436,22 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
                 });
             });
         },
+        // 回测缓存读取
+        readCache: function (key) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('backtest-cache-read', { key: key })];
+                });
+            });
+        },
+        // 回测缓存写入
+        writeCache: function (key, data) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('backtest-cache-write', { key: key, data: data })];
+                });
+            });
+        },
         // QSList 备份列表
         listQSListBackups: function () {
             return __awaiter(this, void 0, void 0, function () {

@@ -240,6 +240,14 @@ contextBridge.exposeInMainWorld('contextModules', {
     async writeQSListBackup(date: string, data: any) {
       return ipcRenderer.invoke('qslist-backup-write', { date, data });
     },
+    // 回测缓存读取
+    async readCache(key: string) {
+      return ipcRenderer.invoke('backtest-cache-read', { key });
+    },
+    // 回测缓存写入
+    async writeCache(key: string, data: any) {
+      return ipcRenderer.invoke('backtest-cache-write', { key, data });
+    },
     // QSList 备份列表
     async listQSListBackups() {
       return ipcRenderer.invoke('qslist-backup-list');

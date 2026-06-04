@@ -422,15 +422,24 @@ class TushareAPI:
     @staticmethod
     def get_trade_dates(year: Optional[int] = None) -> List[str]:
         try:
-            pro = get_pro()
             target_year = year if year is not None else datetime.now().year
+            cache_key = _cache_key("trade_dates", year=target_year)
+            # 历史年份缓存 1 年，当前年份缓存 7 天
+            max_age = 8760 if target_year < datetime.now().year else 168
+            cached = read_cache(cache_key, max_age_hours=max_age)
+            if cached is not None:
+                return cached
+
+            pro = get_pro()
             start_date = f"{target_year}0101"
             end_date = f"{target_year}1231"
             df = pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date, is_open='1')
             if df is None or df.empty:
                 return []
             df['cal_date'] = pd.to_datetime(df['cal_date'])
-            return {"dates": df['cal_date'].dt.strftime('%Y-%m-%d').tolist()}
+            result = {"dates": df['cal_date'].dt.strftime('%Y-%m-%d').tolist()}
+            write_cache(cache_key, result)
+            return result
         except Exception as e:
             return {"error": str(e)}
 

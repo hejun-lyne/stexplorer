@@ -3374,15 +3374,17 @@ export async function CheckStockRSI(secid: string, threshold = 30, klimit = 80) 
 
 
 import {
+  backtestMABounce,
+  optimizeMACDStrategy,
+  optimizeRSIStrategy,
+} from './backtestCompute';
+import type {
   MABacktestTrade,
   MABacktestResult,
   MACDTrade,
   MACDStrategyResult,
   RSIBacktestTrade,
   RSIBacktestResult,
-  backtestMABounce,
-  optimizeMACDStrategy,
-  optimizeRSIStrategy,
 } from './backtestEngine';
 
 export {

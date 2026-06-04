@@ -2,6 +2,8 @@ import {
   backtestMABounce,
   optimizeMACDStrategy,
   optimizeRSIStrategy,
+} from './backtestCompute';
+import type {
   MABacktestResult,
   MACDStrategyResult,
   RSIBacktestResult,
@@ -19,7 +21,7 @@ interface BacktestResponse {
   rsiResults: RSIBacktestResult[];
 }
 
-self.addEventListener('message', (event: MessageEvent<any>) => {
+self.addEventListener('message', async (event: MessageEvent<any>) => {
   console.log('[BacktestWorker] received message', event.data);
 
   if (event.data?.type === 'ping') {
@@ -42,7 +44,7 @@ self.addEventListener('message', (event: MessageEvent<any>) => {
     console.log('[BacktestWorker] running MA backtest...');
     const maResults = backtestMABounce(
       klines,
-      [5, 10, 20, 30, 60],
+      [5, 10, 20, 40, 60],
       [5, 10, 20],
       fixedStopLossPct,
       trailingStopLossPct
@@ -50,11 +52,11 @@ self.addEventListener('message', (event: MessageEvent<any>) => {
     console.log('[BacktestWorker] MA done, results=', maResults.length);
 
     console.log('[BacktestWorker] running MACD backtest...');
-    const macdResults = optimizeMACDStrategy(klines, fixedStopLossPct, trailingStopLossPct);
+    const macdResults = await optimizeMACDStrategy(klines, fixedStopLossPct, trailingStopLossPct);
     console.log('[BacktestWorker] MACD done, results=', macdResults.length);
 
     console.log('[BacktestWorker] running RSI backtest...');
-    const rsiResults = optimizeRSIStrategy(klines, [6, 12, 24], fixedStopLossPct, trailingStopLossPct);
+    const rsiResults = await optimizeRSIStrategy(klines, [6, 12, 24], fixedStopLossPct, trailingStopLossPct);
     console.log('[BacktestWorker] RSI done, results=', rsiResults.length);
 
     const response: BacktestResponse = { maResults, macdResults, rsiResults };

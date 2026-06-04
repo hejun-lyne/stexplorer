@@ -4,7 +4,7 @@ import { BKType, KLineType, MAPeriodType, TechIndicatorType } from '@/utils/enum
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import * as Tech from '@/helpers/tech';
-import * as BacktestEngine from '@/helpers/backtestEngine';
+import * as BacktestCompute from '@/helpers/backtestCompute';
 import { Stock } from '@/types/stock';
 import * as Enums from '@/utils/enums';
 
@@ -450,42 +450,42 @@ export function backtestMABounce(
   trailingStopLossPct: number
 ) {
   bridgeProgressLog('[info] Worker 开始执行 MA 回踩回测...');
-  const result = BacktestEngine.backtestMABounce(klines, maPeriods, trendDays, fixedStopLossPct, trailingStopLossPct);
+  const result = BacktestCompute.backtestMABounce(klines, maPeriods, trendDays, fixedStopLossPct, trailingStopLossPct);
   bridgeProgressLog(`[info] MA 回踩回测完成，共 ${result.length} 组参数`);
   return result;
 }
 
 /** MACD 金叉回测（Worker 代理） */
-export function optimizeMACDStrategy(
+export async function optimizeMACDStrategy(
   klines: Stock.KLineItem[],
   fixedStopLossPct: number,
   trailingStopLossPct: number
 ) {
   bridgeProgressLog('[info] Worker 开始执行 MACD 回测...');
-  const result = BacktestEngine.optimizeMACDStrategy(klines, fixedStopLossPct, trailingStopLossPct);
+  const result = await BacktestCompute.optimizeMACDStrategy(klines, fixedStopLossPct, trailingStopLossPct);
   bridgeProgressLog(`[info] MACD 回测完成，共 ${result.length} 组参数`);
   return result;
 }
 
 /** RSI 超卖反弹回测（Worker 代理） */
-export function optimizeRSIStrategy(
+export async function optimizeRSIStrategy(
   klines: Stock.KLineItem[],
   rsiPeriods: number[],
   fixedStopLossPct: number,
   trailingStopLossPct: number
 ) {
   bridgeProgressLog('[info] Worker 开始执行 RSI 回测...');
-  const result = BacktestEngine.optimizeRSIStrategy(klines, rsiPeriods, fixedStopLossPct, trailingStopLossPct);
+  const result = await BacktestCompute.optimizeRSIStrategy(klines, rsiPeriods, fixedStopLossPct, trailingStopLossPct);
   bridgeProgressLog(`[info] RSI 回测完成，共 ${result.length} 组参数`);
   return result;
 }
 
 /** 批量策略优化（用于 OptimizedStrategyBacktest，避免阻塞主线程） */
-export function batchBacktestOptimize(klinesBatch: Stock.KLineItem[][]) {
+export async function batchBacktestOptimize(klinesBatch: Stock.KLineItem[][]) {
   bridgeProgressLog(`[info] Worker 批量策略优化开始，共 ${klinesBatch.length} 只股票`);
-  const results = klinesBatch.map((klines, i) => {
-    const macdResults = BacktestEngine.optimizeMACDStrategy(klines);
-    const rsiResults = BacktestEngine.optimizeRSIStrategy(klines, [6, 12, 24]);
+  const results = await Promise.all(klinesBatch.map(async (klines, i) => {
+    const macdResults = await BacktestCompute.optimizeMACDStrategy(klines);
+    const rsiResults = await BacktestCompute.optimizeRSIStrategy(klines, [6, 12, 24]);
     
     // 每5只或最后一只发进度，让用户看到Worker没卡死
     if ((i + 1) % 5 === 0 || i === klinesBatch.length - 1) {
@@ -493,7 +493,7 @@ export function batchBacktestOptimize(klinesBatch: Stock.KLineItem[][]) {
     }
     
     return { macdResults, rsiResults };
-  });
+  }));
   bridgeProgressLog(`[info] Worker 批量策略优化完成`);
   return results;
 }

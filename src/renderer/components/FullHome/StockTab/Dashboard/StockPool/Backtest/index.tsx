@@ -69,7 +69,7 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
 
     async getKLines(secid: string, endDate: string, days: number = 120): Promise<Stock.KLineItem[] | null> {
       try {
-        console.log(`[DataProvider] 获取K线: ${secid} 截止${endDate} ${days}天`);
+        // console.log(`[DataProvider] 获取K线: ${secid} 截止${endDate} ${days}天`);
         const kResult = await Services.Stock.GetKFromDataSource(Enums.FundApiType.Tushare, secid, Enums.KLineType.Day);
         const index = kResult.ks.findIndex(k => k.date === endDate);
         if (index === -1) {
@@ -80,7 +80,7 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
         if (sliced.length > days) {
           sliced.splice(0, sliced.length - days);
         }
-        console.log(`[DataProvider] ${secid} K线返回: ${sliced.length} 条 (截止${endDate})`);
+        // console.log(`[DataProvider] ${secid} K线返回: ${sliced.length} 条 (截止${endDate})`);
         return kResult.ks ? Promise.resolve(sliced) : Promise.reject('数据未准备好');
       } catch (e) {
         console.error(`[DataProvider] 获取K线失败 ${secid}:`, e);
@@ -365,6 +365,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [result, setResult] = useState<any>(null);
 
     // 优化策略参数
+    const [initialCapital, setInitialCapital] = useState(1000000);
+    const [maxPositions, setMaxPositions] = useState(8);
+    const [positionRatio, setPositionRatio] = useState(0.125);
     const [stopLossInitPct, setStopLossInitPct] = useState(0.95);
     const [trailingStopPct, setTrailingStopPct] = useState(0.90);
     const [minStrategyScore, setMinStrategyScore] = useState(100);
@@ -467,12 +470,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           const parallelWorkerExecutor = (method: string, args?: any[]) =>  ipcRenderer.invoke('worker-pool-execute', method, args);
 
           // 传入回测引擎（替换原来的单workerExecutor）
-          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, 1000000, parallelWorkerExecutor, {
+          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, initialCapital, parallelWorkerExecutor, {
             stopLossInitPct,
             trailingStopPct,
             minStrategyScore,
             strongLookbackStart,
             strongLookbackEnd,
+            maxPositions,
+            positionRatio,
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -494,7 +499,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           setProgress("回测完成！");
         }
 
-        const initialCapital = 1000000;
         const baseOpts = getNetValueBaseOptions(darkMode, initialCapital);
         const finalOpts = updateNetValueOptions(baseOpts, darkMode, backtestResult.dailyValues, initialCapital);
         setChartOption(finalOpts);
@@ -511,7 +515,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, stopLossInitPct, trailingStopPct, minStrategyScore, strongLookbackStart, strongLookbackEnd]);
+    }, [dates, dataProvider, darkMode, strategyType, stopLossInitPct, trailingStopPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -606,6 +610,18 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 </Radio.Group>
                 {strategyType === 'optimized' && (
                   <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 10, flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>资金:</span>
+                      <InputNumber size="small" min={100000} max={10000000} step={100000} value={initialCapital} onChange={(v) => setInitialCapital(v ?? 1000000)} disabled={running} style={{ width: 80 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>仓位:</span>
+                      <InputNumber size="small" min={1} max={20} step={1} value={maxPositions} onChange={(v) => setMaxPositions(v ?? 8)} disabled={running} style={{ width: 45 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>比例:</span>
+                      <InputNumber size="small" min={0.01} max={0.5} step={0.01} value={positionRatio} onChange={(v) => setPositionRatio(v ?? 0.125)} disabled={running} style={{ width: 55 }} />
+                    </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>止损:</span>
                       <InputNumber size="small" min={0.5} max={0.99} step={0.01} value={stopLossInitPct} onChange={(v) => setStopLossInitPct(v ?? 0.95)} disabled={running} style={{ width: 55 }} />

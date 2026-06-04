@@ -547,6 +547,52 @@ export function listQSListBackups(): string[] {
   }
 }
 
+// ===== 回测策略缓存 =====
+
+const BACKTEST_CACHE_DIR = 'backtest_cache';
+
+function getBacktestCacheDir(): string {
+  if (!dataDir) {
+    initLocalFileStorage();
+  }
+  return path.join(dataDir, BACKTEST_CACHE_DIR);
+}
+
+export function readCache(key: string): { data: any; cachedAt: string } | null {
+  try {
+    const cacheDir = getBacktestCacheDir();
+    const filePath = path.join(cacheDir, `${key}.json`);
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return JSON.parse(content);
+  } catch (error) {
+    console.error(`[LocalFileStorage] Error reading cache for ${key}:`, error);
+    return null;
+  }
+}
+
+export function writeCache(key: string, data: any): boolean {
+  try {
+    const cacheDir = getBacktestCacheDir();
+    if (!fs.existsSync(cacheDir)) {
+      fs.mkdirSync(cacheDir, { recursive: true });
+    }
+    const filePath = path.join(cacheDir, `${key}.json`);
+    const content = JSON.stringify({
+      data,
+      cachedAt: new Date().toISOString(),
+    }, null, 2);
+    fs.writeFileSync(filePath, content, 'utf-8');
+    console.log('[LocalFileStorage] Cache written:', key);
+    return true;
+  } catch (error) {
+    console.error(`[LocalFileStorage] Error writing cache for ${key}:`, error);
+    return false;
+  }
+}
+
 export default {
   initLocalFileStorage,
   readLocalData,
@@ -561,6 +607,8 @@ export default {
   readQSListBackup,
   writeQSListBackup,
   listQSListBackups,
+  readCache,
+  writeCache,
   setCustomStoragePath,
   getStoragePath,
   TABLE_MAP,

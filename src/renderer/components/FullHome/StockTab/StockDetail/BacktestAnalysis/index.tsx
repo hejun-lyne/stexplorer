@@ -116,7 +116,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
       const [maRes, macdRes, rsiRes] = await Promise.all([
         makeWorkerExec('backtestMABounce', [
           klines,
-          [5, 10, 20, 30, 60],
+          [5, 10, 20, 40, 60],
           [5, 10, 20],
           fixedStopLossPct / 100,
           trailingStopLossPct / 100,

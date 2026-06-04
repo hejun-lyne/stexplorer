@@ -125,7 +125,13 @@ export async function BackupLocalStorage(backupPath: string) {
 
 // ===== 本地存储路径管理 =====
 
-const { electron } = window.contextModules;
+const electron = (() => {
+  try {
+    return window.contextModules.electron;
+  } catch {
+    return undefined;
+  }
+})();
 
 export async function GetLocalStoragePath(): Promise<string | null> {
   try {
