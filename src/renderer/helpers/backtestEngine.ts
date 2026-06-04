@@ -676,7 +676,7 @@ export class OptimizedStrategyBacktest {
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
-  private readonly BATCH_SIZE = 10;
+  private readonly BATCH_SIZE = 5; // 每批处理的股票数量，控制并发请求量
   private readonly KLINE_DAYS = 150; // 要预留30天用于计算指标
 
   constructor(tradeDays: string[], initialCapital: number = 1000000, workerExecutor?: (method: string, args?: any[]) => Promise<any>) {
@@ -743,7 +743,7 @@ export class OptimizedStrategyBacktest {
         const nextDay = this.tradeDays[i + 1];
         onProgress?.(`[${i + 1}/${totalDays}] ${today} 生成交易信号...`, Math.round(currentBase + dayPercentStep * 0.3));
         console.log(`[OptBacktest] [${today}] 阶段2: 生成交易信号 (次日执行: ${nextDay})`);
-        if (await this.generateSignals(today, nextDay, dataProvider, (msg, pct) => {
+        if (await this.generateSignals(today, nextDay, dataProvider, currentBase, dayPercentStep, (msg, pct) => {
           onProgress?.(msg, pct ?? Math.round(currentBase + dayPercentStep * 0.6));
         })) {
           onProgress?.('回测已取消', 100);
@@ -899,6 +899,8 @@ export class OptimizedStrategyBacktest {
     today: string,
     nextDay: string,
     dataProvider: StrategyDataProvider,
+    currentBase: number,        
+    dayPercentStep: number,    
     onProgress?: (message: string, percent?: number) => void
   ): Promise<boolean> {
     // 2-1: 处理持仓卖出信号
@@ -1070,17 +1072,48 @@ export class OptimizedStrategyBacktest {
 
     console.log(`[OptBacktest] [${today}] 共 ${batchTasks.length} 个batch进入策略优化，总计 ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只`);
 
-    // 步骤B：并行执行所有batch的策略优化（CPU密集型，多Worker并行）
-    onProgress?.(`[${today}] 并行策略优化 ${batchTasks.length} 个batch...`);
+        // 步骤B：并行执行所有batch的策略优化（CPU密集型，多Worker并行）
+    const totalBatches = batchTasks.length;
+    let completedBatches = 0;
     
-    const optimizePromises = batchTasks.map(b => 
-      this.workerExecutor 
+    // 计算这个阶段能分配的进度条范围（原来占 dayPercentStep 的 30%）
+    const batchPhaseStartPercent = Math.round(currentBase + dayPercentStep * 0.3);
+    const batchPhaseEndPercent = Math.round(currentBase + dayPercentStep * 0.6);
+    const batchPercentRange = batchPhaseEndPercent - batchPhaseStartPercent;
+    
+    onProgress?.(`[${today}] 并行策略优化 ${totalBatches} 个batch...`, batchPhaseStartPercent);
+    console.log(`[OptBacktest] [${today}] 启动并行优化: ${totalBatches} 个batch, ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只股票`);
+
+    const optimizePromises = batchTasks.map((b, batchIndex) => {
+      const basePromise = this.workerExecutor 
         ? this.workerExecutor('batchBacktestOptimize', [b.klinesList])
         : Promise.resolve(b.klinesList.map(klines => ({
             macdResults: optimizeMACDStrategy(klines),
             rsiResults: optimizeRSIStrategy(klines, [6, 12, 24]),
-          })))
-    );
+          })));
+
+      return basePromise
+        .then(result => {
+          completedBatches++;
+          const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
+          onProgress?.(
+            `[${today}] 策略优化进度 ${completedBatches}/${totalBatches} batch (${Math.round(completedBatches/totalBatches*100)}%)`,
+            pct
+          );
+          return result;
+        })
+        .catch(err => {
+          completedBatches++;
+          const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
+          onProgress?.(
+            `[${today}] 策略优化进度 ${completedBatches}/${totalBatches} batch (失败)`,
+            pct
+          );
+          console.error(`[OptBacktest] [${today}] batch ${batchIndex} [${b.batchStart}-${b.batchStart + b.batch.length}] 优化失败:`, err);
+          // 返回空结果，避免单个batch失败导致整个回测中断
+          return b.klinesList.map(() => ({ macdResults: [], rsiResults: [] }));
+        });
+    });
 
     const allOptimizeResults = await Promise.all(optimizePromises);
     console.log(`[OptBacktest] [${today}] 所有batch策略优化完成`);

@@ -475,7 +475,12 @@ export function batchBacktestOptimize(klinesBatch: Stock.KLineItem[][]) {
   const results = klinesBatch.map((klines, i) => {
     const macdResults = BacktestEngine.optimizeMACDStrategy(klines);
     const rsiResults = BacktestEngine.optimizeRSIStrategy(klines, [6, 12, 24]);
-    bridgeProgressLog(`[info] Worker 批量策略优化进度: ${i + 1}/${klinesBatch.length}`);
+    
+    // 每5只或最后一只发进度，让用户看到Worker没卡死
+    if ((i + 1) % 5 === 0 || i === klinesBatch.length - 1) {
+      bridgeProgressLog(`[info] Worker 批量策略优化进度: ${i + 1}/${klinesBatch.length}`);
+    }
+    
     return { macdResults, rsiResults };
   });
   bridgeProgressLog(`[info] Worker 批量策略优化完成`);
