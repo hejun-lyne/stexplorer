@@ -1092,14 +1092,8 @@ export class OptimizedStrategyBacktest {
             macdResults: optimizeMACDStrategy(klines),
             rsiResults: optimizeRSIStrategy(klines, [6, 12, 24]),
           })));
-      
-      // 渲染进程超时保护：无论Worker如何卡住，30秒后必定返回（避免无限挂起）
-      const basePromise = Promise.race([
-        workerPromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('WorkerExecutor timeout after 30s')), 300000))
-      ]);
 
-      return basePromise
+      return workerPromise
         .then(result => {
           completedBatches++;
           console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化完成 (${completedBatches}/${totalBatches})`);
