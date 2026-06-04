@@ -73,6 +73,9 @@ def convert_secid_to_ts_code(secid: str) -> str:
     """将 secid 转换为 tushare 的 ts_code 格式"""
     if "." in secid:
         mk, code = secid.split(".")
+        # 东财指数/板块：market == 2，使用 .DC 后缀（如 931068.DC）
+        if mk == "2":
+            return f"{code}.DC"
         if mk == "1" or code.startswith("6"):
             return f"{code}.SH"
         else:
@@ -121,7 +124,7 @@ def is_board_code(secid: str) -> bool:
 
 
 def is_index_code(secid: str) -> bool:
-    """判断是否为指数代码（上证指数、深证指数、创业板指等）"""
+    """判断是否为指数代码（上证指数、深证指数、创业板指、东财指数等）"""
     if "." in secid:
         mk, code = secid.split(".")
         # 深市指数：399xxx（如创业板指 399006，深证成指 399001）
@@ -130,6 +133,14 @@ def is_index_code(secid: str) -> bool:
         # 沪市指数：000xxx 系列且 market == 1（如上证指数 1.000001，中证500 1.000905）
         # 注意：000xxx 深市个股 market == 0（如平安银行 0.000001）
         if code.startswith("000") and mk == "1":
+            return True
+        # 东财指数：market == 2（如消费龙头 2.931068）
+        if mk == "2":
+            return True
+        # 其他指数（国证、中证等）：market == 0/1 且以 9 开头的 6 位数字代码
+        # 如 0.980017（国证芯片）、1.930606（中证创新药）等
+        # A 股个股代码不以 9 开头，因此不会误判
+        if mk in ("0", "1") and code.startswith("9") and len(code) == 6 and code.isdigit():
             return True
     return False
 
