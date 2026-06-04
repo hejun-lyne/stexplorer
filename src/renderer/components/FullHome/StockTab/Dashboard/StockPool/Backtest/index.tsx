@@ -24,9 +24,6 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
     private boardCache: Map<string, Stock.BoardItem | null> = new Map();
     private allBoardsCache: Map<string, Array<{ code: string; name: string; zf: number }>> = new Map();
     private boardStocksCache: Map<string, Array<{ secid: string; zf: number }>> = new Map();
-    private kLinesCache: Map<string, Stock.KLineItem[]> = new Map();
-    private strongStocksRawCache: Map<string, any[]> = new Map();
-    private hasPreloaded = false;
 
     private getBoardCacheKey(name: string, endDate: string): string {
         return `${name}|${endDate}`;
@@ -40,113 +37,8 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
         return `${boardCode}|${date}`;
     }
 
-    // ===== 数据预加载 =====
-    async preload(tradeDays: string[], onProgress?: (message: string, percent?: number) => void) {
-      if (this.hasPreloaded || tradeDays.length === 0) return;
-      console.log(`[DataProvider] ====== 开始数据预加载 ======`);
-      const totalDays = tradeDays.length;
-
-      // 1. 计算所有需要获取强势股票的日期（每个交易日往前 5-10 个交易日）
-      onProgress?.('计算需要预加载的日期...', 0);
-      const allStrongDates = new Set<string>();
-      for (const today of tradeDays) {
-        const rawDates: string[] = [];
-        const base = moment(today, 'YYYY-MM-DD');
-        for (let d = 1; d <= 40; d++) {
-          rawDates.push(base.clone().subtract(d, 'days').format('YYYY-MM-DD'));
-        }
-        const validTradeDays = await this.filterTradeDays(rawDates);
-        const strongStockDays = validTradeDays.slice(4, 10);
-        strongStockDays.forEach(d => allStrongDates.add(d));
-      }
-      console.log(`[DataProvider] 需要预加载强势股票日期: ${allStrongDates.size} 天`);
-
-      // 2. 并行获取所有日期的原始强势股票
-      onProgress?.(`预加载强势股票 (${allStrongDates.size} 天)...`, 5);
-      const strongDateArray = Array.from(allStrongDates);
-      const strongResults = await Promise.allSettled(
-        strongDateArray.map(async date => {
-          const queryDate = date.replace(/-/g, '');
-          const result = await Helpers.Stock.LoadSingleDateQS(queryDate, undefined, -1);
-          const processed = this.processStrongStocks(result.stocks);
-          return { date, stocks: processed };
-        })
-      );
-
-      const allSecids = new Set<string>();
-      let loadedStrongCount = 0;
-      for (const result of strongResults) {
-        if (result.status === 'fulfilled') {
-          const { date, stocks } = result.value;
-          this.strongStocksRawCache.set(date, stocks);
-          stocks.forEach((s: any) => { if (s.secid) allSecids.add(s.secid); });
-          loadedStrongCount++;
-        }
-      }
-      console.log(`[DataProvider] 强势股票预加载完成: ${loadedStrongCount}/${strongDateArray.length} 天, 涉及 ${allSecids.size} 只股票`);
-      onProgress?.(`预加载 K 线 (${allSecids.size} 只股票)...`, 10);
-
-      // 3. 分批次并行获取所有股票的完整 K 线
-      const secidArray = Array.from(allSecids);
-      const kLineBatchSize = 20;
-      let loadedKCount = 0;
-      for (let i = 0; i < secidArray.length; i += kLineBatchSize) {
-        const batch = secidArray.slice(i, i + kLineBatchSize);
-        await Promise.all(
-          batch.map(async secid => {
-            try {
-              const kResult = await Services.Stock.GetKFromDataSource(Enums.FundApiType.Tushare, secid, Enums.KLineType.Day, 250);
-              if (kResult.ks && kResult.ks.length > 0) {
-                this.kLinesCache.set(secid, kResult.ks);
-              }
-            } catch (e) {
-              console.error(`[DataProvider] K线预加载失败 ${secid}:`, e);
-            }
-          })
-        );
-        loadedKCount += batch.length;
-        const pct = 10 + Math.round((loadedKCount / secidArray.length) * 85);
-        onProgress?.(`预加载 K 线 ${loadedKCount}/${secidArray.length}...`, pct);
-      }
-
-      this.hasPreloaded = true;
-      onProgress?.('数据预加载完成', 100);
-      console.log(`[DataProvider] ====== 数据预加载完成 | K线: ${this.kLinesCache.size} 只 | 强势股票: ${this.strongStocksRawCache.size} 天 ======`);
-    }
-
-    private processStrongStocks(rawStocks: any[]): Stock.DetailItem[] {
-      // const bkCount = new Map<string, number>();
-      const filteredStocks = rawStocks.filter((s: any) => {
-        const code = s.secid?.split('.')[1] || '';
-        if (code.startsWith('688') || code.startsWith('689')) return false;
-        if (code.startsWith('8') || code.startsWith('9')) return false;
-        // const bk = s.hybk || '';
-        // const count = bkCount.get(bk) || 0;
-        // if (count >= 5) return false;
-        // bkCount.set(bk, count + 1);
-        return true;
-      });
-      return filteredStocks.map((s: any) => ({
-        secid: s.secid,
-        name: s.name,
-        zdf: s.zdf,
-        zx: s.zx,
-        bk: s.hybk,
-        lt: (s.ltsz / 100000000)
-      } as Stock.DetailItem));
-    }
-
     async getStrongStocks(date: string): Promise<Stock.DetailItem[]> {
       try {
-        // 优先从预加载缓存读取
-        const cachedRaw = this.strongStocksRawCache.get(date);
-        if (cachedRaw !== undefined) {
-          console.log(`[DataProvider] 强势股票缓存命中: ${date}, 原始 ${cachedRaw.length} 只`);
-          // const processed = this.processStrongStocks(cachedRaw);
-          // console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${processed.length} 只 (缓存)`);
-          return cachedRaw;
-        }
-
         const queryDate = date.replace(/-/g, '');
         console.log(`[DataProvider] 获取强势股票: ${date} -> ${queryDate}`);
         const result = await Helpers.Stock.LoadSingleDateQS(queryDate, undefined, -1);
@@ -154,31 +46,34 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
         if (!result.stocks) {
           return Promise.reject('数据未准备好');
         }
-        const processed = this.processStrongStocks(result.stocks);
-        console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${processed.length} 只`);
-        return processed;
+        const bkCount = new Map<string, number>();
+        const filteredStocks = result.stocks.filter((s: any) => {
+          const code = s.secid?.split('.')[1] || '';
+          if (code.startsWith('688') || code.startsWith('689')) return false;
+          if (code.startsWith('8') || code.startsWith('9')) return false;
+          const bk = s.hybk || '';
+          const count = bkCount.get(bk) || 0;
+          if (count >= 5) return false;
+          bkCount.set(bk, count + 1);
+          return true;
+        });
+        console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${filteredStocks.length} 只`);
+        return Promise.resolve(filteredStocks.map((s: any) => ({ 
+          secid: s.secid, 
+          name: s.name,
+          zdf: s.zdf,
+          zx: s.zx,
+          bk: s.hybk, 
+          lt: (s.ltsz / 100000000) 
+        } as Stock.DetailItem)));
       } catch (e) {
         console.error(`[DataProvider] 获取强势股票失败 ${date}:`, e);
         return [];
-      }
+      } 
     }
 
     async getKLines(secid: string, endDate: string, days: number = 120): Promise<Stock.KLineItem[] | null> {
       try {
-        // 优先从预加载缓存切片
-        const cached = this.kLinesCache.get(secid);
-        if (cached && cached.length > 0) {
-          const index = cached.findIndex(k => k.date === endDate);
-          if (index !== -1) {
-            const sliced = cached.slice(0, index + 1);
-            if (sliced.length > days) {
-              sliced.splice(0, sliced.length - days);
-            }
-            console.log(`[DataProvider] K线缓存命中: ${secid} 截止${endDate} ${sliced.length}条`);
-            return sliced;
-          }
-        }
-
         console.log(`[DataProvider] 获取K线: ${secid} 截止${endDate} ${days}天`);
         const kResult = await Services.Stock.GetKFromDataSource(Enums.FundApiType.Tushare, secid, Enums.KLineType.Day);
         const index = kResult.ks.findIndex(k => k.date === endDate);
@@ -551,16 +446,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
       try {
         let backtestResult: any;
-
-        // 数据预加载（优化策略受益更大）
-        if (strategyType === 'optimized') {
-          setProgress("正在预加载数据...");
-          setProgressPercent(0);
-          await dataProvider.preload(dates, (msg, pct) => {
-            setProgress(msg);
-            if (pct !== undefined) setProgressPercent(Math.round(pct * 0.15));
-          });
-        }
 
         if (strategyType === 'rsi') {
           const strategy = new RSIStrategy.StrongStockBacktest(dates);
