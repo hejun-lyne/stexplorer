@@ -1,6 +1,7 @@
 import { Stock } from '@/types/stock';
 import { ReadCache, WriteCache } from '@/helpers/backtestCache';
 import dayjs from 'dayjs';
+import { calculateMA, calculateMACD, calculateRSI } from '@/helpers/tech';
 import {
   backtestMABounce,
   optimizeMACDStrategy as computeMACDStrategy,
@@ -755,6 +756,16 @@ export class OptimizedStrategyBacktest {
             } else {
               mergedResults.push(workerResults[workerIdx++]);
             }
+
+            // 更新到缓存
+            const { stock, klines } = b.validItems[idx];
+            const lastDate = klines[klines.length - 1]?.date;
+            if (lastDate) {
+              const macdKey = getCacheKey('macd', stock.secid, lastDate, `0.05_0.06`);
+              const rsiKey = getCacheKey('rsi', stock.secid, lastDate, `6_12_24_0.05_0.06`);
+              WriteCache(macdKey, mergedResults[mergedResults.length - 1].macdResults);
+              WriteCache(rsiKey, mergedResults[mergedResults.length - 1].rsiResults);
+            }
           }
           console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化完成 (${completedBatches}/${totalBatches})`);
           const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
@@ -1154,7 +1165,7 @@ export class OptimizedStrategyBacktest {
 
   private checkRSIBuySignal(klines: Stock.KLineItem[], params: RSIBacktestResult, checkDays: number = 3): number {
     const closes = klines.map(k => k.sp);
-    const rsi = Indicators.calculateRSI(closes, params.rsiPeriod);
+    const rsi = calculateRSI(closes, params.rsiPeriod);
 
     const endIdx = closes.length;
     const startIdx = Math.max(1, endIdx - checkDays);
@@ -1200,7 +1211,7 @@ export class OptimizedStrategyBacktest {
 
   private checkRSISellSignal(klines: Stock.KLineItem[], params: RSIBacktestResult): boolean {
     const closes = klines.map(k => k.sp);
-    const rsi = Indicators.calculateRSI(closes, params.rsiPeriod);
+    const rsi = calculateRSI(closes, params.rsiPeriod);
     const i = closes.length - 1;
 
     if (i < 0 || isNaN(rsi[i])) return false;
