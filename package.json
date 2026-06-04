@@ -45,7 +45,10 @@
     "productName": "STExplorer",
     "appId": "com.electron.jimmy.STExplorer",
     "asar": true,
-    "asarUnpack": "**\\*.{node,dll}",
+    "asarUnpack": [
+      "**\\*.{node,dll}",
+      "dist/main/backtest.worker.js"
+    ],
     "copyright": "Copyright © 2021 jimmy",
     "files": [
       "dist",
@@ -218,6 +221,7 @@
     "terser-webpack-plugin": "^5.1.1",
     "ts-loader": "^9.2.3",
     "ts-node": "^10.0.0",
+    "tsconfig-paths": "^4.2.0",
     "type-of": "^2.0.1",
     "typed-scss-modules": "^4.1.1",
     "typescript": "^4.2.4",

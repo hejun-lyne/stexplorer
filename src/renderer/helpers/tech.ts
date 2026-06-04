@@ -1,7 +1,6 @@
 import { Stock } from '@/types/stock';
 import NP from 'number-precision';
 import {EMA, MACD, FasterRSI, FasterOBV, FasterStochasticOscillator, OpenHighLowCloseVolume, FasterADX, OpenHighLowCloseNumber, FasterCG} from 'trading-signals';
-import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import kdj from 'kdj';
 import { TechIndicatorSeriesNames, TechIndicatorType } from '@/utils/enums';

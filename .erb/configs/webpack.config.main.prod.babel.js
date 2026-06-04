@@ -32,6 +32,7 @@ export default merge(baseConfig, {
   entry: {
     'main.prod': path.join(webpackPaths.srcMainPath, 'main.ts'),
     preload: path.join(webpackPaths.srcMainPath, 'preload.ts'),
+    'backtest.worker': path.join(webpackPaths.srcMainPath, 'backtest.worker.ts'),
   },
 
   output: {
