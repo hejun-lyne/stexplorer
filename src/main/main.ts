@@ -29,6 +29,7 @@ import { PythonShell } from 'python-shell';
 import * as ts from 'typescript';
 import { PromiseWorker } from './promiseWorker';
 import * as localFileStorage from './localFileStorage';
+import os from 'os';
 
 let willQuitApp = false;
 
@@ -282,6 +283,20 @@ function getRetryDelay(error: any, attemptCount: number): number {
   return attemptCount * 3000;
 }
 
+function getOptimalWorkerCount(): number {
+  const cpus = os.cpus();
+  const totalCores = cpus.length; // 逻辑核心数（含超线程）
+  
+  // 策略：逻辑核心数 - 1（留一个给主进程和 UI），至少 4 个
+  const count = Math.max(4, totalCores - 1);
+  
+  // 根据可用内存做保护：每个 Worker 约 50MB，总内存不超过 50%
+  const freeMemMB = os.freemem() / 1024 / 1024;
+  const memLimited = Math.floor(freeMemMB / 80);
+  
+  return Math.min(count, memLimited, 16); // 软上限 16，避免极端情况
+}
+
 async function init() {
   console.log('当前工作目录：' + app.getAppPath());
   lockSingleInstance();
@@ -321,7 +336,7 @@ async function init() {
   }
   // ===== 创建基于 worker_threads 的并行计算池 =====
   const os = require('os');
-  const workerCount = Math.min(Math.max(2, os.cpus().length - 1), 6);
+  const workerCount = getOptimalWorkerCount();
 
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
   let workerPath: string;
