@@ -324,7 +324,7 @@ async function init() {
   const workerPool = new WorkerPool(
     workerWindows,
     (text) => mainWindow.webContents.send('on-console-log', text),
-    (progress) => mainWindow.webContents.send('on-progress-log', progress)
+    (progress) => {} // 不再全局广播进度，避免干扰其他页面；各页面通过各自的 onProgress 回调更新
   );
 
   // 等待所有Worker窗口加载完成，避免消息丢失
