@@ -532,7 +532,7 @@ export function MultiStockDetailPush(restart:boolean) {
       }) => {
         // 更新详情
         if (data.diff) {
-          console.log('Detail push', data.diff);
+          // console.log('Detail push', data.diff);
           const details = Object.values(data.diff).map((d) => {
             const r: Stock.PartDetailItem = { secid: d.f13 + '.' + d.f12 };
             if (d.f12) {
