@@ -57,8 +57,9 @@ class WorkerPool {
     this.onProgress = onProgress;
 
     // 监听Worker返回结果（与 win.worker.ts 的 postMessageOut 对应）
-    ipcMain.on('message-from-worker', (event, payload) => {
+    ipcMain.handle('message-from-worker', (event, payload) => {
       const [msgId, error, result] = payload;
+      console.log(`[WorkerPool] 收到Worker消息 msgId=${msgId}, pending=${this.pending.size}, busy=${this.busy.size}`);
 
       // 日志消息（msgId=1）—— 批量日志数组
       if (msgId === 1) {
@@ -75,19 +76,25 @@ class WorkerPool {
 
       // 任务结果
       const task = this.pending.get(msgId);
-      if (!task) return;
+      if (!task) {
+        console.log(`[WorkerPool] 未找到Task ${msgId}`);
+        return;
+      }
 
       this.pending.delete(msgId);
       const worker = this.workers.find(w => w.webContents === event.sender);
       if (worker) {
         this.busy.delete(worker);
+        console.log(`[WorkerPool] Task ${msgId} 完成，Worker释放 (busy: ${this.busy.size}/${this.workers.length})`);
         // 异步触发队列，让空闲Worker立即领取新任务
         setImmediate(() => this.processQueue());
       }
 
       if (error) {
+        console.error(`[WorkerPool] Task ${msgId} 失败:`, error.message);
         task.reject(new Error(error.message || 'Worker execution failed'));
       } else {
+        console.log(`[WorkerPool] Task ${msgId} 成功返回`);
         task.resolve(result);
       }
     });
@@ -100,6 +107,7 @@ class WorkerPool {
       const task = { id, method, args, resolve, reject };
       this.pending.set(id, task);
       this.queue.push(task);
+      console.log(`[WorkerPool] Task ${id} (${method}) 入队，队列长度: ${this.queue.length}`);
       this.processQueue();
     });
   }
@@ -107,16 +115,34 @@ class WorkerPool {
   private processQueue() {
     while (this.queue.length > 0) {
       const worker = this.workers.find(w => !this.busy.has(w));
-      if (!worker) break; // 全部繁忙，等待
+      if (!worker) {
+        console.log(`[WorkerPool] 无空闲Worker，队列剩余: ${this.queue.length}`);
+        break; // 全部繁忙，等待
+      }
+
+      // 检查Worker窗口是否已加载完成，避免消息丢失
+      if (worker.webContents.isLoadingMainFrame()) {
+        console.log(`[WorkerPool] Worker仍在加载中，暂停分发，队列剩余: ${this.queue.length}`);
+        break;
+      }
 
       const task = this.queue.shift()!;
       this.busy.add(worker);
+      console.log(`[WorkerPool] Task ${task.id} (${task.method}) 分发给Worker (busy: ${this.busy.size}/${this.workers.length})`);
 
-      worker.webContents.send('execute-worker-task', {
-        taskId: task.id,
-        method: task.method,
-        args: task.args
-      });
+      try {
+        worker.webContents.send('execute-worker-task', {
+          taskId: task.id,
+          method: task.method,
+          args: task.args
+        });
+      } catch (e) {
+        console.error(`[WorkerPool] Task ${task.id} 发送失败:`, e);
+        this.busy.delete(worker);
+        // 放回队列重试
+        this.queue.unshift(task);
+        break;
+      }
     }
   }
 
@@ -268,9 +294,31 @@ async function init() {
   console.log(`[Main] 启动 ${workerCount} 个并行Worker窗口`);
   
   const workerWindows: Electron.BrowserWindow[] = [];
+  const workerReadyPromises: Promise<void>[] = [];
   for (let i = 0; i < workerCount; i++) {
     const w = creatWorkerWindow(false);
     workerWindows.push(w);
+    workerReadyPromises.push(new Promise<void>((resolve) => {
+      // 转发Worker控制台日志到主进程，便于诊断
+      w.webContents.on('console-message', (event, level, message, line, sourceId) => {
+        const levelStr = ['verbose', 'info', 'warning', 'error'][level] || 'log';
+        console.log(`[Worker${i + 1} Console ${levelStr}] ${message}`);
+      });
+      // 监听渲染进程崩溃
+      w.webContents.on('render-process-gone', (event, details) => {
+        console.error(`[Main] Worker ${i + 1} 渲染进程崩溃:`, details);
+      });
+      // 如果已经加载完成，直接resolve
+      if (!w.webContents.isLoadingMainFrame()) {
+        console.log(`[Main] Worker ${i + 1}/${workerCount} 已经加载完成`);
+        resolve();
+        return;
+      }
+      w.webContents.on('did-finish-load', () => {
+        console.log(`[Main] Worker ${i + 1}/${workerCount} 加载完成`);
+        resolve();
+      });
+    }));
   }
 
   const workerPool = new WorkerPool(
@@ -278,6 +326,10 @@ async function init() {
     (text) => mainWindow.webContents.send('on-console-log', text),
     (progress) => mainWindow.webContents.send('on-progress-log', progress)
   );
+
+  // 等待所有Worker窗口加载完成，避免消息丢失
+  await Promise.all(workerReadyPromises);
+  console.log(`[Main] 所有 ${workerCount} 个Worker窗口已就绪，开始暴露接口`);
 
   // 暴露并行Worker接口给Renderer
   ipcMain.handle('worker-pool-execute', async (event, method: string, args: any[]) => {

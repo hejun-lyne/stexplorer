@@ -7,9 +7,20 @@ import * as Tech from '@/helpers/tech';
 import * as BacktestEngine from '@/helpers/backtestEngine';
 import { Stock } from '@/types/stock';
 import * as Enums from '@/utils/enums';
+
+// Worker模块加载诊断：确认这行日志能输出到Worker控制台
+console.log('[Worker] win.worker.ts 模块开始加载');
+
+// 防御性检查：确保 preload 正确注入
+if (typeof window === 'undefined' || !(window as any).contextModules) {
+  console.error('[Worker] CRITICAL: window.contextModules 不存在，preload.js 可能未加载！');
+  throw new Error('window.contextModules is undefined - preload script not loaded');
+}
 const { ipcRenderer } = window.contextModules.electron;
+console.log('[Worker] ipcRenderer 获取成功');
 
 export function postMessageOut(messageId: number, error: any, result?: any) {
+  console.log(`[Worker] postMessageOut msgId=${messageId}, hasError=${!!error}`);
   if (error) {
     /* istanbul ignore else */
     if (typeof console !== 'undefined' && 'error' in console) {
@@ -512,12 +523,14 @@ ipcRenderer.on('execute-worker-task', async (event, payload: { taskId: number; m
     getFilteredStocks,
   };
   
+  console.log(`[Worker] 收到任务 taskId=${taskId}, method=${method}, args长度=${args?.length || 0}`);
   try {
     const fn = methodMap[method];
     if (typeof fn !== 'function') {
       throw new Error(`Worker method "${method}" not found. Available: ${Object.keys(methodMap).join(', ')}`);
     }
     const result = await fn(...(args || []));
+    console.log(`[Worker] 任务 taskId=${taskId} 执行完成，准备返回结果`);
     postMessageOut(taskId, null, result);
   } catch (e: any) {
     console.error(`[Worker] Task ${taskId} (${method}) failed:`, e);

@@ -464,6 +464,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           backtestResult = await strategy.run(
             dataProvider,
             (msg, pct) => {
+              console.log(`[UI] ${strategyName}回测进度: ${msg} ${pct !== undefined ? `(${pct}%)` : ''}`);
               setProgress(msg);
               if (pct !== undefined) setProgressPercent(pct);
             },

@@ -93,6 +93,9 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
                     'message-from-worker',
                     'on-console-log',
                     'on-progress-log',
+                    'download-video-progress',
+                    'kimi-analysis-chunk',
+                    'kimi-tool-request',
                 ];
                 if (validChannels.includes(channel)) {
                     return electron_1.ipcRenderer.on(channel, func);
@@ -133,6 +136,7 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
             writeText: electron_1.clipboard.writeText,
             writeImage: function (dataUrl) { return electron_1.clipboard.writeImage(electron_1.nativeImage.createFromDataURL(dataUrl)); }
         },
+        downloadVideo: function (url, savePath) { return electron_1.ipcRenderer.invoke('download-video', { url: url, savePath: savePath }); },
         saveImage: function (filePath, dataUrl) {
             var imageBuffer = (0, util_1.base64ToBuffer)(dataUrl);
             fs.writeFileSync(filePath, imageBuffer);
@@ -357,6 +361,86 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
             return __awaiter(this, void 0, void 0, function () {
                 return __generator(this, function (_a) {
                     return [2 /*return*/, electron_1.ipcRenderer.invoke('sqlite-backup', { backupPath: backupPath })];
+                });
+            });
+        },
+        // 获取本地存储路径
+        getLocalStoragePath: function () {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('get-local-storage-path')];
+                });
+            });
+        },
+        // 设置自定义本地存储路径
+        setLocalStoragePath: function (dirPath) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('set-local-storage-path', { dirPath: dirPath })];
+                });
+            });
+        },
+        // 获取本地存储所有文件内容
+        getLocalStorageFiles: function () {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('get-local-storage-files')];
+                });
+            });
+        },
+        // 导出本地存储数据
+        exportLocalStorage: function () {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('local-storage-export')];
+                });
+            });
+        },
+        // 导入本地存储数据
+        importLocalStorage: function (data) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('local-storage-import', { data: data })];
+                });
+            });
+        },
+        // 导出本地存储数据到指定文件路径
+        exportLocalStorageToFile: function (filePath) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('local-storage-export-to-file', { filePath: filePath })];
+                });
+            });
+        },
+        // 从指定文件路径导入本地存储数据
+        importLocalStorageFromFile: function (filePath) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('local-storage-import-from-file', { filePath: filePath })];
+                });
+            });
+        },
+        // QSList 备份读取
+        readQSListBackup: function (date) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('qslist-backup-read', { date: date })];
+                });
+            });
+        },
+        // QSList 备份写入
+        writeQSListBackup: function (date, data) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('qslist-backup-write', { date: date, data: data })];
+                });
+            });
+        },
+        // QSList 备份列表
+        listQSListBackups: function () {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    return [2 /*return*/, electron_1.ipcRenderer.invoke('qslist-backup-list')];
                 });
             });
         }

@@ -1085,16 +1085,24 @@ export class OptimizedStrategyBacktest {
     console.log(`[OptBacktest] [${today}] 启动并行优化: ${totalBatches} 个batch, ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只股票`);
 
     const optimizePromises = batchTasks.map((b, batchIndex) => {
-      const basePromise = this.workerExecutor 
+      console.log(`[OptBacktest] [${today}] batch ${batchIndex} [${b.batchStart}-${b.batchStart + b.batch.length}] 开始优化，${b.klinesList.length} 只股票`);
+      const workerPromise = this.workerExecutor 
         ? this.workerExecutor('batchBacktestOptimize', [b.klinesList])
         : Promise.resolve(b.klinesList.map(klines => ({
             macdResults: optimizeMACDStrategy(klines),
             rsiResults: optimizeRSIStrategy(klines, [6, 12, 24]),
           })));
+      
+      // 渲染进程超时保护：无论Worker如何卡住，30秒后必定返回（避免无限挂起）
+      const basePromise = Promise.race([
+        workerPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('WorkerExecutor timeout after 30s')), 300000))
+      ]);
 
       return basePromise
         .then(result => {
           completedBatches++;
+          console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化完成 (${completedBatches}/${totalBatches})`);
           const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
           onProgress?.(
             `[${today}] 策略优化进度 ${completedBatches}/${totalBatches} batch (${Math.round(completedBatches/totalBatches*100)}%)`,
@@ -1104,6 +1112,7 @@ export class OptimizedStrategyBacktest {
         })
         .catch(err => {
           completedBatches++;
+          console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化失败 (${completedBatches}/${totalBatches})`);
           const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
           onProgress?.(
             `[${today}] 策略优化进度 ${completedBatches}/${totalBatches} batch (失败)`,
@@ -1115,6 +1124,7 @@ export class OptimizedStrategyBacktest {
         });
     });
 
+    console.log(`[OptBacktest] [${today}] 等待 ${optimizePromises.length} 个batch完成...`);
     const allOptimizeResults = await Promise.all(optimizePromises);
     console.log(`[OptBacktest] [${today}] 所有batch策略优化完成`);
 

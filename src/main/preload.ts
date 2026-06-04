@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('contextModules', {
           'close-current-tab',
           'message-to-worker',
           'message-from-worker',
+          'execute-worker-task',
           'on-console-log',
           'on-progress-log',
           'download-video-progress',
