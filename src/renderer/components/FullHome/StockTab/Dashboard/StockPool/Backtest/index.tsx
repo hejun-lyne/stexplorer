@@ -366,11 +366,11 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
     // 优化策略参数
     const [initialCapital, setInitialCapital] = useState(1000000);
-    const [maxPositions, setMaxPositions] = useState(8);
-    const [positionRatio, setPositionRatio] = useState(0.125);
+    const [maxPositions, setMaxPositions] = useState(5);
+    const [positionRatio, setPositionRatio] = useState(0.2);
     const [stopLossInitPct, setStopLossInitPct] = useState(0.95);
-    const [trailingStopPct, setTrailingStopPct] = useState(0.90);
-    const [minStrategyScore, setMinStrategyScore] = useState(100);
+    const [trailingStopPct, setTrailingStopPct] = useState(0.95);
+    const [minStrategyScore, setMinStrategyScore] = useState(90);
     const [strongLookbackStart, setStrongLookbackStart] = useState(10);
     const [strongLookbackEnd, setStrongLookbackEnd] = useState(5);
 
