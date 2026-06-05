@@ -50,6 +50,7 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
           const code = s.secid?.split('.')[1] || '';
           if (code.startsWith('688') || code.startsWith('689')) return false;
           if (code.startsWith('8') || code.startsWith('9')) return false;
+          if (s.zx < 10000 || s.zx > 100000) return false;
           return true;
         });
         console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${filteredStocks.length} 只`);
@@ -470,6 +471,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           const parallelWorkerExecutor = (method: string, args?: any[]) =>  ipcRenderer.invoke('worker-pool-execute', method, args);
 
           // 传入回测引擎（替换原来的单workerExecutor）
+          const { workerCount } = await ipcRenderer.invoke('get-worker-info');
           const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, initialCapital, parallelWorkerExecutor, {
             stopLossInitPct,
             trailingStopPct,
@@ -478,6 +480,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             strongLookbackEnd,
             maxPositions,
             positionRatio,
+            workerCount,
           });
           backtestResult = await strategy.run(
             dataProvider,

@@ -700,6 +700,7 @@ async function synthesizeBoardKline(secid: string, code: number): Promise<Stock.
   }
 }
 
+let s_tradeDates: string[] = [];
 export async function GetKFromDataSource(source:Enums.FundApiType, secid: string, code: number, limit?: number) {
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
@@ -716,29 +717,30 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
     const today = now.format('YYYY-MM-DD');
     const year = now.format('YYYY');
 
-    let tradeDates: string[] = [];
-    if (source === Enums.FundApiType.Tushare) {
-      tradeDates = await TushareAPI.GetTradeDatesFromTushare(year);
-      if (tradeDates.length === 0) {
-        const prevYear = (parseInt(year) - 1).toString();
-        tradeDates = await TushareAPI.GetTradeDatesFromTushare(prevYear);
-      }
-    } else {
-      tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(year);
-      if (tradeDates.length === 0) {
-        const prevYear = (parseInt(year) - 1).toString();
-        tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(prevYear);
+    if (s_tradeDates.length === 0) {
+      if (source === Enums.FundApiType.Tushare) {
+        s_tradeDates = await TushareAPI.GetTradeDatesFromTushare(year);
+        if (s_tradeDates.length === 0) {
+          const prevYear = (parseInt(year) - 1).toString();
+          s_tradeDates = await TushareAPI.GetTradeDatesFromTushare(prevYear);
+        }
+      } else {
+        s_tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(year);
+        if (s_tradeDates.length === 0) {
+          const prevYear = (parseInt(year) - 1).toString();
+          s_tradeDates = await AkshareAPI.GetTradeDatesFromAkshare(prevYear);
+        }
       }
     }
-
-    const isTodayTradeDay = tradeDates.includes(today);
+    
+    const isTodayTradeDay = s_tradeDates.includes(today);
 
     if (isTodayTradeDay && now.hour() >= 17) {
       return today;
     }
-
-    const prevDates = tradeDates.filter(d => d < today);
-    return prevDates.pop() || today;
+    // s_tradeDates 是倒序的，找到第一个小于今天的日期即为最新交易日
+    const todayIndex = s_tradeDates.findIndex(d => d === today);
+    return todayIndex >= 0 ? s_tradeDates[todayIndex + 1] : today;
   }
 
   // 1. 尝试读取磁盘缓存

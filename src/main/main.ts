@@ -366,6 +366,11 @@ async function init() {
     return workerPool.execute(method, args);
   });
 
+  // [优化] 暴露 Worker 池信息，供 Renderer 动态调整并发
+  ipcMain.handle('get-worker-info', () => {
+    return { workerCount, workerPath };
+  });
+
   // ===== 恢复单 Worker 窗口，兼容 makeWorkerExec 调用 =====
   const legacyWorkerWindow = creatWorkerWindow(false);
   await new Promise<void>((resolve) => {

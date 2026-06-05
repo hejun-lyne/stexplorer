@@ -147,16 +147,35 @@ def is_index_code(secid: str) -> bool:
 
 def _standardize_date(d: Any) -> str:
     """标准化日期格式为 YYYY-MM-DD"""
+    if d is None or d == '':
+        return ''
     if hasattr(d, 'strftime'):
         return d.strftime('%Y-%m-%d')
     if isinstance(d, date):
         return d.strftime('%Y-%m-%d')
     if isinstance(d, datetime):
         return d.strftime('%Y-%m-%d')
-    s = str(d)
+    s = str(d).strip()
+    # YYYYMMDD
     if len(s) == 8 and s.isdigit():
         return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    # YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD 等变体
+    import re
+    m = re.match(r'(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})', s)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
     return s
+
+
+def _parse_date_str(date_str: str) -> Optional[date]:
+    """将日期字符串解析为 datetime.date 对象，解析失败返回 None"""
+    if not date_str:
+        return None
+    standardized = _standardize_date(date_str)
+    try:
+        return datetime.strptime(standardized, '%Y-%m-%d').date()
+    except ValueError:
+        return None
 
 
 def _to_float(val) -> float:
@@ -262,7 +281,7 @@ def _get_expected_last_trade_date(period: str = "daily") -> str:
         if cal_df is None or cal_df.empty:
             return today.strftime('%Y-%m-%d')
 
-        trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())
+        trade_dates = sorted([_standardize_date(d) for d in cal_df['cal_date']])
 
         if period == 'daily':
             return _standardize_date(trade_dates[-1])
@@ -640,12 +659,14 @@ class TushareAPI:
 
         # 检查缓存是否包含最新数据
         if isinstance(cached, list) and cached:
-            last_date = cached[-1].get('date', '')
-            expected_last = _get_expected_last_trade_date(period)
+            last_date_str = cached[-1].get('date', '')
+            expected_last_str = _get_expected_last_trade_date(period)
+            last_date = _parse_date_str(last_date_str)
+            expected_last = _parse_date_str(expected_last_str)
             if last_date and expected_last and last_date >= expected_last:
                 print(f"[K线缓存命中] {secid} {period} 最后日期={last_date} >= 期望={expected_last}")
                 return cached
-            print(f"[K线缓存过期] {secid} {period} 最后日期={last_date} < 期望={expected_last}")
+            print(f"[K线缓存过期] {secid} {period} 最后日期={last_date_str} < 期望={expected_last_str}")
 
         try:
             if is_board_code(secid):

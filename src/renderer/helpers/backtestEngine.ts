@@ -38,8 +38,7 @@ export interface MABacktestResult {
   maxDrawdown: number;
   profitFactor: number;
   score: number;
-  trades: MABacktestTrade[];
-  // 止损参数
+  trades?: MABacktestTrade[];          // [优化] 改为可选，减少 IPC 传输
   fixedStopLossPct: number;
   trailingStopLossPct: number;
   maStopLossPct: number;
@@ -63,7 +62,7 @@ export interface MACDStrategyResult {
   signal: number;
   requireAboveZero: boolean;
   requirePriorNegative: boolean;
-  trades: MACDTrade[];
+  trades?: MACDTrade[];                // [优化] 改为可选
   totalReturn: number;
   winRate: number;
   tradeCount: number;
@@ -72,7 +71,6 @@ export interface MACDStrategyResult {
   maxDrawdown: number;
   profitFactor: number;
   score: number;
-  // 止损参数
   fixedStopLossPct: number;
   trailingStopLossPct: number;
 }
@@ -91,23 +89,27 @@ export interface RSIBacktestTrade {
 }
 
 export interface RSIBacktestResult {
-  rsiPeriod: number;      // 6 / 12 / 24
-  buyThreshold: number;     // 超卖反弹买入阈值
-  sellThreshold: number;    // 超买卖出阈值
-  trades: RSIBacktestTrade[];
-  totalReturn: number;      // 累加收益率（非复利）
+  rsiPeriod: number;
+  buyThreshold: number;
+  sellThreshold: number;
+  trades?: RSIBacktestTrade[];          // [优化] 改为可选
+  totalReturn: number;
   winRate: number;
   tradeCount: number;
   avgReturn: number;
-  maxDrawdown: number;     // 单笔最大亏损
-  profitFactor: number;     // 盈亏比
-  score: number;            // 综合评分
-  // 止损参数
+  maxDrawdown: number;
+  profitFactor: number;
+  score: number;
   fixedStopLossPct: number;
   trailingStopLossPct: number;
 }
 
 export { backtestMABounce } from './backtestCompute';
+
+// [优化] 默认 5ms，确保渲染线程有机会绘制
+function yieldToMain(ms: number = 5) {
+  return new Promise<void>(resolve => setTimeout(resolve, ms));
+}
 
 export async function optimizeMACDStrategy(
   klines: Stock.KLineItem[],
@@ -250,14 +252,59 @@ export class OptimizedStrategyBacktest {
   private initialCapital: number;
   private capital: number;
   private availableCash: number;
-  private positions: Map<string, StrategyPosition> = new Map();
+    private positions: Map<string, StrategyPosition> = new Map();
   private pendingOrders: StrategyPendingOrder[] = [];
   private tradeRecords: StrategyTradeRecord[] = [];
   private dailyValues: StrategyDailyValue[] = [];
   private tradeDays: string[];
   private cancelOptions?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean };
   private workerExecutor?: (method: string, args?: any[]) => Promise<any>;
+  
+  // [优化] 新增：板块数据内存缓存，避免同一天重复 IO
+  private boardCache = new Map<string, Array<{ code: string; name: string; zf: number }>>();
+  private boardStocksCache = new Map<string, Array<{ secid: string; zf: number }>>();
+  
+  // [优化] Worker 并发数，默认 6，与 NodeWorkerPool 的 workerCount 对齐
+  private readonly WORKER_CONCURRENCY: number;
   private filterTradeDaysCache: Map<string, string[]> = new Map();
+
+  /** 限制并发数量并定期让出主线程，避免微任务堆积阻塞 UI */
+  private async runWithConcurrency<T, R>(
+    items: T[],
+    fn: (item: T, index: number) => Promise<R>,
+    concurrency: number
+  ): Promise<PromiseSettledResult<R>[]> {
+    const results: PromiseSettledResult<R>[] = [];
+    for (let i = 0; i < items.length; i += concurrency) {
+      const batch = items.slice(i, i + concurrency);
+      const batchResults = await Promise.allSettled(batch.map((item, idx) => fn(item, i + idx)));
+      results.push(...batchResults);
+      await yieldToMain();
+    }
+    return results;
+  }
+
+  /** 限制并发数量，返回按原顺序排列的结果数组（不吞错误，由 fn 自行 catch） */
+  private async runWithLimit<T, R>(
+    items: T[],
+    fn: (item: T, index: number) => Promise<R>,
+    limit: number
+  ): Promise<R[]> {
+    const results = new Array<R>(items.length);
+    let index = 0;
+
+    const worker = async () => {
+      while (index < items.length) {
+        const i = index++;
+        results[i] = await fn(items[i], i);
+        await yieldToMain();
+      }
+    };
+
+    const workers = Array(Math.min(limit, items.length)).fill(null).map(worker);
+    await Promise.all(workers);
+    return results;
+  }
 
   private MAX_POSITIONS = 8;
   private POSITION_RATIO = 0.125;
@@ -266,7 +313,7 @@ export class OptimizedStrategyBacktest {
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
-  private readonly BATCH_SIZE = 5; // 每批处理的股票数量，控制并发请求量
+  private readonly BATCH_SIZE = 20; // 每批处理的股票数量，控制并发请求量
   private readonly KLINE_DAYS = 150; // 要预留30天用于计算指标
 
   private STOP_LOSS_INIT_PCT = 0.95;
@@ -287,6 +334,7 @@ export class OptimizedStrategyBacktest {
       strongLookbackEnd?: number;
       maxPositions?: number;
       positionRatio?: number;
+      workerCount?: number; // [优化] 新增
     }
   ) {
     this.tradeDays = tradeDays;
@@ -294,6 +342,11 @@ export class OptimizedStrategyBacktest {
     this.capital = initialCapital;
     this.availableCash = initialCapital;
     this.workerExecutor = workerExecutor;
+    
+    // [优化] 根据 Worker 数量动态设置并发，上限 8
+    this.WORKER_CONCURRENCY = workerExecutor 
+      ? Math.min(options?.workerCount || 6, 8) 
+      : 1;
     if (options?.stopLossInitPct !== undefined) this.STOP_LOSS_INIT_PCT = options.stopLossInitPct;
     if (options?.trailingStopPct !== undefined) this.TRAILING_STOP_PCT = options.trailingStopPct;
     if (options?.minStrategyScore !== undefined) this.MIN_STRATEGY_SCORE = options.minStrategyScore;
@@ -384,6 +437,9 @@ export class OptimizedStrategyBacktest {
       }
 
       console.log(`[OptBacktest] [${today}] 日终状态: 持仓 ${this.positions.size} 只 | 净值 ${this.dailyValues[this.dailyValues.length - 1]?.totalValue.toFixed(2)}`);
+
+      // 每天结束后让出主线程，避免连续密集计算阻塞 UI
+      await yieldToMain();
     }
 
     onProgress?.('正在计算回测结果...', 95);
@@ -528,10 +584,14 @@ export class OptimizedStrategyBacktest {
     dayPercentStep: number,    
     onProgress?: (message: string, percent?: number) => void
   ): Promise<boolean> {
+    // [优化] 每天开始时清理昨日板块缓存，避免内存无限增长
+    this.boardCache.clear();
+    this.boardStocksCache.clear();
     // 2-1: 处理持仓卖出信号
     console.log(`[OptBacktest] [${today}] 阶段2-1: 处理持仓卖出信号 ${this.positions.size} 只`);
     onProgress?.(`[${today}] 处理持仓卖出信号...`);
 
+    let sellCheckCount = 0;
     for (const [secid, position] of this.positions) {
       if (this.isCancelled()) return true;
       await this.waitIfPaused();
@@ -589,6 +649,10 @@ export class OptimizedStrategyBacktest {
           reason: sellReason,
           signalDate: today
         });
+      }
+
+      if (++sellCheckCount % 5 === 0) {
+        await yieldToMain();
       }
     }
 
@@ -693,6 +757,8 @@ export class OptimizedStrategyBacktest {
           klinesList: validItems.map(v => v.klines)
         });
       }
+
+      await yieldToMain();
     }
 
     console.log(`[OptBacktest] [${today}] 共 ${batchTasks.length} 个batch进入策略优化，总计 ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只`);
@@ -709,44 +775,57 @@ export class OptimizedStrategyBacktest {
     onProgress?.(`[${today}] 并行策略优化 ${totalBatches} 个batch...`, batchPhaseStartPercent);
     console.log(`[OptBacktest] [${today}] 启动并行优化: ${totalBatches} 个batch, ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只股票`);
 
-    const optimizePromises = batchTasks.map(async (b, batchIndex) => {
-      // 1. 先批量检查缓存，命中则跳过
-      const cacheMap = new Map<number, { macdResults: MACDStrategyResult[]; rsiResults: RSIBacktestResult[] }>();
-      const uncachedValidItems: typeof b.validItems = [];
-      const uncachedKlinesList: Stock.KLineItem[][] = [];
+    console.log(`[OptBacktest] [${today}] 等待 ${totalBatches} 个batch完成...`);
 
-      for (let idx = 0; idx < b.validItems.length; idx++) {
-        const { stock, klines } = b.validItems[idx];
-        const lastDate = klines[klines.length - 1]?.date;
-        if (lastDate) {
-          const macdKey = getCacheKey('macd', stock.secid, lastDate, `0.05_0.06`);
-          const rsiKey = getCacheKey('rsi', stock.secid, lastDate, `6_12_24_0.05_0.06`);
-          const macdCached = await ReadCache<MACDStrategyResult[]>(macdKey);
-          const rsiCached = await ReadCache<RSIBacktestResult[]>(rsiKey);
-          if (macdCached && rsiCached) {
-            cacheMap.set(idx, { macdResults: macdCached, rsiResults: rsiCached });
-            continue;
+    // 使用 runWithLimit 限制并发，避免一次性向 Worker 发送过多请求导致 IPC 拥塞
+    const allOptimizeResults = await this.runWithLimit(
+      batchTasks,
+      async (b, batchIndex) => {
+        // 1. 先批量检查缓存，命中则跳过
+        const cacheMap = new Map<number, { macdResults: MACDStrategyResult[]; rsiResults: RSIBacktestResult[] }>();
+        const uncachedValidItems: typeof b.validItems = [];
+        const uncachedKlinesList: Stock.KLineItem[][] = [];
+
+        for (let idx = 0; idx < b.validItems.length; idx++) {
+          const { stock, klines } = b.validItems[idx];
+          const lastDate = klines[klines.length - 1]?.date;
+          if (lastDate) {
+            const macdKey = getCacheKey('macd', stock.secid, lastDate, `0.05_0.06`);
+            const rsiKey = getCacheKey('rsi', stock.secid, lastDate, `6_12_24_0.05_0.06`);
+            const macdCached = await ReadCache<MACDStrategyResult[]>(macdKey);
+            const rsiCached = await ReadCache<RSIBacktestResult[]>(rsiKey);
+            if (macdCached && rsiCached) {
+              cacheMap.set(idx, { macdResults: macdCached, rsiResults: rsiCached });
+              continue;
+            }
           }
+          uncachedValidItems.push(b.validItems[idx]);
+          uncachedKlinesList.push(klines);
         }
-        uncachedValidItems.push(b.validItems[idx]);
-        uncachedKlinesList.push(klines);
-      }
 
-      const cachedCount = cacheMap.size;
-      const totalCount = b.validItems.length;
-      console.log(`[OptBacktest] [${today}] batch ${batchIndex} 共 ${totalCount} 只，缓存命中 ${cachedCount} 只，实际计算 ${uncachedKlinesList.length} 只`);
+        const cachedCount = cacheMap.size;
+        const totalCount = b.validItems.length;
+        console.log(`[OptBacktest] [${today}] batch ${batchIndex} 共 ${totalCount} 只，缓存命中 ${cachedCount} 只，实际计算 ${uncachedKlinesList.length} 只`);
 
-      // 2. 只把未命中的股票传给 Worker / 主线程计算
-      const workerPromise = this.workerExecutor 
-        ? this.workerExecutor('batchBacktestOptimize', [uncachedKlinesList])
-        : Promise.all(uncachedValidItems.map(async ({ stock, klines }) => ({
-            macdResults: await optimizeMACDStrategy(klines, 0.05, 0.06, stock.secid),
-            rsiResults: await optimizeRSIStrategy(klines, [6, 12, 24], 0.05, 0.06, stock.secid),
-          })));
+        try {
+          // 2. 只把未命中的股票传给 Worker / 主线程计算
+          let workerResults: Array<{ macdResults: MACDStrategyResult[]; rsiResults: RSIBacktestResult[] }>;
+          if (this.workerExecutor) {
+            workerResults = await this.workerExecutor('batchBacktestOptimize', [uncachedKlinesList]);
+          } else {
+            // 主线程执行：串行化并定期 yield，避免长时间阻塞 UI
+            workerResults = [];
+            for (let idx = 0; idx < uncachedValidItems.length; idx++) {
+              const { stock, klines } = uncachedValidItems[idx];
+              const macdResults = optimizeMACDStrategy(klines, 0.05, 0.06, stock.secid);
+              const rsiResults = optimizeRSIStrategy(klines, [6, 12, 24], 0.05, 0.06, stock.secid);
+              workerResults.push({ macdResults, rsiResults });
+              if ((idx + 1) % 2 === 0) {
+                await yieldToMain();
+              }
+            }
+          }
 
-      return workerPromise
-        .then(workerResults => {
-          completedBatches++;
           // 3. 按原始顺序合并缓存结果和 Worker 结果
           const mergedResults: Array<{ macdResults: MACDStrategyResult[]; rsiResults: RSIBacktestResult[] }> = [];
           let workerIdx = 0;
@@ -767,6 +846,7 @@ export class OptimizedStrategyBacktest {
               WriteCache(rsiKey, mergedResults[mergedResults.length - 1].rsiResults);
             }
           }
+          completedBatches++;
           console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化完成 (${completedBatches}/${totalBatches})`);
           const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
           onProgress?.(
@@ -774,8 +854,7 @@ export class OptimizedStrategyBacktest {
             pct
           );
           return mergedResults;
-        })
-        .catch(err => {
+        } catch (err: any) {
           completedBatches++;
           console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化失败 (${completedBatches}/${totalBatches})`);
           const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
@@ -786,11 +865,10 @@ export class OptimizedStrategyBacktest {
           console.error(`[OptBacktest] [${today}] batch ${batchIndex} [${b.batchStart}-${b.batchStart + b.batch.length}] 优化失败:`, err);
           // 返回空结果，避免单个batch失败导致整个回测中断
           return b.validItems.map(() => ({ macdResults: [], rsiResults: [] }));
-        });
-    });
-
-    console.log(`[OptBacktest] [${today}] 等待 ${optimizePromises.length} 个batch完成...`);
-    const allOptimizeResults = await Promise.all(optimizePromises);
+        }
+      },
+      this.WORKER_CONCURRENCY // [优化] 原来是 3，改为动态并发
+    );
     console.log(`[OptBacktest] [${today}] 所有batch策略优化完成`);
 
     // 步骤C：串行处理筛选（保持状态一致性：boardHoldings、positions、MAX_POSITIONS等）
@@ -808,8 +886,9 @@ export class OptimizedStrategyBacktest {
       const b = batchTasks[i];
       const optimizeResults = allOptimizeResults[i];
 
-      const processResults = await Promise.allSettled(
-        b.validItems.map(async (item, idx) => {
+      const processResults = await this.runWithConcurrency(
+        b.validItems,
+        async (item, idx) => {
           const { stock, klines } = item;
           const { macdResults, rsiResults } = optimizeResults[idx];
 
@@ -844,6 +923,9 @@ export class OptimizedStrategyBacktest {
             return { pass: false, reason: '最近3天无买入信号', secid: stock.secid };
           }
 
+          // [优化] 同步计算后立刻让出，避免连续阻塞 UI
+          await yieldToMain(1);
+
           // M-Day判断
           const lastIndex = klines.length - 1;
           const mDayKline = klines[mDayIndex];
@@ -873,7 +955,13 @@ export class OptimizedStrategyBacktest {
           const tDayDate = klines[tDayIndex].date;
 
           let boardCode = null;
-          const boards = await dataProvider.getAllBoards(stock.bk, tDayDate);
+          // [优化] 使用内存缓存避免重复请求
+          let boards = this.boardCache.get(tDayDate);
+          if (!boards) {
+            boards = await dataProvider.getAllBoards(stock.bk, tDayDate);
+            if (boards) this.boardCache.set(tDayDate, boards);
+          }
+          
           if (boards && boards.length > 0) {
             const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
             const boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
@@ -890,7 +978,13 @@ export class OptimizedStrategyBacktest {
           if (strongType === 'limit_up') {
             boardRankPass = true;
           } else {
-            const boardStocks = await dataProvider.getBoardStocks(tDayDate, boardCode, stock.bk);
+            // [优化] 板块成分股缓存
+            const boardStocksKey = `${tDayDate}_${boardCode}`;
+            let boardStocks = this.boardStocksCache.get(boardStocksKey);
+            if (!boardStocks) {
+              boardStocks = await dataProvider.getBoardStocks(tDayDate, boardCode, stock.bk);
+              if (boardStocks) this.boardStocksCache.set(boardStocksKey, boardStocks);
+            }
             if (boardStocks && boardStocks.length > 0) {
               const sortedStocks = boardStocks.sort((a, b) => b.zf - a.zf);
               const stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
@@ -917,7 +1011,8 @@ export class OptimizedStrategyBacktest {
             strategyType: bestType,
             strategyParams: bestResult
           };
-        })
+        },
+        2 // [优化] 从 3 改为 2，降低同步计算堆积
       );
 
       for (const result of processResults) {
@@ -943,6 +1038,8 @@ export class OptimizedStrategyBacktest {
           console.log(`[OptBacktest] [${today}] 批量处理异常:`, result.reason);
         }
       }
+
+      await yieldToMain();
     }
 
     // 2-4: 排序和仓位筛选（保持原有逻辑不变）
@@ -1002,6 +1099,7 @@ export class OptimizedStrategyBacktest {
     let stockValue = 0;
     let positionDetails: Array<{ secid: string; close: number; quantity: number; value: number }> = [];
 
+    let posCount = 0;
     for (const [secid, pos] of this.positions) {
       if (this.isCancelled()) return true;
       await this.waitIfPaused();
@@ -1016,6 +1114,10 @@ export class OptimizedStrategyBacktest {
       } else {
         stockValue += pos.buyAmount;
         positionDetails.push({ secid, close: pos.buyPrice, quantity: pos.quantity, value: pos.buyAmount });
+      }
+
+      if (++posCount % 2 === 0) { // [优化] 从 5 改为 2
+        await yieldToMain();
       }
     }
 
