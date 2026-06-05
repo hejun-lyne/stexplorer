@@ -432,26 +432,34 @@ export class OptimizedStrategyBacktest {
   }
 
   // ===== 阶段1: 执行待处理订单 =====
-  private async executePendingOrders(today: string, dataProvider: StrategyDataProvider): Promise<boolean> {
+    private async executePendingOrders(today: string, dataProvider: StrategyDataProvider): Promise<boolean> {
     if (this.pendingOrders.length === 0) {
       console.log(`[OptBacktest] [${today}] 无待执行订单`);
       return false;
     }
+
+    // [优化] 记录因停牌而跳过的订单，用于统计
+    const skippedOrders: Array<{ secid: string; type: string; reason: string }> = [];
 
     for (const order of this.pendingOrders) {
       if (this.isCancelled()) return true;
       await this.waitIfPaused();
       if (this.isCancelled()) return true;
 
-      const klines = await dataProvider.getKLines(order.secid, today, 1);
+      const klines = await dataProvider.getKLines(order.secid, today, 5);
       if (!klines || klines.length === 0) {
         console.log(`[OptBacktest] [${today}] 订单执行失败: ${order.secid} 未获取到K线数据`);
+        skippedOrders.push({ secid: order.secid, type: order.type, reason: '无K线数据' });
         continue;
       }
 
       const todayKLine = klines.find(k => k.date === today);
+      
+      // [优化] 明确检测停牌：最近K线不是今天，说明今日停牌
       if (!todayKLine) {
-        console.log(`[OptBacktest] [${today}] 订单执行失败: ${order.secid} 未找到当日K线`);
+        const lastKline = klines[klines.length - 1];
+        console.log(`[OptBacktest] [${today}] 订单执行跳过: ${order.secid} 停牌 (最近交易日: ${lastKline?.date || '无'})`);
+        skippedOrders.push({ secid: order.secid, type: order.type, reason: `停牌(最近:${lastKline?.date || '无'})` });
         continue;
       }
 
@@ -469,7 +477,15 @@ export class OptimizedStrategyBacktest {
           console.log(`[OptBacktest] [${today}] 卖出订单忽略: ${order.secid} 无持仓`);
         }
       }
+      
+      // [优化] 每执行/跳过一个订单让出一次，避免订单多的时候卡
+      await yieldToMain(1);
     }
+
+    if (skippedOrders.length > 0) {
+      console.log(`[OptBacktest] [${today}] 跳过订单统计:`, skippedOrders);
+    }
+
     this.pendingOrders = [];
     return false;
   }
