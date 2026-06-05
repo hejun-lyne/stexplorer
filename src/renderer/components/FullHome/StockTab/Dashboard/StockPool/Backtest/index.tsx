@@ -72,10 +72,19 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
       try {
         // console.log(`[DataProvider] 获取K线: ${secid} 截止${endDate} ${days}天`);
         const kResult = await Services.Stock.GetKFromDataSource(Enums.FundApiType.Tushare, secid, Enums.KLineType.Day);
-        const index = kResult.ks.findIndex(k => k.date === endDate);
+        let index = kResult.ks.findIndex(k => k.date === endDate);
         if (index === -1) {
-          console.log(`[DataProvider] ${secid} 未找到日期 ${endDate} 的K线，数据范围: ${kResult.ks[0]?.date} ~ ${kResult.ks[kResult.ks.length - 1]?.date}`);
-          return null;
+          // 这天可能股票停牌，应该往前找最近的交易日
+          for (let i = kResult.ks.length - 1; i >= 0; i--) {
+            if (kResult.ks[i].date < endDate) {
+              index = i;
+              break;
+            }
+          }
+          if (index === -1) {
+            console.log(`[DataProvider] ${secid} 未找到日期 ${endDate} 的K线，数据范围: ${kResult.ks[0]?.date} ~ ${kResult.ks[kResult.ks.length - 1]?.date}`);
+            return null;
+          }
         }
         const sliced = kResult.ks.slice(0, index + 1);
         if (sliced.length > days) {
