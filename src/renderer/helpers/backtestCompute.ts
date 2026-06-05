@@ -1,5 +1,5 @@
 import { Stock } from '@/types/stock';
-import { calculateMACD } from '@/helpers/tech';
+import { calculateMACD, calculateRSI } from '@/helpers/tech';
 import * as Indicators from '@/helpers/tech';
 
 import type {
@@ -488,4 +488,240 @@ export function optimizeRSIStrategy(
   // 按综合评分降序
   allResults.sort((a, b) => b.score - a.score);
   return allResults;
+}
+
+// ===== 纯计算：信号检测与K线形态（可在Worker中运行） =====
+
+export interface ScreenResult {
+  pass: boolean;
+  reason?: string;
+  secid: string;
+  score?: number;
+  bestType?: 'macd' | 'rsi';
+  bestResult?: MACDStrategyResult | RSIBacktestResult;
+  mDayIndex?: number;
+  tDayIndex?: number;
+  mDayDate?: string;
+  tDayDate?: string;
+  strongType?: 'limit_up' | 'new_high_60';
+}
+
+export interface BatchBacktestAndScreenItem {
+  stock: { secid: string; bk: string };
+  klines: Stock.KLineItem[];
+}
+
+export interface BatchBacktestAndScreenResult {
+  macdResults: MACDStrategyResult[];
+  rsiResults: RSIBacktestResult[];
+  screenResult: ScreenResult;
+}
+
+export function checkMACDBuySignal(
+  klines: Stock.KLineItem[],
+  params: MACDStrategyResult,
+  checkDays: number = 3
+): number {
+  const closes = klines.map(k => k.sp);
+  const macd = calculateMACD(closes, params.slow, params.fast, params.signal);
+  const dif = macd.MACD;
+  const dea = macd.signal;
+  const hist = macd.histogram;
+
+  const endIdx = closes.length;
+  const startIdx = Math.max(2, endIdx - checkDays);
+
+  for (let i = startIdx; i < endIdx; i++) {
+    if (isNaN(dif[i]) || isNaN(dea[i])) continue;
+    const goldenCross = dif[i] > dea[i] && dif[i - 1] <= dea[i - 1];
+    if (!goldenCross) continue;
+    if (params.requireAboveZero && (dif[i] <= 0 || dea[i] <= 0)) continue;
+    if (params.requirePriorNegative) {
+      let hadNegative = false;
+      for (let j = Math.max(0, i - 5); j < i; j++) {
+        if (hist[j] < 0) { hadNegative = true; break; }
+      }
+      if (!hadNegative) continue;
+    }
+    if (hist[i] <= 0 || hist[i] <= hist[i - 1]) continue;
+    return i;
+  }
+  return -1;
+}
+
+export function checkRSIBuySignal(
+  klines: Stock.KLineItem[],
+  params: RSIBacktestResult,
+  checkDays: number = 3
+): number {
+  const closes = klines.map(k => k.sp);
+  const rsi = calculateRSI(closes, params.rsiPeriod);
+  const endIdx = closes.length;
+  const startIdx = Math.max(1, endIdx - checkDays);
+
+  for (let i = startIdx; i < endIdx; i++) {
+    if (isNaN(rsi[i]) || isNaN(rsi[i - 1])) continue;
+    let inOversold = false;
+    for (let j = Math.max(0, i - 10); j <= i; j++) {
+      if (rsi[j] <= params.buyThreshold) {
+        inOversold = true;
+        break;
+      }
+    }
+    if (inOversold && rsi[i - 1] <= params.buyThreshold && rsi[i] > params.buyThreshold) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+export function hasLongUpperShadow(kline: Stock.KLineItem): boolean {
+  const bodyTop = Math.max(kline.kp, kline.sp);
+  const upperShadow = kline.zg - bodyTop;
+  const range = kline.zg - kline.zd;
+  if (range <= 0) return false;
+  return (upperShadow / range > 0.5) && (upperShadow / kline.kp > 0.02);
+}
+
+export function isLimitUp(kline: Stock.KLineItem, prevClose: number): boolean {
+  const risePct = (kline.sp - prevClose) / prevClose;
+  const isSealed = Math.abs(kline.zg - kline.sp) / prevClose < 0.005;
+  return risePct >= 0.099 && isSealed;
+}
+
+export function isNewHigh60(klines: Stock.KLineItem[], index: number): boolean {
+  if (index < 1) return false;
+  const currentPrice = klines[index].sp;
+  const startIdx = Math.max(0, index - 60);
+  const maxPrice = Math.max(...klines.slice(startIdx, index).map(k => k.zg));
+  return currentPrice >= maxPrice;
+}
+
+export function detectStrongType(klines: Stock.KLineItem[], index: number): 'limit_up' | 'new_high_60' {
+  const prevClose = klines[index - 1].sp;
+  if (isLimitUp(klines[index], prevClose)) {
+    return 'limit_up';
+  }
+  return 'new_high_60';
+}
+
+export function findTDay(
+  klines: Stock.KLineItem[],
+  strongType: 'limit_up' | 'new_high_60',
+  mDayIndex: number,
+  maxLookback: number = 10
+): number {
+  const startIdx = Math.max(1, mDayIndex - maxLookback);
+  if (strongType === 'limit_up') {
+    for (let i = startIdx; i <= mDayIndex; i++) {
+      const prevClose = klines[i - 1].sp;
+      if (isLimitUp(klines[i], prevClose)) {
+        return i;
+      }
+    }
+  } else {
+    for (let i = startIdx; i <= mDayIndex; i++) {
+      if (isNewHigh60(klines, i)) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+export function batchBacktestAndScreen(
+  items: BatchBacktestAndScreenItem[],
+  backtestParams: { fixedStopLossPct: number; trailingStopLossPct: number },
+  screenParams: { minStrategyScore: number; strongLookbackStart: number; strongLookbackEnd: number }
+): BatchBacktestAndScreenResult[] {
+  const results: BatchBacktestAndScreenResult[] = [];
+
+  for (const item of items) {
+    const { stock, klines } = item;
+
+    const macdResults = optimizeMACDStrategy(klines, backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct);
+    const rsiResults = optimizeRSIStrategy(klines, [6, 12, 24], backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct);
+
+    let bestResult: MACDStrategyResult | RSIBacktestResult | null = null;
+    let bestType: 'macd' | 'rsi' | null = null;
+    let bestScore = 0;
+
+    if (macdResults.length > 0 && macdResults[0].score > bestScore) {
+      bestScore = macdResults[0].score;
+      bestResult = macdResults[0];
+      bestType = 'macd';
+    }
+    if (rsiResults.length > 0 && rsiResults[0].score > bestScore) {
+      bestScore = rsiResults[0].score;
+      bestResult = rsiResults[0];
+      bestType = 'rsi';
+    }
+
+    let screenResult: ScreenResult;
+
+    if (!bestResult || bestScore < screenParams.minStrategyScore) {
+      screenResult = { pass: false, reason: `策略得分不足(${bestScore.toFixed(1)})`, secid: stock.secid };
+    } else {
+      let mDayIndex = -1;
+      if (bestType === 'macd') {
+        mDayIndex = checkMACDBuySignal(klines, bestResult as MACDStrategyResult, 3);
+      } else {
+        mDayIndex = checkRSIBuySignal(klines, bestResult as RSIBacktestResult, 3);
+      }
+
+      if (mDayIndex < 0) {
+        screenResult = { pass: false, reason: '最近3天无买入信号', secid: stock.secid };
+      } else {
+        const lastIndex = klines.length - 1;
+        const mDayKline = klines[mDayIndex];
+
+        let failReason = '';
+        if (mDayIndex < lastIndex) {
+          for (let j = mDayIndex + 1; j <= lastIndex; j++) {
+            if (hasLongUpperShadow(klines[j])) {
+              failReason = `M-Day后出现长上影线(${klines[j].date})`;
+              break;
+            }
+          }
+          if (!failReason) {
+            const mDayEntityLow = Math.min(mDayKline.kp, mDayKline.sp);
+            for (let j = mDayIndex + 1; j <= lastIndex; j++) {
+              if (klines[j].sp < mDayEntityLow) {
+                failReason = `M-Day后跌破实体最低价(${klines[j].date})`;
+                break;
+              }
+            }
+          }
+        }
+
+        if (failReason) {
+          screenResult = { pass: false, reason: failReason, secid: stock.secid };
+        } else {
+          const strongType = detectStrongType(klines, klines.length - 1);
+          const tDayIndex = findTDay(klines, strongType, klines.length - 1, 10);
+          if (tDayIndex < 0) {
+            screenResult = { pass: false, reason: '未找到T-Day', secid: stock.secid };
+          } else {
+            screenResult = {
+              pass: true,
+              secid: stock.secid,
+              score: bestScore,
+              bestType: bestType!,
+              bestResult: bestResult!,
+              mDayIndex,
+              tDayIndex,
+              mDayDate: mDayKline.date,
+              tDayDate: klines[tDayIndex].date,
+              strongType,
+              reason: `${bestType?.toUpperCase()}策略得分${bestScore.toFixed(1)}, M-Day=${mDayKline.date}, T-Day=${klines[tDayIndex].date}`,
+            };
+          }
+        }
+      }
+    }
+
+    results.push({ macdResults, rsiResults, screenResult });
+  }
+
+  return results;
 }

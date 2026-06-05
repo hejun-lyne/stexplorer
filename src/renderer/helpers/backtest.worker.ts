@@ -2,6 +2,7 @@ import {
   backtestMABounce,
   optimizeMACDStrategy,
   optimizeRSIStrategy,
+  batchBacktestAndScreen,
 } from './backtestCompute';
 import type {
   MABacktestResult,
@@ -30,7 +31,6 @@ if (!isNodeWorker) {
 }
 
 // [优化] 精简结果：去掉 trades 数组，减少 IPC 序列化和传输开销
-// backtestEngine.ts 中只使用 score、参数和阈值，不读取 trades
 function liteMA(r: MABacktestResult): MABacktestResult {
   const { trades, ...rest } = r as any;
   return rest;
@@ -68,11 +68,9 @@ async function handleSingleBacktest(data: any) {
 }
 
 messagePort.on('message', async (payload: any) => {
-  // NodeWorkerPool 直接发对象；Web Worker 包装在 event.data 里
   const data = payload.data || payload;
   const { taskId, method, args, type, klines, fixedStopLossPct, trailingStopLossPct } = data;
 
-  // 处理心跳
   if (type === 'ping') {
     messagePort.postMessage(isNodeWorker ? { taskId, result: { type: 'pong' } } : { type: 'pong' });
     return;
@@ -91,6 +89,17 @@ messagePort.on('message', async (payload: any) => {
         });
       }
       messagePort.postMessage({ taskId, result: results });
+    } catch (error: any) {
+      messagePort.postMessage({ taskId, error: { message: error?.message || String(error) } });
+    }
+    return;
+  }
+
+  if (method === 'batchBacktestAndScreen') {
+    const [items, backtestParams, screenParams] = args || [];
+    try {
+      const result = batchBacktestAndScreen(items, backtestParams, screenParams);
+      messagePort.postMessage({ taskId, result });
     } catch (error: any) {
       messagePort.postMessage({ taskId, error: { message: error?.message || String(error) } });
     }
@@ -117,7 +126,6 @@ messagePort.on('message', async (payload: any) => {
     return;
   }
 
-  // 未知格式
   messagePort.postMessage(
     isNodeWorker
       ? { taskId, error: { message: 'Unknown message format' } }

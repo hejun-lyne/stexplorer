@@ -546,13 +546,16 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       [darkMode, lowKey, chartOption]
     );
 
+    const chartOptionRef = useRef(chartOption);
+    chartOptionRef.current = chartOption;
+
     useEffect(() => {
-      if (chartOption && result) {
+      if (chartOptionRef.current && result) {
         const initialCapital = 1000000;
-        const updated = updateNetValueOptions(chartOption, darkMode, result.dailyValues, initialCapital);
+        const updated = updateNetValueOptions(chartOptionRef.current, darkMode, result.dailyValues, initialCapital);
         setChartOption({ ...updated });
       }
-    }, [darkMode, result, chartOption]);
+    }, [darkMode, result]);
 
     const tradeColumns = [
         { title: '日期', dataIndex: 'date', key: 'date', width: 100 },

@@ -37,6 +37,7 @@ const methodMap: Record<string, (...args: any[]) => any> = {
   optimizeMACDStrategy: BacktestCompute.optimizeMACDStrategy,
   optimizeRSIStrategy: BacktestCompute.optimizeRSIStrategy,
   backtestMABounce: BacktestCompute.backtestMABounce,
+  batchBacktestAndScreen: BacktestCompute.batchBacktestAndScreen,
 };
 
 console.log('[Worker] 方法映射就绪，等待任务...');

@@ -6,12 +6,14 @@ import {
   backtestMABounce,
   optimizeMACDStrategy as computeMACDStrategy,
   optimizeRSIStrategy as computeRSIStrategy,
+  batchBacktestAndScreen,
+  type BatchBacktestAndScreenResult,
 } from './backtestCompute';
 
 // ===== 策略优化结果 localStorage 缓存 =====
 const CACHE_PREFIX = 'bt_opt_';
 
-function getCacheKey(type: 'macd' | 'rsi', secid: string, lastDate: string, extra: string): string {
+function getCacheKey(type: 'macd' | 'rsi' | 'screen', secid: string, lastDate: string, extra: string): string {
   return `${CACHE_PREFIX}${type}_${secid}_${lastDate}_${extra}`;
 }
 
@@ -21,7 +23,6 @@ export interface MABacktestTrade {
   sellIndex: number;
   returnPct: number;
   maxDrawdownPct: number;
-  // 止损相关
   stopLossPrice: number;
   exitReason: 'take_profit' | 'stop_loss_fixed' | 'stop_loss_trailing' | 'stop_loss_ma' | 'hold_end';
 }
@@ -38,7 +39,7 @@ export interface MABacktestResult {
   maxDrawdown: number;
   profitFactor: number;
   score: number;
-  trades?: MABacktestTrade[];          // [优化] 改为可选，减少 IPC 传输
+  trades?: MABacktestTrade[]; // [优化] 改为可选，减少 IPC 传输
   fixedStopLossPct: number;
   trailingStopLossPct: number;
   maStopLossPct: number;
@@ -51,7 +52,6 @@ export interface MACDTrade {
   returnPct: number;
   maxDrawdownPct: number;
   holdDays: number;
-  // 止损相关
   stopLossPrice: number;
   exitReason: 'macd_exit' | 'stop_loss_fixed' | 'stop_loss_trailing' | 'hist_shrink';
 }
@@ -62,7 +62,7 @@ export interface MACDStrategyResult {
   signal: number;
   requireAboveZero: boolean;
   requirePriorNegative: boolean;
-  trades?: MACDTrade[];                // [优化] 改为可选
+  trades?: MACDTrade[]; // [优化] 改为可选
   totalReturn: number;
   winRate: number;
   tradeCount: number;
@@ -82,8 +82,7 @@ export interface RSIBacktestTrade {
   buyPrice: number;
   sellPrice: number;
   returnPct: number;
-  maxDrawdownPct: number; // 持仓期最大回撤
-  // 止损相关
+  maxDrawdownPct: number;
   stopLossPrice: number;
   exitReason: 'rsi_overbought' | 'stop_loss_fixed' | 'stop_loss_trailing';
 }
@@ -92,7 +91,7 @@ export interface RSIBacktestResult {
   rsiPeriod: number;
   buyThreshold: number;
   sellThreshold: number;
-  trades?: RSIBacktestTrade[];          // [优化] 改为可选
+  trades?: RSIBacktestTrade[]; // [优化] 改为可选
   totalReturn: number;
   winRate: number;
   tradeCount: number;
@@ -106,7 +105,7 @@ export interface RSIBacktestResult {
 
 export { backtestMABounce } from './backtestCompute';
 
-// [优化] 默认 5ms，确保渲染线程有机会绘制
+/** [优化] 默认让出 5ms，确保渲染线程至少完成一次 paint */
 function yieldToMain(ms: number = 5) {
   return new Promise<void>(resolve => setTimeout(resolve, ms));
 }
@@ -169,25 +168,6 @@ export async function optimizeRSIStrategy(
 }
 
 // ===== 策略优化驱动回测类 =====
-// 1. 获取5-10个交易日前的强势股票集合（去重）
-// 2. 对每只强势股票，调用接口optimizeMACDStrategy\optimizeRSIStrategy取得最佳macd\RSI参数和得分，取得分高的作为最佳策略保存
-// 3. 筛选符合以下条件的股票进入候选列表：
-//    a. 得分超过100分，并且最佳策略测试最近3天出现满足买入条件（MACD金叉或RSI超卖反弹），记录下满足的交易日，标记为M-Day；
-//    b. 如果M-Day是今天，则认为该股票满足技术面条件，继续往下判断；
-//    c. 如果M-Day不是今天，判断M-Day+1到今天是否出现冲高回来k线有长上影线的情况，有则放弃，再判断M-Day+1到今天是否出现收盘价是否跌破M-Day实体最低价，有则放弃；
-//    c. 如果入选条件是涨停，则往前找最多10个交易日内，找到最早出现涨停的交易日，记录下来，标记为T-Day；
-//    d. 如果入选条件是60日新高，则往前找最多10个交易日内，找到最早出现60日新高的交易日，记录下来，标记为T-Day；
-//    e. 获取T-Day所在交易日的板块数据；
-//    f. 如果T-Day板块涨幅在所有板块排名前10%，则认为该股票满足板块驱动条件；
-//    4. 如果T-Day股票在板块涨幅排名前10%，则认为该股票满足板块驱动条件，涨停默认满足；
-// 4. 候选列表根据最佳策略得分排序，再进行筛选：
-//    a. 同一板块的股票最多选2只；
-//    b. 买入金额不超过总资金的12.5%，且不低于5%，优先选满12.5%，如果资金不足则选接近12.5%的金额；
-//    c. 最多选8只股票；
-// 5. 生成买入订单，次日开盘执行；
-// 6. 卖出信号：持仓期间如果出现以下任一情况，次日开盘卖出：
-//    a. 根据买入时使用的最佳策略测试最新k线，如果有卖出信号；
-//    c. 触及止损价（初始止损价为买入价的95%，如果股价创新高，则止损价跟随上涨，保持在最高价的90%）；
 export interface StrategyPosition {
   secid: string;
   boardCode: string;
@@ -252,21 +232,21 @@ export class OptimizedStrategyBacktest {
   private initialCapital: number;
   private capital: number;
   private availableCash: number;
-    private positions: Map<string, StrategyPosition> = new Map();
+  private positions: Map<string, StrategyPosition> = new Map();
   private pendingOrders: StrategyPendingOrder[] = [];
   private tradeRecords: StrategyTradeRecord[] = [];
   private dailyValues: StrategyDailyValue[] = [];
   private tradeDays: string[];
   private cancelOptions?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean };
   private workerExecutor?: (method: string, args?: any[]) => Promise<any>;
-  
+  private filterTradeDaysCache: Map<string, string[]> = new Map();
+
   // [优化] 新增：板块数据内存缓存，避免同一天重复 IO
   private boardCache = new Map<string, Array<{ code: string; name: string; zf: number }>>();
   private boardStocksCache = new Map<string, Array<{ secid: string; zf: number }>>();
-  
-  // [优化] Worker 并发数，默认 6，与 NodeWorkerPool 的 workerCount 对齐
+
+  // [优化] Worker 并发数，动态计算
   private readonly WORKER_CONCURRENCY: number;
-  private filterTradeDaysCache: Map<string, string[]> = new Map();
 
   /** 限制并发数量并定期让出主线程，避免微任务堆积阻塞 UI */
   private async runWithConcurrency<T, R>(
@@ -284,7 +264,7 @@ export class OptimizedStrategyBacktest {
     return results;
   }
 
-  /** 限制并发数量，返回按原顺序排列的结果数组（不吞错误，由 fn 自行 catch） */
+  /** 限制并发数量，返回按原顺序排列的结果数组 */
   private async runWithLimit<T, R>(
     items: T[],
     fn: (item: T, index: number) => Promise<R>,
@@ -313,8 +293,8 @@ export class OptimizedStrategyBacktest {
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
-  private readonly BATCH_SIZE = 20; // 每批处理的股票数量，控制并发请求量
-  private readonly KLINE_DAYS = 150; // 要预留30天用于计算指标
+  private readonly BATCH_SIZE = 20; // [优化] 从 5 改为 20，减少 Worker 调度开销
+  private readonly KLINE_DAYS = 150;
 
   private STOP_LOSS_INIT_PCT = 0.95;
   private TRAILING_STOP_PCT = 0.90;
@@ -342,11 +322,12 @@ export class OptimizedStrategyBacktest {
     this.capital = initialCapital;
     this.availableCash = initialCapital;
     this.workerExecutor = workerExecutor;
-    
+
     // [优化] 根据 Worker 数量动态设置并发，上限 8
-    this.WORKER_CONCURRENCY = workerExecutor 
-      ? Math.min(options?.workerCount || 6, 8) 
+    this.WORKER_CONCURRENCY = workerExecutor
+      ? Math.min(options?.workerCount || 6, 8)
       : 1;
+
     if (options?.stopLossInitPct !== undefined) this.STOP_LOSS_INIT_PCT = options.stopLossInitPct;
     if (options?.trailingStopPct !== undefined) this.TRAILING_STOP_PCT = options.trailingStopPct;
     if (options?.minStrategyScore !== undefined) this.MIN_STRATEGY_SCORE = options.minStrategyScore;
@@ -354,15 +335,16 @@ export class OptimizedStrategyBacktest {
     if (options?.strongLookbackEnd !== undefined) this.STRONG_LOOKBACK_END = options.strongLookbackEnd;
     if (options?.maxPositions !== undefined) this.MAX_POSITIONS = options.maxPositions;
     if (options?.positionRatio !== undefined) this.POSITION_RATIO = options.positionRatio;
-    console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'}`);
+    console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
       TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
-      STRONG_LOOKBACK_START: this.STRONG_LOOKBACK_START,
-      STRONG_LOOKBACK_END: this.STRONG_LOOKBACK_END,
-      MAX_POSITIONS: this.MAX_POSITIONS,
-      POSITION_RATIO: this.POSITION_RATIO,
+      STRONG_LOOKBACK: `${this.STRONG_LOOKBACK_START}-${this.STRONG_LOOKBACK_END}天前`,
+      SLIPPAGE: this.SLIPPAGE,
+      COMMISSION: this.COMMISSION,
+      STAMP_TAX: this.STAMP_TAX,
+      BATCH_SIZE: this.BATCH_SIZE
     });
   }
 
@@ -438,7 +420,6 @@ export class OptimizedStrategyBacktest {
 
       console.log(`[OptBacktest] [${today}] 日终状态: 持仓 ${this.positions.size} 只 | 净值 ${this.dailyValues[this.dailyValues.length - 1]?.totalValue.toFixed(2)}`);
 
-      // 每天结束后让出主线程，避免连续密集计算阻塞 UI
       await yieldToMain();
     }
 
@@ -576,18 +557,18 @@ export class OptimizedStrategyBacktest {
   }
 
   // ===== 阶段2: 生成交易信号 =====
-  private async generateSignals(
+    private async generateSignals(
     today: string,
     nextDay: string,
     dataProvider: StrategyDataProvider,
-    currentBase: number,        
-    dayPercentStep: number,    
+    currentBase: number,
+    dayPercentStep: number,
     onProgress?: (message: string, percent?: number) => void
   ): Promise<boolean> {
-    // [优化] 每天开始时清理昨日板块缓存，避免内存无限增长
     this.boardCache.clear();
     this.boardStocksCache.clear();
-    // 2-1: 处理持仓卖出信号
+
+    // ===== 2-1: 处理持仓卖出信号（数据量小，保留在主线程） =====
     console.log(`[OptBacktest] [${today}] 阶段2-1: 处理持仓卖出信号 ${this.positions.size} 只`);
     onProgress?.(`[${today}] 处理持仓卖出信号...`);
 
@@ -597,7 +578,6 @@ export class OptimizedStrategyBacktest {
       await this.waitIfPaused();
       if (this.isCancelled()) return true;
 
-      // A股是T+1交易，今天买入的不能今天卖出，所以应该过滤掉今天买入的股票 （即持仓时间必须≥1天）
       if (position.buyDate === today) {
         console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: 今日买入的股票`);
         continue;
@@ -610,7 +590,6 @@ export class OptimizedStrategyBacktest {
 
       const currentPrice = klines[klines.length - 1].sp;
 
-      // 更新最高价和移动止损
       if (currentPrice > position.highestPrice) {
         const oldHigh = position.highestPrice;
         position.highestPrice = currentPrice;
@@ -618,7 +597,6 @@ export class OptimizedStrategyBacktest {
         console.log(`[OptBacktest] [${today}] ${secid} 创新高: ${oldHigh.toFixed(2)} → ${currentPrice.toFixed(2)}, 移动止损更新为 ${position.stopLossPrice.toFixed(2)}`);
       }
 
-      // 检查止损
       if (currentPrice < position.stopLossPrice) {
         console.log(`[OptBacktest] [${today}] ${secid} 🔴 止损触发: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
         this.pendingOrders.push({
@@ -630,7 +608,6 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
-      // 检查策略卖出信号
       let hasSellSignal = false;
       let sellReason = '';
       if (position.strategyType === 'macd') {
@@ -651,27 +628,24 @@ export class OptimizedStrategyBacktest {
         });
       }
 
-      if (++sellCheckCount % 5 === 0) {
-        await yieldToMain();
+      if (++sellCheckCount % 1 === 0) {
+        await yieldToMain(1);
       }
     }
 
-    // 2-2: 获取today往前5-10个交易日的强势股票
+    // ===== 2-2: 获取强势股票（限制并发，避免微任务堆积） =====
     const rawDates: string[] = [];
     const base = dayjs(today, 'YYYY-MM-DD');
-    // 生成足够多的自然日（留40天余量应对长假），再过滤出交易日
     for (let d = 1; d <= 40; d++) {
       rawDates.push(base.subtract(d, 'day').format('YYYY-MM-DD'));
     }
 
-    // filterTradeDays 结果缓存（key 为 rawDates 逗号拼接）
     const rawDatesKey = rawDates.join(',');
     let tradeDays = this.filterTradeDaysCache.get(rawDatesKey);
     if (!tradeDays) {
       tradeDays = await dataProvider.filterTradeDays(rawDates);
       this.filterTradeDaysCache.set(rawDatesKey, tradeDays);
     }
-    // 取往前第N-M个交易日（rawDates从近到远，tradeDays也保持此顺序）
     const strongStockDays = tradeDays.slice(this.STRONG_LOOKBACK_END - 1, this.STRONG_LOOKBACK_START);
 
     console.log(`[OptBacktest] [${today}] 阶段2-2: 获取强势股票 ${strongStockDays.join(', ')}`);
@@ -681,38 +655,51 @@ export class OptimizedStrategyBacktest {
     await this.waitIfPaused();
     if (this.isCancelled()) return true;
 
-    // 并行获取所有日期的强势股票
     const strongStocksMap = new Map<string, Stock.DetailItem>();
-    const strongResults = await Promise.allSettled(
-      strongStockDays.map(day => dataProvider.getStrongStocks(day))
+        const strongResults = await this.runWithConcurrency(
+      strongStockDays,
+      async (day) => {
+        try {
+          const stocks = await dataProvider.getStrongStocks(day);
+          return { ok: true as const, stocks, day };
+        } catch (reason: any) {
+          return { ok: false as const, reason, day };
+        }
+      },
+      3
     );
 
-    for (let i = 0; i < strongResults.length; i++) {
-      const result = strongResults[i];
-      const day = strongStockDays[i];
+    let mapSetCount = 0;
+    for (const result of strongResults) {
+      // 外层 Promise.allSettled 结果
       if (result.status === 'fulfilled') {
-        const stocks = result.value;
-        console.log(`[OptBacktest] [${today}] ${day} 强势股票: ${stocks.length} 只`);
-        for (const stock of stocks) {
-          if (!strongStocksMap.has(stock.secid)) {
-            strongStocksMap.set(stock.secid, stock);
+        const inner = result.value; // { ok: true, stocks, day } | { ok: false, reason, day }
+        if (inner.ok) {
+          console.log(`[OptBacktest] [${today}] ${inner.day} 强势股票: ${inner.stocks.length} 只`);
+          for (const stock of inner.stocks) {
+            if (!strongStocksMap.has(stock.secid)) {
+              strongStocksMap.set(stock.secid, stock);
+            }
+            if (++mapSetCount % 50 === 0) {
+              await yieldToMain(1);
+            }
           }
+        } else {
+          console.log(`[OptBacktest] [${today}] 获取 ${inner.day} 强势股票失败:`, inner.reason);
         }
       } else {
-        console.log(`[OptBacktest] [${today}] 获取 ${day} 强势股票失败:`, result.reason);
+        // 理论上不会进这里，因为 fn 内部 catch 了，但保险起见
+        console.log(`[OptBacktest] [${today}] 获取强势股票异常:`, result.reason);
       }
     }
 
     const strongStocks = Array.from(strongStocksMap.values());
     console.log(`[OptBacktest] [${today}] 去重后强势股票共 ${strongStocks.length} 只`);
 
-    // 排除已持仓
     const filteredStocks = strongStocks.filter(s => !this.positions.has(s.secid));
     console.log(`[OptBacktest] [${today}] 排除已持仓后剩余 ${filteredStocks.length} 只`);
 
-    // ===== 2-3: 批量策略优化和筛选（并行化改造） =====
-    
-    // 步骤A：收集所有batch的数据
+    // ===== 2-3: 批量获取K线（限制并发，避免IPC反序列化阻塞） =====
     const batchTasks: Array<{
       batchStart: number;
       batch: Stock.DetailItem[];
@@ -728,22 +715,27 @@ export class OptimizedStrategyBacktest {
       const batch = filteredStocks.slice(batchStart, batchStart + this.BATCH_SIZE);
       onProgress?.(`[${today}] 准备数据 ${Math.min(batchStart + this.BATCH_SIZE, filteredStocks.length)}/${filteredStocks.length}...`);
 
-      // 1. 并行获取K线（IO不阻塞）
-      const klinesBatch = await Promise.all(
-        batch.map(stock => dataProvider.getKLines(stock.secid, today, this.KLINE_DAYS))
+      const klinesBatch = await this.runWithLimit(
+        batch,
+        async (stock) => dataProvider.getKLines(stock.secid, today, this.KLINE_DAYS),
+        5
       );
 
       const validItems: Array<{ stock: Stock.DetailItem; klines: Stock.KLineItem[]; batchIndex: number }> = [];
       const invalidResults: Array<{ pass: false; reason: string; secid: string }> = [];
 
-      batch.forEach((stock, i) => {
+      for (let i = 0; i < batch.length; i++) {
+        const stock = batch[i];
         const klines = klinesBatch[i];
         if (!klines || klines.length < 60) {
           invalidResults.push({ pass: false, reason: 'K线不足', secid: stock.secid });
         } else {
           validItems.push({ stock, klines, batchIndex: i });
         }
-      });
+        if (i % 10 === 0) {
+          await yieldToMain(1);
+        }
+      }
 
       for (const res of invalidResults) {
         console.log(`[OptBacktest] [${today}] ${res.secid} ❌ 筛选失败: ${res.reason}`);
@@ -761,117 +753,103 @@ export class OptimizedStrategyBacktest {
       await yieldToMain();
     }
 
-    console.log(`[OptBacktest] [${today}] 共 ${batchTasks.length} 个batch进入策略优化，总计 ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只`);
+    console.log(`[OptBacktest] [${today}] 共 ${batchTasks.length} 个batch进入优化+筛选，总计 ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只`);
 
-        // 步骤B：并行执行所有batch的策略优化（CPU密集型，多Worker并行）
+    // ===== [核心优化] 步骤B+C：Worker 执行策略优化 + 候选筛选（纯计算全部迁移） =====
     const totalBatches = batchTasks.length;
     let completedBatches = 0;
-    
-    // 计算这个阶段能分配的进度条范围（原来占 dayPercentStep 的 30%）
+
     const batchPhaseStartPercent = Math.round(currentBase + dayPercentStep * 0.3);
     const batchPhaseEndPercent = Math.round(currentBase + dayPercentStep * 0.6);
     const batchPercentRange = batchPhaseEndPercent - batchPhaseStartPercent;
-    
-    onProgress?.(`[${today}] 并行策略优化 ${totalBatches} 个batch...`, batchPhaseStartPercent);
-    console.log(`[OptBacktest] [${today}] 启动并行优化: ${totalBatches} 个batch, ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只股票`);
 
-    console.log(`[OptBacktest] [${today}] 等待 ${totalBatches} 个batch完成...`);
+    onProgress?.(`[${today}] 并行策略优化+筛选 ${totalBatches} 个batch...`, batchPhaseStartPercent);
+    console.log(`[OptBacktest] [${today}] 启动并行优化+筛选: ${totalBatches} 个batch`);
 
-    // 使用 runWithLimit 限制并发，避免一次性向 Worker 发送过多请求导致 IPC 拥塞
-    const allOptimizeResults = await this.runWithLimit(
+    const allBatchResults = await this.runWithLimit(
       batchTasks,
       async (b, batchIndex) => {
-        // 1. 先批量检查缓存，命中则跳过
-        const cacheMap = new Map<number, { macdResults: MACDStrategyResult[]; rsiResults: RSIBacktestResult[] }>();
-        const uncachedValidItems: typeof b.validItems = [];
-        const uncachedKlinesList: Stock.KLineItem[][] = [];
+        const backtestParams = {
+          fixedStopLossPct: 0.05,
+          trailingStopLossPct: 0.06,
+        };
+        const screenParams = {
+          minStrategyScore: this.MIN_STRATEGY_SCORE,
+          strongLookbackStart: this.STRONG_LOOKBACK_START,
+          strongLookbackEnd: this.STRONG_LOOKBACK_END,
+        };
 
-        for (let idx = 0; idx < b.validItems.length; idx++) {
-          const { stock, klines } = b.validItems[idx];
+        const items = b.validItems.map(v => ({
+          stock: { secid: v.stock.secid, bk: v.stock.bk },
+          klines: v.klines,
+        }));
+
+        // 检查缓存（缓存整个优化+筛选结果）
+        const cachedResults: BatchBacktestAndScreenResult[] = [];
+        const uncachedIndices: number[] = [];
+        const uncachedItems: typeof items = [];
+
+        for (let i = 0; i < items.length; i++) {
+          const { stock, klines } = items[i];
           const lastDate = klines[klines.length - 1]?.date;
           if (lastDate) {
-            const macdKey = getCacheKey('macd', stock.secid, lastDate, `0.05_0.06`);
-            const rsiKey = getCacheKey('rsi', stock.secid, lastDate, `6_12_24_0.05_0.06`);
-            const macdCached = await ReadCache<MACDStrategyResult[]>(macdKey);
-            const rsiCached = await ReadCache<RSIBacktestResult[]>(rsiKey);
-            if (macdCached && rsiCached) {
-              cacheMap.set(idx, { macdResults: macdCached, rsiResults: rsiCached });
+            const key = getCacheKey('screen', stock.secid, lastDate, `${backtestParams.fixedStopLossPct}_${backtestParams.trailingStopLossPct}_${screenParams.minStrategyScore}`);
+            const cached = await ReadCache<BatchBacktestAndScreenResult>(key);
+            if (cached) {
+              cachedResults[i] = cached;
               continue;
             }
           }
-          uncachedValidItems.push(b.validItems[idx]);
-          uncachedKlinesList.push(klines);
+          uncachedIndices.push(i);
+          uncachedItems.push(items[i]);
         }
 
-        const cachedCount = cacheMap.size;
-        const totalCount = b.validItems.length;
-        console.log(`[OptBacktest] [${today}] batch ${batchIndex} 共 ${totalCount} 只，缓存命中 ${cachedCount} 只，实际计算 ${uncachedKlinesList.length} 只`);
-
-        try {
-          // 2. 只把未命中的股票传给 Worker / 主线程计算
-          let workerResults: Array<{ macdResults: MACDStrategyResult[]; rsiResults: RSIBacktestResult[] }>;
+        let workerResults: BatchBacktestAndScreenResult[] = [];
+        if (uncachedItems.length > 0) {
           if (this.workerExecutor) {
-            workerResults = await this.workerExecutor('batchBacktestOptimize', [uncachedKlinesList]);
+            workerResults = await this.workerExecutor('batchBacktestAndScreen', [
+              uncachedItems,
+              backtestParams,
+              screenParams,
+            ]);
           } else {
-            // 主线程执行：串行化并定期 yield，避免长时间阻塞 UI
-            workerResults = [];
-            for (let idx = 0; idx < uncachedValidItems.length; idx++) {
-              const { stock, klines } = uncachedValidItems[idx];
-              const macdResults = optimizeMACDStrategy(klines, 0.05, 0.06, stock.secid);
-              const rsiResults = optimizeRSIStrategy(klines, [6, 12, 24], 0.05, 0.06, stock.secid);
-              workerResults.push({ macdResults, rsiResults });
-              if ((idx + 1) % 2 === 0) {
-                await yieldToMain();
-              }
-            }
+            // 主线程 fallback（开发环境无Worker时）
+            workerResults = batchBacktestAndScreen(uncachedItems, backtestParams, screenParams);
           }
+        }
 
-          // 3. 按原始顺序合并缓存结果和 Worker 结果
-          const mergedResults: Array<{ macdResults: MACDStrategyResult[]; rsiResults: RSIBacktestResult[] }> = [];
-          let workerIdx = 0;
-          for (let idx = 0; idx < totalCount; idx++) {
-            if (cacheMap.has(idx)) {
-              mergedResults.push(cacheMap.get(idx)!);
-            } else {
-              mergedResults.push(workerResults[workerIdx++]);
-            }
-
-            // 更新到缓存
-            const { stock, klines } = b.validItems[idx];
+        // 合并缓存和Worker结果
+        const mergedResults: BatchBacktestAndScreenResult[] = [];
+        let workerIdx = 0;
+        for (let i = 0; i < items.length; i++) {
+          if (cachedResults[i]) {
+            mergedResults.push(cachedResults[i]);
+          } else {
+            mergedResults.push(workerResults[workerIdx++]);
+            const { stock, klines } = items[i];
             const lastDate = klines[klines.length - 1]?.date;
             if (lastDate) {
-              const macdKey = getCacheKey('macd', stock.secid, lastDate, `0.05_0.06`);
-              const rsiKey = getCacheKey('rsi', stock.secid, lastDate, `6_12_24_0.05_0.06`);
-              WriteCache(macdKey, mergedResults[mergedResults.length - 1].macdResults);
-              WriteCache(rsiKey, mergedResults[mergedResults.length - 1].rsiResults);
+              const key = getCacheKey('screen', stock.secid, lastDate, `${backtestParams.fixedStopLossPct}_${backtestParams.trailingStopLossPct}_${screenParams.minStrategyScore}`);
+              WriteCache(key, mergedResults[mergedResults.length - 1]);
             }
           }
-          completedBatches++;
-          console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化完成 (${completedBatches}/${totalBatches})`);
-          const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
-          onProgress?.(
-            `[${today}] 策略优化进度 ${completedBatches}/${totalBatches} batch (${Math.round(completedBatches/totalBatches*100)}%)`,
-            pct
-          );
-          return mergedResults;
-        } catch (err: any) {
-          completedBatches++;
-          console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化失败 (${completedBatches}/${totalBatches})`);
-          const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
-          onProgress?.(
-            `[${today}] 策略优化进度 ${completedBatches}/${totalBatches} batch (失败)`,
-            pct
-          );
-          console.error(`[OptBacktest] [${today}] batch ${batchIndex} [${b.batchStart}-${b.batchStart + b.batch.length}] 优化失败:`, err);
-          // 返回空结果，避免单个batch失败导致整个回测中断
-          return b.validItems.map(() => ({ macdResults: [], rsiResults: [] }));
         }
-      },
-      this.WORKER_CONCURRENCY // [优化] 原来是 3，改为动态并发
-    );
-    console.log(`[OptBacktest] [${today}] 所有batch策略优化完成`);
 
-    // 步骤C：串行处理筛选（保持状态一致性：boardHoldings、positions、MAX_POSITIONS等）
+        completedBatches++;
+        console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化+筛选完成 (${completedBatches}/${totalBatches})`);
+        const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
+        onProgress?.(
+          `[${today}] 优化+筛选进度 ${completedBatches}/${totalBatches} batch (${Math.round(completedBatches / totalBatches * 100)}%)`,
+          pct
+        );
+        return mergedResults;
+      },
+      this.WORKER_CONCURRENCY
+    );
+
+    console.log(`[OptBacktest] [${today}] 所有batch优化+筛选完成`);
+
+    // ===== 2-4: 板块驱动条件 + 排序和仓位筛选（主线程只做IO和状态管理） =====
     const buyCandidates: Array<{
       secid: string;
       score: number;
@@ -884,165 +862,80 @@ export class OptimizedStrategyBacktest {
 
     for (let i = 0; i < batchTasks.length; i++) {
       const b = batchTasks[i];
-      const optimizeResults = allOptimizeResults[i];
+      const batchResults = allBatchResults[i];
 
-      const processResults = await this.runWithConcurrency(
-        b.validItems,
-        async (item, idx) => {
-          const { stock, klines } = item;
-          const { macdResults, rsiResults } = optimizeResults[idx];
+      for (let j = 0; j < batchResults.length; j++) {
+        const { screenResult } = batchResults[j];
+        const { stock, klines } = b.validItems[j];
 
-          let bestResult: MACDStrategyResult | RSIBacktestResult | null = null;
-          let bestType: 'macd' | 'rsi' | null = null;
-          let bestScore = 0;
-
-          if (macdResults.length > 0 && macdResults[0].score > bestScore) {
-            bestScore = macdResults[0].score;
-            bestResult = macdResults[0];
-            bestType = 'macd';
+        if (!screenResult.pass) {
+          if (screenResult.reason !== 'K线不足') {
+            console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ 筛选失败: ${screenResult.reason}`);
           }
-          if (rsiResults.length > 0 && rsiResults[0].score > bestScore) {
-            bestScore = rsiResults[0].score;
-            bestResult = rsiResults[0];
-            bestType = 'rsi';
+          continue;
+        }
+
+        // 板块驱动条件（IO，只对通过筛选的少量股票执行）
+        let boardPass = false;
+        let boardRankPass = false;
+        let boardCode = null;
+
+        const boards = await dataProvider.getAllBoards(stock.bk, screenResult.tDayDate!);
+        if (boards && boards.length > 0) {
+          const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
+          const boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
+          if (boardRank >= 0) {
+            boardPass = (boardRank + 1) <= boards.length * 0.1;
+            boardCode = boards[boardRank].code;
           }
+        }
 
-          if (!bestResult || bestScore < this.MIN_STRATEGY_SCORE) {
-            return { pass: false, reason: `策略得分不足(${bestScore.toFixed(1)})`, secid: stock.secid };
-          }
+        if (!boardPass) {
+          console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ 筛选失败: 板块未进全市场前10%`);
+          continue;
+        }
 
-          // 检查最近3天买入信号
-          let mDayIndex = -1;
-          if (bestType === 'macd') {
-            mDayIndex = this.checkMACDBuySignal(klines, bestResult as MACDStrategyResult, 3);
-          } else {
-            mDayIndex = this.checkRSIBuySignal(klines, bestResult as RSIBacktestResult, 3);
-          }
-
-          if (mDayIndex < 0) {
-            return { pass: false, reason: '最近3天无买入信号', secid: stock.secid };
-          }
-
-          // [优化] 同步计算后立刻让出，避免连续阻塞 UI
-          await yieldToMain(1);
-
-          // M-Day判断
-          const lastIndex = klines.length - 1;
-          const mDayKline = klines[mDayIndex];
-
-          if (mDayIndex < lastIndex) {
-            for (let j = mDayIndex + 1; j <= lastIndex; j++) {
-              if (this.hasLongUpperShadow(klines[j])) {
-                return { pass: false, reason: `M-Day后出现长上影线(${klines[j].date})`, secid: stock.secid };
-              }
-            }
-            const mDayEntityLow = Math.min(mDayKline.kp, mDayKline.sp);
-            for (let j = mDayIndex + 1; j <= lastIndex; j++) {
-              if (klines[j].sp < mDayEntityLow) {
-                return { pass: false, reason: `M-Day后跌破实体最低价(${klines[j].date})`, secid: stock.secid };
-              }
-            }
-          }
-
-          // 板块驱动条件
-          let boardPass = false;
-          let boardRankPass = false;
-          const strongType = (stock as any).strongType || this.detectStrongType(klines, klines.length - 1);
-          const tDayIndex = this.findTDay(klines, strongType, klines.length - 1, 10);
-          if (tDayIndex < 0) {
-            return { pass: false, reason: '未找到T-Day', secid: stock.secid };
-          }
-          const tDayDate = klines[tDayIndex].date;
-
-          let boardCode = null;
-          // [优化] 使用内存缓存避免重复请求
-          let boards = this.boardCache.get(tDayDate);
-          if (!boards) {
-            boards = await dataProvider.getAllBoards(stock.bk, tDayDate);
-            if (boards) this.boardCache.set(tDayDate, boards);
-          }
-          
-          if (boards && boards.length > 0) {
-            const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
-            const boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
-            if (boardRank >= 0) {
-              boardPass = (boardRank + 1) <= boards.length * 0.1;
-              boardCode = boards[boardRank].code;
-            }
-          }
-
-          if (!boardPass) {
-            return { pass: false, reason: '板块未进全市场前10%', secid: stock.secid };
-          }
-
-          if (strongType === 'limit_up') {
-            boardRankPass = true;
-          } else {
-            // [优化] 板块成分股缓存
-            const boardStocksKey = `${tDayDate}_${boardCode}`;
-            let boardStocks = this.boardStocksCache.get(boardStocksKey);
-            if (!boardStocks) {
-              boardStocks = await dataProvider.getBoardStocks(tDayDate, boardCode, stock.bk);
-              if (boardStocks) this.boardStocksCache.set(boardStocksKey, boardStocks);
-            }
-            if (boardStocks && boardStocks.length > 0) {
-              const sortedStocks = boardStocks.sort((a, b) => b.zf - a.zf);
-              const stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
-              if (stockRank >= 0 && (stockRank + 1) <= boardStocks.length * 0.1) {
-                boardRankPass = true;
-              }
-            } else {
-              boardRankPass = true; // 数据缺失默认通过
-            }
-          }
-
-          if (!boardRankPass) {
-            return { pass: false, reason: '股票未进板块内前10%', secid: stock.secid };
-          }
-
-          const currentPrice = klines[lastIndex].sp;
-          return {
-            pass: true,
-            secid: stock.secid,
-            score: bestScore,
-            boardCode: stock.bk,
-            price: currentPrice,
-            reason: `${bestType?.toUpperCase()}策略得分${bestScore.toFixed(1)}, M-Day=${mDayKline.date}, T-Day=${tDayDate}`,
-            strategyType: bestType,
-            strategyParams: bestResult
-          };
-        },
-        2 // [优化] 从 3 改为 2，降低同步计算堆积
-      );
-
-      for (const result of processResults) {
-        if (result.status === 'fulfilled') {
-          const value = result.value as any;
-          if (value.pass) {
-            buyCandidates.push({
-              secid: value.secid,
-              score: value.score,
-              boardCode: value.boardCode,
-              price: value.price,
-              reason: value.reason,
-              strategyType: value.strategyType,
-              strategyParams: value.strategyParams
-            });
-            console.log(`[OptBacktest] [${today}] ${value.secid} ✅ 通过筛选 | ${value.reason}`);
-          } else {
-            if (value.reason !== 'K线不足') {
-              console.log(`[OptBacktest] [${today}] ${value.secid} ❌ 筛选失败: ${value.reason}`);
-            }
-          }
+        if (screenResult.strongType === 'limit_up') {
+          boardRankPass = true;
         } else {
-          console.log(`[OptBacktest] [${today}] 批量处理异常:`, result.reason);
+          const boardStocks = await dataProvider.getBoardStocks(screenResult.tDayDate!, boardCode, stock.bk);
+          if (boardStocks && boardStocks.length > 0) {
+            const sortedStocks = boardStocks.sort((a, b) => b.zf - a.zf);
+            const stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
+            if (stockRank >= 0 && (stockRank + 1) <= boardStocks.length * 0.1) {
+              boardRankPass = true;
+            }
+          } else {
+            boardRankPass = true;
+          }
+        }
+
+        if (!boardRankPass) {
+          console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ 筛选失败: 股票未进板块内前10%`);
+          continue;
+        }
+
+        const currentPrice = klines[klines.length - 1].sp;
+        buyCandidates.push({
+          secid: stock.secid,
+          score: screenResult.score!,
+          boardCode: stock.bk,
+          price: currentPrice,
+          reason: screenResult.reason!,
+          strategyType: screenResult.bestType!,
+          strategyParams: screenResult.bestResult!,
+        });
+        console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}`);
+
+        if (buyCandidates.length % 5 === 0) {
+          await yieldToMain(1);
         }
       }
 
       await yieldToMain();
     }
 
-    // 2-4: 排序和仓位筛选（保持原有逻辑不变）
+    // 排序和仓位筛选（数据量极小，同步执行无压力）
     if (buyCandidates.length > 0) {
       buyCandidates.sort((a, b) => b.score - a.score);
       console.log(`[OptBacktest] [${today}] 候选排序前5:`, buyCandidates.slice(0, 5).map(c => `${c.secid}(${c.score.toFixed(1)})`));
@@ -1116,7 +1009,8 @@ export class OptimizedStrategyBacktest {
         positionDetails.push({ secid, close: pos.buyPrice, quantity: pos.quantity, value: pos.buyAmount });
       }
 
-      if (++posCount % 2 === 0) { // [优化] 从 5 改为 2
+      // [优化] 从 5 改为 2
+      if (++posCount % 2 === 0) {
         await yieldToMain();
       }
     }
@@ -1232,63 +1126,9 @@ export class OptimizedStrategyBacktest {
   }
 
   // ===== 策略信号检测 =====
-  private checkMACDBuySignal(klines: Stock.KLineItem[], params: MACDStrategyResult, checkDays: number = 3): number {
-    const closes = klines.map(k => k.sp);
-    const macd = calculateMACD(closes, params.slow, params.fast, params.signal);
-    const dif = macd.MACD;
-    const dea = macd.signal;
-    const hist = macd.histogram;
+  
 
-    const endIdx = closes.length;
-    const startIdx = Math.max(2, endIdx - checkDays);
-
-    for (let i = startIdx; i < endIdx; i++) {
-      if (isNaN(dif[i]) || isNaN(dea[i])) continue;
-
-      const goldenCross = dif[i] > dea[i] && dif[i - 1] <= dea[i - 1];
-      if (!goldenCross) continue;
-
-      if (params.requireAboveZero && (dif[i] <= 0 || dea[i] <= 0)) continue;
-
-      if (params.requirePriorNegative) {
-        let hadNegative = false;
-        for (let j = Math.max(0, i - 5); j < i; j++) {
-          if (hist[j] < 0) { hadNegative = true; break; }
-        }
-        if (!hadNegative) continue;
-      }
-
-      if (hist[i] <= 0 || hist[i] <= hist[i - 1]) continue;
-
-      return i;
-    }
-    return -1;
-  }
-
-  private checkRSIBuySignal(klines: Stock.KLineItem[], params: RSIBacktestResult, checkDays: number = 3): number {
-    const closes = klines.map(k => k.sp);
-    const rsi = calculateRSI(closes, params.rsiPeriod);
-
-    const endIdx = closes.length;
-    const startIdx = Math.max(1, endIdx - checkDays);
-
-    for (let i = startIdx; i < endIdx; i++) {
-      if (isNaN(rsi[i]) || isNaN(rsi[i - 1])) continue;
-
-      let inOversold = false;
-      for (let j = Math.max(0, i - 10); j <= i; j++) {
-        if (rsi[j] <= params.buyThreshold) {
-          inOversold = true;
-          break;
-        }
-      }
-
-      if (inOversold && rsi[i - 1] <= params.buyThreshold && rsi[i] > params.buyThreshold) {
-        return i;
-      }
-    }
-    return -1;
-  }
+  
 
   private checkMACDSellSignal(klines: Stock.KLineItem[], params: MACDStrategyResult): boolean {
     const closes = klines.map(k => k.sp);
@@ -1323,60 +1163,7 @@ export class OptimizedStrategyBacktest {
   }
 
   // ===== K线形态判断 =====
-  private isLimitUp(kline: Stock.KLineItem, prevClose: number): boolean {
-    const risePct = (kline.sp - prevClose) / prevClose;
-    const isSealed = Math.abs(kline.zg - kline.sp) / prevClose < 0.005;
-    return risePct >= 0.099 && isSealed;
-  }
 
-  private isNewHigh60(klines: Stock.KLineItem[], index: number): boolean {
-    if (index < 1) return false;
-    const currentPrice = klines[index].sp;
-    const startIdx = Math.max(0, index - 60);
-    const maxPrice = Math.max(...klines.slice(startIdx, index).map(k => k.zg));
-    return currentPrice >= maxPrice;
-  }
-
-  private hasLongUpperShadow(kline: Stock.KLineItem): boolean {
-    const bodyTop = Math.max(kline.kp, kline.sp);
-    const upperShadow = kline.zg - bodyTop;
-    const range = kline.zg - kline.zd;
-    if (range <= 0) return false;
-    return (upperShadow / range > 0.5) && (upperShadow / kline.kp > 0.02);
-  }
-
-  private detectStrongType(klines: Stock.KLineItem[], index: number): 'limit_up' | 'new_high_60' {
-    const prevClose = klines[index - 1].sp;
-    if (this.isLimitUp(klines[index], prevClose)) {
-      return 'limit_up';
-    }
-    return 'new_high_60';
-  }
-
-  private findTDay(
-    klines: Stock.KLineItem[],
-    strongType: 'limit_up' | 'new_high_60',
-    mDayIndex: number,
-    maxLookback: number = 10
-  ): number {
-    const startIdx = Math.max(1, mDayIndex - maxLookback);
-
-    if (strongType === 'limit_up') {
-      for (let i = startIdx; i <= mDayIndex; i++) {
-        const prevClose = klines[i - 1].sp;
-        if (this.isLimitUp(klines[i], prevClose)) {
-          return i;
-        }
-      }
-    } else {
-      for (let i = startIdx; i <= mDayIndex; i++) {
-        if (this.isNewHigh60(klines, i)) {
-          return i;
-        }
-      }
-    }
-    return -1;
-  }
 
   // ===== 通用工具 =====
   private getTradeDaysDiff(date1: string, date2: string): number {
