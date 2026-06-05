@@ -587,6 +587,11 @@ export class OptimizedStrategyBacktest {
         console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: K线不足`);
         continue;
       }
+      // [优化] 停牌股票跳过卖出信号检测（无法交易）
+      if (klines[klines.length - 1].date !== today) {
+        console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: 停牌`);
+        continue;
+      }
 
       const currentPrice = klines[klines.length - 1].sp;
 
@@ -729,6 +734,9 @@ export class OptimizedStrategyBacktest {
         const klines = klinesBatch[i];
         if (!klines || klines.length < 60) {
           invalidResults.push({ pass: false, reason: 'K线不足', secid: stock.secid });
+        } else if (klines[klines.length - 1].date !== today) {
+          // [优化] 跳过停牌股票：最后一条K线不是当天，说明今日无交易
+          invalidResults.push({ pass: false, reason: '停牌', secid: stock.secid });
         } else {
           validItems.push({ stock, klines, batchIndex: i });
         }
