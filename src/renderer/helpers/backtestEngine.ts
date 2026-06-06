@@ -970,7 +970,13 @@ export class OptimizedStrategyBacktest {
 
         const items = b.validItems.map(v => ({
           stock: { secid: v.stock.secid, bk: v.stock.bk },
-          klines: v.klines,
+          klines: v.klines.map(k => ({
+            date: k.date,
+            kp: k.kp,
+            sp: k.sp,
+            zg: k.zg,
+            zd: k.zd,
+          })),
         }));
 
         // [优化] 按股票聚合缓存：一个股票一个文件，内部按 date 区分
