@@ -751,17 +751,22 @@ export class OptimizedStrategyBacktest {
     dayPercentStep: number,
     onProgress?: (message: string, percent?: number) => void
   ): Promise<boolean> {
+    const tStart = performance.now();
     this.boardCache.clear();
     this.boardStocksCache.clear();
 
     // ===== 阶段 2-0: 检查观察列表 =====
+    const tWatch0 = performance.now();
     console.log(`[OptBacktest] [${today}] 阶段2-0: 检查观察列表 ${this.watchList.size} 只`);
     const watchBuyCandidates = await this.checkWatchList(today, dataProvider);
     if (watchBuyCandidates.length > 0) {
       console.log(`[OptBacktest] [${today}] 观察列表产生 ${watchBuyCandidates.length} 个买入候选`);
     }
+    const tWatch1 = performance.now();
+    console.log(`[Perf] [${today}] 观察列表: ${(tWatch1 - tWatch0).toFixed(1)}ms (${this.watchList.size}只)`);
 
     // 2-1: 处理持仓卖出信号（改为当天收盘价执行）
+    const tSell0 = performance.now();
     console.log(`[OptBacktest] [${today}] 阶段2-1: 处理持仓卖出信号 ${this.positions.size} 只`);
     onProgress?.(`[${today}] 处理持仓卖出信号...`);
 
@@ -826,8 +831,11 @@ export class OptimizedStrategyBacktest {
         await yieldToMain(1);
       }
     }
+    const tSell1 = performance.now();
+    console.log(`[Perf] [${today}] 持仓卖出: ${(tSell1 - tSell0).toFixed(1)}ms (${this.positions.size}只)`);
 
     // ===== 2-2: 获取强势股票（限制并发，避免微任务堆积） =====
+    const tStrong0 = performance.now();
     const rawDates: string[] = [];
     const base = dayjs(today, 'YYYY-MM-DD');
     for (let d = 1; d <= 20; d++) {
@@ -851,7 +859,12 @@ export class OptimizedStrategyBacktest {
     const strongStocks = await dataProvider.getStrongStocks(strongStockDay);
     console.log(`[OptBacktest] [${today}] ${strongStockDay} 强势股票数量: ${strongStocks.length}`); 
 
+    const tStrong1 = performance.now();
+    console.log(`[Perf] [${today}] 强势股票IO: ${(tStrong1 - tStrong0).toFixed(1)}ms (${strongStocks.length}只)`);
+
     // [新增] 强势股票中的观察列表股票踢出，由当天重新计算决定是否重新加入
+    // [新增] 踢出观察列表计时
+    const tKick0 = performance.now();
     let watchKicked = 0;
     for (const stock of strongStocks) {
       if (this.watchList.has(stock.secid)) {
@@ -863,11 +876,14 @@ export class OptimizedStrategyBacktest {
     if (watchKicked > 0) {
       console.log(`[OptBacktest] [${today}] 强势列表踢出观察列表: ${watchKicked} 只，剩余观察 ${this.watchList.size} 只`);
     }
+    const tKick1 = performance.now();
+    console.log(`[Perf] [${today}] 踢出观察: ${(tKick1 - tKick0).toFixed(1)}ms`);
 
     const filteredStocks = strongStocks.filter(s => !this.positions.has(s.secid));
     console.log(`[OptBacktest] [${today}] 排除已持仓后剩余 ${filteredStocks.length} 只`);
 
     // ===== 2-3: 批量获取K线（限制并发，避免IPC反序列化阻塞） =====
+    const tK0 = performance.now();
     const batchTasks: Array<{
       batchStart: number;
       batch: Stock.DetailItem[];
@@ -925,7 +941,9 @@ export class OptimizedStrategyBacktest {
     }
 
     console.log(`[OptBacktest] [${today}] 共 ${batchTasks.length} 个batch进入优化+筛选，总计 ${batchTasks.reduce((s, b) => s + b.validItems.length, 0)} 只`);
-
+    
+    const tK1 = performance.now();
+    console.log(`[Perf] [${today}] K线IO: ${(tK1 - tK0).toFixed(1)}ms (${filteredStocks.length}只→${batchTasks.reduce((s,b)=>s+b.validItems.length,0)}只)`);
     // ===== [核心优化] 步骤B+C：Worker 执行策略优化 + 候选筛选（纯计算全部迁移） =====
     const totalBatches = batchTasks.length;
     let completedBatches = 0;
@@ -937,7 +955,8 @@ export class OptimizedStrategyBacktest {
     onProgress?.(`[${today}] 并行策略优化+筛选 ${totalBatches} 个batch...`, batchPhaseStartPercent);
     console.log(`[OptBacktest] [${today}] 启动并行优化+筛选: ${totalBatches} 个batch`);
 
-        const allBatchResults = await this.runWithLimit(
+    const tWorker0 = performance.now();
+    const allBatchResults = await this.runWithLimit(
       batchTasks,
       async (b, batchIndex) => {
         const backtestParams = {
@@ -1041,8 +1060,10 @@ export class OptimizedStrategyBacktest {
     );
 
     console.log(`[OptBacktest] [${today}] 所有batch优化+筛选完成`);
-
+    const tWorker1 = performance.now();
+    console.log(`[Perf] [${today}] Worker总耗时: ${(tWorker1 - tWorker0).toFixed(1)}ms (${totalBatches}batch)`);
     // ===== 2-4: 板块驱动条件 + 排序和仓位筛选（主线程只做IO和状态管理） =====
+    const tScreen0 = performance.now();
     const buyCandidates: Array<{
       secid: string;
       score: number;
@@ -1210,6 +1231,8 @@ export class OptimizedStrategyBacktest {
 
       await yieldToMain();
     }
+    const tScreen1 = performance.now();
+    console.log(`[Perf] [${today}] 板块筛选: ${(tScreen1 - tScreen0).toFixed(1)}ms (${buyCandidates.length}候选)`);
 
     // 合并观察列表候选和正常候选，去重
     const allBuyCandidates = [...watchBuyCandidates, ...buyCandidates];

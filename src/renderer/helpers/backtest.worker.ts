@@ -97,8 +97,11 @@ messagePort.on('message', async (payload: any) => {
 
   if (method === 'batchBacktestAndScreen') {
     const [items, backtestParams, screenParams] = args || [];
+    const t0 = performance.now();
     try {
       const result = batchBacktestAndScreen(items, backtestParams, screenParams);
+      const t1 = performance.now();
+      console.log(`[PerfWorker] batchBacktestAndScreen: ${items.length}只, ${(t1-t0).toFixed(1)}ms, 单只${((t1-t0)/items.length).toFixed(1)}ms`);
       messagePort.postMessage({ taskId, result });
     } catch (error: any) {
       messagePort.postMessage({ taskId, error: { message: error?.message || String(error) } });
