@@ -591,13 +591,16 @@ export function isLimitUp(kline: Stock.KLineItem, prevClose: number): boolean {
 
 export function isNewHigh60(klines: Stock.KLineItem[], index: number): boolean {
   if (index < 1) return false;
-  const currentPrice = klines[index].sp;
+  const currentPrice = klines[index].zg;
   const startIdx = Math.max(0, index - 60);
   const maxPrice = Math.max(...klines.slice(startIdx, index).map(k => k.zg));
   return currentPrice >= maxPrice;
 }
 
-export function detectStrongType(klines: Stock.KLineItem[], index: number): 'limit_up' | 'new_high_60' {
+export function detectStrongType(klines: Stock.KLineItem[], strongDate: string): 'limit_up' | 'new_high_60' {
+  const index = klines.findIndex(k => k.date === strongDate);
+  if (index < 0) return 'new_high_60';
+
   const prevClose = klines[index - 1].sp;
   if (isLimitUp(klines[index], prevClose)) {
     return 'limit_up';
@@ -608,19 +611,21 @@ export function detectStrongType(klines: Stock.KLineItem[], index: number): 'lim
 export function findTDay(
   klines: Stock.KLineItem[],
   strongType: 'limit_up' | 'new_high_60',
-  mDayIndex: number,
+  strongDate: string,
   maxLookback: number = 10
 ): number {
-  const startIdx = Math.max(1, mDayIndex - maxLookback);
+  const strongDayIndex = klines.findIndex(k => k.date === strongDate);
+  if (strongDayIndex < 0) return -1;
+  const startIdx = Math.max(1, strongDayIndex - maxLookback);
   if (strongType === 'limit_up') {
-    for (let i = startIdx; i <= mDayIndex; i++) {
+    for (let i = startIdx; i <= strongDayIndex; i++) {
       const prevClose = klines[i - 1].sp;
       if (isLimitUp(klines[i], prevClose)) {
         return i;
       }
     }
   } else {
-    for (let i = startIdx; i <= mDayIndex; i++) {
+    for (let i = startIdx; i <= strongDayIndex; i++) {
       if (isNewHigh60(klines, i)) {
         return i;
       }
@@ -632,7 +637,7 @@ export function findTDay(
 export function batchBacktestAndScreen(
   items: BatchBacktestAndScreenItem[],
   backtestParams: { fixedStopLossPct: number; trailingStopLossPct: number },
-  screenParams: { minStrategyScore: number; strongLookback: number }
+  screenParams: { strongStockDay:string, minStrategyScore: number; strongLookback: number }
 ): BatchBacktestAndScreenResult[] {
   const results: BatchBacktestAndScreenResult[] = [];
 
@@ -670,8 +675,8 @@ export function batchBacktestAndScreen(
       }
 
       // 先计算 strongType 和 tDay，无论是否有买入信号（观察列表需要）
-      const strongType = detectStrongType(klines, klines.length - 1);
-      const tDayIndex = findTDay(klines, strongType, klines.length - 1, screenParams.strongLookback);
+      const strongType = detectStrongType(klines, screenParams.strongStockDay);
+      const tDayIndex = findTDay(klines, strongType, screenParams.strongStockDay, screenParams.strongLookback);
       const tDayDate = tDayIndex >= 0 ? klines[tDayIndex].date : klines[klines.length - 1].date;
 
       if (mDayIndex < 0) {

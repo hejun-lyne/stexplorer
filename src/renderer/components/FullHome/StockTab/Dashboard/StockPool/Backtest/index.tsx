@@ -68,33 +68,63 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
       } 
     }
 
-    async getKLines(secid: string, endDate: string, days: number = 120): Promise<Stock.KLineItem[] | null> {
+    async getKLines(secids: string[], endDate: string, days: number = 120): Promise<any> {
       try {
-        // console.log(`[DataProvider] 获取K线: ${secid} 截止${endDate} ${days}天`);
-        const kResult = await Services.Stock.GetKFromDataSource(Enums.FundApiType.Tushare, secid, Enums.KLineType.Day);
-        let index = kResult.ks.findIndex(k => k.date === endDate);
-        if (index === -1) {
-          // 这天可能股票停牌，应该往前找最近的交易日
-          for (let i = kResult.ks.length - 1; i >= 0; i--) {
-            if (kResult.ks[i].date < endDate) {
-              index = i;
-              break;
+        const isSingle = typeof secids === 'string';
+        const inputSecids: string[] = isSingle ? [secids as string] : (secids as string[]);
+
+        console.log(`[DataProvider] 批量获取K线: ${inputSecids.length} 只，截止${endDate}，${days}天`);
+        const batchResult = await Services.Tushare.BatchGetKFromTushare(
+          inputSecids,
+          endDate,
+          days,
+          Enums.KLineType.Day
+        );
+
+        // 裁剪到 endDate 之前的 K 线（处理停牌情况）
+        const sliceToDate = (klines: Stock.KLineItem[]): Stock.KLineItem[] => {
+          if (!klines || klines.length === 0) return [];
+          let index = klines.findIndex(k => k.date === endDate);
+          if (index === -1) {
+            for (let i = klines.length - 1; i >= 0; i--) {
+              if (klines[i].date < endDate) {
+                index = i;
+                break;
+              }
             }
           }
-          if (index === -1) {
-            console.log(`[DataProvider] ${secid} 未找到日期 ${endDate} 的K线，数据范围: ${kResult.ks[0]?.date} ~ ${kResult.ks[kResult.ks.length - 1]?.date}`);
-            return null;
+          if (index === -1) return [];
+          const sliced = klines.slice(0, index + 1);
+          if (sliced.length > days) {
+            sliced.splice(0, sliced.length - days);
           }
+          return sliced;
+        };
+
+        if (isSingle) {
+          const secid = inputSecids[0];
+          const klines = batchResult[secid] || [];
+          const sliced = sliceToDate(klines);
+          console.log(`[DataProvider] ${secid} K线返回: ${sliced.length} 条 (截止${endDate})`);
+          return sliced;
         }
-        const sliced = kResult.ks.slice(0, index + 1);
-        if (sliced.length > days) {
-          sliced.splice(0, sliced.length - days);
-        }
-        // console.log(`[DataProvider] ${secid} K线返回: ${sliced.length} 条 (截止${endDate})`);
-        return kResult.ks ? Promise.resolve(sliced) : Promise.reject('数据未准备好');
+
+        const result: Record<string, Stock.KLineItem[]> = {};
+        inputSecids.forEach((secid) => {
+          const klines = batchResult[secid] || [];
+          result[secid] = sliceToDate(klines);
+          if (klines.length === 0) {
+            console.log(`[DataProvider] ${secid} 未获取到K线数据`);
+          }
+        });
+        console.log(`[DataProvider] 批量K线返回: ${inputSecids.length} 只`);
+        return result;
       } catch (e) {
-        console.error(`[DataProvider] 获取K线失败 ${secid}:`, e);
-        return null;
+        console.error(`[DataProvider] 获取K线失败 ${secids}:`, e);
+        if (typeof secids === 'string') return [];
+        const fallback: Record<string, Stock.KLineItem[]> = {};
+        (secids as string[]).forEach((secid) => { fallback[secid] = []; });
+        return fallback;
       }
     }
 
@@ -209,9 +239,40 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
       }
     }
 
+    async getAllBoardsBatch(dates: string[]): Promise<Record<string, Array<{ code: string; name: string; zf: number; }>>> {
+      try {
+        if (!dates || dates.length === 0) return {};
+        console.log(`[DataProvider] 批量获取全板块: ${dates.length} 个日期`);
+        const result = await Services.Tushare.GetBoardsByDateBatchFromTushare(dates);
+        console.log(`[DataProvider] 批量全板块返回: ${Object.keys(result).length} 个日期`);
+        return result;
+      } catch (e) {
+        console.error(`[DataProvider] 批量获取全板块失败:`, e);
+        const emptyMap: Record<string, Array<{ code: string; name: string; zf: number }>> = {};
+        dates.forEach((d) => { emptyMap[d] = []; });
+        return emptyMap;
+      }
+    }
+
+    async getBoardStocksBatch(requests: Array<{ date: string; boardCode: string | null; boardName: string; }>): Promise<Record<string, Array<{ secid: string; zf: number; }>>> {
+      try {
+        if (!requests || requests.length === 0) return {};
+        console.log(`[DataProvider] 批量获取板块成分股: ${requests.length} 个请求`);
+        const result = await Services.Tushare.GetBoardStocksBatchFromTushare(requests);
+        console.log(`[DataProvider] 批量成分股返回: ${Object.keys(result).length} 个key`);
+        return result;
+      } catch (e) {
+        console.error(`[DataProvider] 批量获取板块成分股失败:`, e);
+        const emptyMap: Record<string, Array<{ secid: string; zf: number }>> = {};
+        requests.forEach((req) => { emptyMap[`${req.date}_${req.boardCode}`] = []; });
+        return emptyMap;
+      }
+    }
+
     async filterTradeDays(dates: string[]): Promise<string[]> {
       return Services.Tushare.FilterTradeDays(dates);
     }
+
 }
 
 // ==================== 净值曲线图表配置 ====================

@@ -639,7 +639,7 @@ class TushareAPI:
     # ------------------ K 线数据（Pro 接口，支持复权）------------------
 
     @staticmethod
-    def get_kline_data(secid: str, period: str = "daily", adjust: str = "qfq", limit: int = 0) -> List[Dict[str, Any]]:
+    def get_kline_data(secid: str, period: str = "daily", adjust: str = "qfq", limit: int = 0, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取个股K线数据（Tushare pro_bar / daily / weekly / monthly）
 
         参数:
@@ -647,6 +647,7 @@ class TushareAPI:
             period: daily/weekly/monthly
             adjust: qfq-前复权, hfq-后复权, 空字符串-不复权
             limit: 限制返回条数，0 表示不限制，>0 表示返回最近 limit 条
+            end_date: 截止日期(YYYY-MM-DD 或 YYYYMMDD)，不传则默认为今天
 
         注意：
         - Tushare daily/weekly/monthly 接口的 amount 单位是"千元"，需×1000 转为元
@@ -654,11 +655,13 @@ class TushareAPI:
         - pro_bar 优先调用，失败则 fallback 到 daily + adj_factor 手动复权
         - 支持磁盘缓存：除非缓存没有最后一个交易日/周/月，否则直接返回缓存
         """
-        cache_key = f"kline_{secid}_{period}_{adjust}_{limit}"
+        end_date_std = _standardize_date(end_date) if end_date else ''
+        end_date_fmt = end_date_std.replace('-', '') if end_date_std else datetime.now().strftime("%Y%m%d")
+        cache_key = f"kline_{secid}_{period}_{adjust}_{limit}_{end_date_std or 'latest'}"
         cached = read_cache(cache_key, max_age_hours=168 * 4)  # 缓存最长4周
 
-        # 检查缓存是否包含最新数据
-        if isinstance(cached, list) and cached:
+        # 检查缓存是否包含最新数据（仅在未指定 end_date 时）
+        if not end_date_std and isinstance(cached, list) and cached:
             last_date_str = cached[-1].get('date', '')
             expected_last_str = _get_expected_last_trade_date(period)
             last_date = _parse_date_str(last_date_str)
@@ -676,32 +679,30 @@ class TushareAPI:
                 return result
 
             if is_index_code(secid):
-                result = TushareAPI._get_index_kline(secid, period, limit)
+                result = TushareAPI._get_index_kline(secid, period, limit, end_date_fmt)
                 if isinstance(result, list) and result:
                     write_cache(cache_key, result)
                 return result
 
             code = convert_secid_to_pure_code(secid)
             ts_code = convert_secid_to_ts_code(secid)
-            end_date = datetime.now().strftime("%Y%m%d")
 
-            # 根据 limit 和周期动态计算 start_date
-            # 注意：自然日 ≠ 交易日，需要足够大的缓冲确保返回 limit 条数据
-            # A股一年约250个交易日，日K需要 limit*2 天自然日才能确保覆盖
+            # 根据 limit 和周期动态计算 start_date，基于 end_date_fmt 往前推
+            end_dt = datetime.strptime(end_date_fmt, "%Y%m%d")
             if limit > 0:
                 if period == 'daily':
                     days_needed = limit * 2 + 60  # 2倍+60天缓冲，应对长假
-                    start_date = (datetime.now() - timedelta(days=days_needed)).strftime("%Y%m%d")
+                    start_date = (end_dt - timedelta(days=days_needed)).strftime("%Y%m%d")
                 elif period == 'weekly':
                     weeks_needed = limit * 2 + 10  # 2倍+10周缓冲
-                    start_date = (datetime.now() - timedelta(days=weeks_needed * 7)).strftime("%Y%m%d")
+                    start_date = (end_dt - timedelta(days=weeks_needed * 7)).strftime("%Y%m%d")
                 elif period == 'monthly':
                     months_needed = limit * 2 + 6  # 2倍+6月缓冲
-                    start_date = (datetime.now() - timedelta(days=months_needed * 30)).strftime("%Y%m%d")
+                    start_date = (end_dt - timedelta(days=months_needed * 30)).strftime("%Y%m%d")
                 else:
-                    start_date = (datetime.now() - timedelta(days=limit * 2 + 60)).strftime("%Y%m%d")
+                    start_date = (end_dt - timedelta(days=limit * 2 + 60)).strftime("%Y%m%d")
             else:
-                start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y%m%d")  # 默认3年
+                start_date = (end_dt - timedelta(days=365 * 3)).strftime("%Y%m%d")  # 默认3年
 
             pro = get_pro()
             freq_map = {'daily': 'D', 'weekly': 'W', 'monthly': 'M'}
@@ -710,25 +711,25 @@ class TushareAPI:
             # 1. 优先使用 pro_bar 获取复权数据（一站式接口）
             df = None
             try:
-                df = ts.pro_bar(ts_code=ts_code, freq=freq, adj=adjust, start_date=start_date, end_date=end_date)
+                df = ts.pro_bar(ts_code=ts_code, freq=freq, adj=adjust, start_date=start_date, end_date=end_date_fmt)
             except Exception as e:
                 print(f"[pro_bar 失败] {ts_code}: {e}")
 
             # 2. pro_bar 失败，fallback 到基础接口 + 手动复权
             if df is None or df.empty:
                 if period == 'daily':
-                    df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
                 elif period == 'weekly':
-                    df = pro.weekly(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    df = pro.weekly(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
                 elif period == 'monthly':
-                    df = pro.monthly(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    df = pro.monthly(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
                 else:
-                    df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                    df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
 
                 # 手动复权
                 if adjust in ('qfq', 'hfq') and df is not None and not df.empty:
                     try:
-                        adj_df = pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                        adj_df = pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
                         if adj_df is not None and not adj_df.empty:
                             df = df.merge(adj_df[['trade_date', 'adj_factor']], on='trade_date', how='left')
                             base_factor = df['adj_factor'].iloc[-1] if adjust == 'qfq' else df['adj_factor'].iloc[0]
@@ -749,7 +750,7 @@ class TushareAPI:
 
             # 补充换手率：merge daily_basic
             try:
-                basic_df = pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                basic_df = pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
                 if basic_df is not None and not basic_df.empty:
                     basic_df = basic_df.sort_values('trade_date', ascending=True)
                     df = df.merge(basic_df[['trade_date', 'turnover_rate']], on='trade_date', how='left')
@@ -792,36 +793,60 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
-    def _get_index_kline(secid: str, period: str = "daily", limit: int = 0) -> List[Dict[str, Any]]:
+    def get_kline_data_batch(secids: List[str], period: str = "daily", adjust: str = "qfq", limit: int = 0, end_date: Optional[str] = None) -> Dict[str, Any]:
+        """批量获取K线，使用线程池并发，减少单只串行等待"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time
+        
+        results = {}
+        t0 = time.time()
+        
+        def fetch_one(secid: str) -> tuple:
+            return secid, TushareAPI.get_kline_data(secid, period, adjust, limit, end_date)
+        
+        # 并发数设为8，避免Tushare限流
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_map = {executor.submit(fetch_one, sid): sid for sid in secids}
+            for future in as_completed(future_map):
+                sid, data = future.result()
+                results[sid] = data
+        
+        print(f"[PerfPython] batch {len(secids)}只: {(time.time()-t0)*1000:.1f}ms")
+        return results
+    
+    @staticmethod
+    def _get_index_kline(secid: str, period: str = "daily", limit: int = 0, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取指数K线数据（index_daily/weekly/monthly）"""
         try:
             ts_code = convert_secid_to_ts_code(secid)
-            end_date = datetime.now().strftime("%Y%m%d")
+            end_date_std = _standardize_date(end_date) if end_date else ''
+            end_date_fmt = end_date_std.replace('-', '') if end_date_std else datetime.now().strftime("%Y%m%d")
 
+            end_dt = datetime.strptime(end_date_fmt, "%Y%m%d")
             if limit > 0:
                 if period == 'daily':
                     days_needed = limit * 2 + 60
-                    start_date = (datetime.now() - timedelta(days=days_needed)).strftime("%Y%m%d")
+                    start_date = (end_dt - timedelta(days=days_needed)).strftime("%Y%m%d")
                 elif period == 'weekly':
                     weeks_needed = limit * 2 + 10
-                    start_date = (datetime.now() - timedelta(days=weeks_needed * 7)).strftime("%Y%m%d")
+                    start_date = (end_dt - timedelta(days=weeks_needed * 7)).strftime("%Y%m%d")
                 elif period == 'monthly':
                     months_needed = limit * 2 + 6
-                    start_date = (datetime.now() - timedelta(days=months_needed * 30)).strftime("%Y%m%d")
+                    start_date = (end_dt - timedelta(days=months_needed * 30)).strftime("%Y%m%d")
                 else:
-                    start_date = (datetime.now() - timedelta(days=limit * 2 + 60)).strftime("%Y%m%d")
+                    start_date = (end_dt - timedelta(days=limit * 2 + 60)).strftime("%Y%m%d")
             else:
-                start_date = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y%m%d")
+                start_date = (end_dt - timedelta(days=365 * 3)).strftime("%Y%m%d")
 
             pro = get_pro()
             if period == 'daily':
-                df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
             elif period == 'weekly':
-                df = pro.index_weekly(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                df = pro.index_weekly(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
             elif period == 'monthly':
-                df = pro.index_monthly(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                df = pro.index_monthly(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
             else:
-                df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
 
             if df is None or df.empty:
                 return {"error": "No data available"}
@@ -1596,7 +1621,8 @@ class TushareAPI:
             try:
                 cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=target_date, is_open='1')
                 if cal_df is not None and not cal_df.empty:
-                    trade_date = str(cal_df['cal_date'].iloc[-1])
+                    # trade_cal 默认返回降序，iloc[0] 才是最近交易日
+                    trade_date = str(cal_df['cal_date'].iloc[0])
             except Exception as e:
                 print(f"[trade_cal 失败] {e}")
             debug_info["trade_date"] = trade_date
@@ -1634,32 +1660,27 @@ class TushareAPI:
                     return {"error": df.get("error"), "debug": debug_info}
                 
                 if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-                    # 带 trade_date 失败，尝试不带 trade_date（查询最新）
+                    # dc_member 只支持最近约7天的历史成分股，更早日期返回空
+                    # 这里不做 fallback 到最新数据，避免历史日期混入最新成分股
                     debug_info["dc_member_empty"] = True
-                    df2 = safe_api_call(pro.dc_member, ts_code=ts_code)
-                    debug_info["dc_member2_type"] = type(df2).__name__
-                    if isinstance(df2, pd.DataFrame) and not df2.empty:
-                        df = df2
-                        debug_info["dc_member2_shape"] = df2.shape
-                    else:
-                        # dc_member 彻底失败，尝试同花顺（如果代码看起来像同花顺）
-                        if is_ths or code.startswith("88") or code.startswith("3"):
-                            ths_stocks = _get_board_stocks_from_ths(code)
-                            for s in ths_stocks:
-                                stock_code = s["code"]
-                                market = 1 if stock_code.startswith("6") else 0
-                                member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
-                                member_map[member_ts] = {
-                                    "code": stock_code,
-                                    "name": s["name"],
-                                    "market": market,
-                                    "secid": s["secid"],
-                                }
-                            debug_info["fallback"] = "ths_web"
-                        if not member_map:
-                            return {"total": 0, "stocks": [], "debug": debug_info}
-                
-                if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+                    debug_info["dc_member_limit_note"] = "dc_member only supports ~7 days history"
+                    # 尝试同花顺 fallback（如果代码看起来像同花顺）
+                    if is_ths or code.startswith("88") or code.startswith("3"):
+                        ths_stocks = _get_board_stocks_from_ths(code)
+                        for s in ths_stocks:
+                            stock_code = s["code"]
+                            market = 1 if stock_code.startswith("6") else 0
+                            member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
+                            member_map[member_ts] = {
+                                "code": stock_code,
+                                "name": s["name"],
+                                "market": market,
+                                "secid": s["secid"],
+                            }
+                        debug_info["fallback"] = "ths_web"
+                    if not member_map:
+                        return {"total": 0, "stocks": [], "debug": debug_info}
+                elif df is not None and isinstance(df, pd.DataFrame) and not df.empty:
                     debug_info["dc_member_rows"] = len(df)
                     for _, row in df.iterrows():
                         con_code = str(row.get("con_code", ""))
@@ -1730,7 +1751,6 @@ class TushareAPI:
                         for _, row in ths_mf.iterrows():
                             tc = str(row.get("ts_code", ""))
                             if tc in member_map:
-                                # 万元 → 元
                                 main_in_map[tc] = _to_float(row.get("net_amount", 0)) * 10000
                                 main_in_5d_map[tc] = _to_float(row.get("net_d5_amount", 0)) * 10000
                 except Exception as e:
@@ -1763,69 +1783,7 @@ class TushareAPI:
                                     main_in_5d_map[tc] = main_in_5d_map.get(tc, 0) + net_amount
                     except Exception as e:
                         print(f"[moneyflow_dc {td} 查询失败] {e}")
-            # ========== 获取主力资金数据 ==========
-            main_in_map: Dict[str, float] = {}
-            main_in_5d_map: Dict[str, float] = {}
 
-            if is_ths:
-                # 同花顺：使用 moneyflow_ths（含当日和5日）
-                try:
-                    ths_mf = safe_api_call(pro.moneyflow_ths, trade_date=trade_date)
-                    if ths_mf is not None and not (isinstance(ths_mf, dict) and ths_mf.get("error")) and not ths_mf.empty:
-                        for _, row in ths_mf.iterrows():
-                            tc = str(row.get("ts_code", ""))
-                            if tc in member_map:
-                                main_in_map[tc] = _to_float(row.get("net_amount", 0)) * 10000
-                                main_in_5d_map[tc] = _to_float(row.get("net_d5_amount", 0)) * 10000
-                except Exception as e:
-                    print(f"[moneyflow_ths 查询失败] {e}")
-            else:
-                # 东财板块个股：用 moneyflow_dc（6000积分，每日盘后更新）
-                # 先获取最近5个交易日
-                trade_dates: List[str] = []
-                try:
-                    cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=trade_date, is_open='1')
-                    if cal_df is not None and not cal_df.empty:
-                        trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
-                        print(f"[debug] trade_dates: {trade_dates}, count={len(trade_dates)}")
-                except Exception as e:
-                    print(f"[trade_cal 查询失败] {e}")
-
-                # 逐日查询 moneyflow_dc 全市场数据，累加成分股
-                success_dates = 0
-                for td in trade_dates:
-                    try:
-                        dc_mf = safe_api_call(pro.moneyflow_dc, trade_date=td)
-                        if isinstance(dc_mf, dict) and dc_mf.get("error"):
-                            print(f"[moneyflow_dc {td}] API error: {dc_mf.get('error')}")
-                            continue
-                        if dc_mf is None or (isinstance(dc_mf, pd.DataFrame) and dc_mf.empty):
-                            print(f"[moneyflow_dc {td}] empty data")
-                            continue
-
-                        success_dates += 1
-                        matched = 0
-                        for _, row in dc_mf.iterrows():
-                            tc = str(row.get("ts_code", ""))
-                            if tc in member_map:
-                                net_amount = _to_float(row.get("net_amount", 0)) * 10000
-                                if td == trade_dates[-1]:
-                                    main_in_map[tc] = net_amount
-                                main_in_5d_map[tc] = main_in_5d_map.get(tc, 0) + net_amount
-                                matched += 1
-                        print(f"[moneyflow_dc {td}] matched {matched}/{len(member_map)} stocks")
-                    except Exception as e:
-                        print(f"[moneyflow_dc {td} 查询失败] {e}")
-
-                print(f"[debug] moneyflow_dc summary: success={success_dates}/{len(trade_dates)}, "
-                    f"main_in records={len(main_in_map)}, main_in_5d records={len(main_in_5d_map)}")
-
-                # 检查异常：两者相等且不为0的情况
-                for tc in list(member_map.keys())[:10]:
-                    mi = main_in_map.get(tc, 0)
-                    m5 = main_in_5d_map.get(tc, 0)
-                    if mi != 0 and abs(mi - m5) < 0.01:
-                        print(f"[debug] WARNING equal value: {tc} main_in={mi}, main_in_5d={m5}")
                 # ========== 组装结果 ==========
                 stocks = []
                 for member_ts, info in member_map.items():
@@ -1872,7 +1830,41 @@ class TushareAPI:
                 return cached
             return {"error": str(e)}
 
-        # ------------------ 行业-概念关联分析（Tushare Pro 原生接口）------------------
+    @staticmethod
+    def get_boards_by_date_batch(dates: List[str]) -> Dict[str, Any]:
+        """批量获取多个交易日的全市场板块数据（industry + concept 合并）"""
+        result = {}
+        for date in dates:
+            industry = TushareAPI.get_boards_by_date(bk_type="industry", date=date)
+            concept = TushareAPI.get_boards_by_date(bk_type="concept", date=date)
+            all_boards = []
+            if isinstance(industry, dict) and industry.get("boards"):
+                all_boards.extend(industry["boards"])
+            if isinstance(concept, dict) and concept.get("boards"):
+                all_boards.extend(concept["boards"])
+            result[date] = {"boards": all_boards, "count": len(all_boards), "date": date}
+        return result
+
+    @staticmethod
+    def get_board_stocks_batch(requests: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """批量获取板块成分股，按 date+boardCode 去重内部查询"""
+        seen = set()
+        result = {}
+        for req in requests:
+            date = req.get("date")
+            board_code = req.get("boardCode")
+            board_name = req.get("boardName")
+            key = f"{date}_{board_code}"
+            if key in seen:
+                continue
+            seen.add(key)
+            result[key] = TushareAPI.get_board_stocks(
+                secid=f"90.{board_code}" if board_code else "",
+                date=date
+            )
+        return result
+    
+    # ------------------ 行业-概念关联分析（Tushare Pro 原生接口）------------------
 
     @staticmethod
     def _get_concept_stocks_simple(concept_code: str, concept_source: str = "dc") -> List[str]:

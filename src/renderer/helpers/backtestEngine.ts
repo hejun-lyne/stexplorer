@@ -255,9 +255,13 @@ export interface StrategyBacktestResult {
 
 export interface StrategyDataProvider {
   getStrongStocks(date: string): Promise<Stock.DetailItem[]>;
-  getKLines(secid: string, endDate: string, days?: number): Promise<Stock.KLineItem[] | null>;
+  getKLines(secids: string[], endDate: string, days?: number): Promise<Record<string, Stock.KLineItem[]>>;
   getAllBoards(associateBoardName: string, date: string): Promise<Array<{ code: string; name: string; zf: number }>>;
   getBoardStocks(date: string, boardCode: string | null, boardName: string): Promise<Array<{ secid: string; zf: number }>>;
+  // [新增] 批量接口
+  getAllBoardsBatch(dates: string[]): Promise<Record<string, Array<{ code: string; name: string; zf: number }>>>;
+  getBoardStocksBatch(requests: Array<{ date: string; boardCode: string | null; boardName: string }>): Promise<Record<string, Array<{ secid: string; zf: number }>>>;
+  
   filterTradeDays(dates: string[]): Promise<string[]>;
 }
 
@@ -286,10 +290,70 @@ export class OptimizedStrategyBacktest {
   private workerExecutor?: (method: string, args?: any[]) => Promise<any>;
   private filterTradeDaysCache: Map<string, string[]> = new Map();
 
-  // [优化] 新增：板块数据内存缓存，避免同一天重复 IO
+    // [优化] 板块数据内存缓存
   private boardCache = new Map<string, Array<{ code: string; name: string; zf: number }>>();
   private boardStocksCache = new Map<string, Array<{ secid: string; zf: number }>>();
+  
+  // [新增] 请求锁：同一 key 的并发查询复用同一个 Promise，避免重复 IPC
+  private boardRequestLock = new Map<string, Promise<Array<{ code: string; name: string; zf: number }> | null>>();
+  private boardStocksRequestLock = new Map<string, Promise<Array<{ secid: string; zf: number }> | null>>();
 
+    /** [优化] 带请求锁的全市场板块查询 */
+  private async getAllBoardsCached(
+    dataProvider: StrategyDataProvider,
+    bk: string,
+    date: string
+  ): Promise<Array<{ code: string; name: string; zf: number }> | null> {
+    const key = date; // getAllBoards 返回全市场所有板块，与 bk 无关
+    const cached = this.boardCache.get(key);
+    if (cached) return cached;
+
+    const locked = this.boardRequestLock.get(key);
+    if (locked) return locked;
+
+    const promise = dataProvider.getAllBoards(bk, date).then(boards => {
+      if (boards && boards.length > 0) {
+        this.boardCache.set(key, boards);
+      }
+      this.boardRequestLock.delete(key);
+      return boards;
+    }).catch(err => {
+      this.boardRequestLock.delete(key);
+      throw err;
+    });
+
+    this.boardRequestLock.set(key, promise);
+    return promise;
+  }
+
+  /** [优化] 带请求锁的板块成分股查询 */
+  private async getBoardStocksCached(
+    dataProvider: StrategyDataProvider,
+    date: string,
+    boardCode: string | null,
+    boardName: string
+  ): Promise<Array<{ secid: string; zf: number }> | null> {
+    const key = `${date}_${boardCode || boardName}`;
+    const cached = this.boardStocksCache.get(key);
+    if (cached) return cached;
+
+    const locked = this.boardStocksRequestLock.get(key);
+    if (locked) return locked;
+
+    const promise = dataProvider.getBoardStocks(date, boardCode, boardName).then(stocks => {
+      if (stocks && stocks.length > 0) {
+        this.boardStocksCache.set(key, stocks);
+      }
+      this.boardStocksRequestLock.delete(key);
+      return stocks;
+    }).catch(err => {
+      this.boardStocksRequestLock.delete(key);
+      throw err;
+    });
+
+    this.boardStocksRequestLock.set(key, promise);
+    return promise;
+  }
   // [优化] Worker 并发数，动态计算
   private readonly WORKER_CONCURRENCY: number;
 
@@ -341,7 +405,7 @@ export class OptimizedStrategyBacktest {
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
-  private readonly BATCH_SIZE = 20; // [优化] 从 5 改为 20，减少 Worker 调度开销
+  private readonly BATCH_SIZE = 50; // [优化] 从 5 改为 20，减少 Worker 调度开销
   private readonly KLINE_DAYS = 150;
 
   private STOP_LOSS_INIT_PCT = 0.95;
@@ -507,12 +571,14 @@ export class OptimizedStrategyBacktest {
     // [优化] 记录因停牌而跳过的订单，用于统计
     const skippedOrders: Array<{ secid: string; type: string; reason: string }> = [];
 
+    const secidsToFetch = this.pendingOrders.map(o => o.secid);
+    const klinesMap = await dataProvider.getKLines(secidsToFetch, today, 5);
     for (const order of this.pendingOrders) {
       if (this.isCancelled()) return true;
       await this.waitIfPaused();
       if (this.isCancelled()) return true;
 
-      const klines = await dataProvider.getKLines(order.secid, today, 5);
+      const klines = klinesMap[order.secid];
       if (!klines || klines.length === 0) {
         console.log(`[OptBacktest] [${today}] 订单执行失败: ${order.secid} 未获取到K线数据`);
         skippedOrders.push({ secid: order.secid, type: order.type, reason: '无K线数据' });
@@ -660,6 +726,7 @@ export class OptimizedStrategyBacktest {
       strategyParams: MACDStrategyResult | RSIBacktestResult;
     }> = [];
 
+    // 预处理：移除已持仓、观察期满的股票
     for (const [secid, item] of this.watchList) {
       if (this.positions.has(secid)) {
         console.log(`[OptBacktest] [${today}] ${secid} 观察移除: 已持仓`);
@@ -673,8 +740,16 @@ export class OptimizedStrategyBacktest {
         this.watchList.delete(secid);
         continue;
       }
+    }
 
-      const klines = await dataProvider.getKLines(secid, today, this.KLINE_DAYS);
+    // 批量获取观察列表K线
+    const watchSecids = Array.from(this.watchList.keys());
+    const klinesMap = watchSecids.length > 0
+      ? await dataProvider.getKLines(watchSecids, today, this.KLINE_DAYS)
+      : {};
+
+    for (const [secid, item] of this.watchList) {
+      const klines = klinesMap[secid];
       if (!klines || klines.length < 60) {
         console.log(`[OptBacktest] [${today}] ${secid} 观察跳过: K线不足`);
         continue;
@@ -684,6 +759,8 @@ export class OptimizedStrategyBacktest {
         console.log(`[OptBacktest] [${today}] ${secid} 观察跳过: 停牌`);
         continue;
       }
+
+      const daysInWatch = this.getTradeDaysDiff(item.addedDate, today);
 
       let mDayIndex = -1;
       if (item.strategyType === 'macd') {
@@ -735,7 +812,8 @@ export class OptimizedStrategyBacktest {
         strategyType: item.strategyType,
         strategyParams: item.strategyParams,
       });
-      console.log(`[OptBacktest] [${today}] ${secid} ✅ 观察期出现买入信号，加入候选`);
+      console.log(`[OptBacktest] [${today}] ${secid} ✅ 观察期出现买入信号，加入候选。`);
+      console.log(`[OptBacktest] 策略类型 ${item.strategyType}，策略参数 ${item.strategyParams}`);
       this.watchList.delete(secid);
     }
 
@@ -771,6 +849,17 @@ export class OptimizedStrategyBacktest {
     onProgress?.(`[${today}] 处理持仓卖出信号...`);
 
     let sellCheckCount = 0;
+    const sellSecidsToFetch: string[] = [];
+    for (const [secid, position] of this.positions) {
+      if (position.buyDate !== today) {
+        sellSecidsToFetch.push(secid);
+      }
+    }
+
+    const sellKlinesMap = sellSecidsToFetch.length > 0
+      ? await dataProvider.getKLines(sellSecidsToFetch, today, 60)
+      : {};
+
     for (const [secid, position] of this.positions) {
       if (this.isCancelled()) return true;
       await this.waitIfPaused();
@@ -782,7 +871,7 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
-      const klines = await dataProvider.getKLines(secid, today, 60);
+      const klines = sellKlinesMap[secid];
       if (!klines || klines.length === 0) {
         console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: K线不足`);
         continue;
@@ -899,30 +988,41 @@ export class OptimizedStrategyBacktest {
       const batch = filteredStocks.slice(batchStart, batchStart + this.BATCH_SIZE);
       onProgress?.(`[${today}] 准备数据 ${Math.min(batchStart + this.BATCH_SIZE, filteredStocks.length)}/${filteredStocks.length}...`);
 
-      const klinesBatch = await this.runWithLimit(
-        batch,
-        async (stock) => dataProvider.getKLines(stock.secid, today, this.KLINE_DAYS),
-        5
-      );
-
+      const batchSecids = batch.map(s => s.secid);
+      const tKFetch0 = performance.now();
+      const klinesMap = await dataProvider.getKLines(batchSecids, today, this.KLINE_DAYS);
+      const tKFetch1 = performance.now();
+      console.log(`[PerfKLine] 批量IPC ${batchSecids.length}只: ${(tKFetch1-tKFetch0).toFixed(1)}ms`);
       const validItems: Array<{ stock: Stock.DetailItem; klines: Stock.KLineItem[]; batchIndex: number }> = [];
       const invalidResults: Array<{ pass: false; reason: string; secid: string }> = [];
 
+      // [优化] 大数据量反序列化后，分批处理避免阻塞UI
+      const tKProcess0 = performance.now();
       for (let i = 0; i < batch.length; i++) {
         const stock = batch[i];
-        const klines = klinesBatch[i];
+        const klines = klinesMap[stock.secid];
         if (!klines || klines.length < 60) {
           invalidResults.push({ pass: false, reason: 'K线不足', secid: stock.secid });
         } else if (klines[klines.length - 1].date !== today) {
-          // [优化] 跳过停牌股票：最后一条K线不是当天，说明今日无交易
           invalidResults.push({ pass: false, reason: '停牌', secid: stock.secid });
         } else {
-          validItems.push({ stock, klines, batchIndex: i });
+          // [优化] 只保留策略计算需要的字段，减少内存占用和后续传输
+          const liteKlines = klines.map(k => ({
+            date: k.date,
+            kp: k.kp,
+            sp: k.sp,
+            zg: k.zg,
+            zd: k.zd,
+          }));
+          validItems.push({ stock, klines: liteKlines, batchIndex: i });
         }
-        if (i % 10 === 0) {
+        // [优化] 每处理5只让出一次，避免106只同步循环阻塞UI
+        if (i % 5 === 0) {
           await yieldToMain(1);
         }
       }
+      const tKProcess1 = performance.now();
+      console.log(`[PerfKLine] 处理${batch.length}只: ${(tKProcess1-tKProcess0).toFixed(1)}ms`);
 
       for (const res of invalidResults) {
         console.log(`[OptBacktest] [${today}] ${res.secid} ❌ 筛选失败: ${res.reason}`);
@@ -964,6 +1064,7 @@ export class OptimizedStrategyBacktest {
           trailingStopLossPct: 1 - this.TRAILING_STOP_PCT,
         };
         const screenParams = {
+          strongStockDay: strongStockDay,
           minStrategyScore: this.MIN_STRATEGY_SCORE,
           strongLookback: this.STRONG_LOOKBACK,
         };
@@ -1068,7 +1169,9 @@ export class OptimizedStrategyBacktest {
     console.log(`[OptBacktest] [${today}] 所有batch优化+筛选完成`);
     const tWorker1 = performance.now();
     console.log(`[Perf] [${today}] Worker总耗时: ${(tWorker1 - tWorker0).toFixed(1)}ms (${totalBatches}batch)`);
-    // ===== 2-4: 板块驱动条件 + 排序和仓位筛选（主线程只做IO和状态管理） =====
+    
+    
+    // ===== 2-4: 板块驱动条件（观察列表+候选合并并行）+ 排序和仓位筛选 =====
     const tScreen0 = performance.now();
     const buyCandidates: Array<{
       secid: string;
@@ -1080,144 +1183,186 @@ export class OptimizedStrategyBacktest {
       strategyParams: MACDStrategyResult | RSIBacktestResult;
     }> = [];
 
+    // ===== 2-4 前置：批量预查询所有板块条件 =====
+    const tPreBoard0 = performance.now();
+
+    // 1. 收集所有需要检查的日期和股票
+    const itemsToCheck: Array<{
+      type: 'watch' | 'candidate';
+      stock: Stock.DetailItem;
+      klines: Stock.KLineItem[];
+      screenResult: BatchBacktestAndScreenResult['screenResult'];
+    }> = [];
+
     for (let i = 0; i < batchTasks.length; i++) {
       const b = batchTasks[i];
       const batchResults = allBatchResults[i];
-
       for (let j = 0; j < batchResults.length; j++) {
         const { screenResult } = batchResults[j];
         const { stock, klines } = b.validItems[j];
-
         if (!screenResult.pass) {
-          // [新增] 无买入信号但策略得分和板块满足，加入观察列表
           if (screenResult.reason === '最近3天无买入信号' &&
               !this.positions.has(stock.secid) &&
               !this.watchList.has(stock.secid)) {
-
-            let boardPass = false;
-            let boardRankPass = false;
-            let boardCode = null;
-            let boardRank = -1;
-            let stockRank = -1;
-            let boardStocks: any[] = [];
-            const boards = await dataProvider.getAllBoards(stock.bk, screenResult.tDayDate!);
-            if (boards && boards.length > 0) {
-              const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
-              // b.name 有时候会有罗马序号，但是stock.bk没有，所以应该根据前缀匹配
-              boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
-              if (boardRank < 0) {
-                boardRank = sortedBoards.findIndex(b => b.name.startsWith(stock.bk));
-              }
-              if (boardRank >= 0) {
-                boardPass = (boardRank + 1) <= boards.length * this.BOARD_RANK_PCT; // 板块前N%进入观察列表
-                boardCode = boards[boardRank].code;
-              } else {
-                console.log(`[OptBacktest] [${today}] ${stock.secid} 观察筛选失败: 未找到所属板块${stock.bk}的排名信息`);
-              }
-            }
-
-            if (boardPass) {
-              if (screenResult.strongType === 'limit_up') {
-                boardRankPass = true;
-              } else {
-                boardStocks = await dataProvider.getBoardStocks(screenResult.tDayDate!, boardCode, stock.bk);
-                let nonLimitStocks: any[] = [];
-                if (boardStocks && boardStocks.length > 0) {
-                  // 排除涨停股后计算排名
-                  nonLimitStocks = boardStocks.filter(s => !isLimitUpStock(s.secid, s.zf));
-                  const sortedStocks = nonLimitStocks.sort((a, b) => b.zf - a.zf);
-                  stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
-                  if (stockRank >= 0) {
-                    boardRankPass = (stockRank + 1) <= nonLimitStocks.length * this.STOCK_RANK_PCT;
-                  } else {
-                    boardRankPass = true; // 没有找到股票排名信息，宽松处理进入观察列表
-                    console.log(`[OptBacktest] [${today}] ${stock.secid} 观察筛选失败: 未找到所属板块${stock.bk}的股票排名信息(排除涨停后${nonLimitStocks.length}只)`);
-                  }
-                } else {
-                  boardRankPass = true;
-                }
-                if (!boardRankPass) {
-                  console.log(`[OptBacktest] [${today}] ${stock.secid} 观察筛选失败: 股票未进板块内前${(this.STOCK_RANK_PCT * 100).toFixed(0)}%(排除涨停后), 实际排名${stockRank + 1}/${nonLimitStocks.length}`);
-                }
-              }
-              if (boardRankPass) {
-                this.watchList.set(stock.secid, {
-                  secid: stock.secid,
-                  boardCode: stock.bk,
-                  strategyType: screenResult.bestType!,
-                  strategyParams: screenResult.bestResult!,
-                  score: screenResult.score,
-                  addedDate: today,
-                  tDayDate: screenResult.tDayDate!,
-                  strongType: screenResult.strongType!,
-                  maxWatchDays: this.MAX_WATCH_DAYS,
-                });
-                console.log(`[OptBacktest] [${today}] ${stock.secid} 👀 加入观察列表 (评分${screenResult.score.toFixed(1)}, 策略${screenResult.bestType?.toUpperCase()}, 观察${this.MAX_WATCH_DAYS}天)`);
-              }
-            } else {
-              console.log(`[OptBacktest] [${today}] ${stock.secid} 观察筛选失败: 板块未进全市场前${(this.BOARD_RANK_PCT * 100).toFixed(0)}%, 实际排名${boardRank + 1}/${boards.length}`);
-            }
-          }
-
-          if (screenResult.reason !== 'K线不足') {
-            console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ 筛选失败: ${screenResult.reason}`);
+            itemsToCheck.push({ type: 'watch', stock, klines, screenResult });
           }
           continue;
         }
+        itemsToCheck.push({ type: 'candidate', stock, klines, screenResult });
+      }
+    }
 
-        // 板块驱动条件（IO，只对通过筛选的少量股票执行）
-        let boardPass = false;
-        let boardRankPass = false;
-        let boardCode = null;
-        let boardRank = -1;
-        let stockRank = -1;
-        let boardStocks: any[] = [];
-        const boards = await dataProvider.getAllBoards(stock.bk, screenResult.tDayDate!);
-        if (boards && boards.length > 0) {
-          const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
-          boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
-          if (boardRank < 0) {
-            boardRank = sortedBoards.findIndex(b => b.name.startsWith(stock.bk));
-          }
-          if (boardRank >= 0) {
-            boardPass = (boardRank + 1) <= boards.length * this.BOARD_RANK_PCT; // 板块前N%才考虑
-            boardCode = boards[boardRank].code;
-          } else {
-            console.log(`[OptBacktest] [${today}] ${stock.secid} 观察筛选失败: 未找到所属板块${stock.bk}的排名信息`);
-          }
-        }
+    // 2. 批量预查 getAllBoards（按日期去重）
+    const uniqueDates = [...new Set(itemsToCheck.map(i => i.screenResult.tDayDate!))];
+    console.log(`[OptBacktest] [${today}] 批量预查板块: ${itemsToCheck.length}只, 涉及${uniqueDates.length}个日期`);
 
-        if (!boardPass) {
-          console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ 筛选失败: 板块未进全市场前${(this.BOARD_RANK_PCT * 100).toFixed(0)}%, 实际排名${boardRank + 1}/${boards.length}`);
-          continue;
-        }
-
-        if (screenResult.strongType === 'limit_up') {
-          boardRankPass = true;
-        } else {
-          boardStocks = await dataProvider.getBoardStocks(screenResult.tDayDate!, boardCode, stock.bk);
-          stockRank = -1;
-          let nonLimitStocks: any[] = [];
-          if (boardStocks && boardStocks.length > 0) {
-            // 排除涨停股后计算排名
-            nonLimitStocks = boardStocks.filter(s => !isLimitUpStock(s.secid, s.zf));
-            const sortedStocks = nonLimitStocks.sort((a, b) => b.zf - a.zf);
-            stockRank = sortedStocks.findIndex(s => s.secid === stock.secid);
-            if (stockRank >= 0) {
-              boardRankPass = (stockRank + 1) <= nonLimitStocks.length * this.STOCK_RANK_PCT;
-            } else { 
-              boardRankPass = true; // 没有找到股票排名信息，宽松处理进入观察列表
-              console.log(`[OptBacktest] [${today}] ${stock.secid} 观察筛选失败: 未找到所属板块${stock.bk}的股票排名信息(排除涨停后${nonLimitStocks.length}只)`);
-            }
-          } else {
-            boardRankPass = true;
-          }
-          if (!boardRankPass) {
-            console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ 筛选失败: 股票未进板块内前${(this.STOCK_RANK_PCT * 100).toFixed(0)}%(排除涨停后), 实际排名${stockRank + 1}/${nonLimitStocks.length}`);
-            continue;
+    let boardsByDate: Record<string, Array<{ code: string; name: string; zf: number }>> = {};
+    if (uniqueDates.length > 0) {
+      // 如果 dataProvider 支持批量接口
+      if ((dataProvider as any).getAllBoardsBatch) {
+        boardsByDate = await (dataProvider as any).getAllBoardsBatch(uniqueDates);
+      } else {
+        // fallback：用请求锁并发查
+        const dateResults = await this.runWithConcurrency(
+          uniqueDates,
+          async (date) => ({ date, boards: await this.getAllBoardsCached(dataProvider, '', date) }),
+          3
+        );
+        for (const r of dateResults) {
+          if (r.status === 'fulfilled') {
+            boardsByDate[r.value.date] = r.value.boards || [];
           }
         }
+      }
+    }
 
+    // 3. 预计算每只股票的 boardCode 和是否需要查 boardStocks
+    const boardStockRequests: Array<{ date: string; boardCode: string; boardName: string; secid: string }> = [];
+    const preComputed = new Map<string, {
+      boardPass: boolean;
+      boardRankPass: boolean;
+      boardCode: string | null;
+      boardRank: number;
+      stockRank: number;
+      nonLimitCount: number;
+    }>();
+
+    for (const item of itemsToCheck) {
+      const { stock, screenResult } = item;
+      const date = screenResult.tDayDate!;
+      const boards = boardsByDate[date] || [];
+      
+      let boardPass = false;
+      let boardCode: string | null = null;
+      let boardRank = -1;
+
+      if (boards.length > 0) {
+        const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
+        boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
+        if (boardRank < 0) boardRank = sortedBoards.findIndex(b => b.name.startsWith(stock.bk));
+        if (boardRank >= 0) {
+          boardPass = (boardRank + 1) <= boards.length * this.BOARD_RANK_PCT;
+          boardCode = boards[boardRank].code;
+        }
+      }
+
+      if (!boardPass) {
+        preComputed.set(stock.secid, { boardPass: false, boardRankPass: false, boardCode, boardRank, stockRank: -1, nonLimitCount: 0 });
+        continue;
+      }
+
+      if (screenResult.strongType === 'limit_up') {
+        preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode, boardRank, stockRank: -1, nonLimitCount: 0 });
+      } else {
+        // 需要查 boardStocks，收集请求
+        if (boardCode) {
+          boardStockRequests.push({ date, boardCode, boardName: stock.bk, secid: stock.secid });
+        }
+      }
+    }
+
+    // 4. 批量查 boardStocks（按 date+boardCode 去重）
+    let boardStocksByKey: Record<string, Array<{ secid: string; zf: number }>> = {};
+    if (boardStockRequests.length > 0) {
+      // 去重：同 date+boardCode 只查一次
+      const uniqueRequests = new Map<string, { date: string; boardCode: string; boardName: string }>();
+      for (const req of boardStockRequests) {
+        const key = `${req.date}_${req.boardCode}`;
+        if (!uniqueRequests.has(key)) {
+          uniqueRequests.set(key, { date: req.date, boardCode: req.boardCode, boardName: req.boardName });
+        }
+      }
+
+      if ((dataProvider as any).getBoardStocksBatch) {
+        const batchReqs = Array.from(uniqueRequests.values());
+        boardStocksByKey = await (dataProvider as any).getBoardStocksBatch(batchReqs);
+      } else {
+        // fallback：请求锁并发查
+        const reqResults = await this.runWithConcurrency(
+          Array.from(uniqueRequests.entries()),
+          async ([key, req]) => ({
+            key,
+            stocks: await this.getBoardStocksCached(dataProvider, req.date, req.boardCode, req.boardName)
+          }),
+          3
+        );
+        for (const r of reqResults) {
+          if (r.status === 'fulfilled') {
+            boardStocksByKey[r.value.key] = r.value.stocks || [];
+          }
+        }
+      }
+
+      // 5. 回填 stockRank
+      for (const req of boardStockRequests) {
+        const key = `${req.date}_${req.boardCode}`;
+        const stocks = boardStocksByKey[key] || [];
+        const nonLimitStocks = stocks.filter(s => !isLimitUpStock(s.secid, s.zf)).sort((a, b) => b.zf - a.zf);
+        const stockRank = nonLimitStocks.findIndex(s => s.secid === req.secid);
+        const boardRankPass = stockRank >= 0 && (stockRank + 1) <= nonLimitStocks.length * this.STOCK_RANK_PCT;
+        
+        const existing = preComputed.get(req.secid)!;
+        preComputed.set(req.secid, {
+          ...existing,
+          boardRankPass: boardRankPass || stockRank < 0, // 找不到排名时宽松处理
+          stockRank,
+          nonLimitCount: nonLimitStocks.length
+        });
+      }
+    }
+
+    const tPreBoard1 = performance.now();
+    console.log(`[Perf] [${today}] 板块预查询: ${(tPreBoard1 - tPreBoard0).toFixed(1)}ms (${uniqueDates}日期, ${boardStockRequests.length}股票需查成分股)`);
+
+    // 6. 根据预计算结果分配（纯内存操作，零 IPC）
+    for (const item of itemsToCheck) {
+      const { type, stock, klines, screenResult } = item;
+      const computed = preComputed.get(stock.secid);
+
+      if (!computed || !computed.boardPass) {
+        console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ ${type === 'watch' ? '观察' : ''}筛选失败: 板块未进全市场前${(this.BOARD_RANK_PCT * 100).toFixed(0)}%`);
+        continue;
+      }
+
+      if (!computed.boardRankPass) {
+        console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ ${type === 'watch' ? '观察' : ''}筛选失败: 股票未进板块内前${(this.STOCK_RANK_PCT * 100).toFixed(0)}%(排除涨停后${computed.nonLimitCount}只)`);
+        continue;
+      }
+
+      if (type === 'watch') {
+        this.watchList.set(stock.secid, {
+          secid: stock.secid,
+          boardCode: stock.bk,
+          strategyType: screenResult.bestType!,
+          strategyParams: screenResult.bestResult!,
+          score: screenResult.score!,
+          addedDate: today,
+          tDayDate: screenResult.tDayDate!,
+          strongType: screenResult.strongType!,
+          maxWatchDays: this.MAX_WATCH_DAYS,
+        });
+        console.log(`[OptBacktest] [${today}] ${stock.secid} 👀 加入观察列表 (评分${screenResult.score!.toFixed(1)})`);
+      } else {
         const currentPrice = klines[klines.length - 1].sp;
         buyCandidates.push({
           secid: stock.secid,
@@ -1229,16 +1374,11 @@ export class OptimizedStrategyBacktest {
           strategyParams: screenResult.bestResult!,
         });
         console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}`);
-
-        if (buyCandidates.length % 5 === 0) {
-          await yieldToMain(1);
-        }
       }
-
-      await yieldToMain();
     }
+
     const tScreen1 = performance.now();
-    console.log(`[Perf] [${today}] 板块筛选: ${(tScreen1 - tScreen0).toFixed(1)}ms (${buyCandidates.length}候选)`);
+    console.log(`[Perf] [${today}] 板块筛选总耗时: ${(tScreen1 - tScreen0).toFixed(1)}ms (${itemsToCheck.length}只→${buyCandidates.length}候选)`);
 
     // 合并观察列表候选和正常候选，去重
     const allBuyCandidates = [...watchBuyCandidates, ...buyCandidates];
@@ -1307,13 +1447,18 @@ export class OptimizedStrategyBacktest {
     let stockValue = 0;
     let positionDetails: Array<{ secid: string; close: number; quantity: number; value: number }> = [];
 
+    const positionSecids = Array.from(this.positions.keys());
+    const klinesMap = positionSecids.length > 0
+      ? await dataProvider.getKLines(positionSecids, date, 1)
+      : {};
+
     let posCount = 0;
     for (const [secid, pos] of this.positions) {
       if (this.isCancelled()) return true;
       await this.waitIfPaused();
       if (this.isCancelled()) return true;
 
-      const klines = await dataProvider.getKLines(secid, date, 1);
+      const klines = klinesMap[secid];
       if (klines && klines.length > 0) {
         const close = klines[klines.length - 1].sp;
         const value = close * pos.quantity;

@@ -307,6 +307,84 @@ export async function GetKFromTushare(secid: string, code: number, limit?: numbe
   }
 }
 
+/**
+ * 批量获取K线数据 - 使用 Tushare 数据源
+ * 
+ * @param secids secid 数组，如 ["1.600000", "0.000001"]
+ * @param date 截止日期 (YYYY-MM-DD)，获取该日期之前的 K 线
+ * @param limit 每个 secid 返回的最大条数
+ * @param code K线周期类型，默认日K
+ * @returns 按 secid 分组的结果对象
+ */
+export async function BatchGetKFromTushare(
+  secids: string[],
+  date: string,
+  limit: number,
+  code: number = KLineType.Day
+): Promise<Record<string, Stock.KLineItem[]>> {
+  const periodMap: Record<number, string> = {
+    [KLineType.Day]: 'daily',
+    [KLineType.Week]: 'weekly',
+    [KLineType.Month]: 'monthly',
+  };
+
+  const period = periodMap[code] || 'daily';
+  const endDate = date.replace(/-/g, '');
+
+  try {
+    const batchResult = await callTushare('get_kline_data_batch', {
+      secids,
+      period,
+      limit,
+      end_date: endDate,
+    });
+
+    if (batchResult.error || typeof batchResult !== 'object') {
+      console.error('批量获取K线失败:', batchResult.error || 'Invalid response');
+      const emptyMap: Record<string, Stock.KLineItem[]> = {};
+      secids.forEach((secid) => { emptyMap[secid] = []; });
+      return emptyMap;
+    }
+
+    const map: Record<string, Stock.KLineItem[]> = {};
+    for (const secid of secids) {
+      const klines = batchResult[secid];
+      if (!Array.isArray(klines) || klines.length === 0) {
+        map[secid] = [];
+        continue;
+      }
+
+      let sliced = klines;
+      if (limit > 0 && sliced.length > limit) {
+        sliced = sliced.slice(-limit);
+      }
+
+      map[secid] = sliced.map((item: any) => ({
+        secid,
+        type: code,
+        date: item.date,
+        kp: item.kp,
+        sp: item.sp,
+        zg: item.zg,
+        zd: item.zd,
+        cjl: item.cjl,
+        cje: item.cje,
+        zdf: item.zdf,
+        zde: item.zde,
+        hsl: item.hsl,
+        chan: 0,
+      } as Stock.KLineItem));
+    }
+
+    return map;
+  } catch (error) {
+    logError(error, 'BatchGetKFromTushare', '批量获取K线数据失败');
+    const emptyMap: Record<string, Stock.KLineItem[]> = {};
+    secids.forEach((secid) => { emptyMap[secid] = []; });
+    return emptyMap;
+  }
+}
+
 // ==================== 分时走势 ====================
 /**
  * 获取分时走势数据 - 使用 Tushare 数据源
@@ -411,6 +489,91 @@ export async function GetBoardStocksByDateFromTushare(
   } catch (error) {
     logError(error, 'GetBoardStocksByDateFromTushare', '获取板块成分股失败');
     return [];
+  }
+}
+
+/**
+ * 批量获取多个交易日的全市场板块数据（industry + concept 合并）
+ * @param dates 交易日期数组 (YYYYMMDD)
+ * @returns 按日期分组的全市场板块数据
+ */
+export async function GetBoardsByDateBatchFromTushare(dates: string[]): Promise<Record<string, Array<{ code: string; name: string; zf: number }>>> {
+  try {
+    const result = await callTushare('get_boards_by_date_batch', { dates });
+
+    if (result.error || typeof result !== 'object') {
+      console.error('批量获取板块数据失败:', result.error || 'Invalid response');
+      const emptyMap: Record<string, Array<{ code: string; name: string; zf: number }>> = {};
+      dates.forEach((d) => { emptyMap[d] = []; });
+      return emptyMap;
+    }
+
+    const map: Record<string, Array<{ code: string; name: string; zf: number }>> = {};
+    for (const date of dates) {
+      const dayData = result[date];
+      if (dayData && Array.isArray(dayData.boards)) {
+        map[date] = dayData.boards.map((item: any) => ({
+          code: item.code,
+          name: item.name,
+          zf: item.zdf || 0,
+        }));
+      } else {
+        map[date] = [];
+      }
+    }
+    return map;
+  } catch (error) {
+    logError(error, 'GetBoardsByDateBatchFromTushare', '批量获取板块数据失败');
+    const emptyMap: Record<string, Array<{ code: string; name: string; zf: number }>> = {};
+    dates.forEach((d) => { emptyMap[d] = []; });
+    return emptyMap;
+  }
+}
+
+/**
+ * 批量获取板块成分股，按 date+boardCode 去重内部查询
+ * @param requests 请求数组，每个元素包含 { date, boardCode, boardName }
+ * @returns 按 "date_boardCode" 分组的成分股列表
+ */
+export async function GetBoardStocksBatchFromTushare(
+  requests: Array<{ date: string; boardCode: string | null; boardName: string }>
+): Promise<Record<string, Array<{ secid: string; zf: number }>>> {
+  try {
+    // 将日期转为 YYYYMMDD
+    const formattedReqs = requests.map((req) => ({
+      date: req.date.replace(/-/g, ''),
+      boardCode: req.boardCode,
+      boardName: req.boardName,
+    }));
+
+    const result = await callTushare('get_board_stocks_batch', { requests: formattedReqs });
+
+    if (result.error || typeof result !== 'object') {
+      console.error('批量获取板块成分股失败:', result.error || 'Invalid response');
+      const emptyMap: Record<string, Array<{ secid: string; zf: number }>> = {};
+      requests.forEach((req) => { emptyMap[`${req.date}_${req.boardCode}`] = []; });
+      return emptyMap;
+    }
+
+    const map: Record<string, Array<{ secid: string; zf: number }>> = {};
+    for (const req of requests) {
+      const key = `${req.date}_${req.boardCode}`;
+      const dayData = result[key];
+      if (dayData && Array.isArray(dayData.stocks)) {
+        map[key] = dayData.stocks.map((s: any) => ({
+          secid: s.secid,
+          zf: s.zdf || 0,
+        }));
+      } else {
+        map[key] = [];
+      }
+    }
+    return map;
+  } catch (error) {
+    logError(error, 'GetBoardStocksBatchFromTushare', '批量获取板块成分股失败');
+    const emptyMap: Record<string, Array<{ secid: string; zf: number }>> = {};
+    requests.forEach((req) => { emptyMap[`${req.date}_${req.boardCode}`] = []; });
+    return emptyMap;
   }
 }
 
