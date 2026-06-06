@@ -818,118 +818,121 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           </div>
           
           <div className={styles.chartwrapper}>
+            {/* [修复] 净值曲线始终保留DOM，避免echarts init报getAttribute null */}
+            <div style={{ display: (!running && result) ? 'block' : 'none' }}>
+              <Card title="📈 每日净值曲线" size="small" style={{ margin: '0 16px 16px' }}>
+                <div ref={chartRef} style={{ width: '100%', height: 320 }} />
+              </Card>
+            </div>
+
             {running && (
-                <div style={{ padding: '40px 20px', textAlign: 'center' }}>
-                    <Progress 
-                        percent={progressPercent} 
-                        status={paused ? 'normal' : 'active'} 
-                        strokeColor={{ from: '#108ee9', to: '#87d068' }} 
-                    />
-                    <div style={{ marginTop: 12, color: '#666', fontSize: 14 }}>
-                        {progress}{paused ? ' (已暂停)' : ''}
-                    </div>
+              <div style={{ padding: '40px 20px', textAlign: 'center' }}>
+                <Progress 
+                  percent={progressPercent} 
+                  status={paused ? 'normal' : 'active'} 
+                  strokeColor={{ from: '#108ee9', to: '#87d068' }} 
+                />
+                <div style={{ marginTop: 12, color: '#666', fontSize: 14 }}>
+                  {progress}{paused ? ' (已暂停)' : ''}
                 </div>
+              </div>
             )}
 
             {!running && result && (
-                <div style={{ padding: 16 }}>
-                    <Card title="📈 每日净值曲线" size="small" style={{ marginBottom: 16 }}>
-                        <div ref={chartRef} style={{ width: '100%', height: 320 }} />
-                    </Card>
-
-                    <Card title="📊 回测结果汇总" size="small" style={{ marginBottom: 16 }}>
-                        <Row gutter={[16, 16]}>
-                            <Col span={6}>
-                                <Statistic 
-                                    title="总收益率" 
-                                    value={result.totalReturn * 100} 
-                                    precision={2} 
-                                    suffix="%" 
-                                    valueStyle={{ color: result.totalReturn >= 0 ? '#cf1322' : '#3f8600' }} 
-                                />
-                            </Col>
-                            <Col span={6}>
-                                <Statistic 
-                                    title="年化收益率" 
-                                    value={result.annualizedReturn * 100} 
-                                    precision={2} 
-                                    suffix="%" 
-                                    valueStyle={{ color: result.annualizedReturn >= 0 ? '#cf1322' : '#3f8600' }} 
-                                />
-                            </Col>
-                            <Col span={6}>
-                                <Statistic 
-                                    title="最大回撤" 
-                                    value={result.maxDrawdown * 100} 
-                                    precision={2} 
-                                    suffix="%" 
-                                    valueStyle={{ color: '#3f8600' }} 
-                                />
-                            </Col>
-                            <Col span={6}>
-                                <Statistic 
-                                    title="胜率" 
-                                    value={result.winRate * 100} 
-                                    precision={2} 
-                                    suffix="%" 
-                                />
-                            </Col>
-                            <Col span={6}>
-                                <Statistic 
-                                    title="盈亏比" 
-                                    value={result.profitFactor} 
-                                    precision={2} 
-                                />
-                            </Col>
-                            <Col span={6}>
-                                <Statistic 
-                                    title="夏普比率" 
-                                    value={result.sharpeRatio} 
-                                    precision={2} 
-                                />
-                            </Col>
-                            <Col span={6}>
-                                <Statistic 
-                                    title="总交易次数" 
-                                    value={result.totalTrades} 
-                                />
-                            </Col>
-                            <Col span={6}>
-                                <Statistic 
-                                    title="平均持仓天数" 
-                                    value={result.avgHoldingDays} 
-                                    precision={1} 
-                                    suffix="天" 
-                                />
-                            </Col>
-                        </Row>
-                    </Card>
-                    
-                    <Card title="📝 交易明细" size="small" style={{ marginBottom: 16 }}>
-                        <Table 
-                            columns={tradeColumns} 
-                            dataSource={result.trades.map((t: any, i: number) => ({ ...t, key: i }))}
-                            pagination={{ pageSize: 20, showSizeChanger: true }}
-                            scroll={{ x: 800 }}
-                            size="small"
-                        />
-                    </Card>
-                    
-                    <Card title="📋 每日净值" size="small">
-                        <Table 
-                            columns={dailyColumns} 
-                            dataSource={result.dailyValues.map((d: any, i: number) => ({ ...d, key: i }))}
-                            pagination={{ pageSize: 20, showSizeChanger: true }}
-                            size="small"
-                        />
-                    </Card>
-                </div>
+              <div style={{ padding: 16 }}>
+                <Card title="📊 回测结果汇总" size="small" style={{ marginBottom: 16 }}>
+                  <Row gutter={[16, 16]}>
+                    <Col span={6}>
+                      <Statistic 
+                        title="总收益率" 
+                        value={result.totalReturn * 100} 
+                        precision={2} 
+                        suffix="%" 
+                        valueStyle={{ color: result.totalReturn >= 0 ? '#cf1322' : '#3f8600' }} 
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic 
+                        title="年化收益率" 
+                        value={result.annualizedReturn * 100} 
+                        precision={2} 
+                        suffix="%" 
+                        valueStyle={{ color: result.annualizedReturn >= 0 ? '#cf1322' : '#3f8600' }} 
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic 
+                        title="最大回撤" 
+                        value={result.maxDrawdown * 100} 
+                        precision={2} 
+                        suffix="%" 
+                        valueStyle={{ color: '#3f8600' }} 
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic 
+                        title="胜率" 
+                        value={result.winRate * 100} 
+                        precision={2} 
+                        suffix="%" 
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic 
+                        title="盈亏比" 
+                        value={result.profitFactor} 
+                        precision={2} 
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic 
+                        title="夏普比率" 
+                        value={result.sharpeRatio} 
+                        precision={2} 
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic 
+                        title="总交易次数" 
+                        value={result.totalTrades} 
+                      />
+                    </Col>
+                    <Col span={6}>
+                      <Statistic 
+                        title="平均持仓天数" 
+                        value={result.avgHoldingDays} 
+                        precision={1} 
+                        suffix="天" 
+                      />
+                    </Col>
+                  </Row>
+                </Card>
+                
+                <Card title="📝 交易明细" size="small" style={{ marginBottom: 16 }}>
+                  <Table 
+                    columns={tradeColumns} 
+                    dataSource={result.trades.map((t: any, i: number) => ({ ...t, key: i }))}
+                    pagination={{ pageSize: 20, showSizeChanger: true }}
+                    scroll={{ x: 800 }}
+                    size="small"
+                  />
+                </Card>
+                
+                <Card title="📋 每日净值" size="small">
+                  <Table 
+                    columns={dailyColumns} 
+                    dataSource={result.dailyValues.map((d: any, i: number) => ({ ...d, key: i }))}
+                    pagination={{ pageSize: 20, showSizeChanger: true }}
+                    size="small"
+                  />
+                </Card>
+              </div>
             )}
 
             {!running && !result && (
-                <div style={{ padding: 40, textAlign: 'center', color: '#999' }}>
-                    选择日期范围后点击回测按钮开始
-                </div>
+              <div style={{ padding: 40, textAlign: 'center', color: '#999' }}>
+                选择日期范围后点击回测按钮开始
+              </div>
             )}
           </div>
         </div>
