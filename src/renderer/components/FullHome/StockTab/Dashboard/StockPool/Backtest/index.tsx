@@ -831,20 +831,12 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 </div>
             )}
 
-            <div style={{ 
-              visibility: (!running && result) ? 'visible' : 'hidden',
-              height: (!running && result) ? 'auto' : 0,
-              overflow: 'hidden',
-              padding: (!running && result) ? '0 16px' : 0,
-              marginBottom: (!running && result) ? 16 : 0
-            }}>
-              <Card title="📈 每日净值曲线" size="small">
-                <div ref={chartRef} style={{ width: '100%', height: 320 }} />
-              </Card>
-            </div>
-
             {!running && result && (
                 <div style={{ padding: 16 }}>
+                    <Card title="📈 每日净值曲线" size="small" style={{ marginBottom: 16 }}>
+                        <div ref={chartRef} style={{ width: '100%', height: 320 }} />
+                    </Card>
+
                     <Card title="📊 回测结果汇总" size="small" style={{ marginBottom: 16 }}>
                         <Row gutter={[16, 16]}>
                             <Col span={6}>
