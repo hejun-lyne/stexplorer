@@ -812,8 +812,11 @@ export class OptimizedStrategyBacktest {
         strategyType: item.strategyType,
         strategyParams: item.strategyParams,
       });
-      console.log(`[OptBacktest] [${today}] ${secid} ✅ 观察期出现买入信号，加入候选。`);
-      console.log(`[OptBacktest] 策略类型 ${item.strategyType}，策略参数 ${item.strategyParams}`);
+
+      const paramsStr = item.strategyType === 'macd'
+        ? `fast=${(item.strategyParams as MACDStrategyResult).fast} slow=${(item.strategyParams as MACDStrategyResult).slow} signal=${(item.strategyParams as MACDStrategyResult).signal}`
+        : `period=${(item.strategyParams as RSIBacktestResult).rsiPeriod} buy=${(item.strategyParams as RSIBacktestResult).buyThreshold} sell=${(item.strategyParams as RSIBacktestResult).sellThreshold}`;
+      console.log(`[OptBacktest] [${today}] ${item.secid} ✅ 观察期出现买入信号，参数: ${paramsStr}`);
       this.watchList.delete(secid);
     }
 
