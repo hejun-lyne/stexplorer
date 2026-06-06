@@ -632,7 +632,7 @@ export function findTDay(
 export function batchBacktestAndScreen(
   items: BatchBacktestAndScreenItem[],
   backtestParams: { fixedStopLossPct: number; trailingStopLossPct: number },
-  screenParams: { minStrategyScore: number; strongLookbackStart: number; strongLookbackEnd: number }
+  screenParams: { minStrategyScore: number; strongLookback: number }
 ): BatchBacktestAndScreenResult[] {
   const results: BatchBacktestAndScreenResult[] = [];
 
@@ -669,8 +669,22 @@ export function batchBacktestAndScreen(
         mDayIndex = checkRSIBuySignal(klines, bestResult as RSIBacktestResult, 3);
       }
 
+      // 先计算 strongType 和 tDay，无论是否有买入信号（观察列表需要）
+      const strongType = detectStrongType(klines, klines.length - 1);
+      const tDayIndex = findTDay(klines, strongType, klines.length - 1, screenParams.strongLookback);
+      const tDayDate = tDayIndex >= 0 ? klines[tDayIndex].date : klines[klines.length - 1].date;
+
       if (mDayIndex < 0) {
-        screenResult = { pass: false, reason: '最近3天无买入信号', secid: stock.secid };
+        screenResult = {
+          pass: false,
+          reason: '最近3天无买入信号',
+          secid: stock.secid,
+          score: bestScore,
+          bestType: bestType!,
+          bestResult: bestResult!,
+          tDayDate,
+          strongType,
+        };
       } else {
         const lastIndex = klines.length - 1;
         const mDayKline = klines[mDayIndex];
@@ -695,12 +709,30 @@ export function batchBacktestAndScreen(
         }
 
         if (failReason) {
-          screenResult = { pass: false, reason: failReason, secid: stock.secid };
+          screenResult = { 
+            pass: false, 
+            reason: failReason, 
+            secid: stock.secid,
+            score: bestScore,
+            bestType: bestType!,
+            bestResult: bestResult!,
+            mDayIndex,
+            mDayDate: mDayKline.date,
+            strongType,
+          };
         } else {
-          const strongType = detectStrongType(klines, klines.length - 1);
-          const tDayIndex = findTDay(klines, strongType, klines.length - 1, 10);
           if (tDayIndex < 0) {
-            screenResult = { pass: false, reason: '未找到T-Day', secid: stock.secid };
+            screenResult = { 
+              pass: false, 
+              reason: '未找到T-Day', 
+              secid: stock.secid,
+              score: bestScore,
+              bestType: bestType!,
+              bestResult: bestResult!,
+              mDayIndex,
+              mDayDate: mDayKline.date,
+              strongType,
+            };
           } else {
             screenResult = {
               pass: true,

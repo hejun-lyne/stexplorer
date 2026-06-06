@@ -383,12 +383,59 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [minStrategyScore, setMinStrategyScore] = useState(90);
     const [strongLookbackStart, setStrongLookbackStart] = useState(10);
     const [strongLookbackEnd, setStrongLookbackEnd] = useState(5);
+    const [boardRankPct, setBoardRankPct] = useState(0.3);
+    const [stockRankPct, setStockRankPct] = useState(0.3);
 
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
 
     const { ref: chartRef, chartInstance: chart } = useResizeEchart(-1);
     const [chartOption, setChartOption] = useState<any>(undefined);
+
+    // 缓存 key
+    const CACHE_KEY = 'backtest_last_result';
+    const { electron } = window.contextModules;
+
+    // 从缓存恢复上一次的回测结果和参数
+    useEffect(() => {
+      (async () => {
+        try {
+          const cached = await electron.readCache(CACHE_KEY);
+          // IPC 返回结构: { success: true, data: { data: 真实缓存, cachedAt: '...' } }
+          const payload = cached?.data?.data;
+          if (payload) {
+            const { result: cachedResult, dates: cachedDates, strategyType: cachedStrategyType, params } = payload;
+            if (cachedResult) {
+              setResult(cachedResult);
+              const baseOpts = getNetValueBaseOptions(darkMode, params?.initialCapital || 1000000);
+              const finalOpts = updateNetValueOptions(baseOpts, darkMode, cachedResult.dailyValues, params?.initialCapital || 1000000);
+              setChartOption(finalOpts);
+              console.log('[Backtest] 已从缓存恢复上一次的回测结果');
+            }
+            if (cachedDates && cachedDates.length > 0) {
+              setDates(cachedDates);
+            }
+            if (cachedStrategyType) {
+              setStrategyType(cachedStrategyType);
+            }
+            if (params) {
+              setInitialCapital(params.initialCapital ?? 1000000);
+              setMaxPositions(params.maxPositions ?? 5);
+              setPositionRatio(params.positionRatio ?? 0.2);
+              setStopLossInitPct(params.stopLossInitPct ?? 0.95);
+              setTrailingStopPct(params.trailingStopPct ?? 0.95);
+              setMinStrategyScore(params.minStrategyScore ?? 90);
+              setStrongLookbackStart(params.strongLookbackStart ?? 10);
+              setStrongLookbackEnd(params.strongLookbackEnd ?? 5);
+              setBoardRankPct(params.boardRankPct ?? 0.3);
+              setStockRankPct(params.stockRankPct ?? 0.3);
+            }
+          }
+        } catch (e) {
+          console.error('[Backtest] 读取缓存失败:', e);
+        }
+      })();
+    }, []);
 
     const onChangeDate = useCallback(
         (d: moment.Moment | null, isStart = true) => {
@@ -485,11 +532,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             stopLossInitPct,
             trailingStopPct,
             minStrategyScore,
-            strongLookbackStart,
-            strongLookbackEnd,
+            strongLookback: strongLookbackStart,
             maxPositions,
             positionRatio,
             workerCount,
+            maxWatchDays: strongLookbackEnd,
+            boardRankPct,
+            stockRankPct,
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -515,6 +564,30 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         const finalOpts = updateNetValueOptions(baseOpts, darkMode, backtestResult.dailyValues, initialCapital);
         setChartOption(finalOpts);
 
+        // 缓存回测结果和参数到磁盘
+        try {
+          await electron.writeCache(CACHE_KEY, {
+            result: backtestResult,
+            dates,
+            strategyType,
+            params: {
+              initialCapital,
+              maxPositions,
+              positionRatio,
+              stopLossInitPct,
+              trailingStopPct,
+              minStrategyScore,
+              strongLookbackStart,
+              strongLookbackEnd,
+              boardRankPct,
+              stockRankPct,
+            },
+          });
+          console.log('[Backtest] 回测结果已缓存到磁盘');
+        } catch (e) {
+          console.error('[Backtest] 缓存回测结果失败:', e);
+        }
+
         console.log(`[UI] ${strategyName}回测结果已接收，图表已生成`);
       } catch (e) {
         const errorMsg = e instanceof Error ? e.message : String(e);
@@ -527,7 +600,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, stopLossInitPct, trailingStopPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio]);
+    }, [dates, dataProvider, darkMode, strategyType, stopLossInitPct, trailingStopPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -654,6 +727,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       <InputNumber size="small" min={2} max={30} step={1} value={strongLookbackStart} onChange={(v) => setStrongLookbackStart(v ?? 10)} disabled={running} style={{ width: 50 }} />
                       <span style={{ fontSize: 12 }}>-</span>
                       <InputNumber size="small" min={1} max={29} step={1} value={strongLookbackEnd} onChange={(v) => setStrongLookbackEnd(v ?? 5)} disabled={running} style={{ width: 50 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>板块排名:</span>
+                      <InputNumber size="small" min={0.01} max={1} step={0.05} value={boardRankPct} onChange={(v) => setBoardRankPct(v ?? 0.3)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>股票排名:</span>
+                      <InputNumber size="small" min={0.01} max={1} step={0.05} value={stockRankPct} onChange={(v) => setStockRankPct(v ?? 0.3)} disabled={running} style={{ width: 55 }} />
                     </div>
                   </div>
                 )}

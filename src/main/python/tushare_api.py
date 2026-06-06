@@ -1256,9 +1256,27 @@ class TushareAPI:
                 "date": "20240101"
             }
         """
+        target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+        cache_key = f"boards_by_date_{bk_type}_{target_date}"
+        cached = read_cache(cache_key, max_age_hours=8760 * 10)  # 历史数据几乎不变，缓存10年
+
+        # 检查缓存有效性
+        if isinstance(cached, dict) and cached.get("boards"):
+            cached_date = cached.get("date", "")
+            if date:
+                # 指定了历史日期，数据不变，直接返回缓存
+                print(f"[板块缓存命中] {bk_type} date={target_date} (指定日期)")
+                return cached
+            else:
+                # 未指定日期，检查缓存是否为最近交易日
+                expected_last = _get_expected_last_trade_date("daily")
+                if cached_date == expected_last.replace("-", ""):
+                    print(f"[板块缓存命中] {bk_type} date={cached_date} (最新交易日)")
+                    return cached
+                print(f"[板块缓存过期] {bk_type} 缓存日期={cached_date} != 期望={expected_last.replace('-', '')}")
+
         try:
             pro = get_pro()
-            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
             idx_type = "行业板块" if bk_type == "industry" else "概念板块"
 
             # 1. 获取板块行情（dc_index 支持 trade_date 参数）
@@ -1314,12 +1332,19 @@ class TushareAPI:
                     "source": "dc",
                 })
 
-            return {
+            result = {
                 "boards": boards,
                 "count": len(boards),
                 "date": target_date,
             }
+            if isinstance(result, dict) and result.get("boards"):
+                write_cache(cache_key, result)
+            return result
         except Exception as e:
+            # 请求失败时，如果有缓存则返回过期缓存（降级）
+            if isinstance(cached, dict) and cached.get("boards"):
+                print(f"[板块请求失败，返回过期缓存] {bk_type} date={target_date}: {e}")
+                return cached
             return {"error": str(e)}
 
     @staticmethod
@@ -1529,10 +1554,28 @@ class TushareAPI:
         返回字段补全：通过 daily + daily_basic 获取指定日期行情
         新增主力资金：main_in（当日）, main_in_5d（5日）
         """
+        code = convert_secid_to_pure_code(secid)
+        target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+        cache_key = f"board_stocks_{secid}_{target_date}"
+        cached = read_cache(cache_key, max_age_hours=8760 * 10)  # 历史数据几乎不变，缓存10年
+
+        # 检查缓存有效性
+        if isinstance(cached, dict) and cached.get("stocks"):
+            cached_date = cached.get("date", "")
+            if date:
+                # 指定了历史日期，数据不变，直接返回缓存
+                print(f"[板块成分股缓存命中] {secid} date={target_date} (指定日期)")
+                return cached
+            else:
+                # 未指定日期，检查缓存是否为最近交易日
+                expected_last = _get_expected_last_trade_date("daily")
+                if cached_date == expected_last.replace("-", ""):
+                    print(f"[板块成分股缓存命中] {secid} date={cached_date} (最新交易日)")
+                    return cached
+                print(f"[板块成分股缓存过期] {secid} 缓存日期={cached_date} != 期望={expected_last.replace('-', '')}")
+
         try:
             pro = get_pro()
-            code = convert_secid_to_pure_code(secid)
-            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
             start_date_5d = (datetime.strptime(target_date, '%Y%m%d') - timedelta(days=10)).strftime('%Y%m%d')
 
             # 判断板块类型
@@ -1818,8 +1861,15 @@ class TushareAPI:
                         "cs": 0,
                     })
 
-                return {"total": len(stocks), "stocks": stocks}
+                result = {"total": len(stocks), "stocks": stocks, "date": target_date}
+                if isinstance(result, dict) and result.get("stocks"):
+                    write_cache(cache_key, result)
+                return result
         except Exception as e:
+            # 请求失败时，如果有缓存则返回过期缓存（降级）
+            if isinstance(cached, dict) and cached.get("stocks"):
+                print(f"[板块成分股请求失败，返回过期缓存] {secid} date={target_date}: {e}")
+                return cached
             return {"error": str(e)}
 
         # ------------------ 行业-概念关联分析（Tushare Pro 原生接口）------------------

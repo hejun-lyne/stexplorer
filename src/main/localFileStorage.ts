@@ -549,7 +549,7 @@ export function listQSListBackups(): string[] {
 
 // ===== 回测策略缓存 =====
 
-const BACKTEST_CACHE_DIR = 'backtest_cache';
+const BACKTEST_CACHE_DIR = 'backups/backtest_cache';
 
 function getBacktestCacheDir(): string {
   if (!dataDir) {
