@@ -327,6 +327,29 @@ def safe_api_call(func, *args, **kwargs):
         return {"error": err_msg}
 
 
+def _get_stock_basic_maps() -> tuple[Dict[str, str], Dict[str, str]]:
+    """获取股票基本信息映射（名称 + 行业），带本地缓存（7天）"""
+    cache_key = "stock_basic_all"
+    cached = read_cache(cache_key, max_age_hours=168)
+    if cached and isinstance(cached, dict):
+        return cached.get("name_map", {}), cached.get("industry_map", {})
+
+    name_map: Dict[str, str] = {}
+    industry_map: Dict[str, str] = {}
+    try:
+        pro = get_pro()
+        basic_df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
+        if basic_df is not None and not basic_df.empty:
+            for _, row in basic_df.iterrows():
+                tc = str(row['ts_code'])
+                name_map[tc] = str(row['name'])
+                industry_map[tc] = str(row.get('industry', ''))
+            write_cache(cache_key, {"name_map": name_map, "industry_map": industry_map})
+    except Exception:
+        pass
+    return name_map, industry_map
+
+
 # ============ 同花顺板块成分股辅助函数 ============
 
 def _get_ths_cookie() -> str:
@@ -2920,15 +2943,8 @@ class TushareAPI:
                 hist_df = pd.concat(hist_frames, ignore_index=True)
                 high_60 = hist_df.groupby('ts_code')['high'].max().to_dict()
 
-            # 6. 获取股票名称
-            name_map = {}
-            try:
-                basic_df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
-                if basic_df is not None and not basic_df.empty:
-                    for _, row in basic_df.iterrows():
-                        name_map[str(row['ts_code'])] = str(row['name'])
-            except Exception:
-                pass
+            # 6. 获取股票名称和行业（带缓存复用）
+            name_map, industry_map = _get_stock_basic_maps()
 
             # 7. 筛选：涨停 或 60日新高
             stocks = []
@@ -2961,14 +2977,14 @@ class TushareAPI:
                         "secid": secid,
                         "code": code,
                         "name": name_map.get(tc, ''),
-                        "zx": close,
+                        "zx": close * 1000,
                         "zdf": zdf,
                         "zg": high,
                         "zd": low,
                         "cjl": vol,
                         "cje": round(amount, 2),
                         "strongType": "limit_up" if is_limit else "new_high_60",
-                        "hybk": "",
+                        "hybk": industry_map.get(tc, ''),
                         "ltsz": 0,
                     })
 
@@ -3043,15 +3059,8 @@ class TushareAPI:
                         limit_data[td] = codes
                         write_cache(cache_key_limit, [{'ts_code': c} for c in codes])
 
-            # 获取股票名称
-            name_map = {}
-            try:
-                basic_df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
-                if basic_df is not None and not basic_df.empty:
-                    for _, row in basic_df.iterrows():
-                        name_map[str(row['ts_code'])] = str(row['name'])
-            except Exception:
-                pass
+            # 获取股票名称和行业（带缓存复用）
+            name_map, industry_map = _get_stock_basic_maps()
 
             # 逐日计算60日新高并筛选
             result = {}
@@ -3106,7 +3115,7 @@ class TushareAPI:
                             "cjl": vol,
                             "cje": round(amount, 2),
                             "strongType": "limit_up" if is_limit else "new_high_60",
-                            "hybk": "",
+                            "hybk": industry_map.get(tc, ''),
                             "ltsz": 0,
                         })
 

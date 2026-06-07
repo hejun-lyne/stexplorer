@@ -956,8 +956,6 @@ export async function GetFinanceDataFromTushare(secid: string): Promise<any> {
 
 // ==================== 强势股票 ====================
 
-const STRONG_STOCKS_TABLE = 'strong_stocks_tushare';
-
 /**
  * 获取指定日期的强势股票（60日新高 或 涨停）
  * 优先读本地缓存，未命中则调用 Tushare 生成
@@ -966,12 +964,12 @@ export async function GetStrongStocksFromTushare(date: string): Promise<any> {
   try {
     const queryDate = date.replace(/-/g, '');
 
-    // 1. 先读本地缓存
+    // 1. 先读本地缓存（QSList backup）
     try {
-      const cached = await window.contextModules.electron.sqliteRead(STRONG_STOCKS_TABLE, queryDate);
-      if (cached?.success && cached.data?.data?.stocks) {
+      const cached = await Helpers.Storage.ReadQSListBackup(queryDate);
+      if (cached?.data?.stocks) {
         console.log(`[StrongStocks] 缓存命中: ${date}`);
-        return cached.data.data;
+        return cached.data;
       }
     } catch (e) {
       // 缓存不存在
@@ -986,9 +984,9 @@ export async function GetStrongStocksFromTushare(date: string): Promise<any> {
       return { stocks: [], date: queryDate, count: 0 };
     }
 
-    // 3. 写入本地缓存
+    // 3. 写入本地缓存（QSList backup）
     try {
-      await window.contextModules.electron.sqliteWrite(STRONG_STOCKS_TABLE, result, dayjs().format('YYYY-MM-DD HH:mm:ss'), queryDate);
+      await Helpers.Storage.WriteQSListBackup(queryDate, result);
       console.log(`[StrongStocks] 已缓存: ${date}, ${result.count} 只`);
     } catch (e) {
       console.error('缓存强势股票失败:', e);
@@ -1010,42 +1008,61 @@ export async function BatchGetStrongStocksFromTushare(startDate: string, endDate
     const start = startDate.replace(/-/g, '');
     const end = endDate.replace(/-/g, '');
 
-    // 检查批量缓存
-    try {
-      const cached = await window.contextModules.electron.sqliteRead(STRONG_STOCKS_TABLE, `batch_${start}_${end}`);
-      if (cached?.success && cached.data?.data?.dates) {
-        console.log(`[StrongStocks] 批量缓存命中: ${startDate} ~ ${endDate}`);
-        return cached.data.data.dates;
-      }
-    } catch (e) {
-      // 无批量缓存
+    // 1. 逐日检查 QSList backup 缓存
+    const allDates: string[] = [];
+    let current = dayjs(startDate);
+    const endDay = dayjs(endDate);
+    while (!current.isAfter(endDay, 'day')) {
+      allDates.push(current.format('YYYYMMDD'));
+      current = current.add(1, 'day');
     }
 
-    console.log(`[StrongStocks] 批量生成: ${startDate} ~ ${endDate}`);
+    const cachedDates: Record<string, any> = {};
+    const missingDates: string[] = [];
+
+    for (const d of allDates) {
+      try {
+        const cached = await Helpers.Storage.ReadQSListBackup(d);
+        if (cached?.data?.stocks) {
+          cachedDates[d] = cached.data;
+        } else {
+          missingDates.push(d);
+        }
+      } catch (e) {
+        missingDates.push(d);
+      }
+    }
+
+    if (missingDates.length === 0) {
+      console.log(`[StrongStocks] 批量缓存全部命中: ${startDate} ~ ${endDate}`);
+      return cachedDates;
+    }
+
+    console.log(`[StrongStocks] 批量生成: ${startDate} ~ ${endDate}, 缺失 ${missingDates.length} 天`);
     const result = await callTushare('get_strong_stocks_batch', { start_date: start, end_date: end });
 
     if (result.error || !result.dates) {
       console.error('批量生成强势股票失败:', result.error);
+      // 如果有部分缓存，返回部分缓存（降级）
+      if (Object.keys(cachedDates).length > 0) {
+        return cachedDates;
+      }
       return {};
     }
 
-    // 逐日写入缓存
+    // 逐日写入 QSList backup 缓存
     const dates = Object.keys(result.dates);
     for (const d of dates) {
       try {
-        await window.contextModules.electron.sqliteWrite(STRONG_STOCKS_TABLE, result.dates[d], dayjs().format('YYYY-MM-DD HH:mm:ss'), d);
+        await Helpers.Storage.WriteQSListBackup(d, result.dates[d]);
+        cachedDates[d] = result.dates[d];
       } catch (e) {
         // 单条缓存失败继续
       }
     }
 
-    // 写入批量缓存标记
-    try {
-      await window.contextModules.electron.sqliteWrite(STRONG_STOCKS_TABLE, result, dayjs().format('YYYY-MM-DD HH:mm:ss'), `batch_${start}_${end}`);
-    } catch (e) {}
-
     console.log(`[StrongStocks] 批量完成: ${dates.length} 天`);
-    return result.dates;
+    return cachedDates;
   } catch (error) {
     logError(error, 'BatchGetStrongStocksFromTushare', '批量生成强势股票失败');
     return {};

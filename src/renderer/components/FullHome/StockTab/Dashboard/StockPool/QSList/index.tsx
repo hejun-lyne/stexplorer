@@ -477,7 +477,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                       : ''}
                   </Col>
                   <Col span={8}>
-                    {s.reason === 1 ? '60日新高' : s.reason === 2 ? '多次涨停' : '新高且多次涨停'}
+                    {(s.reason === 1 || s.strongType === 'new_high_60') ? '60日新高' : (s.reason === 2 || s.strongType === 'new_high_60') ? '多次涨停' : '新高且多次涨停'}
                   </Col>
                 </Row>
               ))}
