@@ -711,6 +711,7 @@ export class OptimizedStrategyBacktest {
   }
 
   private executeBuy(order: StrategyPendingOrder, date: string, price: number) {
+    console.log(`[Debug][ executeBuy in][${date}] ${order.secid} order.boardRank=${order.boardRank !== undefined && order.boardRank >= 0 ? order.boardRank + 1 : '-'} order.stockRank=${order.stockRank !== undefined && order.stockRank >= 0 ? order.stockRank + 1 : '-'} type=${order.strategyType}`);
     const adjustedPrice = price * (1 + this.SLIPPAGE);
     const standardAmount = this.capital * this.POSITION_RATIO;
     const maxBuyAmount = Math.min(standardAmount, this.availableCash);
@@ -1477,6 +1478,8 @@ export class OptimizedStrategyBacktest {
           stockRank,
           nonLimitCount: nonLimitStocks.length
         });
+        // [调试] 打印个股排名回填结果
+        console.log(`[Debug][ stockRank回填][${req.date}] ${req.secid} 板块=${req.boardName} 个股排名=${stockRank >= 0 ? stockRank + 1 : '未找到'} 板块内非涨停数=${nonLimitStocks.length} 通过=${boardRankPass || stockRank < 0}`);
       }
     }
 
@@ -1539,7 +1542,7 @@ export class OptimizedStrategyBacktest {
           strategyType: screenResult.bestType!,
           strategyParams: screenResult.bestResult!,
         });
-        console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}`);
+        console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}${computed.boardRank >= 0 ? ` | 板块排名=${computed.boardRank + 1}` : ''}${computed.stockRank >= 0 ? ` | 个股排名=${computed.stockRank + 1}` : ''}`);
       }
     }
 
@@ -1590,6 +1593,8 @@ export class OptimizedStrategyBacktest {
         }
 
         const computed = preComputed.get(candidate.secid);
+        // [调试] 打印即将传入pendingOrders的排名信息
+        console.log(`[Debug][ pendingOrder][${today}] ${candidate.secid} score=${candidate.score.toFixed(1)} boardRank=${computed?.boardRank !== undefined && computed.boardRank >= 0 ? computed.boardRank + 1 : '-'} stockRank=${computed?.stockRank !== undefined && computed.stockRank >= 0 ? computed.stockRank + 1 : '-'}`);
         this.pendingOrders.push({
           secid: candidate.secid,
           type: 'buy',
