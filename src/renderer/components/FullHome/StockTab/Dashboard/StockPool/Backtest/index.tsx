@@ -737,9 +737,51 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         },
     ];
 
-    const dailyColumns = [
-        { title: '日期', dataIndex: 'date', key: 'date', width: 120 },
-        { title: '总市值', dataIndex: 'totalValue', key: 'totalValue', render: (v: number) => v.toFixed(2) },
+    const stockStatsColumns = [
+        { title: '股票', dataIndex: 'secid', key: 'secid', width: 110, fixed: 'left' as const },
+        { title: '策略', dataIndex: 'strategyType', key: 'strategyType', width: 80, render: (v: string) => v?.toUpperCase() || '-' },
+        { title: '策略得分', dataIndex: 'score', key: 'score', width: 90, render: (v: number) => (v || 0).toFixed(1) },
+        { title: '策略参数', dataIndex: 'strategyParamsStr', key: 'strategyParamsStr', width: 240, render: (v?: string) => v || '-', ellipsis: true },
+        { title: '板块排名', dataIndex: 'boardRank', key: 'boardRank', width: 90, render: (v?: number) => v !== undefined && v >= 0 ? v + 1 : '-' },
+        { title: '个股排名', dataIndex: 'stockRank', key: 'stockRank', width: 90, render: (v?: number) => v !== undefined && v >= 0 ? v + 1 : '-' },
+        { title: '交易次数', dataIndex: 'totalTrades', key: 'totalTrades', width: 90 },
+        { title: '盈利', dataIndex: 'winTrades', key: 'winTrades', width: 80 },
+        { title: '亏损', dataIndex: 'lossTrades', key: 'lossTrades', width: 80 },
+        { title: '胜率', dataIndex: 'winRate', key: 'winRate', width: 90, render: (v: number) => `${(v * 100).toFixed(1)}%` },
+        { title: '总盈亏', dataIndex: 'totalPnl', key: 'totalPnl', width: 120, render: (v: number) => (
+            <span style={{ color: (v || 0) >= 0 ? '#cf1322' : '#3f8600' }}>{(v || 0) >= 0 ? '+' : ''}{(v || 0).toFixed(2)}</span>
+        )},
+        { title: '平均收益', dataIndex: 'avgReturnPct', key: 'avgReturnPct', width: 100, render: (v: number) => (
+            <span style={{ color: (v || 0) >= 0 ? '#cf1322' : '#3f8600' }}>{(v || 0) >= 0 ? '+' : ''}{(v || 0).toFixed(2)}%</span>
+        )},
+    ];
+
+    const tradeDetailColumns = [
+        { title: '买入日期', dataIndex: 'buyDate', key: 'buyDate', width: 100 },
+        { title: '买入价', dataIndex: 'buyPrice', key: 'buyPrice', width: 90, render: (v: number) => v?.toFixed(2) },
+        { title: '卖出日期', dataIndex: 'sellDate', key: 'sellDate', width: 100, render: (v?: string) => v || '持仓中' },
+        { title: '卖出价', dataIndex: 'sellPrice', key: 'sellPrice', width: 90, render: (v?: number) => v !== undefined ? v.toFixed(2) : '-' },
+        { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 90 },
+        { title: '收益率', dataIndex: 'returnPct', key: 'returnPct', width: 100, render: (v?: number) => v !== undefined ? (
+            <span style={{ color: v >= 0 ? '#cf1322' : '#3f8600' }}>{v >= 0 ? '+' : ''}{v.toFixed(2)}%</span>
+        ) : '-' },
+        { title: '盈亏', dataIndex: 'pnl', key: 'pnl', width: 120, render: (v?: number) => v !== undefined ? (
+            <span style={{ color: v >= 0 ? '#cf1322' : '#3f8600' }}>{v >= 0 ? '+' : ''}{v.toFixed(2)}</span>
+        ) : '-' },
+        { title: '持仓天数', dataIndex: 'holdDays', key: 'holdDays', width: 90, render: (v?: number) => v !== undefined ? `${v}天` : '-' },
+        { title: '卖出原因', dataIndex: 'sellReason', key: 'sellReason', width: 200, render: (v?: string) => v || '-' },
+    ];
+
+    const scoreDistributionColumns = [
+        { title: '得分区间', dataIndex: 'scoreRange', key: 'scoreRange', width: 100 },
+        { title: '股票数', dataIndex: 'count', key: 'count', width: 90 },
+        { title: '交易次数', key: 'totalTrades', width: 90, render: (_: any, r: any) => (r.winTrades || 0) + (r.lossTrades || 0) },
+        { title: '盈利次数', dataIndex: 'winTrades', key: 'winTrades', width: 90 },
+        { title: '亏损次数', dataIndex: 'lossTrades', key: 'lossTrades', width: 90 },
+        { title: '胜率', dataIndex: 'winRate', key: 'winRate', width: 100, render: (v: number) => `${(v * 100).toFixed(1)}%` },
+        { title: '平均收益率', dataIndex: 'avgReturnPct', key: 'avgReturnPct', width: 120, render: (v: number) => (
+            <span style={{ color: (v || 0) >= 0 ? '#cf1322' : '#3f8600' }}>{(v || 0) >= 0 ? '+' : ''}{(v || 0).toFixed(2)}%</span>
+        )},
     ];
 
     return (
@@ -936,15 +978,43 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     size="small"
                   />
                 </Card>
+
+                {result.stockStats && result.stockStats.length > 0 && (
+                  <Card title="📊 股票交易统计" size="small" style={{ marginBottom: 16 }}>
+                    <Table 
+                      columns={stockStatsColumns}
+                      dataSource={result.stockStats.map((s: any, i: number) => ({ ...s, key: i }))}
+                      pagination={{ pageSize: 20, showSizeChanger: true }}
+                      scroll={{ x: 1240 }}
+                      size="small"
+                      expandable={{
+                        expandedRowRender: (record: any) => (
+                          <Table
+                            columns={tradeDetailColumns}
+                            dataSource={record.trades.map((t: any, i: number) => ({ ...t, key: i }))}
+                            pagination={false}
+                            size="small"
+                            rowKey="buyDate"
+                          />
+                        ),
+                        rowExpandable: (record: any) => record.trades && record.trades.length > 0,
+                      }}
+                    />
+                  </Card>
+                )}
+
+                {result.scoreDistribution && result.scoreDistribution.length > 0 && (
+                  <Card title="📈 策略得分与胜率关系" size="small" style={{ marginBottom: 16 }}>
+                    <Table 
+                      columns={scoreDistributionColumns}
+                      dataSource={result.scoreDistribution.map((d: any, i: number) => ({ ...d, key: i }))}
+                      pagination={false}
+                      size="small"
+                    />
+                  </Card>
+                )}
                 
-                <Card title="📋 每日净值" size="small">
-                  <Table 
-                    columns={dailyColumns} 
-                    dataSource={result.dailyValues.map((d: any, i: number) => ({ ...d, key: i }))}
-                    pagination={{ pageSize: 20, showSizeChanger: true }}
-                    size="small"
-                  />
-                </Card>
+
               </div>
             )}
 

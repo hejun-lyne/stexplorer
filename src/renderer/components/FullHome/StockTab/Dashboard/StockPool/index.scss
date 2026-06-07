@@ -143,6 +143,7 @@
 .chartwrapper {
   height: calc(100% - 66px);
   display: flex;
+  overflow-y: auto;
   // flex-direction: row-reverse;
   border-top: 2px solid var(--top-background-color);
 }
