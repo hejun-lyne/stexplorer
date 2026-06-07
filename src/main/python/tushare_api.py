@@ -2977,7 +2977,7 @@ class TushareAPI:
                         "secid": secid,
                         "code": code,
                         "name": name_map.get(tc, ''),
-                        "zx": close * 1000,
+                        "zx": close,
                         "zdf": zdf,
                         "zg": high,
                         "zd": low,
