@@ -954,6 +954,103 @@ export async function GetFinanceDataFromTushare(secid: string): Promise<any> {
   }
 }
 
+// ==================== 强势股票 ====================
+
+const STRONG_STOCKS_TABLE = 'strong_stocks_tushare';
+
+/**
+ * 获取指定日期的强势股票（60日新高 或 涨停）
+ * 优先读本地缓存，未命中则调用 Tushare 生成
+ */
+export async function GetStrongStocksFromTushare(date: string): Promise<any> {
+  try {
+    const queryDate = date.replace(/-/g, '');
+
+    // 1. 先读本地缓存
+    try {
+      const cached = await window.contextModules.electron.sqliteRead(STRONG_STOCKS_TABLE, queryDate);
+      if (cached?.success && cached.data?.data?.stocks) {
+        console.log(`[StrongStocks] 缓存命中: ${date}`);
+        return cached.data.data;
+      }
+    } catch (e) {
+      // 缓存不存在
+    }
+
+    // 2. 调用 Python 生成
+    console.log(`[StrongStocks] 生成强势股票: ${date}`);
+    const result = await callTushare('get_strong_stocks', { date: queryDate });
+
+    if (result.error) {
+      console.error('生成强势股票失败:', result.error);
+      return { stocks: [], date: queryDate, count: 0 };
+    }
+
+    // 3. 写入本地缓存
+    try {
+      await window.contextModules.electron.sqliteWrite(STRONG_STOCKS_TABLE, result, dayjs().format('YYYY-MM-DD HH:mm:ss'), queryDate);
+      console.log(`[StrongStocks] 已缓存: ${date}, ${result.count} 只`);
+    } catch (e) {
+      console.error('缓存强势股票失败:', e);
+    }
+
+    return result;
+  } catch (error) {
+    logError(error, 'GetStrongStocksFromTushare', '获取强势股票失败');
+    return { stocks: [], date: date.replace(/-/g, ''), count: 0 };
+  }
+}
+
+/**
+ * 批量生成指定时间段的每日强势股票（回测预生成用）
+ * 返回按日期分组的对象
+ */
+export async function BatchGetStrongStocksFromTushare(startDate: string, endDate: string): Promise<Record<string, any>> {
+  try {
+    const start = startDate.replace(/-/g, '');
+    const end = endDate.replace(/-/g, '');
+
+    // 检查批量缓存
+    try {
+      const cached = await window.contextModules.electron.sqliteRead(STRONG_STOCKS_TABLE, `batch_${start}_${end}`);
+      if (cached?.success && cached.data?.data?.dates) {
+        console.log(`[StrongStocks] 批量缓存命中: ${startDate} ~ ${endDate}`);
+        return cached.data.data.dates;
+      }
+    } catch (e) {
+      // 无批量缓存
+    }
+
+    console.log(`[StrongStocks] 批量生成: ${startDate} ~ ${endDate}`);
+    const result = await callTushare('get_strong_stocks_batch', { start_date: start, end_date: end });
+
+    if (result.error || !result.dates) {
+      console.error('批量生成强势股票失败:', result.error);
+      return {};
+    }
+
+    // 逐日写入缓存
+    const dates = Object.keys(result.dates);
+    for (const d of dates) {
+      try {
+        await window.contextModules.electron.sqliteWrite(STRONG_STOCKS_TABLE, result.dates[d], dayjs().format('YYYY-MM-DD HH:mm:ss'), d);
+      } catch (e) {
+        // 单条缓存失败继续
+      }
+    }
+
+    // 写入批量缓存标记
+    try {
+      await window.contextModules.electron.sqliteWrite(STRONG_STOCKS_TABLE, result, dayjs().format('YYYY-MM-DD HH:mm:ss'), `batch_${start}_${end}`);
+    } catch (e) {}
+
+    console.log(`[StrongStocks] 批量完成: ${dates.length} 天`);
+    return result.dates;
+  } catch (error) {
+    logError(error, 'BatchGetStrongStocksFromTushare', '批量生成强势股票失败');
+    return {};
+  }
+}
 // ==================== 综合查询 ====================
 
 export async function FromTushare(secid: string): Promise<any> {

@@ -40,12 +40,19 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
     async getStrongStocks(date: string): Promise<Stock.DetailItem[]> {
       try {
         const queryDate = date.replace(/-/g, '');
-        console.log(`[DataProvider] 获取强势股票: ${date} -> ${queryDate}`);
-        const result = await Helpers.Stock.LoadSingleDateQS(queryDate, undefined, -1);
-        console.log(`[DataProvider] 强势股票 ${date} 返回: ${result.stocks?.length || 0} 只`);
-        if (!result.stocks) {
-          return Promise.reject('数据未准备好');
+        console.log(`[DataProvider] 获取强势股票: ${date}`);
+
+        // 使用 Tushare 生成强势股票（60日新高 + 涨停）
+        const result = await Services.Tushare.GetStrongStocksFromTushare(date);
+        
+        if (!result.stocks || result.stocks.length === 0) {
+          console.log(`[DataProvider] 强势股票 ${date} 为空`);
+          return [];
         }
+
+        console.log(`[DataProvider] 强势股票 ${date}: ${result.stocks.length} 只 (涨停${result.limit_up_count || 0}, 新高${result.new_high_count || 0})`);
+
+        // 过滤并转换格式（兼容原有 LoadSingleDateQS 格式）
         const filteredStocks = result.stocks.filter((s: any) => {
           const code = s.secid?.split('.')[1] || '';
           if (code.startsWith('688') || code.startsWith('689')) return false;
@@ -53,15 +60,16 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
           if (s.zx < 10000 || s.zx > 100000) return false;
           return true;
         });
-        console.log(`[DataProvider] 强势股票 ${date} 过滤后: ${filteredStocks.length} 只`);
-        return Promise.resolve(filteredStocks.map((s: any) => ({ 
-          secid: s.secid, 
+
+        return Promise.resolve(filteredStocks.map((s: any) => ({
+          secid: s.secid,
           name: s.name,
           zdf: s.zdf,
           zx: s.zx,
-          bk: s.hybk, 
-          lt: (s.ltsz / 100000000) 
-        } as Stock.DetailItem)));
+          bk: s.hybk || '',
+          lt: (s.ltsz || 0) / 100000000,
+          strongType: s.strongType,
+        } as unknown as Stock.DetailItem)));
       } catch (e) {
         console.error(`[DataProvider] 获取强势股票失败 ${date}:`, e);
         return [];
@@ -436,6 +444,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [progress, setProgress] = useState("正在准备数据...");
     const [progressPercent, setProgressPercent] = useState(0);
     const [result, setResult] = useState<any>(null);
+    const [preloading, setPreloading] = useState(false);
+    const [preloadProgress, setPreloadProgress] = useState('');
 
     // 优化策略参数
     const [initialCapital, setInitialCapital] = useState(1000000);
@@ -552,6 +562,50 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         },
         [dates]
       );
+
+    const handlePreload = useCallback(async () => {
+      if (!dates.length) {
+        console.warn('[UI] 未选择日期，无法预生成');
+        return;
+      }
+      const start = dates[0];
+      const end = dates[dates.length - 1];
+      console.log(`[UI] ====== 开始预生成强势股票: ${start} ~ ${end} ======`);
+
+      setPreloading(true);
+      setPreloadProgress('正在获取交易日历...');
+
+      try {
+        // 先过滤出交易日（避免对非交易日发起无效请求）
+        const tradeDays = await dataProvider.filterTradeDays(dates);
+        if (tradeDays.length === 0) {
+          setPreloadProgress('所选范围内无交易日');
+          setPreloading(false);
+          return;
+        }
+
+        setPreloadProgress(`共 ${tradeDays.length} 个交易日，开始批量生成...`);
+
+        // 逐日生成（批量接口可能一次请求太大，拆成逐日更稳定）
+        let completed = 0;
+        for (const day of tradeDays) {
+          const result = await Services.Tushare.GetStrongStocksFromTushare(day);
+          completed++;
+          setPreloadProgress(`已生成 ${completed}/${tradeDays.length} 天 (${day}: ${result.count || 0}只)`);
+          // 每生成一天让出一次，避免UI卡顿
+          await new Promise(r => setTimeout(r, 10));
+        }
+
+        setPreloadProgress(`预生成完成！共 ${tradeDays.length} 天`);
+        console.log(`[UI] 预生成完成: ${tradeDays.length} 天`);
+      } catch (e) {
+        const errorMsg = e instanceof Error ? e.message : String(e);
+        setPreloadProgress(`预生成失败: ${errorMsg}`);
+        console.error('[UI] 预生成异常:', e);
+      } finally {
+        setPreloading(false);
+      }
+    }, [dates]);
     
     const startBacktest = useCallback(async () => {
       if (!dates.length) {
@@ -809,6 +863,21 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     value={moment(dates[dates.length - 1], 'YYYY-MM-DD')}
                     style={{ marginRight: 10 }}
                 />
+                {/* [新增] 预生成按钮 */}
+                {!running && !preloading && (
+                  <a 
+                    className={styles.abtn} 
+                    onClick={handlePreload}
+                    style={{ marginRight: 10, color: '#1890ff' }}
+                  >
+                    预生成强势数据
+                  </a>
+                )}
+                {preloading && (
+                  <span style={{ marginRight: 10, color: '#1890ff', fontSize: 12 }}>
+                    {preloadProgress}
+                  </span>
+                )}
                 <Radio.Group
                     value={strategyType}
                     onChange={(e) => setStrategyType(e.target.value)}

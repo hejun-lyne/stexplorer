@@ -2801,6 +2801,272 @@ class TushareAPI:
             return df_to_records(df)
         except Exception as e:
             return {"error": str(e)}
+        
+    # ------------------ 强势股票（60日新高 + 涨停）------------------
+    @staticmethod
+    def get_strong_stocks(date: str) -> Dict[str, Any]:
+        """获取指定日期的强势股票（60日新高 或 涨停）"""
+        try:
+            pro = get_pro()
+            date_str = date.replace('-', '')
+
+            # 1. 检查缓存
+            cache_key = f"strong_stocks_{date_str}"
+            cached = read_cache(cache_key, max_age_hours=24)
+            if cached is not None:
+                return cached
+
+            # 2. 获取当日全市场日线
+            today_df = safe_api_call(pro.daily, trade_date=date_str)
+            if isinstance(today_df, dict) and today_df.get("error"):
+                return today_df
+            if today_df is None or today_df.empty:
+                return {"error": "No daily data"}
+
+            # 3. 获取涨停数据
+            limit_df = safe_api_call(pro.limit_list, trade_date=date_str)
+            limit_codes = set()
+            if isinstance(limit_df, pd.DataFrame) and not limit_df.empty:
+                limit_codes = set(limit_df[limit_df['limit'] == 'U']['ts_code'].tolist())
+
+            # 4. 获取最近60个交易日
+            start_60 = (datetime.strptime(date_str, '%Y%m%d') - timedelta(days=90)).strftime('%Y%m%d')
+            cal_df = safe_api_call(pro.trade_cal, exchange='SSE', start_date=start_60, end_date=date_str, is_open='1')
+            if isinstance(cal_df, dict) and cal_df.get("error"):
+                trade_dates = []
+            else:
+                trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())
+
+            if len(trade_dates) < 2:
+                return {"error": "Not enough trade dates"}
+
+            today_idx = trade_dates.index(date_str) if date_str in trade_dates else len(trade_dates) - 1
+            hist_dates = trade_dates[max(0, today_idx - 60):today_idx]
+
+            # 5. 获取历史数据计算60日最高价（带缓存）
+            hist_frames = []
+            for hd in hist_dates:
+                cache_key_daily = f"daily_all_{hd}"
+                cached_daily = read_cache(cache_key_daily, max_age_hours=8760)
+                if cached_daily and isinstance(cached_daily, list):
+                    hist_frames.append(pd.DataFrame(cached_daily))
+                else:
+                    df = safe_api_call(pro.daily, trade_date=hd)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        write_cache(cache_key_daily, df_to_records(df))
+                        hist_frames.append(df)
+
+            high_60 = {}
+            if hist_frames:
+                hist_df = pd.concat(hist_frames, ignore_index=True)
+                high_60 = hist_df.groupby('ts_code')['high'].max().to_dict()
+
+            # 6. 获取股票名称
+            name_map = {}
+            try:
+                basic_df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
+                if basic_df is not None and not basic_df.empty:
+                    for _, row in basic_df.iterrows():
+                        name_map[str(row['ts_code'])] = str(row['name'])
+            except Exception:
+                pass
+
+            # 7. 筛选：涨停 或 60日新高
+            stocks = []
+            for _, row in today_df.iterrows():
+                tc = str(row['ts_code'])
+                code = tc.split('.')[0]
+                market = '1' if code.startswith('6') else '0'
+                secid = f"{market}.{code}"
+                close = _to_float(row['close'])
+                high = _to_float(row['high'])
+                low = _to_float(row['low'])
+                pre_close = _to_float(row['pre_close'])
+                vol = _to_int(row['vol'])
+                amount = _to_float(row['amount']) * 1000
+                zdf = _to_float(row['pct_chg'])
+
+                # 涨停判断
+                is_limit = tc in limit_codes
+                if not is_limit:
+                    if code.startswith('30') or code.startswith('68') or code.startswith('8') or code.startswith('9'):
+                        is_limit = zdf >= 19.9
+                    else:
+                        is_limit = zdf >= 9.9
+
+                # 60日新高判断
+                is_new_high = close >= high_60.get(tc, 0) * 0.999
+
+                if is_limit or is_new_high:
+                    stocks.append({
+                        "secid": secid,
+                        "code": code,
+                        "name": name_map.get(tc, ''),
+                        "zx": close,
+                        "zdf": zdf,
+                        "zg": high,
+                        "zd": low,
+                        "cjl": vol,
+                        "cje": round(amount, 2),
+                        "strongType": "limit_up" if is_limit else "new_high_60",
+                        "hybk": "",
+                        "ltsz": 0,
+                    })
+
+            result = {
+                "stocks": stocks,
+                "date": date_str,
+                "count": len(stocks),
+                "limit_up_count": len([s for s in stocks if s['strongType'] == 'limit_up']),
+                "new_high_count": len([s for s in stocks if s['strongType'] == 'new_high_60']),
+            }
+
+            write_cache(cache_key, result)
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def get_strong_stocks_batch(start_date: str, end_date: str) -> Dict[str, Any]:
+        """批量生成指定时间段的每日强势股票（回测预生成用）"""
+        try:
+            pro = get_pro()
+            start = start_date.replace('-', '')
+            end = end_date.replace('-', '')
+
+            # 检查批量缓存
+            cache_key = f"strong_stocks_batch_{start}_{end}"
+            cached = read_cache(cache_key, max_age_hours=24)
+            if cached is not None:
+                return cached
+
+            # 获取交易日历
+            cal_start = (datetime.strptime(start, '%Y%m%d') - timedelta(days=90)).strftime('%Y%m%d')
+            cal_df = safe_api_call(pro.trade_cal, exchange='SSE', start_date=cal_start, end_date=end, is_open='1')
+            if isinstance(cal_df, dict) and cal_df.get("error"):
+                return cal_df
+            all_trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())
+
+            target_dates = [d for d in all_trade_dates if start <= d <= end]
+            if not target_dates:
+                return {"error": "No trade dates in range"}
+
+            # 需要的历史数据日期（含前60日）
+            hist_start_idx = max(0, len(all_trade_dates) - len(target_dates) - 60)
+            hist_dates = all_trade_dates[hist_start_idx:]
+
+            print(f"[get_strong_stocks_batch] 获取 {len(hist_dates)} 个交易日全市场数据...")
+
+            # 批量获取所有日期的 daily 数据（带缓存）
+            daily_data = {}
+            for td in hist_dates:
+                cache_key_daily = f"daily_all_{td}"
+                cached_daily = read_cache(cache_key_daily, max_age_hours=8760)
+                if cached_daily and isinstance(cached_daily, list):
+                    daily_data[td] = pd.DataFrame(cached_daily)
+                else:
+                    df = safe_api_call(pro.daily, trade_date=td)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        write_cache(cache_key_daily, df_to_records(df))
+                        daily_data[td] = df
+
+            # 获取涨停数据
+            limit_data = {}
+            for td in target_dates:
+                cache_key_limit = f"limit_up_{td}"
+                cached_limit = read_cache(cache_key_limit, max_age_hours=24)
+                if cached_limit and isinstance(cached_limit, list):
+                    limit_data[td] = set(pd.DataFrame(cached_limit)['ts_code'].tolist())
+                else:
+                    df = safe_api_call(pro.limit_list, trade_date=td)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        codes = set(df[df['limit'] == 'U']['ts_code'].tolist())
+                        limit_data[td] = codes
+                        write_cache(cache_key_limit, [{'ts_code': c} for c in codes])
+
+            # 获取股票名称
+            name_map = {}
+            try:
+                basic_df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
+                if basic_df is not None and not basic_df.empty:
+                    for _, row in basic_df.iterrows():
+                        name_map[str(row['ts_code'])] = str(row['name'])
+            except Exception:
+                pass
+
+            # 逐日计算60日新高并筛选
+            result = {}
+            for td in target_dates:
+                idx = hist_dates.index(td)
+                start_idx = max(0, idx - 60)
+                past_dates = hist_dates[start_idx:idx]
+
+                past_frames = [daily_data[d] for d in past_dates if d in daily_data]
+                if not past_frames:
+                    continue
+
+                past_df = pd.concat(past_frames, ignore_index=True)
+                high_60 = past_df.groupby('ts_code')['high'].max().to_dict()
+
+                if td not in daily_data:
+                    continue
+                today_df = daily_data[td]
+
+                stocks = []
+                for _, row in today_df.iterrows():
+                    tc = str(row['ts_code'])
+                    code = tc.split('.')[0]
+                    market = '1' if code.startswith('6') else '0'
+                    secid = f"{market}.{code}"
+                    close = _to_float(row['close'])
+                    high = _to_float(row['high'])
+                    low = _to_float(row['low'])
+                    pre_close = _to_float(row['pre_close'])
+                    vol = _to_int(row['vol'])
+                    amount = _to_float(row['amount']) * 1000
+                    zdf = _to_float(row['pct_chg'])
+
+                    is_limit = tc in limit_data.get(td, set())
+                    if not is_limit:
+                        if code.startswith('30') or code.startswith('68') or code.startswith('8') or code.startswith('9'):
+                            is_limit = zdf >= 19.9
+                        else:
+                            is_limit = zdf >= 9.9
+
+                    is_new_high = close >= high_60.get(tc, 0) * 0.999
+
+                    if is_limit or is_new_high:
+                        stocks.append({
+                            "secid": secid,
+                            "code": code,
+                            "name": name_map.get(tc, ''),
+                            "zx": close,
+                            "zdf": zdf,
+                            "zg": high,
+                            "zd": low,
+                            "cjl": vol,
+                            "cje": round(amount, 2),
+                            "strongType": "limit_up" if is_limit else "new_high_60",
+                            "hybk": "",
+                            "ltsz": 0,
+                        })
+
+                result[td] = {
+                    "stocks": stocks,
+                    "count": len(stocks),
+                }
+
+            final_result = {
+                "dates": result,
+                "start_date": start,
+                "end_date": end,
+            }
+
+            write_cache(cache_key, final_result)
+            print(f"[get_strong_stocks_batch] 完成: {len(target_dates)} 天, 共 {sum(len(v['stocks']) for v in result.values())} 只强势股票")
+            return final_result
+        except Exception as e:
+            return {"error": str(e)}
 
 
 # ============ JSON 编码器 ============

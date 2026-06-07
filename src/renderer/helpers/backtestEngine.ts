@@ -476,7 +476,7 @@ export class OptimizedStrategyBacktest {
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
   private readonly BATCH_SIZE = 50; // [优化] 从 5 改为 20，减少 Worker 调度开销
-  private readonly KLINE_DAYS = 150;
+  private readonly KLINE_DAYS = 150; // 应该至少要半年
 
   private STOP_LOSS_INIT_PCT = 0.95;
   private TRAILING_STOP_PCT = 0.90;
