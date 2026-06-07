@@ -414,7 +414,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                   </Col>
                   <Col span={2}>{s.hybk}</Col>
                   <Col span={2} className={Utils.GetValueColor(s.zdf).textClass}>
-                    {(s.zx / 1000).toFixed(2)}
+                    {(s.zx > 1000 ? s.zx / 1000 : s.zx).toFixed(2)}
                   </Col>
                   <Col span={2}>{(s.ltsz / 100000000).toFixed(2) + '亿'}</Col>
                   <Col span={2}>
