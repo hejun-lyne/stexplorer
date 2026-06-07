@@ -622,6 +622,17 @@ export class OptimizedStrategyBacktest {
     return false;
   }
 
+  private formatStrategyParams(type?: 'macd' | 'rsi', params?: MACDStrategyResult | RSIBacktestResult): string {
+    if (!type || !params) return '';
+    if (type === 'macd') {
+      const p = params as MACDStrategyResult;
+      return `MACD(fast=${p.fast},slow=${p.slow},signal=${p.signal},aboveZero=${p.requireAboveZero},priorNeg=${p.requirePriorNegative})`;
+    } else {
+      const p = params as RSIBacktestResult;
+      return `RSI(period=${p.rsiPeriod},buy=${p.buyThreshold},sell=${p.sellThreshold})`;
+    }
+  }
+
   private executeBuy(order: StrategyPendingOrder, date: string, price: number) {
     const adjustedPrice = price * (1 + this.SLIPPAGE);
     const standardAmount = this.capital * this.POSITION_RATIO;
@@ -658,6 +669,9 @@ export class OptimizedStrategyBacktest {
       strategyParams: order.strategyParams || ({} as any)
     });
 
+    const paramsStr = this.formatStrategyParams(order.strategyType, order.strategyParams);
+    const finalReason = paramsStr ? `${order.reason} | ${paramsStr}` : order.reason;
+
     console.log(`[OptBacktest] [${date}] ${order.secid} 买入成功: 价${adjustedPrice.toFixed(2)} | 量${quantity} | 总成本${totalCost.toFixed(2)} | 策略${order.strategyType} | 止损价${stopLossPrice.toFixed(2)} | 剩余资金${this.availableCash.toFixed(2)}`);
 
     this.tradeRecords.push({
@@ -667,7 +681,7 @@ export class OptimizedStrategyBacktest {
       price: adjustedPrice,
       quantity,
       amount: totalCost,
-      reason: order.reason
+      reason: finalReason
     });
   }
 
@@ -687,6 +701,9 @@ export class OptimizedStrategyBacktest {
     this.availableCash += netAmount;
     const pnl = netAmount - position.buyAmount;
 
+    const paramsStr = this.formatStrategyParams(position.strategyType, position.strategyParams);
+    const finalReason = paramsStr ? `${reason} | ${paramsStr}` : reason;
+
     console.log(`[OptBacktest] [${date}] ${secid} 卖出成功: 价${adjustedPrice.toFixed(2)} | 量${quantity} | 净额${netAmount.toFixed(2)} | 盈亏${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} | 剩余资金${this.availableCash.toFixed(2)}`);
 
     this.tradeRecords.push({
@@ -696,7 +713,7 @@ export class OptimizedStrategyBacktest {
       price: adjustedPrice,
       quantity,
       amount: netAmount,
-      reason,
+      reason: finalReason,
       pnl
     });
 
