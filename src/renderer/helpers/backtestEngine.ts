@@ -299,7 +299,8 @@ export interface RankWinRateDistribution {
   rankRange: string;
   minRank: number;
   maxRank: number;
-  count: number;
+  count: number;        // 该区间完成交易次数
+  uniqueCount: number;  // 涉及的唯一股票数
   winTrades: number;
   lossTrades: number;
   winRate: number;
@@ -475,7 +476,7 @@ export class OptimizedStrategyBacktest {
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
-  private readonly BATCH_SIZE = 50; // [优化] 从 5 改为 20，减少 Worker 调度开销
+  private readonly BATCH_SIZE = 12; // [优化] 从 5 改为 20，减少 Worker 调度开销
   private readonly KLINE_DAYS = 150; // 应该至少要半年
 
   private STOP_LOSS_INIT_PCT = 0.95;
@@ -1176,6 +1177,11 @@ export class OptimizedStrategyBacktest {
     const allBatchResults = await this.runWithLimit(
       batchTasks,
       async (b, batchIndex) => {
+        // [优化] 每批次开始时立即报告进度，避免"启动后很久没动静"
+        onProgress?.(
+          `[${today}] 优化 batch ${batchIndex+1}/${totalBatches} (${b.validItems.length}只)...`,
+          batchPhaseStartPercent + Math.round((batchIndex / totalBatches) * batchPercentRange * 0.3)
+        );
         const backtestParams = {
           fixedStopLossPct: 1 - this.STOP_LOSS_INIT_PCT,
           trailingStopLossPct: 1 - this.TRAILING_STOP_PCT,
@@ -1233,6 +1239,7 @@ export class OptimizedStrategyBacktest {
 
         let workerResults: BatchBacktestAndScreenResult[] = [];
         if (uncachedItems.length > 0) {
+          const tIpc0 = performance.now();
           if (this.workerExecutor) {
             workerResults = await this.workerExecutor('batchBacktestAndScreen', [
               uncachedItems,
@@ -1242,6 +1249,8 @@ export class OptimizedStrategyBacktest {
           } else {
             workerResults = batchBacktestAndScreen(uncachedItems, backtestParams, screenParams);
           }
+          const tIpc1 = performance.now();
+          console.log(`[PerfWorker] batch ${batchIndex} IPC传输+计算: ${(tIpc1-tIpc0).toFixed(1)}ms (items=${uncachedItems.length})`);
         }
 
         // 合并缓存和Worker结果，并写入聚合缓存
@@ -1751,11 +1760,14 @@ export class OptimizedStrategyBacktest {
     });
   }
 
-  // [新增] 按排名区间统计胜率分布
-  private calculateRankDistribution(stockStats: StockTradeStats[]): {
+  // [新增] 按排名区间统计胜率分布（基于每笔交易，避免按股票聚合导致的口径不一致）
+  private calculateRankDistribution(): {
     boardRankDistribution: RankWinRateDistribution[];
     stockRankDistribution: RankWinRateDistribution[];
   } {
+    const buyRecords = this.tradeRecords.filter(t => t.type === 'buy');
+    const sellRecords = this.tradeRecords.filter(t => t.type === 'sell');
+
     const rankRanges = [
       { label: '1-3', min: 0, max: 3 },
       { label: '4-10', min: 3, max: 10 },
@@ -1766,27 +1778,51 @@ export class OptimizedStrategyBacktest {
 
     const calc = (rankType: 'boardRank' | 'stockRank'): RankWinRateDistribution[] => {
       return rankRanges.map(r => {
-        const items = stockStats.filter(s =>
-          s[rankType] !== undefined &&
-          s[rankType]! >= r.min &&
-          s[rankType]! < r.max &&
-          s.totalTrades > 0
-        );
-        const totalTrades = items.reduce((sum, s) => sum + s.totalTrades, 0);
-        const winTrades = items.reduce((sum, s) => sum + s.winTrades, 0);
-        const lossTrades = items.reduce((sum, s) => sum + s.lossTrades, 0);
-        const totalReturn = items.reduce((sum, s) => sum + s.avgReturnPct * s.totalTrades, 0);
+        let count = 0;
+        let winTrades = 0;
+        let lossTrades = 0;
+        let totalReturnPct = 0;
+        const uniqueSecids = new Set<string>();
+        const usedSellKeys = new Set<string>();
 
+        // 按日期排序买入记录，确保配对顺序正确
+        const sortedBuys = [...buyRecords].sort((a, b) => a.date.localeCompare(b.date));
+
+        for (const buy of sortedBuys) {
+          const rank = buy[rankType];
+          if (rank === undefined || rank < r.min || rank >= r.max) continue;
+
+          const sell = sellRecords.find(s =>
+            s.secid === buy.secid &&
+            s.date > buy.date &&
+            !usedSellKeys.has(`${s.secid}_${s.date}`)
+          );
+          if (!sell) continue;
+
+          usedSellKeys.add(`${sell.secid}_${sell.date}`);
+          uniqueSecids.add(buy.secid);
+          count++;
+          const returnPct = sell.returnPct || 0;
+          totalReturnPct += returnPct;
+          if ((sell.pnl || 0) > 0) {
+            winTrades++;
+          } else {
+            lossTrades++;
+          }
+        }
+
+        const totalTrades = winTrades + lossTrades;
         return {
           rankType,
           rankRange: r.label,
           minRank: r.min,
           maxRank: r.max === Infinity ? 9999 : r.max,
-          count: items.length,
+          count,
+          uniqueCount: uniqueSecids.size,
           winTrades,
           lossTrades,
           winRate: totalTrades > 0 ? winTrades / totalTrades : 0,
-          avgReturnPct: totalTrades > 0 ? totalReturn / totalTrades : 0,
+          avgReturnPct: totalTrades > 0 ? totalReturnPct / totalTrades : 0,
         };
       });
     };
@@ -1855,7 +1891,7 @@ export class OptimizedStrategyBacktest {
 
     const stockStats = this.calculateStockStats();
     const scoreDistribution = this.calculateScoreDistribution(stockStats);
-    const { boardRankDistribution, stockRankDistribution } = this.calculateRankDistribution(stockStats);
+    const { boardRankDistribution, stockRankDistribution } = this.calculateRankDistribution();
 
     const result: StrategyBacktestResult = {
       totalReturn,

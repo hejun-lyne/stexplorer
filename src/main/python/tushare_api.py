@@ -653,41 +653,70 @@ class TushareAPI:
         - Tushare daily/weekly/monthly 接口的 amount 单位是"千元"，需×1000 转为元
         - 返回数据按日期升序排列（最早日期在前），与东财接口保持一致
         - pro_bar 优先调用，失败则 fallback 到 daily + adj_factor 手动复权
-        - 支持磁盘缓存：除非缓存没有最后一个交易日/周/月，否则直接返回缓存
+        - 支持磁盘缓存：缓存 key 为 kline_{secid}_{period}_{adjust}，与 limit/end_date 无关
+              缓存检查逻辑：看最后一条 K 线日期是否满足需求，命中后按 limit/end_date 裁剪
         """
         end_date_std = _standardize_date(end_date) if end_date else ''
         end_date_fmt = end_date_std.replace('-', '') if end_date_std else datetime.now().strftime("%Y%m%d")
-        cache_key = f"kline_{secid}_{period}_{adjust}_{limit}_{end_date_std or 'latest'}"
+
+        # 统一缓存 key，与 limit/end_date 无关
+        cache_key = f"kline_{secid}_{period}_{adjust}"
         cached = read_cache(cache_key, max_age_hours=168 * 4)  # 缓存最长4周
 
-        # 检查缓存是否包含最新数据（仅在未指定 end_date 时）
-        if not end_date_std and isinstance(cached, list) and cached:
-            last_date_str = cached[-1].get('date', '')
-            expected_last_str = _get_expected_last_trade_date(period)
+        def _is_cache_sufficient(cached_data: List[Dict]) -> bool:
+            """检查缓存数据是否满足当前查询需求"""
+            if not isinstance(cached_data, list) or not cached_data:
+                return False
+            last_date_str = cached_data[-1].get('date', '')
             last_date = _parse_date_str(last_date_str)
-            expected_last = _parse_date_str(expected_last_str)
-            if last_date and expected_last and last_date >= expected_last:
-                print(f"[K线缓存命中] {secid} {period} 最后日期={last_date} >= 期望={expected_last}")
-                return cached
-            print(f"[K线缓存过期] {secid} {period} 最后日期={last_date_str} < 期望={expected_last_str}")
+            if not last_date:
+                return False
+            if not end_date_std:
+                # 未指定 end_date：检查是否包含最新交易日
+                expected_last_str = _get_expected_last_trade_date(period)
+                expected_last = _parse_date_str(expected_last_str)
+                return expected_last is not None and last_date >= expected_last
+            else:
+                # 指定了 end_date：检查缓存是否覆盖到 end_date
+                end_date_dt = _parse_date_str(end_date_std)
+                return end_date_dt is not None and last_date >= end_date_dt
+
+        def _slice_from_cache(cached_data: List[Dict]) -> List[Dict]:
+            """从缓存数据中按 end_date 和 limit 裁剪"""
+            data = cached_data[:]
+            if end_date_std:
+                end_date_dt = _parse_date_str(end_date_std)
+                if end_date_dt:
+                    # 保留 <= end_date 的数据
+                    data = [k for k in data if _parse_date_str(k.get('date', '')) <= end_date_dt]
+            if limit > 0 and len(data) > limit:
+                data = data[-limit:]
+            return data
+
+        # 尝试命中缓存
+        if _is_cache_sufficient(cached):
+            need_str = end_date_std or _get_expected_last_trade_date(period)
+            print(f"[K线缓存命中] {secid} {period} 缓存覆盖到 {cached[-1].get('date')} >= 需求={need_str}")
+            return _slice_from_cache(cached)
+        elif isinstance(cached, list) and cached:
+            print(f"[K线缓存过期/不足] {secid} {period} 缓存最后={cached[-1].get('date')} < 需求={end_date_std or _get_expected_last_trade_date(period)}")
 
         try:
             if is_board_code(secid):
                 result = TushareAPI._get_board_kline(secid, period)
-                if isinstance(result, list) and result:
-                    write_cache(cache_key, result)
+                # 板块 K 线不走统一缓存
                 return result
 
             if is_index_code(secid):
                 result = TushareAPI._get_index_kline(secid, period, limit, end_date_fmt)
-                if isinstance(result, list) and result:
-                    write_cache(cache_key, result)
+                # 指数 K 线不走统一缓存
                 return result
 
             code = convert_secid_to_pure_code(secid)
             ts_code = convert_secid_to_ts_code(secid)
 
-            # 根据 limit 和周期动态计算 start_date，基于 end_date_fmt 往前推
+            # 计算 start_date：基于 end_date_fmt 往前推足够大的范围
+            # 缓存策略：尽可能多存数据，让后续不同 limit 的查询都能命中
             end_dt = datetime.strptime(end_date_fmt, "%Y%m%d")
             if limit > 0:
                 if period == 'daily':
@@ -742,7 +771,7 @@ class TushareAPI:
                 # 请求无数据时，如果有缓存则返回过期缓存（降级）
                 if isinstance(cached, list) and cached:
                     print(f"[K线请求无数据，返回过期缓存] {secid} {period}")
-                    return cached
+                    return _slice_from_cache(cached)
                 return {"error": "No data available"}
 
             # Tushare 默认返回降序（最新日期在前），需转为升序（最早日期在前）
@@ -776,21 +805,39 @@ class TushareAPI:
                     "hsl": _to_float(row.get("turnover_rate", 0)),
                 })
 
-            # 根据 limit 裁剪，返回最近的数据
-            if limit > 0 and len(klines) > limit:
-                klines = klines[-limit:]
+            # 合并新旧缓存（扩大缓存范围）
+            merged = TushareAPI._merge_klines(cached if isinstance(cached, list) else [], klines)
+            if merged:
+                write_cache(cache_key, merged)
+                print(f"[K线缓存更新] {secid} {period} 合并后 {len(merged)} 条 ({merged[0].get('date')} ~ {merged[-1].get('date')})")
 
-            # 写入缓存
-            if isinstance(klines, list) and klines:
-                write_cache(cache_key, klines)
-
-            return klines
+            # 从合并后的数据中按 limit/end_date 裁剪返回
+            return _slice_from_cache(merged if merged else klines)
         except Exception as e:
             # 请求失败时，如果有缓存则返回过期缓存（降级）
             if isinstance(cached, list) and cached:
                 print(f"[K线请求失败，返回过期缓存] {secid} {period}: {e}")
-                return cached
+                return _slice_from_cache(cached)
             return {"error": str(e)}
+
+    @staticmethod
+    def _merge_klines(old: List[Dict[str, Any]], new: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """合并新旧 K 线数据，按日期去重，升序排列"""
+        if not old:
+            return new
+        if not new:
+            return old
+        date_map: Dict[str, Dict[str, Any]] = {}
+        for k in old:
+            d = k.get('date', '')
+            if d:
+                date_map[d] = k
+        for k in new:
+            d = k.get('date', '')
+            if d:
+                date_map[d] = k
+        sorted_dates = sorted(date_map.keys())
+        return [date_map[d] for d in sorted_dates]
 
     @staticmethod
     def get_kline_data_batch(secids: List[str], period: str = "daily", adjust: str = "qfq", limit: int = 0, end_date: Optional[str] = None) -> Dict[str, Any]:
@@ -1578,26 +1625,35 @@ class TushareAPI:
 
         返回字段补全：通过 daily + daily_basic 获取指定日期行情
         新增主力资金：main_in（当日）, main_in_5d（5日）
+
+        缓存策略：
+        - 缓存 key 统一为 board_stocks_{secid}，与 date 无关
+        - 缓存中按日期存储多份数据 {date: {total, stocks}}
+        - 查询时检查目标日期是否已有缓存，有则命中；无则请求后合并
         """
         code = convert_secid_to_pure_code(secid)
         target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
-        cache_key = f"board_stocks_{secid}_{target_date}"
-        cached = read_cache(cache_key, max_age_hours=8760 * 10)  # 历史数据几乎不变，缓存10年
 
-        # 检查缓存有效性
-        if isinstance(cached, dict) and cached.get("stocks"):
-            cached_date = cached.get("date", "")
+        # 统一缓存 key，与 date 无关
+        cache_key = f"board_stocks_{secid}"
+        cached_all = read_cache(cache_key, max_age_hours=8760 * 10)  # 历史数据几乎不变，缓存10年
+        if not isinstance(cached_all, dict):
+            cached_all = {}
+
+        # 检查目标日期是否已在缓存中
+        cached_day = cached_all.get(target_date)
+        if isinstance(cached_day, dict) and cached_day.get("stocks"):
             if date:
-                # 指定了历史日期，数据不变，直接返回缓存
+                # 指定了历史日期，直接返回
                 print(f"[板块成分股缓存命中] {secid} date={target_date} (指定日期)")
-                return cached
+                return cached_day
             else:
-                # 未指定日期，检查缓存是否为最近交易日
+                # 未指定日期，检查是否为最近交易日
                 expected_last = _get_expected_last_trade_date("daily")
-                if cached_date == expected_last.replace("-", ""):
-                    print(f"[板块成分股缓存命中] {secid} date={cached_date} (最新交易日)")
-                    return cached
-                print(f"[板块成分股缓存过期] {secid} 缓存日期={cached_date} != 期望={expected_last.replace('-', '')}")
+                if target_date == expected_last.replace("-", ""):
+                    print(f"[板块成分股缓存命中] {secid} date={target_date} (最新交易日)")
+                    return cached_day
+                print(f"[板块成分股缓存过期] {secid} 缓存日期={target_date} != 期望={expected_last.replace('-', '')}")
 
         try:
             pro = get_pro()
@@ -1821,13 +1877,16 @@ class TushareAPI:
 
                 result = {"total": len(stocks), "stocks": stocks, "date": target_date}
                 if isinstance(result, dict) and result.get("stocks"):
-                    write_cache(cache_key, result)
+                    # 合并到统一缓存（按日期更新）
+                    cached_all[target_date] = result
+                    write_cache(cache_key, cached_all)
+                    print(f"[板块成分股缓存更新] {secid} 已缓存 {len(cached_all)} 个日期")
                 return result
         except Exception as e:
             # 请求失败时，如果有缓存则返回过期缓存（降级）
-            if isinstance(cached, dict) and cached.get("stocks"):
+            if isinstance(cached_day, dict) and cached_day.get("stocks"):
                 print(f"[板块成分股请求失败，返回过期缓存] {secid} date={target_date}: {e}")
-                return cached
+                return cached_day
             return {"error": str(e)}
 
     @staticmethod

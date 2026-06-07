@@ -750,6 +750,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       [darkMode, lowKey, chartOption]
     );
 
+    useEffect(() => {
+      if (!running && result && chart) {
+        requestAnimationFrame(() => {
+          chart.resize();
+        });
+      }
+    }, [running, result, chart]);
+
     const chartOptionRef = useRef(chartOption);
     chartOptionRef.current = chartOption;
 
@@ -840,8 +848,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
     const rankDistributionColumns = [
         { title: '排名区间', dataIndex: 'rankRange', key: 'rankRange', width: 100 },
-        { title: '股票数', dataIndex: 'count', key: 'count', width: 90 },
-        { title: '交易次数', key: 'totalTrades', width: 90, render: (_: any, r: any) => (r.winTrades || 0) + (r.lossTrades || 0) },
+        { title: '交易次数', dataIndex: 'count', key: 'count', width: 90 },
+        { title: '涉及股票数', dataIndex: 'uniqueCount', key: 'uniqueCount', width: 100 },
         { title: '盈利次数', dataIndex: 'winTrades', key: 'winTrades', width: 90 },
         { title: '亏损次数', dataIndex: 'lossTrades', key: 'lossTrades', width: 90 },
         { title: '胜率', dataIndex: 'winRate', key: 'winRate', width: 100, render: (v: number) => `${(v * 100).toFixed(1)}%` },
@@ -959,11 +967,11 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             </div>
           </div>
           
-          <div className={styles.chartwrapper}>
+          <div className={styles.chartwrapper} style={{ flexDirection: 'column' }}>
             {/* [修复] 净值曲线始终保留DOM，避免echarts init报getAttribute null */}
             <div style={{ display: (!running && result) ? 'block' : 'none' }}>
               <Card title="📈 每日净值曲线" size="small" style={{ margin: '0 16px 16px' }}>
-                <div ref={chartRef} style={{ width: '100%', height: 320 }} />
+                <div ref={chartRef} style={{ width: '100%', height: 320, position: 'relative' }} />
               </Card>
             </div>
 
