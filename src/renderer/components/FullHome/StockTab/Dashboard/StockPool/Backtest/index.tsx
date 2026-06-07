@@ -784,6 +784,18 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         )},
     ];
 
+    const rankDistributionColumns = [
+        { title: '排名区间', dataIndex: 'rankRange', key: 'rankRange', width: 100 },
+        { title: '股票数', dataIndex: 'count', key: 'count', width: 90 },
+        { title: '交易次数', key: 'totalTrades', width: 90, render: (_: any, r: any) => (r.winTrades || 0) + (r.lossTrades || 0) },
+        { title: '盈利次数', dataIndex: 'winTrades', key: 'winTrades', width: 90 },
+        { title: '亏损次数', dataIndex: 'lossTrades', key: 'lossTrades', width: 90 },
+        { title: '胜率', dataIndex: 'winRate', key: 'winRate', width: 100, render: (v: number) => `${(v * 100).toFixed(1)}%` },
+        { title: '平均收益率', dataIndex: 'avgReturnPct', key: 'avgReturnPct', width: 120, render: (v: number) => (
+            <span style={{ color: (v || 0) >= 0 ? '#cf1322' : '#3f8600' }}>{(v || 0) >= 0 ? '+' : ''}{(v || 0).toFixed(2)}%</span>
+        )},
+    ];
+
     return (
         <div className={styles.content}>
           <div className={styles.toolbar}>
@@ -1008,6 +1020,28 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <Table 
                       columns={scoreDistributionColumns}
                       dataSource={result.scoreDistribution.map((d: any, i: number) => ({ ...d, key: i }))}
+                      pagination={false}
+                      size="small"
+                    />
+                  </Card>
+                )}
+
+                {result.boardRankDistribution && result.boardRankDistribution.length > 0 && (
+                  <Card title="📊 板块排名与胜率关系" size="small" style={{ marginBottom: 16 }}>
+                    <Table 
+                      columns={rankDistributionColumns}
+                      dataSource={result.boardRankDistribution.map((d: any, i: number) => ({ ...d, key: i }))}
+                      pagination={false}
+                      size="small"
+                    />
+                  </Card>
+                )}
+
+                {result.stockRankDistribution && result.stockRankDistribution.length > 0 && (
+                  <Card title="📊 个股排名与胜率关系" size="small" style={{ marginBottom: 16 }}>
+                    <Table 
+                      columns={rankDistributionColumns}
+                      dataSource={result.stockRankDistribution.map((d: any, i: number) => ({ ...d, key: i }))}
                       pagination={false}
                       size="small"
                     />

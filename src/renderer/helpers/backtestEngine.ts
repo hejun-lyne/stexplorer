@@ -294,6 +294,18 @@ export interface ScoreWinRateDistribution {
   avgReturnPct: number;
 }
 
+export interface RankWinRateDistribution {
+  rankType: 'boardRank' | 'stockRank';
+  rankRange: string;
+  minRank: number;
+  maxRank: number;
+  count: number;
+  winTrades: number;
+  lossTrades: number;
+  winRate: number;
+  avgReturnPct: number;
+}
+
 export interface StrategyBacktestResult {
   totalReturn: number;
   annualizedReturn: number;
@@ -307,6 +319,8 @@ export interface StrategyBacktestResult {
   dailyValues: StrategyDailyValue[];
   stockStats: StockTradeStats[];
   scoreDistribution: ScoreWinRateDistribution[];
+  boardRankDistribution: RankWinRateDistribution[];
+  stockRankDistribution: RankWinRateDistribution[];
 }
 
 export interface StrategyDataProvider {
@@ -1737,6 +1751,52 @@ export class OptimizedStrategyBacktest {
     });
   }
 
+  // [新增] 按排名区间统计胜率分布
+  private calculateRankDistribution(stockStats: StockTradeStats[]): {
+    boardRankDistribution: RankWinRateDistribution[];
+    stockRankDistribution: RankWinRateDistribution[];
+  } {
+    const rankRanges = [
+      { label: '1-3', min: 0, max: 3 },
+      { label: '4-10', min: 3, max: 10 },
+      { label: '11-30', min: 10, max: 30 },
+      { label: '31-50', min: 30, max: 50 },
+      { label: '50+', min: 50, max: Infinity },
+    ];
+
+    const calc = (rankType: 'boardRank' | 'stockRank'): RankWinRateDistribution[] => {
+      return rankRanges.map(r => {
+        const items = stockStats.filter(s =>
+          s[rankType] !== undefined &&
+          s[rankType]! >= r.min &&
+          s[rankType]! < r.max &&
+          s.totalTrades > 0
+        );
+        const totalTrades = items.reduce((sum, s) => sum + s.totalTrades, 0);
+        const winTrades = items.reduce((sum, s) => sum + s.winTrades, 0);
+        const lossTrades = items.reduce((sum, s) => sum + s.lossTrades, 0);
+        const totalReturn = items.reduce((sum, s) => sum + s.avgReturnPct * s.totalTrades, 0);
+
+        return {
+          rankType,
+          rankRange: r.label,
+          minRank: r.min,
+          maxRank: r.max === Infinity ? 9999 : r.max,
+          count: items.length,
+          winTrades,
+          lossTrades,
+          winRate: totalTrades > 0 ? winTrades / totalTrades : 0,
+          avgReturnPct: totalTrades > 0 ? totalReturn / totalTrades : 0,
+        };
+      });
+    };
+
+    return {
+      boardRankDistribution: calc('boardRank'),
+      stockRankDistribution: calc('stockRank'),
+    };
+  }
+
   // ===== 结果计算 =====
   private calculateResult(): StrategyBacktestResult {
     const finalValue = this.dailyValues[this.dailyValues.length - 1]?.totalValue || this.initialCapital;
@@ -1795,6 +1855,7 @@ export class OptimizedStrategyBacktest {
 
     const stockStats = this.calculateStockStats();
     const scoreDistribution = this.calculateScoreDistribution(stockStats);
+    const { boardRankDistribution, stockRankDistribution } = this.calculateRankDistribution(stockStats);
 
     const result: StrategyBacktestResult = {
       totalReturn,
@@ -1809,6 +1870,8 @@ export class OptimizedStrategyBacktest {
       dailyValues: this.dailyValues,
       stockStats,
       scoreDistribution,
+      boardRankDistribution,
+      stockRankDistribution,
     };
 
     console.log(`[OptBacktest] 结果指标:`, {
