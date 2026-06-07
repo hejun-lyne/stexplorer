@@ -423,6 +423,7 @@ function updateNetValueOptions(
 // ==================== 主组件 ====================
 
 type StrategyType = 'rsi' | 'optimized';
+type OptimizedSubStrategy = 'macd' | 'rsi' | 'both';
 
 const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const { darkMode, lowKey } = useHomeContext();
@@ -431,6 +432,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [paused, setPaused] = useState(false);
     const [dataProvider] = useState<UnifiedDataProvider>(new UnifiedDataProvider());
     const [strategyType, setStrategyType] = useState<StrategyType>('rsi');
+    const [optimizedSubStrategy, setOptimizedSubStrategy] = useState<OptimizedSubStrategy>('both');
     const [progress, setProgress] = useState("正在准备数据...");
     const [progressPercent, setProgressPercent] = useState(0);
     const [result, setResult] = useState<any>(null);
@@ -465,7 +467,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           // IPC 返回结构: { success: true, data: { data: 真实缓存, cachedAt: '...' } }
           const payload = cached?.data?.data;
           if (payload) {
-            const { result: cachedResult, dates: cachedDates, strategyType: cachedStrategyType, params } = payload;
+            const { result: cachedResult, dates: cachedDates, strategyType: cachedStrategyType, optimizedSubStrategy: cachedOptimizedSubStrategy, params } = payload;
             if (cachedResult) {
               setResult(cachedResult);
               const baseOpts = getNetValueBaseOptions(darkMode, params?.initialCapital || 1000000);
@@ -478,6 +480,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             }
             if (cachedStrategyType) {
               setStrategyType(cachedStrategyType);
+            }
+            if (cachedOptimizedSubStrategy) {
+              setOptimizedSubStrategy(cachedOptimizedSubStrategy);
             }
             if (params) {
               setInitialCapital(params.initialCapital ?? 1000000);
@@ -600,6 +605,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             maxWatchDays: strongLookbackEnd,
             boardRankPct,
             stockRankPct,
+            strategyMode: optimizedSubStrategy,
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -631,6 +637,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             result: backtestResult,
             dates,
             strategyType,
+            optimizedSubStrategy,
             params: {
               initialCapital,
               maxPositions,
@@ -661,7 +668,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, stopLossInitPct, trailingStopPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -758,6 +765,18 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <Radio.Button value="optimized">优化策略</Radio.Button>
                 </Radio.Group>
                 {strategyType === 'optimized' && (
+                  <Radio.Group
+                    value={optimizedSubStrategy}
+                    onChange={(e) => setOptimizedSubStrategy(e.target.value)}
+                    style={{ marginRight: 10 }}
+                    disabled={running}
+                  >
+                    <Radio.Button value="macd">MACD</Radio.Button>
+                    <Radio.Button value="rsi">RSI</Radio.Button>
+                    <Radio.Button value="both">MACD+RSI</Radio.Button>
+                  </Radio.Group>
+                )}
+                {strategyType === 'optimized' && (
                   <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 10, flexWrap: 'wrap' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>资金:</span>
@@ -801,7 +820,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 )}
               {!running && (
                 <a className={styles.abtn} onClick={startBacktest}>
-                  {strategyType === 'rsi' ? 'RSI策略回测强势股票' : '优化策略回测强势股票'}
+                  {strategyType === 'rsi' ? 'RSI策略回测强势股票' : `${optimizedSubStrategy === 'both' ? 'MACD+RSI' : optimizedSubStrategy.toUpperCase()}优化策略回测强势股票`}
                 </a>
               )}
               {running && (

@@ -39,6 +39,7 @@ interface StockScreenCacheEntry {
     fixedStopLossPct: number;
     trailingStopLossPct: number;
     minStrategyScore: number;
+    strategyMode: 'macd' | 'rsi' | 'both';
   };
   result: BatchBacktestAndScreenResult;
 }
@@ -414,6 +415,7 @@ export class OptimizedStrategyBacktest {
   private STRONG_LOOKBACK = 10;
   private BOARD_RANK_PCT = 0.3;
   private STOCK_RANK_PCT = 0.3;
+  private strategyMode: 'macd' | 'rsi' | 'both' = 'both';
 
   constructor(
     tradeDays: string[],
@@ -430,6 +432,7 @@ export class OptimizedStrategyBacktest {
       maxWatchDays?: number;
       boardRankPct?: number;
       stockRankPct?: number;
+      strategyMode?: 'macd' | 'rsi' | 'both';
     }
   ) {
     this.tradeDays = tradeDays;
@@ -452,6 +455,7 @@ export class OptimizedStrategyBacktest {
     if (options?.maxWatchDays !== undefined) this.MAX_WATCH_DAYS = options.maxWatchDays;
     if (options?.boardRankPct !== undefined) this.BOARD_RANK_PCT = options.boardRankPct;
     if (options?.stockRankPct !== undefined) this.STOCK_RANK_PCT = options.stockRankPct;
+    if (options?.strategyMode !== undefined) this.strategyMode = options.strategyMode;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
@@ -464,6 +468,7 @@ export class OptimizedStrategyBacktest {
       BATCH_SIZE: this.BATCH_SIZE,
       BOARD_RANK_PCT: this.BOARD_RANK_PCT,
       STOCK_RANK_PCT: this.STOCK_RANK_PCT,
+      STRATEGY_MODE: this.strategyMode,
     });
   }
 
@@ -1082,6 +1087,7 @@ export class OptimizedStrategyBacktest {
         const backtestParams = {
           fixedStopLossPct: 1 - this.STOP_LOSS_INIT_PCT,
           trailingStopLossPct: 1 - this.TRAILING_STOP_PCT,
+          strategyMode: this.strategyMode,
         };
         const screenParams = {
           strongStockDay: strongStockDay,
@@ -1119,7 +1125,8 @@ export class OptimizedStrategyBacktest {
             if (entry &&
                 entry.params.fixedStopLossPct === backtestParams.fixedStopLossPct &&
                 entry.params.trailingStopLossPct === backtestParams.trailingStopLossPct &&
-                entry.params.minStrategyScore === screenParams.minStrategyScore) {
+                entry.params.minStrategyScore === screenParams.minStrategyScore &&
+                entry.params.strategyMode === backtestParams.strategyMode) {
               cachedResults.push(entry.result);
               continue;
             }
@@ -1165,6 +1172,7 @@ export class OptimizedStrategyBacktest {
                   fixedStopLossPct: backtestParams.fixedStopLossPct,
                   trailingStopLossPct: backtestParams.trailingStopLossPct,
                   minStrategyScore: screenParams.minStrategyScore,
+                  strategyMode: backtestParams.strategyMode,
                 },
                 result,
               };

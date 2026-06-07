@@ -636,7 +636,7 @@ export function findTDay(
 
 export function batchBacktestAndScreen(
   items: BatchBacktestAndScreenItem[],
-  backtestParams: { fixedStopLossPct: number; trailingStopLossPct: number },
+  backtestParams: { fixedStopLossPct: number; trailingStopLossPct: number; strategyMode?: 'macd' | 'rsi' | 'both' },
   screenParams: { strongStockDay:string, minStrategyScore: number; strongLookback: number }
 ): BatchBacktestAndScreenResult[] {
   const results: BatchBacktestAndScreenResult[] = [];
@@ -644,8 +644,13 @@ export function batchBacktestAndScreen(
   for (const item of items) {
     const { stock, klines } = item;
 
-    const macdResults = optimizeMACDStrategy(klines, backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct);
-    const rsiResults = optimizeRSIStrategy(klines, [6, 12, 24], backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct);
+    const strategyMode = backtestParams.strategyMode || 'both';
+    const macdResults = strategyMode !== 'rsi'
+      ? optimizeMACDStrategy(klines, backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
+      : [];
+    const rsiResults = strategyMode !== 'macd'
+      ? optimizeRSIStrategy(klines, [6, 12, 24], backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
+      : [];
 
     let bestResult: MACDStrategyResult | RSIBacktestResult | null = null;
     let bestType: 'macd' | 'rsi' | null = null;
