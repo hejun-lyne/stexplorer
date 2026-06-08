@@ -12,7 +12,7 @@ import { Stock } from '@/types/stock';
 import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import { useRenderEcharts, useResizeEchart } from '@/utils/hooks';
-import { setStockTradePointsAction } from '@/actions/stock';
+import { setBacktestMarksAction } from '@/actions/stock';
 
 const { ipcRenderer, makeWorkerExec } = window.contextModules.electron;
 
@@ -964,7 +964,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 const sellPoints = result.trades
                   .filter((t: any) => t.secid === secid && t.type === 'sell')
                   .map((t: any) => ({ x: t.date, y: t.price, t: 'bt' }));
-                dispatch(setStockTradePointsAction(secid, buyPoints, sellPoints, ['bt']));
+                dispatch(setBacktestMarksAction(secid, buyPoints, sellPoints));
               }
               onOpenStock(secid, secid);
             }}>{secid}</a>

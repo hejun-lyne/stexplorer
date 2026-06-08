@@ -58,7 +58,7 @@ async function handleSingleBacktest(data: any) {
     trailingStopLossPct
   );
   const macdResults = await optimizeMACDStrategy(klines, fixedStopLossPct, trailingStopLossPct);
-  const rsiResults = await optimizeRSIStrategy(klines, [6, 12, 24], fixedStopLossPct, trailingStopLossPct);
+  const rsiResults = await optimizeRSIStrategy(klines, [12, 24], fixedStopLossPct, trailingStopLossPct);
 
   return {
     maResults: maResults.map(liteMA),

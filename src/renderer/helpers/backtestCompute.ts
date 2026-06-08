@@ -651,7 +651,7 @@ export function batchBacktestAndScreen(
       ? optimizeMACDStrategy(klines, backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
       : [];
     const rsiResults = strategyMode !== 'macd'
-      ? optimizeRSIStrategy(klines, [6, 12, 24], backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
+      ? optimizeRSIStrategy(klines, [12, 24], backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
       : [];
 
     let bestResult: MACDStrategyResult | RSIBacktestResult | null = null;

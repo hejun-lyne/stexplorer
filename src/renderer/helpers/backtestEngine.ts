@@ -1033,6 +1033,16 @@ export class OptimizedStrategyBacktest {
       // [调试] 打印持仓卖出使用的K线收盘价，用于核对价格是否匹配
       console.log(`[Debug][ sellCheck][${today}] ${secid} K线确认: date=${kLast.date} kp=${kLast.kp.toFixed(2)} sp=${kLast.sp.toFixed(2)} zg=${kLast.zg.toFixed(2)} zd=${kLast.zd.toFixed(2)} → 使用收盘价=${currentPrice.toFixed(2)}`);
 
+      // 0. 时间止损：持仓 ≥3 天且亏损，强制离场
+      const daysHeld = this.getTradeDaysDiff(position.buyDate, today);
+      const isProfitable = currentPrice > position.buyPrice;
+      
+      if (daysHeld >= 3 && !isProfitable) {
+        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损: 持仓${daysHeld}天仍亏损(成本${position.buyPrice.toFixed(2)} 当前${currentPrice.toFixed(2)})`);
+        this.executeSell(secid, today, currentPrice, position.quantity, `时间止损(持仓${daysHeld}天未盈利)`);
+        continue;
+      }
+
       // 1. 更新最高价（同时服务于移动止损和动态止盈）
       if (currentPrice > position.highestPrice) {
         position.highestPrice = currentPrice;

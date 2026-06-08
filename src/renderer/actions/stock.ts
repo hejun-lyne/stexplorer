@@ -22,6 +22,7 @@ export const SYNC_HOLDINGS = 'SYNC_HOLDINGS';
 export const SYNC_NOWHOLDS = 'SYNC_NOWHOLDS';
 export const SYNC_STOCK_TRADING = 'SYNC_STOCK_TRADING';
 export const SYNC_STOCK_TRAININGS = 'SYNC_STOCK_TRAININGS';
+export const SET_BACKTEST_MARKS = 'SET_BACKTEST_MARKS';
 
 export function syncRemoteStocksAction(): ThunkAction {
   return (dispatch, getState) => {
@@ -1046,6 +1047,19 @@ export function clearStockTradePointAction(secid: string, isTrain: boolean, type
     } catch (error) {
       console.log('清除标的标记点出错', error);
     }
+  };
+}
+
+export function setBacktestMarksAction(
+  secid: string,
+  buyPoints: { x: string; y: number; t: string }[],
+  sellPoints: { x: string; y: number; t: string }[]
+): ThunkAction {
+  return (dispatch) => {
+    dispatch({
+      type: SET_BACKTEST_MARKS,
+      payload: { secid, buyPoints, sellPoints },
+    });
   };
 }
 

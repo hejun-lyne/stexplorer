@@ -15,6 +15,7 @@ import {
   SYNC_STOCK_TRAININGS,
   SYNC_STOCKS_DATA,
   SYNC_NOWHOLDS,
+  SET_BACKTEST_MARKS,
 } from '@/actions/stock';
 import { Reducer } from '@/reducers/types';
 import { Stock } from '@/types/stock';
@@ -41,6 +42,7 @@ export interface StockState {
   stockConfigsModified: string;
   tradingsModified: string;
   syning: { v: boolean; t: string };
+  backtestMarks: Record<string, { buyPoints: { x: string; y: number; t: string }[]; sellPoints: { x: string; y: number; t: string }[] }>;
 }
 
 const stock: Reducer<StockState> = (
@@ -66,6 +68,7 @@ const stock: Reducer<StockState> = (
     tradingsModified: '1970-01-01 00:00:00',
     trainingsModified: '1970-01-01 00:00:00',
     syning: { v: false, t: '' },
+    backtestMarks: {},
   },
   action
 ) => {
@@ -179,6 +182,15 @@ const stock: Reducer<StockState> = (
       return {
         ...state,
         syning: action.payload,
+      };
+    case SET_BACKTEST_MARKS:
+      const { secid: markSecid, buyPoints, sellPoints } = action.payload;
+      return {
+        ...state,
+        backtestMarks: {
+          ...state.backtestMarks,
+          [markSecid]: { buyPoints, sellPoints },
+        },
       };
     default:
       return state;

@@ -1467,6 +1467,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
   }) => {
     const stock = useSelector((state: StoreState) => state.stock.stocksMapping[secid]);
     const config = useSelector((state: StoreState) => state.stock.stockConfigsMapping[secid]);
+    const backtestMarks = useSelector((state: StoreState) => state.stock.backtestMarks[secid]);
     const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
     const isStock = Helpers.Stock.GetStockType(secid) == StockMarketType.AB;
     const [typeIndex, setTypeIndex] = useState(0);
@@ -2338,34 +2339,37 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                 yAxis: selectedArea.avgcost,
               });
             }
-            let pData =
-              config && config.buyPoints
-                ? config.buyPoints.map((p) => {
-                    const x = typeIndex == 1 ? p.x : p.x.substring(0, 10);
-                    return {
-                      value: p.t ? 'T买' : '买',
-                      coord: [x, p.y],
-                      itemStyle: {
-                        color: increaseColor,
-                      },
-                    };
-                  })
-                : [];
-            if (config && config.sellPoints) {
-              pData = pData.concat(
-                config.sellPoints.map((p) => {
-                  const x = typeIndex == 1 ? p.x : p.x.substring(0, 10);
-                  return {
-                    value: p.t ? 'T卖' : '卖',
-                    coord: [x, p.y],
-                    itemStyle: {
-                      color: reduceColor,
-                      symbolRotate: -180,
-                    },
-                  };
-                })
-              );
-            }
+            const allBuyPoints = [
+              ...(config?.buyPoints || []),
+              ...(backtestMarks?.buyPoints || []),
+            ];
+            const allSellPoints = [
+              ...(config?.sellPoints || []),
+              ...(backtestMarks?.sellPoints || []),
+            ];
+            let pData = allBuyPoints.map((p) => {
+              const x = typeIndex == 1 ? p.x : p.x.substring(0, 10);
+              return {
+                value: p.t ? 'T买' : '买',
+                coord: [x, p.y],
+                itemStyle: {
+                  color: increaseColor,
+                },
+              };
+            });
+            pData = pData.concat(
+              allSellPoints.map((p) => {
+                const x = typeIndex == 1 ? p.x : p.x.substring(0, 10);
+                return {
+                  value: p.t ? 'T卖' : '卖',
+                  coord: [x, p.y],
+                  itemStyle: {
+                    color: reduceColor,
+                    symbolRotate: -180,
+                  },
+                };
+              })
+            );
             // firstQSAppear 黄色标记
             if (firstQSAppear && typeof firstQSAppear === 'string' && typeIndex !== 0 && klineData.klines[typeIndex]?.length > 0) {
               const day = firstQSAppear.substring(0, 10);
