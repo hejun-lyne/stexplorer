@@ -684,7 +684,8 @@ export function batchBacktestAndScreen(
       // 先计算 strongType 和 tDay，无论是否有买入信号（观察列表需要）
       const strongType = detectStrongType(klines, screenParams.strongStockDay);
       const tDayIndex = findTDay(klines, strongType, screenParams.strongStockDay, screenParams.strongLookback);
-      const tDayDate = tDayIndex >= 0 ? klines[tDayIndex].date : klines[klines.length - 1].date;
+      // 用strongStockDay兜底
+      const tDayDate = tDayIndex >= 0 ? klines[tDayIndex].date : screenParams.strongStockDay;
 
       if (mDayIndex < 0) {
         screenResult = {

@@ -12,6 +12,7 @@ import {
   hasLongUpperShadow,
   type BatchBacktestAndScreenResult,
 } from './backtestCompute';
+import stock from '@/reducers/stock';
 
 // ===== 策略优化结果 localStorage 缓存 =====
 const CACHE_PREFIX = 'bt_opt_';
@@ -218,6 +219,9 @@ export interface StrategyPosition {
   takeProfitPrice: number;     // 固定止盈目标价
   peakPrice: number;           // 持仓期最高价（动态止盈用）
   takeProfitTrailingPrice: number; // 动态止盈触发价
+
+  // [新增] 买入当天K线实体最低价（用于时间止损）
+  buyDayEntityLow: number;
 }
 
 export interface StrategyPendingOrder {
@@ -363,6 +367,8 @@ export class OptimizedStrategyBacktest {
   private cancelOptions?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean };
   private workerExecutor?: (method: string, args?: any[]) => Promise<any>;
   private filterTradeDaysCache: Map<string, string[]> = new Map();
+  // [新增] 持仓最后收盘价，用于回测结束时统计持仓盈亏
+  private lastPositionPrices = new Map<string, number>();
 
     // [优化] 板块数据内存缓存
   private boardCache = new Map<string, Array<{ code: string; name: string; zf: number }>>();
@@ -474,7 +480,7 @@ export class OptimizedStrategyBacktest {
 
   private MAX_POSITIONS = 8;
   private POSITION_RATIO = 0.125;
-  private readonly MAX_SAME_BOARD = 2;
+  private readonly MAX_SAME_BOARD = 1;
   private readonly MIN_POSITION_RATIO = 0.05;
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
@@ -688,18 +694,19 @@ export class OptimizedStrategyBacktest {
       }
 
       const openPrice = todayKLine.kp;
+      const buyDayEntityLow = Math.min(todayKLine.kp, todayKLine.sp); // [新增]
       // [调试] 打印K线原始数据，用于核对价格是否匹配
       console.log(`[Debug][ executePendingOrders][${today}] ${order.secid} ${order.type} K线确认: date=${todayKLine.date} kp=${todayKLine.kp.toFixed(2)} sp=${todayKLine.sp.toFixed(2)} zg=${todayKLine.zg.toFixed(2)} zd=${todayKLine.zd.toFixed(2)}`);
 
       if (order.type === 'buy') {
         // [新增] 剔除一字板：开盘即涨停且全天没有更高价格，无法买入
         if (todayKLine.kp === todayKLine.zg && isLimitUpStock(order.secid, todayKLine.zdf)) {
-          console.log(`[OptBacktest] [${today}] ${order.secid} 买入跳过: 一字板 (开盘${todayKLine.kp.toFixed(2)}=最高${todayKLine.zg.toFixed(2)}, 涨幅${todayKLine.zdf.toFixed(2)}%)`);
+          console.log(`[OptBacktest] [${today}] ${order.secid} 买入跳过: 一字板 (开盘${todayKLine.kp.toFixed(2)}=最高${todayKLine.zg.toFixed(2)}, 涨幅${todayKLine.zdf.toFixed(2)}%) | 实体最低: ${buyDayEntityLow.toFixed(2)}`);
           skippedOrders.push({ secid: order.secid, type: order.type, reason: '一字板' });
           continue;
         }
         console.log(`[OptBacktest] [${today}] 执行买入: ${order.secid} | 开盘价: ${openPrice.toFixed(2)} | 原因: ${order.reason}`);
-        this.executeBuy(order, today, openPrice);
+        this.executeBuy(order, today, openPrice, buyDayEntityLow);
       } else if (order.type === 'sell') {
         const position = this.positions.get(order.secid);
         if (position) {
@@ -733,7 +740,41 @@ export class OptimizedStrategyBacktest {
     }
   }
 
-  private executeBuy(order: StrategyPendingOrder, date: string, price: number) {
+    /** [修复] 安全的交易日差计算，支持 fallback 到 filterTradeDays */
+  private async getTradeDaysDiffAsync(
+    date1: string,
+    date2: string,
+    dataProvider: StrategyDataProvider
+  ): Promise<number> {
+    // 优先走同步路径（快）
+    const idx1 = this.tradeDays.indexOf(date1);
+    const idx2 = this.tradeDays.indexOf(date2);
+    if (idx1 >= 0 && idx2 >= 0) {
+      return Math.abs(idx2 - idx1);
+    }
+
+    // fallback: 生成日期范围并过滤出交易日
+    const dates: string[] = [];
+    const start = dayjs(date1, 'YYYY-MM-DD');
+    const end = dayjs(date2, 'YYYY-MM-DD');
+    const diffDays = end.diff(start, 'day');
+    const step = diffDays >= 0 ? 1 : -1;
+    for (let i = 0; i <= Math.abs(diffDays); i++) {
+      dates.push(start.add(i * step, 'day').format('YYYY-MM-DD'));
+    }
+
+    const validDays = await dataProvider.filterTradeDays(dates);
+    const validIdx1 = validDays.indexOf(date1);
+    const validIdx2 = validDays.indexOf(date2);
+    if (validIdx1 >= 0 && validIdx2 >= 0) {
+      return Math.abs(validIdx2 - validIdx1);
+    }
+
+    console.warn(`[OptBacktest] 无法计算交易日差: ${date1} ~ ${date2}`);
+    return 0;
+  }
+
+  private executeBuy(order: StrategyPendingOrder, date: string, price: number, buyDayEntityLow: number) {
     console.log(`[Debug][ executeBuy in][${date}] ${order.secid} order.boardRank=${order.boardRank !== undefined && order.boardRank >= 0 ? order.boardRank + 1 : '-'} order.stockRank=${order.stockRank !== undefined && order.stockRank >= 0 ? order.stockRank + 1 : '-'} type=${order.strategyType}`);
     const adjustedPrice = price * (1 + this.SLIPPAGE);
     const standardAmount = this.capital * this.POSITION_RATIO;
@@ -775,13 +816,14 @@ export class OptimizedStrategyBacktest {
       peakPrice: adjustedPrice,            // 动态止盈基准
       takeProfitPrice,                    // 固定止盈
       takeProfitTrailingPrice: adjustedPrice * this.TAKE_PROFIT_TRAILING, // 动态止盈触发价
+      buyDayEntityLow, // [新增] 保存买入当天实体最低价
     });
 
     const paramsStr = this.formatStrategyParams(order.strategyType, order.strategyParams);
     const finalReason = paramsStr ? `${order.reason} | ${paramsStr}` : order.reason;
 
     console.log(`[Debug][ executeBuy][${date}] ${order.secid} 原始价=${price.toFixed(2)} 滑点调整后=${adjustedPrice.toFixed(2)} (SLIPPAGE=${this.SLIPPAGE})`);
-    console.log(`[OptBacktest] [${date}] ${order.secid} 买入成功: 价${adjustedPrice.toFixed(2)} | 量${quantity} | 总成本${totalCost.toFixed(2)} | 策略${order.strategyType} | 止损价${stopLossPrice.toFixed(2)} | 剩余资金${this.availableCash.toFixed(2)}`);
+    console.log(`[OptBacktest] [${date}] ${order.secid} 买入成功: 价${adjustedPrice.toFixed(2)} | 量${quantity} | 总成本${totalCost.toFixed(2)} | 策略${order.strategyType} | 实体最低${buyDayEntityLow.toFixed(2)} | 止损价${stopLossPrice.toFixed(2)} | 剩余资金${this.availableCash.toFixed(2)}`);
 
     this.tradeRecords.push({
       date,
@@ -875,8 +917,9 @@ export class OptimizedStrategyBacktest {
         this.watchList.delete(secid);
         continue;
       }
-
-      const daysInWatch = this.getTradeDaysDiff(item.addedDate, today);
+      // [修复] 使用异步安全的交易日差计算
+      const daysInWatch = await this.getTradeDaysDiffAsync(item.addedDate, today, dataProvider);
+      // const daysInWatch = this.getTradeDaysDiff(item.addedDate, today);
       if (daysInWatch >= item.maxWatchDays) {
         console.log(`[OptBacktest] [${today}] ${secid} 观察期满 ${daysInWatch} 天，踢出`);
         this.watchList.delete(secid);
@@ -1035,11 +1078,11 @@ export class OptimizedStrategyBacktest {
 
       // 0. 时间止损：持仓 ≥3 天且亏损，强制离场
       const daysHeld = this.getTradeDaysDiff(position.buyDate, today);
-      const isProfitable = currentPrice > position.buyPrice;
+      // const isProfitable = currentPrice > position.buyPrice;
       
-      if (daysHeld >= 3 && !isProfitable) {
-        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损: 持仓${daysHeld}天仍亏损(成本${position.buyPrice.toFixed(2)} 当前${currentPrice.toFixed(2)})`);
-        this.executeSell(secid, today, currentPrice, position.quantity, `时间止损(持仓${daysHeld}天未盈利)`);
+      if (daysHeld >= 3 && currentPrice < position.buyDayEntityLow) {
+        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损: 持仓${daysHeld}天, 当前${currentPrice.toFixed(2)} < 买入实体最低${position.buyDayEntityLow.toFixed(2)}`);
+        this.executeSell(secid, today, currentPrice, position.quantity, `时间止损(持仓${daysHeld}天跌破买入实体)`);
         continue;
       }
 
@@ -1148,9 +1191,11 @@ export class OptimizedStrategyBacktest {
     let watchKicked = 0;
     for (const stock of strongStocks) {
       if (this.watchList.has(stock.secid)) {
+        const item = this.watchList.get(stock.secid)!;
+        const daysInWatch = this.getTradeDaysDiff(item.addedDate, today); // 这里保持同步，因为 today 和 addedDate 都应在 tradeDays 中
         this.watchList.delete(stock.secid);
         watchKicked++;
-        console.log(`[OptBacktest] [${today}] ${stock.secid} 出现在强势列表，从观察列表踢出`);
+        console.log(`[OptBacktest] [${today}] ${stock.secid} 出现在强势列表，从观察列表踢出(已观察${daysInWatch}个交易日)`);
       }
     }
     if (watchKicked > 0) {
@@ -1446,13 +1491,15 @@ export class OptimizedStrategyBacktest {
     }
 
     // 3. 预计算每只股票的 boardCode 和是否需要查 boardStocks
-    const boardStockRequests: Array<{ date: string; boardCode: string | null; boardName: string; secid: string, boardRank:number }> = [];
+    const boardStockRequests: Array<{ date: string; boardCode: string | null; boardName: string; secid: string, boardRank:number, boardZf: number }> = [];
     const preComputed = new Map<string, {
       boardPass: boolean;
       boardRankPass: boolean;
       boardCode: string | null;
       boardRank: number;
+      boardZf: number;
       stockRank: number;
+      stockZf: number;
       nonLimitCount: number;
     }>();
 
@@ -1463,11 +1510,11 @@ export class OptimizedStrategyBacktest {
       if (skipBoardRankCheck) {
         // 板块排名检查已跳过，所有板块都通过
         if (skipStockRankCheck || screenResult.strongType === 'limit_up') {
-          preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode: null, boardRank: -1, stockRank: -1, nonLimitCount: 0 });
+          preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode: null, boardRank: -1, boardZf: 0, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
         } else {
           // 仍需查 boardStocks（通过板块名称查找）
-          preComputed.set(stock.secid, { boardPass: true, boardRankPass: false, boardCode: null, boardRank: -1, stockRank: -1, nonLimitCount: 0 });
-          boardStockRequests.push({ date, boardCode: null, boardName: stock.bk, secid: stock.secid, boardRank: -1 });
+          preComputed.set(stock.secid, { boardPass: true, boardRankPass: false, boardCode: null, boardRank: -1, stockRank: -1, boardZf: 0, stockZf: 0, nonLimitCount: 0 });
+          boardStockRequests.push({ date, boardCode: null, boardName: stock.bk, secid: stock.secid, boardRank: -1, boardZf: 0 });
         }
         continue;
       }
@@ -1477,28 +1524,32 @@ export class OptimizedStrategyBacktest {
       let boardPass = false;
       let boardCode: string | null = null;
       let boardRank = -1;
-
+      let boardZf = 0;
       if (boards.length > 0) {
         const sortedBoards = boards.sort((a, b) => b.zf - a.zf);
         boardRank = sortedBoards.findIndex(b => b.name === stock.bk);
         if (boardRank < 0) boardRank = sortedBoards.findIndex(b => b.name.startsWith(stock.bk));
+        // 条件2：绝对涨幅（板块当日必须涨 > 2%）
+        boardZf = boardRank >= 0 ? sortedBoards[boardRank].zf : 0;
         if (boardRank >= 0) {
-          boardPass = (boardRank + 1) <= boards.length * this.BOARD_RANK_PCT;
+          const absolutePass = boardZf > 2; // 板块涨幅必须 > 2%
+
+          boardPass = absolutePass && (boardRank + 1) <= boards.length * this.BOARD_RANK_PCT;
           boardCode = boards[boardRank].code;
         }
       }
 
       if (!boardPass) {
-        preComputed.set(stock.secid, { boardPass: false, boardRankPass: false, boardCode, boardRank, stockRank: -1, nonLimitCount: 0 });
+        preComputed.set(stock.secid, { boardPass: false, boardRankPass: false, boardCode, boardRank, boardZf, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
         continue;
       }
 
       if (screenResult.strongType === 'limit_up' || skipStockRankCheck) {
-        preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode, boardRank, stockRank: -1, nonLimitCount: 0 });
+        preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode, boardRank, boardZf, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
       } else {
         // 需要查 boardStocks，收集请求
         if (boardCode) {
-          boardStockRequests.push({ date, boardCode, boardName: stock.bk, secid: stock.secid, boardRank });
+          boardStockRequests.push({ date, boardCode, boardName: stock.bk, secid: stock.secid, boardRank, boardZf, });
         }
       }
     }
@@ -1545,18 +1596,20 @@ export class OptimizedStrategyBacktest {
         if (stockRank == -1 && stockRankInAll != -1) {
           stockRank = 1; // 应该是涨停了
         }
-        const boardRankPass = stockRank >= 0 && (stockRank + 1) <= nonLimitStocks.length * this.STOCK_RANK_PCT;
+        const stockZf = stockRankInAll > 0 ? stocks[stockRankInAll].zf : 0;
+        const boardRankPass = stockZf > 3 && stockRank >= 0 && (stockRank + 1) <= nonLimitStocks.length * this.STOCK_RANK_PCT;
         
         const existing = preComputed.get(req.secid)!;
         preComputed.set(req.secid, {
           ...existing,
           boardRankPass: boardRankPass || stockRank < 0, // 找不到排名时宽松处理
           stockRank,
+          stockZf,
           boardRank: req.boardRank,
           nonLimitCount: nonLimitStocks.length
         });
         // [调试] 打印个股排名回填结果
-        console.log(`[Debug][ stockRank回填][${req.date}] ${req.secid} 板块=${req.boardName} 个股排名=${stockRank >= 0 ? stockRank + 1 : '未找到'} 板块内非涨停数=${nonLimitStocks.length} 通过=${boardRankPass || stockRank < 0}`);
+        console.log(`[Debug][ stockRank回填][${req.date}] ${req.secid} 板块=${req.boardName} 个股排名=${stockRank >= 0 ? stockRank + 1 : '未找到'} 涨幅${stockZf.toFixed(2)}% 板块内非涨停数=${nonLimitStocks.length} 通过=${boardRankPass || stockRank < 0}`);
         if (stockRank < 0) {
           console.log(`[Debug][ stockRank回填][${req.date}] ${req.secid} stockRank<0, nonLimitStocks内容:`, nonLimitStocks.map(s => `${s.secid}(${s.zf.toFixed(2)}%)`).join(', '));
         }
@@ -1588,7 +1641,7 @@ export class OptimizedStrategyBacktest {
       const computed = preComputed.get(stock.secid);
 
       if (!computed || !computed.boardPass) {
-        console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ ${type === 'watch' ? '观察' : ''}筛选失败: 板块未进全市场前${(this.BOARD_RANK_PCT * 100).toFixed(0)}%`);
+        console.log(`[OptBacktest] [${today}] ${stock.secid} ❌ ${type === 'watch' ? '观察' : ''}筛选失败: 板块未进全市场前${(this.BOARD_RANK_PCT * 100).toFixed(0)}% 涨幅${computed?.boardZf.toFixed(2)}%`);
         continue;
       }
 
@@ -1716,6 +1769,7 @@ export class OptimizedStrategyBacktest {
       const klines = klinesMap[secid];
       if (klines && klines.length > 0) {
         const close = klines[klines.length - 1].sp;
+        this.lastPositionPrices.set(secid, close);
         const value = close * pos.quantity;
         stockValue += value;
         positionDetails.push({ secid, close, quantity: pos.quantity, value });
@@ -1791,6 +1845,24 @@ export class OptimizedStrategyBacktest {
         detail.returnPct = sell.returnPct;
         detail.sellReason = sell.reason;
         detail.holdDays = this.getTradeDaysDiff(buy.date, sell.date);
+      } else {
+        // [修正] 回测结束时仍持仓，按最后收盘价虚拟结算
+        const position = this.positions.get(buy.secid);
+        const lastPrice = this.lastPositionPrices.get(buy.secid);
+        if (position && lastPrice !== undefined && position.buyDate === buy.date) {
+          const adjustedPrice = lastPrice * (1 - this.SLIPPAGE);
+          const totalAmount = adjustedPrice * position.quantity;
+          const commission = totalAmount * this.COMMISSION;
+          const stampTax = totalAmount * this.STAMP_TAX;
+          const netAmount = totalAmount - commission - stampTax;
+          const pnl = netAmount - position.buyAmount;
+          detail.sellDate = this.tradeDays[this.tradeDays.length - 1] || buy.date;
+          detail.sellPrice = adjustedPrice;
+          detail.pnl = pnl;
+          detail.returnPct = position.buyAmount > 0 ? (pnl / position.buyAmount) * 100 : 0;
+          detail.sellReason = '持仓期末结算';
+          detail.holdDays = this.getTradeDaysDiff(buy.date, detail.sellDate);
+        }
       }
 
       currentStats.trades.push(detail);
@@ -1882,14 +1954,47 @@ export class OptimizedStrategyBacktest {
             s.date > buy.date &&
             !usedSellKeys.has(`${s.secid}_${s.date}`)
           );
-          if (!sell) continue;
 
-          usedSellKeys.add(`${sell.secid}_${sell.date}`);
+          let actualSell: StrategyTradeRecord | undefined = sell;
+          if (!actualSell) {
+            // [修正] 回测结束时仍持仓，按最后收盘价虚拟结算
+            const position = this.positions.get(buy.secid);
+            const lastPrice = this.lastPositionPrices.get(buy.secid);
+            if (position && lastPrice !== undefined && position.buyDate === buy.date) {
+              const adjustedPrice = lastPrice * (1 - this.SLIPPAGE);
+              const totalAmount = adjustedPrice * position.quantity;
+              const commission = totalAmount * this.COMMISSION;
+              const stampTax = totalAmount * this.STAMP_TAX;
+              const netAmount = totalAmount - commission - stampTax;
+              const pnl = netAmount - position.buyAmount;
+              const returnPct = position.buyAmount > 0 ? (pnl / position.buyAmount) * 100 : 0;
+              actualSell = {
+                date: this.tradeDays[this.tradeDays.length - 1] || buy.date,
+                secid: buy.secid,
+                type: 'sell',
+                price: adjustedPrice,
+                quantity: position.quantity,
+                amount: netAmount,
+                reason: '持仓期末结算',
+                pnl,
+                score: (position as any).score,
+                boardRank: (position as any).boardRank,
+                stockRank: (position as any).stockRank,
+                boardCode: position.boardCode,
+                returnPct,
+                strategyType: position.strategyType,
+                strategyParams: position.strategyParams,
+              } as StrategyTradeRecord;
+            }
+          }
+          if (!actualSell) continue;
+
+          usedSellKeys.add(`${actualSell.secid}_${actualSell.date}`);
           uniqueSecids.add(buy.secid);
           count++;
-          const returnPct = sell.returnPct || 0;
+          const returnPct = actualSell.returnPct || 0;
           totalReturnPct += returnPct;
-          if ((sell.pnl || 0) > 0) {
+          if ((actualSell.pnl || 0) > 0) {
             winTrades++;
           } else {
             lossTrades++;
@@ -1942,12 +2047,45 @@ export class OptimizedStrategyBacktest {
       }
     }
 
+    // [修正] 为持仓中的股票生成虚拟卖出记录，回测结束时按最后收盘价结算盈亏
+    const virtualSellTrades: StrategyTradeRecord[] = [];
+    const lastDate = this.tradeDays[this.tradeDays.length - 1] || '';
+    for (const [secid, pos] of this.positions) {
+      const lastPrice = this.lastPositionPrices.get(secid);
+      if (lastPrice === undefined) continue;
+      const adjustedPrice = lastPrice * (1 - this.SLIPPAGE);
+      const totalAmount = adjustedPrice * pos.quantity;
+      const commission = totalAmount * this.COMMISSION;
+      const stampTax = totalAmount * this.STAMP_TAX;
+      const netAmount = totalAmount - commission - stampTax;
+      const pnl = netAmount - pos.buyAmount;
+      const returnPct = pos.buyAmount > 0 ? (pnl / pos.buyAmount) * 100 : 0;
+      virtualSellTrades.push({
+        date: lastDate,
+        secid,
+        type: 'sell',
+        price: adjustedPrice,
+        quantity: pos.quantity,
+        amount: netAmount,
+        reason: '持仓期末结算',
+        pnl,
+        score: (pos as any).score,
+        boardRank: (pos as any).boardRank,
+        stockRank: (pos as any).stockRank,
+        boardCode: pos.boardCode,
+        returnPct,
+        strategyType: pos.strategyType,
+        strategyParams: pos.strategyParams,
+      });
+    }
+
     const sellTrades = this.tradeRecords.filter(t => t.type === 'sell');
-    const winTrades = sellTrades.filter(t => (t.pnl || 0) > 0);
-    const winRate = sellTrades.length > 0 ? winTrades.length / sellTrades.length : 0;
+    const allSellTrades = [...sellTrades, ...virtualSellTrades];
+    const winTrades = allSellTrades.filter(t => (t.pnl || 0) > 0);
+    const winRate = allSellTrades.length > 0 ? winTrades.length / allSellTrades.length : 0;
 
     const totalProfit = winTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
-    const lossTrades = sellTrades.filter(t => (t.pnl || 0) <= 0);
+    const lossTrades = allSellTrades.filter(t => (t.pnl || 0) <= 0);
     const totalLoss = lossTrades.reduce((sum, t) => sum + Math.abs(t.pnl || 0), 0);
     const profitFactor = totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? Infinity : 0);
 
@@ -1962,7 +2100,7 @@ export class OptimizedStrategyBacktest {
     const sharpeRatio = stdReturn > 0 ? (avgReturn / stdReturn) * Math.sqrt(252) : 0;
 
     const holdingDays: number[] = [];
-    for (const sell of sellTrades) {
+    for (const sell of allSellTrades) {
       const buy = this.tradeRecords.find(
         t => t.secid === sell.secid && t.type === 'buy' && t.date <= sell.date
       );
@@ -1985,7 +2123,7 @@ export class OptimizedStrategyBacktest {
       winRate,
       profitFactor,
       sharpeRatio,
-      totalTrades: sellTrades.length,
+      totalTrades: allSellTrades.length,
       avgHoldingDays,
       trades: this.tradeRecords,
       dailyValues: this.dailyValues,
@@ -2005,7 +2143,7 @@ export class OptimizedStrategyBacktest {
       胜率: (winRate * 100).toFixed(2) + '%',
       盈亏比: profitFactor.toFixed(2),
       夏普比率: sharpeRatio.toFixed(2),
-      总交易次数: sellTrades.length,
+      总交易次数: allSellTrades.length,
       平均持仓天数: avgHoldingDays.toFixed(1)
     });
 
