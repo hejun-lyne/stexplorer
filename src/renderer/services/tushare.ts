@@ -557,8 +557,9 @@ export async function GetBoardStocksBatchFromTushare(
 
     const map: Record<string, Array<{ secid: string; zf: number }>> = {};
     for (const req of requests) {
+      const rkey = `${req.date.replace(/-/g, '')}_${req.boardCode}`;
       const key = `${req.date}_${req.boardCode}`;
-      const dayData = result[key];
+      const dayData = result[rkey];
       if (dayData && Array.isArray(dayData.stocks)) {
         map[key] = dayData.stocks.map((s: any) => ({
           secid: s.secid,

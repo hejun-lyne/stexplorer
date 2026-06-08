@@ -209,9 +209,9 @@ export function optimizeMACDStrategy(
   const allResults: MACDStrategyResult[] = [];
 
   // 参数网格
-  const fastPeriods = [12];
-  const slowPeriods = [26];
-  const signalPeriods = [9];
+  const fastPeriods = [8, 12];        // 2 个：灵敏 + 标准
+  const slowPeriods = [21, 26];       // 2 个：短趋势 + 标准趋势
+  const signalPeriods = [9];            // 1 个：固定
   const aboveZeroOptions =  [true, false];      // 是否要求零轴上方金叉
   const priorNegOptions = [true, false];      // 是否要求金叉前 MACD 曾为负
 
@@ -360,7 +360,7 @@ export function optimizeMACDStrategy(
 // ===== RSI 策略参数优化回测 =====
 export function optimizeRSIStrategy(
   klines: Stock.KLineItem[],
-  rsiPeriods: number[] = [6, 12, 24],
+  rsiPeriods: number[] = [12, 24],
   // 止损参数
   fixedStopLossPct: number = 0.05,
   trailingStopLossPct: number = 0.06
@@ -371,8 +371,9 @@ export function optimizeRSIStrategy(
   const allResults: RSIBacktestResult[] = [];
 
   // 参数网格：超卖买点 15-35，超买卖点 65-85
-  const buyThresholds = [20, 30];
-  const sellThresholds = [70, 80];
+  // 买入：强势股浅回调即可介入，不等深度超卖
+  const buyThresholds = [35, 40, 45]; // 35=浅回调，40=整理，45=强势横盘
+  const sellThresholds = [75, 80, 85]; // 75=温和止盈，80=标准超买，85=让利润奔跑
 
   for (const period of rsiPeriods) {
     const rsi = Indicators.calculateRSI(closes, period);
@@ -413,13 +414,14 @@ export function optimizeRSIStrategy(
 
             // 卖出信号：RSI 进入超买区（≥ sellTh）
             // 用"进入即卖"比"下穿卖"更及时，避免利润回吐
+            // [优化] 卖出信号：RSI冲高回落（前一天超买，今天回落）
             let sellPrice: number;
             let exitReason: RSIBacktestTrade['exitReason'];
 
             if (shouldStop) {
               sellPrice = closes[i];
               exitReason = stopReason as RSIBacktestTrade['exitReason'];
-            } else if (rsi[i] >= sellTh) {
+            } else if (rsi[i - 1] >= sellTh && rsi[i] < rsi[i - 1]) {
               sellPrice = closes[i];
               exitReason = 'rsi_overbought';
             } else {

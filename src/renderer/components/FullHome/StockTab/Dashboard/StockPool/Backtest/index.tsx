@@ -1,5 +1,6 @@
 import React, { useCallback, useState, useEffect, useRef } from 'react';
-import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio, InputNumber } from 'antd';
+import { useDispatch } from 'react-redux';
+import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio, InputNumber, Modal, Button, List, Popconfirm, Space } from 'antd';
 import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
 import * as Services from '@/services';
@@ -11,6 +12,7 @@ import { Stock } from '@/types/stock';
 import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import { useRenderEcharts, useResizeEchart } from '@/utils/hooks';
+import { setStockTradePointsAction } from '@/actions/stock';
 
 const { ipcRenderer, makeWorkerExec } = window.contextModules.electron;
 
@@ -434,6 +436,7 @@ type StrategyType = 'rsi' | 'optimized';
 type OptimizedSubStrategy = 'macd' | 'rsi' | 'both';
 
 const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
+    const dispatch = useDispatch();
     const { darkMode, lowKey } = useHomeContext();
     const [dates, setDates] = useState([moment(new Date()).format('YYYY-MM-DD')]);
     const [running, setRunning] = useState(false);
@@ -447,12 +450,27 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [preloading, setPreloading] = useState(false);
     const [preloadProgress, setPreloadProgress] = useState('');
 
+    // 历史记录
+    const [historyVisible, setHistoryVisible] = useState(false);
+    const [historyList, setHistoryList] = useState<Array<{
+      id: string;
+      timestamp: number;
+      label: string;
+      result: any;
+      dates: string[];
+      strategyType: StrategyType;
+      optimizedSubStrategy: OptimizedSubStrategy;
+      params: any;
+    }>>([]);
+
     // 优化策略参数
     const [initialCapital, setInitialCapital] = useState(1000000);
     const [maxPositions, setMaxPositions] = useState(5);
     const [positionRatio, setPositionRatio] = useState(0.2);
     const [stopLossInitPct, setStopLossInitPct] = useState(0.95);
     const [trailingStopPct, setTrailingStopPct] = useState(0.95);
+    const [takeProfitPct, setTakeProfitPct] = useState(1.15);
+    const [takeProfitTrailing, setTakeProfitTrailing] = useState(0.92);
     const [minStrategyScore, setMinStrategyScore] = useState(90);
     const [strongLookbackStart, setStrongLookbackStart] = useState(10);
     const [strongLookbackEnd, setStrongLookbackEnd] = useState(5);
@@ -467,6 +485,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
     // 缓存 key
     const CACHE_KEY = 'backtest_last_result';
+    const HISTORY_CACHE_KEY = 'backtest_history';
+    const MAX_HISTORY_COUNT = 30;
     const { electron } = window.contextModules;
 
     // 从缓存恢复上一次的回测结果和参数
@@ -500,6 +520,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setPositionRatio(params.positionRatio ?? 0.2);
               setStopLossInitPct(params.stopLossInitPct ?? 0.95);
               setTrailingStopPct(params.trailingStopPct ?? 0.95);
+              setTakeProfitPct(params.takeProfitPct ?? 1.15);
+              setTakeProfitTrailing(params.takeProfitTrailing ?? 0.92);
               setMinStrategyScore(params.minStrategyScore ?? 90);
               setStrongLookbackStart(params.strongLookbackStart ?? 10);
               setStrongLookbackEnd(params.strongLookbackEnd ?? 5);
@@ -512,6 +534,111 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         }
       })();
     }, []);
+
+    // 加载历史记录列表
+    const loadHistory = useCallback(async () => {
+      try {
+        const cached = await electron.readCache(HISTORY_CACHE_KEY);
+        const list = cached?.data?.data || [];
+        setHistoryList(Array.isArray(list) ? list : []);
+      } catch (e) {
+        console.error('[Backtest] 读取历史记录失败:', e);
+        setHistoryList([]);
+      }
+    }, []);
+
+    // 组件挂载时加载历史记录
+    useEffect(() => {
+      loadHistory();
+    }, [loadHistory]);
+
+    // 保存到历史记录
+    const saveToHistory = useCallback(async (
+      backtestResult: any,
+      backtestDates: string[],
+      st: StrategyType,
+      oss: OptimizedSubStrategy,
+      backtestParams: any
+    ) => {
+      try {
+        const cached = await electron.readCache(HISTORY_CACHE_KEY);
+        let list: any[] = cached?.data?.data || [];
+        if (!Array.isArray(list)) list = [];
+
+        const totalReturnPct = ((backtestResult?.totalReturn || 0) * 100).toFixed(2);
+        const tradeCount = backtestResult?.totalTrades || 0;
+        const dateRange = backtestDates.length > 0
+          ? `${backtestDates[0]} ~ ${backtestDates[backtestDates.length - 1]}`
+          : '';
+        const strategyLabel = st === 'rsi' ? 'RSI' : (oss === 'both' ? 'MACD+RSI' : oss.toUpperCase());
+        const label = `${dateRange} | ${strategyLabel} | 收益${totalReturnPct}% | ${tradeCount}笔`;
+
+        const newItem = {
+          id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          timestamp: Date.now(),
+          label,
+          result: backtestResult,
+          dates: backtestDates,
+          strategyType: st,
+          optimizedSubStrategy: oss,
+          params: backtestParams,
+        };
+
+        list = [newItem, ...list];
+        if (list.length > MAX_HISTORY_COUNT) {
+          list = list.slice(0, MAX_HISTORY_COUNT);
+        }
+
+        await electron.writeCache(HISTORY_CACHE_KEY, list);
+        setHistoryList(list);
+        console.log('[Backtest] 已保存到历史记录');
+      } catch (e) {
+        console.error('[Backtest] 保存历史记录失败:', e);
+      }
+    }, []);
+
+    // 加载某条历史记录
+    const loadHistoryItem = useCallback((item: typeof historyList[0]) => {
+      setResult(item.result);
+      setDates(item.dates);
+      setStrategyType(item.strategyType);
+      setOptimizedSubStrategy(item.optimizedSubStrategy);
+
+      const p = item.params;
+      if (p) {
+        setInitialCapital(p.initialCapital ?? 1000000);
+        setMaxPositions(p.maxPositions ?? 5);
+        setPositionRatio(p.positionRatio ?? 0.2);
+        setStopLossInitPct(p.stopLossInitPct ?? 0.95);
+        setTrailingStopPct(p.trailingStopPct ?? 0.95);
+        setTakeProfitPct(p.takeProfitPct ?? 1.15);
+        setTakeProfitTrailing(p.takeProfitTrailing ?? 0.92);
+        setMinStrategyScore(p.minStrategyScore ?? 90);
+        setStrongLookbackStart(p.strongLookbackStart ?? 10);
+        setStrongLookbackEnd(p.strongLookbackEnd ?? 5);
+        setBoardRankPct(p.boardRankPct ?? 0.3);
+        setStockRankPct(p.stockRankPct ?? 0.3);
+      }
+
+      const baseOpts = getNetValueBaseOptions(darkMode, p?.initialCapital || 1000000);
+      const finalOpts = updateNetValueOptions(baseOpts, darkMode, item.result.dailyValues, p?.initialCapital || 1000000);
+      setChartOption(finalOpts);
+
+      setHistoryVisible(false);
+      console.log('[Backtest] 已恢复历史记录:', item.label);
+    }, [darkMode]);
+
+    // 删除某条历史记录
+    const deleteHistoryItem = useCallback(async (id: string) => {
+      try {
+        const newList = historyList.filter(item => item.id !== id);
+        await electron.writeCache(HISTORY_CACHE_KEY, newList);
+        setHistoryList(newList);
+        console.log('[Backtest] 已删除历史记录:', id);
+      } catch (e) {
+        console.error('[Backtest] 删除历史记录失败:', e);
+      }
+    }, [historyList]);
 
     const onChangeDate = useCallback(
         (d: moment.Moment | null, isStart = true) => {
@@ -651,6 +778,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, initialCapital, parallelWorkerExecutor, {
             stopLossInitPct,
             trailingStopPct,
+            takeProfitPct,
+            takeProfitTrailing,
             minStrategyScore,
             strongLookback: strongLookbackStart,
             maxPositions,
@@ -698,6 +827,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               positionRatio,
               stopLossInitPct,
               trailingStopPct,
+              takeProfitPct,
+              takeProfitTrailing,
               minStrategyScore,
               strongLookbackStart,
               strongLookbackEnd,
@@ -708,6 +839,30 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           console.log('[Backtest] 回测结果已缓存到磁盘');
         } catch (e) {
           console.error('[Backtest] 缓存回测结果失败:', e);
+        }
+
+        // 保存到历史记录（未取消时才保存）
+        if (!cancelledRef.current) {
+          await saveToHistory(
+            backtestResult,
+            dates,
+            strategyType,
+            optimizedSubStrategy,
+            {
+              initialCapital,
+              maxPositions,
+              positionRatio,
+              stopLossInitPct,
+              trailingStopPct,
+              takeProfitPct,
+              takeProfitTrailing,
+              minStrategyScore,
+              strongLookbackStart,
+              strongLookbackEnd,
+              boardRankPct,
+              stockRankPct,
+            }
+          );
         }
 
         console.log(`[UI] ${strategyName}回测结果已接收，图表已生成`);
@@ -722,7 +877,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, takeProfitTrailing, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -800,7 +955,21 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     ];
 
     const stockStatsColumns = [
-        { title: '股票', dataIndex: 'secid', key: 'secid', width: 110, fixed: 'left' as const },
+        { title: '股票', dataIndex: 'secid', key: 'secid', width: 110, fixed: 'left' as const, render: (secid: string) => (
+            <a onClick={() => {
+              if (result?.trades) {
+                const buyPoints = result.trades
+                  .filter((t: any) => t.secid === secid && t.type === 'buy')
+                  .map((t: any) => ({ x: t.date, y: t.price, t: 'bt' }));
+                const sellPoints = result.trades
+                  .filter((t: any) => t.secid === secid && t.type === 'sell')
+                  .map((t: any) => ({ x: t.date, y: t.price, t: 'bt' }));
+                dispatch(setStockTradePointsAction(secid, buyPoints, sellPoints, ['bt']));
+              }
+              onOpenStock(secid, secid);
+            }}>{secid}</a>
+        ) },
+        { title: '所属板块', dataIndex: 'boardCode', key: 'boardCode', width: 100, render: (v?: string) => v || '-' },
         { title: '策略', dataIndex: 'strategyType', key: 'strategyType', width: 80, render: (v: string) => v?.toUpperCase() || '-' },
         { title: '策略得分', dataIndex: 'score', key: 'score', width: 90, render: (v: number) => (v || 0).toFixed(1) },
         { title: '策略参数', dataIndex: 'strategyParamsStr', key: 'strategyParamsStr', width: 240, render: (v?: string) => v || '-', ellipsis: true },
@@ -930,6 +1099,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       <InputNumber size="small" min={0.5} max={0.99} step={0.01} value={trailingStopPct} onChange={(v) => setTrailingStopPct(v ?? 0.90)} disabled={running} style={{ width: 55 }} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>止盈:</span>
+                      <InputNumber size="small" min={1.01} max={2.0} step={0.01} value={takeProfitPct} onChange={(v) => setTakeProfitPct(v ?? 1.15)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>盈轨:</span>
+                      <InputNumber size="small" min={0.5} max={0.99} step={0.01} value={takeProfitTrailing} onChange={(v) => setTakeProfitTrailing(v ?? 0.92)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>分数:</span>
                       <InputNumber size="small" min={0} max={500} step={1} value={minStrategyScore} onChange={(v) => setMinStrategyScore(v ?? 100)} disabled={running} style={{ width: 55 }} />
                     </div>
@@ -950,9 +1127,18 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                   </div>
                 )}
               {!running && (
-                <a className={styles.abtn} onClick={startBacktest}>
-                  {strategyType === 'rsi' ? 'RSI策略回测强势股票' : `${optimizedSubStrategy === 'both' ? 'MACD+RSI' : optimizedSubStrategy.toUpperCase()}优化策略回测强势股票`}
-                </a>
+                <>
+                  <a className={styles.abtn} onClick={startBacktest}>
+                    {strategyType === 'rsi' ? 'RSI策略回测强势股票' : `${optimizedSubStrategy === 'both' ? 'MACD+RSI' : optimizedSubStrategy.toUpperCase()}优化策略回测强势股票`}
+                  </a>
+                  <Button
+                    size="small"
+                    onClick={() => { loadHistory(); setHistoryVisible(true); }}
+                    style={{ marginLeft: 10 }}
+                  >
+                    历史 ({historyList.length})
+                  </Button>
+                </>
               )}
               {running && (
                 <>
@@ -1074,7 +1260,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       columns={stockStatsColumns}
                       dataSource={result.stockStats.map((s: any, i: number) => ({ ...s, key: i }))}
                       pagination={{ pageSize: 20, showSizeChanger: true }}
-                      scroll={{ x: 1240 }}
+                      scroll={{ x: 1340 }}
                       size="small"
                       expandable={{
                         expandedRowRender: (record: any) => (
@@ -1135,6 +1321,74 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               </div>
             )}
           </div>
+
+          {/* 历史记录弹窗 */}
+          <Modal
+            title="📚 回测历史记录"
+            open={historyVisible}
+            onCancel={() => setHistoryVisible(false)}
+            footer={null}
+            width={720}
+          >
+            {historyList.length === 0 ? (
+              <div style={{ padding: 40, textAlign: 'center', color: '#999' }}>
+                暂无历史记录，完成一次回测后将自动保存
+              </div>
+            ) : (
+              <List
+                dataSource={historyList}
+                renderItem={(item) => (
+                  <List.Item
+                    actions={[
+                      <Button size="small" type="primary" onClick={() => loadHistoryItem(item)}>
+                        加载
+                      </Button>,
+                      <Popconfirm
+                        title="确认删除？"
+                        onConfirm={() => deleteHistoryItem(item.id)}
+                        okText="删除"
+                        cancelText="取消"
+                      >
+                        <Button size="small" danger>
+                          删除
+                        </Button>
+                      </Popconfirm>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={
+                        <Space>
+                          <span>{new Date(item.timestamp).toLocaleString()}</span>
+                          <Tag color={item.strategyType === 'rsi' ? 'blue' : 'purple'}>
+                            {item.strategyType === 'rsi' ? 'RSI' : (item.optimizedSubStrategy === 'both' ? 'MACD+RSI' : item.optimizedSubStrategy.toUpperCase())}
+                          </Tag>
+                          <Tag color={(item.result?.totalReturn || 0) >= 0 ? 'red' : 'green'}>
+                            收益 {((item.result?.totalReturn || 0) * 100).toFixed(2)}%
+                          </Tag>
+                          <Tag>{item.result?.totalTrades || 0} 笔交易</Tag>
+                        </Space>
+                      }
+                      description={
+                        <div style={{ fontSize: 12, color: '#666' }}>
+                          <div>日期: {item.dates[0]} ~ {item.dates[item.dates.length - 1]} ({item.dates.length}天)</div>
+                          <div style={{ marginTop: 4 }}>
+                            资金{item.params?.initialCapital?.toLocaleString() || 1000000} | 
+                            仓位{item.params?.maxPositions || 5}只 | 
+                            止损{(item.params?.stopLossInitPct || 0.95) * 100}% | 
+                            追踪{(item.params?.trailingStopPct || 0.95) * 100}% | 
+                            止盈{((item.params?.takeProfitPct || 1.15) * 100).toFixed(0)}% | 
+                            盈轨{(item.params?.takeProfitTrailing || 0.92) * 100}% | 
+                            分数{item.params?.minStrategyScore || 100} | 
+                            回看{item.params?.strongLookbackStart || 10}-{item.params?.strongLookbackEnd || 5}
+                          </div>
+                        </div>
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Modal>
         </div>
       );
 }
