@@ -360,7 +360,7 @@ export function optimizeMACDStrategy(
 // ===== RSI 策略参数优化回测 =====
 export function optimizeRSIStrategy(
   klines: Stock.KLineItem[],
-  rsiPeriods: number[] = [6, 12, 24],
+  rsiPeriods: number[] = [6, 12],
   // 止损参数
   fixedStopLossPct: number = 0.05,
   trailingStopLossPct: number = 0.06
