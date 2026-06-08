@@ -209,10 +209,10 @@ export function optimizeMACDStrategy(
   const allResults: MACDStrategyResult[] = [];
 
   // 参数网格
-  const fastPeriods = [8, 12, 15];
-  const slowPeriods = [21, 26, 30];
-  const signalPeriods = [7, 9, 12];
-  const aboveZeroOptions = [true, false];      // 是否要求零轴上方金叉
+  const fastPeriods = [12];
+  const slowPeriods = [26];
+  const signalPeriods = [9];
+  const aboveZeroOptions =  [true, false];      // 是否要求零轴上方金叉
   const priorNegOptions = [true, false];      // 是否要求金叉前 MACD 曾为负
 
   for (const fast of fastPeriods) {
@@ -360,7 +360,7 @@ export function optimizeMACDStrategy(
 // ===== RSI 策略参数优化回测 =====
 export function optimizeRSIStrategy(
   klines: Stock.KLineItem[],
-  rsiPeriods: number[] = [6, 12],
+  rsiPeriods: number[] = [6, 12, 24],
   // 止损参数
   fixedStopLossPct: number = 0.05,
   trailingStopLossPct: number = 0.06
@@ -371,8 +371,8 @@ export function optimizeRSIStrategy(
   const allResults: RSIBacktestResult[] = [];
 
   // 参数网格：超卖买点 15-35，超买卖点 65-85
-  const buyThresholds = [15, 20, 25, 28, 30, 35];
-  const sellThresholds = [65, 70, 72, 75, 80, 85];
+  const buyThresholds = [20, 30];
+  const sellThresholds = [70, 80];
 
   for (const period of rsiPeriods) {
     const rsi = Indicators.calculateRSI(closes, period);
