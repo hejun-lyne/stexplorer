@@ -478,6 +478,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [stockRankPct, setStockRankPct] = useState(0.3);
     const [structureBreakDays, setStructureBreakDays] = useState(3);
     const [rangeBoundDays, setRangeBoundDays] = useState(5);
+    const [maxPullbackPct, setMaxPullbackPct] = useState(0.12);
 
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
@@ -531,6 +532,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setStockRankPct(params.stockRankPct ?? 0.3);
               setStructureBreakDays(params.structureBreakDays ?? 3);
               setRangeBoundDays(params.rangeBoundDays ?? 5);
+              setMaxPullbackPct(params.maxPullbackPct ?? 0.12);
             }
           }
         } catch (e) {
@@ -624,6 +626,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setStockRankPct(p.stockRankPct ?? 0.3);
         setStructureBreakDays(p.structureBreakDays ?? 3);
         setRangeBoundDays(p.rangeBoundDays ?? 5);
+        setMaxPullbackPct(p.maxPullbackPct ?? 0.12);
       }
 
       const baseOpts = getNetValueBaseOptions(darkMode, p?.initialCapital || 1000000);
@@ -797,6 +800,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             strategyMode: optimizedSubStrategy,
             structureBreakDays,
             rangeBoundDays,
+            maxPullbackPct,
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -844,6 +848,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               stockRankPct,
               structureBreakDays,
               rangeBoundDays,
+              maxPullbackPct,
             },
           });
           console.log('[Backtest] 回测结果已缓存到磁盘');
@@ -871,6 +876,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               strongLookbackEnd,
               boardRankPct,
               stockRankPct,
+              structureBreakDays,
+              rangeBoundDays,
+              maxPullbackPct,
             }
           );
         }
@@ -887,7 +895,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, takeProfitTrailing, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, takeProfitTrailing, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1141,6 +1149,10 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>横盘震荡:</span>
                       <InputNumber size="small" min={1} max={30} step={1} value={rangeBoundDays} onChange={(v) => setRangeBoundDays(v ?? 5)} disabled={running} style={{ width: 50 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>深度回调:</span>
+                      <InputNumber size="small" min={0} max={0.5} step={0.01} value={maxPullbackPct} onChange={(v) => setMaxPullbackPct(v ?? 0.12)} disabled={running} style={{ width: 55 }} />
                     </div>
                   </div>
                 )}
@@ -1399,7 +1411,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                             分数{item.params?.minStrategyScore || 100} | 
                             回看{item.params?.strongLookbackStart || 10}-{item.params?.strongLookbackEnd || 5} | 
                             结构破坏{item.params?.structureBreakDays || 3}天 | 
-                            横盘{item.params?.rangeBoundDays || 5}天
+                            横盘{item.params?.rangeBoundDays || 5}天 | 
+                            深度回调{(item.params?.maxPullbackPct || 0.12) * 100}%
                           </div>
                         </div>
                       }

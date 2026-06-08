@@ -504,6 +504,8 @@ export class OptimizedStrategyBacktest {
   // [新增] 时间止损参数
   private STRUCTURE_BREAK_DAYS = 3;   // 结构破坏：持仓天数阈值
   private RANGE_BOUND_DAYS = 5;       // 横盘震荡：持仓天数阈值
+  // [新增] 深度回调排除阈值
+  private MAX_PULLBACK_PCT = 0.12;    // 最近5天内从高点回调超过该比例则排除
 
   constructor(
     tradeDays: string[],
@@ -525,6 +527,7 @@ export class OptimizedStrategyBacktest {
       strategyMode?: 'macd' | 'rsi' | 'both';
       structureBreakDays?: number;
       rangeBoundDays?: number;
+      maxPullbackPct?: number;
     }
   ) {
     this.tradeDays = tradeDays;
@@ -552,6 +555,7 @@ export class OptimizedStrategyBacktest {
     if (options?.strategyMode !== undefined) this.strategyMode = options.strategyMode;
     if (options?.structureBreakDays !== undefined) this.STRUCTURE_BREAK_DAYS = options.structureBreakDays;
     if (options?.rangeBoundDays !== undefined) this.RANGE_BOUND_DAYS = options.rangeBoundDays;
+    if (options?.maxPullbackPct !== undefined) this.MAX_PULLBACK_PCT = options.maxPullbackPct;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
@@ -569,6 +573,7 @@ export class OptimizedStrategyBacktest {
       STRATEGY_MODE: this.strategyMode,
       STRUCTURE_BREAK_DAYS: this.STRUCTURE_BREAK_DAYS,
       RANGE_BOUND_DAYS: this.RANGE_BOUND_DAYS,
+      MAX_PULLBACK_PCT: this.MAX_PULLBACK_PCT,
     });
   }
 
@@ -1266,8 +1271,8 @@ export class OptimizedStrategyBacktest {
           const currentPrice = klines[klines.length - 1].sp;
           const pullBackPct = (high3Day - currentPrice) / high3Day;
           
-          // 如果最近 5 天内已从高点回调 > 12%，说明深度回调，排除
-          if (pullBackPct > 0.12) {
+          // 如果最近 5 天内已从高点回调超过阈值，说明深度回调，排除
+          if (pullBackPct > this.MAX_PULLBACK_PCT) {
             console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}%`);
             continue;
           }
