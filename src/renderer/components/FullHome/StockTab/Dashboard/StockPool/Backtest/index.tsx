@@ -57,7 +57,7 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
           const code = s.secid?.split('.')[1] || '';
           if (code.startsWith('688') || code.startsWith('689')) return false;
           if (code.startsWith('8') || code.startsWith('9')) return false;
-          if (s.zx < 10000 || s.zx > 100000) return false;
+          // if (s.zx < 10000 || s.zx > 100000) return false;
           return true;
         });
 
