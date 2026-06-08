@@ -175,7 +175,7 @@ export async function optimizeMACDStrategy(
 
 export async function optimizeRSIStrategy(
   klines: Stock.KLineItem[],
-  rsiPeriods: number[] = [6, 12, 24],
+  rsiPeriods: number[] = [6, 12],
   fixedStopLossPct: number = 0.05,
   trailingStopLossPct: number = 0.06,
   secid?: string
@@ -220,8 +220,8 @@ export interface StrategyPosition {
   peakPrice: number;           // 持仓期最高价（动态止盈用）
   takeProfitTrailingPrice: number; // 动态止盈触发价
 
-  // [新增] 买入当天K线实体最低价（用于时间止损）
-  buyDayEntityLow: number;
+  // [新增] 出现买入信号当天K线实体最低价（用于时间止损）
+  signalDayEntityLow: number;
 }
 
 export interface StrategyPendingOrder {
@@ -696,8 +696,13 @@ export class OptimizedStrategyBacktest {
         skippedOrders.push({ secid: order.secid, type: order.type, reason: '无K线数据' });
         continue;
       }
-
+      
       const todayKLine = klines.find(k => k.date === today);
+      if (!todayKLine) {
+        console.log(`[OptBacktest] [${today}] 订单执行失败:未获取到今日K线数据`);
+        continue;
+      }
+      const signalKLine = klines[klines.indexOf(todayKLine) - 1];
       
       // [优化] 明确检测停牌：最近K线不是今天，说明今日停牌
       if (!todayKLine) {
@@ -708,7 +713,7 @@ export class OptimizedStrategyBacktest {
       }
 
       const openPrice = todayKLine.kp;
-      const buyDayEntityLow = Math.min(todayKLine.kp, todayKLine.sp); // [新增]
+      const signalDayEntityLow = Math.min(signalKLine.kp, signalKLine.sp); // [新增]
       // [调试] 打印K线原始数据，用于核对价格是否匹配
       console.log(`[Debug][ executePendingOrders][${today}] ${order.secid} ${order.type} K线确认: date=${todayKLine.date} kp=${todayKLine.kp.toFixed(2)} sp=${todayKLine.sp.toFixed(2)} zg=${todayKLine.zg.toFixed(2)} zd=${todayKLine.zd.toFixed(2)}`);
 
@@ -720,7 +725,7 @@ export class OptimizedStrategyBacktest {
           continue;
         }
         console.log(`[OptBacktest] [${today}] 执行买入: ${order.secid} | 开盘价: ${openPrice.toFixed(2)} | 原因: ${order.reason}`);
-        this.executeBuy(order, today, openPrice, buyDayEntityLow);
+        this.executeBuy(order, today, openPrice, signalDayEntityLow);
       } else if (order.type === 'sell') {
         const position = this.positions.get(order.secid);
         if (position) {
@@ -788,7 +793,7 @@ export class OptimizedStrategyBacktest {
     return 0;
   }
 
-  private executeBuy(order: StrategyPendingOrder, date: string, price: number, buyDayEntityLow: number) {
+  private executeBuy(order: StrategyPendingOrder, date: string, price: number, signalDayEntityLow: number) {
     console.log(`[Debug][ executeBuy in][${date}] ${order.secid} order.boardRank=${order.boardRank !== undefined && order.boardRank >= 0 ? order.boardRank + 1 : '-'} order.stockRank=${order.stockRank !== undefined && order.stockRank >= 0 ? order.stockRank + 1 : '-'} type=${order.strategyType}`);
     const adjustedPrice = price * (1 + this.SLIPPAGE);
     const standardAmount = this.capital * this.POSITION_RATIO;
@@ -830,14 +835,14 @@ export class OptimizedStrategyBacktest {
       peakPrice: adjustedPrice,            // 动态止盈基准
       takeProfitPrice,                    // 固定止盈
       takeProfitTrailingPrice: adjustedPrice * this.TAKE_PROFIT_TRAILING, // 动态止盈触发价
-      buyDayEntityLow, // [新增] 保存买入当天实体最低价
+      signalDayEntityLow, // [新增] 保存买入当天实体最低价
     });
 
     const paramsStr = this.formatStrategyParams(order.strategyType, order.strategyParams);
     const finalReason = paramsStr ? `${order.reason} | ${paramsStr}` : order.reason;
 
     console.log(`[Debug][ executeBuy][${date}] ${order.secid} 原始价=${price.toFixed(2)} 滑点调整后=${adjustedPrice.toFixed(2)} (SLIPPAGE=${this.SLIPPAGE})`);
-    console.log(`[OptBacktest] [${date}] ${order.secid} 买入成功: 价${adjustedPrice.toFixed(2)} | 量${quantity} | 总成本${totalCost.toFixed(2)} | 策略${order.strategyType} | 实体最低${buyDayEntityLow.toFixed(2)} | 止损价${stopLossPrice.toFixed(2)} | 剩余资金${this.availableCash.toFixed(2)}`);
+    console.log(`[OptBacktest] [${date}] ${order.secid} 买入成功: 价${adjustedPrice.toFixed(2)} | 量${quantity} | 总成本${totalCost.toFixed(2)} | 策略${order.strategyType} | 实体最低${signalDayEntityLow.toFixed(2)} | 止损价${stopLossPrice.toFixed(2)} | 剩余资金${this.availableCash.toFixed(2)}`);
 
     this.tradeRecords.push({
       date,
@@ -1095,8 +1100,8 @@ export class OptimizedStrategyBacktest {
       // const isProfitable = currentPrice > position.buyPrice;
       
       // 档1：结构破坏（跌破买入实体）
-      if (daysHeld >= this.STRUCTURE_BREAK_DAYS && currentPrice < position.buyDayEntityLow) {
-        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(结构破坏): 持仓${daysHeld}天, 当前${currentPrice.toFixed(2)} < 实体最低${position.buyDayEntityLow.toFixed(2)}`);
+      if (daysHeld >= this.STRUCTURE_BREAK_DAYS && currentPrice < position.signalDayEntityLow) {
+        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(结构破坏): 持仓${daysHeld}天, 当前${currentPrice.toFixed(2)} < 信号日实体最低${position.signalDayEntityLow.toFixed(2)}`);
         this.executeSell(secid, today, currentPrice, position.quantity, `时间止损-结构破坏(${daysHeld}天)`);
         continue;
       }

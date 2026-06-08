@@ -360,7 +360,7 @@ export function optimizeMACDStrategy(
 // ===== RSI 策略参数优化回测 =====
 export function optimizeRSIStrategy(
   klines: Stock.KLineItem[],
-  rsiPeriods: number[] = [12, 24],
+  rsiPeriods: number[] = [6, 12],
   // 止损参数
   fixedStopLossPct: number = 0.05,
   trailingStopLossPct: number = 0.06
@@ -372,8 +372,8 @@ export function optimizeRSIStrategy(
 
   // 参数网格：超卖买点 15-35，超买卖点 65-85
   // 买入：强势股浅回调即可介入，不等深度超卖
-  const buyThresholds = [35, 40, 45]; // 35=浅回调，40=整理，45=强势横盘
-  const sellThresholds = [75, 80, 85]; // 75=温和止盈，80=标准超买，85=让利润奔跑
+  const buyThresholds = [25, 30, 35, 40, 45]; // 35=浅回调，40=整理，45=强势横盘
+  const sellThresholds = [60, 65, 70, 75, 80, 85]; // 75=温和止盈，80=标准超买，85=让利润奔跑
 
   for (const period of rsiPeriods) {
     const rsi = Indicators.calculateRSI(closes, period);
@@ -660,7 +660,7 @@ export function batchBacktestAndScreen(
       ? optimizeMACDStrategy(klines, backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
       : [];
     const rsiResults = strategyMode !== 'macd'
-      ? optimizeRSIStrategy(klines, [12, 24], backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
+      ? optimizeRSIStrategy(klines, [6, 12], backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
       : [];
 
     let bestResult: MACDStrategyResult | RSIBacktestResult | null = null;
@@ -679,10 +679,14 @@ export function batchBacktestAndScreen(
     }
 
     let screenResult: ScreenResult;
-
-    if (!bestResult || bestScore < screenParams.minStrategyScore) {
+    if (!bestResult) {
+      screenResult = { pass: false, reason: `未找到最佳策略`, secid: stock.secid };
+    } else if (bestResult.winRate != 100) {
+      screenResult = { pass: false, reason: `策略胜率不足(${bestResult.winRate.toFixed(1)})`, secid: stock.secid };
+    } else if (bestScore < screenParams.minStrategyScore) {
       screenResult = { pass: false, reason: `策略得分不足(${bestScore.toFixed(1)})`, secid: stock.secid };
     } else {
+      
       let mDayIndex = -1;
       if (bestType === 'macd') {
         mDayIndex = checkMACDBuySignal(klines, bestResult as MACDStrategyResult, 3);
