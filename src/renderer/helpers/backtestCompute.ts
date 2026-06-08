@@ -551,6 +551,7 @@ export function checkMACDBuySignal(
   return -1;
 }
 
+// backtestCompute.ts 中 checkRSIBuySignal 或 backtestEngine.ts 买入检测
 export function checkRSIBuySignal(
   klines: Stock.KLineItem[],
   params: RSIBacktestResult,
@@ -563,16 +564,24 @@ export function checkRSIBuySignal(
 
   for (let i = startIdx; i < endIdx; i++) {
     if (isNaN(rsi[i]) || isNaN(rsi[i - 1])) continue;
+
+    // 条件1：RSI 从超卖区上穿
     let inOversold = false;
     for (let j = Math.max(0, i - 10); j <= i; j++) {
-      if (rsi[j] <= params.buyThreshold) {
-        inOversold = true;
-        break;
-      }
+      if (rsi[j] <= params.buyThreshold) { inOversold = true; break; }
     }
-    if (inOversold && rsi[i - 1] <= params.buyThreshold && rsi[i] > params.buyThreshold) {
-      return i;
+    if (!inOversold || !(rsi[i - 1] <= params.buyThreshold && rsi[i] > params.buyThreshold)) {
+      continue;
     }
+
+    // [新增] 条件2：当日必须收阳（收盘价 > 开盘价）
+    if (klines[i].sp <= klines[i].kp) continue;
+
+    // [新增] 条件3：当日最低价不能创近期新低（停止创新低）
+    const recentLow = Math.min(...klines.slice(Math.max(0, i - 5), i).map(k => k.zd));
+    if (klines[i].zd < recentLow * 0.995) continue; // 允许微小误差
+
+    return i;
   }
   return -1;
 }

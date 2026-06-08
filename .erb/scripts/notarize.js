@@ -7,6 +7,11 @@ exports.default = async function notarizeMacos(context) {
     return;
   }
 
+  if (process.env.NOTARIZE === 'false') {
+    console.warn('Skipping notarizing step. NOTARIZE=false');
+    return;
+  }
+
   if (!process.env.CI) {
     console.warn('Skipping notarizing step. Packaging is not running in CI');
     return;

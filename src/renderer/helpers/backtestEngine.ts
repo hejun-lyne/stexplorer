@@ -501,6 +501,9 @@ export class OptimizedStrategyBacktest {
   private BOARD_RANK_PCT = 0.3;
   private STOCK_RANK_PCT = 0.3;
   private strategyMode: 'macd' | 'rsi' | 'both' = 'both';
+  // [新增] 时间止损参数
+  private STRUCTURE_BREAK_DAYS = 3;   // 结构破坏：持仓天数阈值
+  private RANGE_BOUND_DAYS = 5;       // 横盘震荡：持仓天数阈值
 
   constructor(
     tradeDays: string[],
@@ -520,6 +523,8 @@ export class OptimizedStrategyBacktest {
       boardRankPct?: number;
       stockRankPct?: number;
       strategyMode?: 'macd' | 'rsi' | 'both';
+      structureBreakDays?: number;
+      rangeBoundDays?: number;
     }
   ) {
     this.tradeDays = tradeDays;
@@ -545,6 +550,8 @@ export class OptimizedStrategyBacktest {
     if (options?.boardRankPct !== undefined) this.BOARD_RANK_PCT = options.boardRankPct;
     if (options?.stockRankPct !== undefined) this.STOCK_RANK_PCT = options.stockRankPct;
     if (options?.strategyMode !== undefined) this.strategyMode = options.strategyMode;
+    if (options?.structureBreakDays !== undefined) this.STRUCTURE_BREAK_DAYS = options.structureBreakDays;
+    if (options?.rangeBoundDays !== undefined) this.RANGE_BOUND_DAYS = options.rangeBoundDays;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
@@ -560,6 +567,8 @@ export class OptimizedStrategyBacktest {
       BOARD_RANK_PCT: this.BOARD_RANK_PCT,
       STOCK_RANK_PCT: this.STOCK_RANK_PCT,
       STRATEGY_MODE: this.strategyMode,
+      STRUCTURE_BREAK_DAYS: this.STRUCTURE_BREAK_DAYS,
+      RANGE_BOUND_DAYS: this.RANGE_BOUND_DAYS,
     });
   }
 
@@ -964,6 +973,14 @@ export class OptimizedStrategyBacktest {
 
       let failReason = '';
       if (mDayIndex < lastIndex) {
+        const mDayPrice = klines[mDayIndex].sp;
+        for (let j = mDayIndex + 1; j <= lastIndex; j++) {
+          const dropFromMDay = (mDayPrice - klines[j].sp) / mDayPrice;
+          if (dropFromMDay > 0.05) {
+            failReason = `M-Day后深度回调${(dropFromMDay*100).toFixed(1)}%`;
+            break;
+          }
+        }
         for (let j = mDayIndex + 1; j <= lastIndex; j++) {
           if (hasLongUpperShadow(klines[j])) {
             failReason = `M-Day后出现长上影线(${klines[j].date})`;
@@ -1080,9 +1097,19 @@ export class OptimizedStrategyBacktest {
       const daysHeld = this.getTradeDaysDiff(position.buyDate, today);
       // const isProfitable = currentPrice > position.buyPrice;
       
-      if (daysHeld >= 3 && currentPrice < position.buyDayEntityLow) {
-        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损: 持仓${daysHeld}天, 当前${currentPrice.toFixed(2)} < 买入实体最低${position.buyDayEntityLow.toFixed(2)}`);
-        this.executeSell(secid, today, currentPrice, position.quantity, `时间止损(持仓${daysHeld}天跌破买入实体)`);
+      // 档1：结构破坏（跌破买入实体）
+      if (daysHeld >= this.STRUCTURE_BREAK_DAYS && currentPrice < position.buyDayEntityLow) {
+        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(结构破坏): 持仓${daysHeld}天, 当前${currentPrice.toFixed(2)} < 实体最低${position.buyDayEntityLow.toFixed(2)}`);
+        this.executeSell(secid, today, currentPrice, position.quantity, `时间止损-结构破坏(${daysHeld}天)`);
+        continue;
+      }
+
+      // 档2：横盘震荡（未脱离成本区，资金效率止损）
+      const buyEntityRange = position.buyPrice * 0.03; // ±3% 视为成本区
+      const inCostZone = Math.abs(currentPrice - position.buyPrice) <= buyEntityRange;
+      if (daysHeld >= this.RANGE_BOUND_DAYS && inCostZone) {
+        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(横盘): 持仓${daysHeld}天, 仍在成本区±3%(${currentPrice.toFixed(2)} vs ${position.buyPrice.toFixed(2)})`);
+        this.executeSell(secid, today, currentPrice, position.quantity, `时间止损-横盘(${daysHeld}天)`);
         continue;
       }
 
@@ -1242,6 +1269,16 @@ export class OptimizedStrategyBacktest {
         } else if (klines[klines.length - 1].date !== today) {
           invalidResults.push({ pass: false, reason: '停牌', secid: stock.secid });
         } else {
+          // 在 filteredStocks 筛选后，进入 batch 前增加
+          const high3Day = Math.max(...klines.slice(-5).map(k => k.zg));
+          const currentPrice = klines[klines.length - 1].sp;
+          const pullBackPct = (high3Day - currentPrice) / high3Day;
+          
+          // 如果最近 5 天内已从高点回调 > 12%，说明深度回调，排除
+          if (pullBackPct > 0.12) {
+            console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}%`);
+            continue;
+          }
           // [优化] 只保留策略计算需要的字段，减少内存占用和后续传输
           const liteKlines = klines.map(k => ({
             date: k.date,
