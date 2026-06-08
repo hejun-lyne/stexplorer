@@ -209,13 +209,15 @@ export interface StrategyPosition {
   buyPrice: number;
   quantity: number;
   buyAmount: number;
-  highestPrice: number;
-  stopLossPrice: number;
+  highestPrice: number;        // 用于移动止损
+  stopLossPrice: number;       // 固定止损价
   strategyType: 'macd' | 'rsi';
   strategyParams: MACDStrategyResult | RSIBacktestResult;
-  score?: number;
-  boardRank?: number;
-  stockRank?: number;
+  
+  // [新增] 止盈相关
+  takeProfitPrice: number;     // 固定止盈目标价
+  peakPrice: number;           // 持仓期最高价（动态止盈用）
+  takeProfitTrailingPrice: number; // 动态止盈触发价
 }
 
 export interface StrategyPendingOrder {
@@ -243,6 +245,7 @@ export interface StrategyTradeRecord {
   score?: number;
   boardRank?: number;
   stockRank?: number;
+  boardCode?: string;
   returnPct?: number;
   strategyType?: 'macd' | 'rsi';
   strategyParams?: MACDStrategyResult | RSIBacktestResult;
@@ -476,11 +479,17 @@ export class OptimizedStrategyBacktest {
   private readonly SLIPPAGE = 0.001;
   private readonly COMMISSION = 0.0003;
   private readonly STAMP_TAX = 0.001;
-  private readonly BATCH_SIZE = 12; // [优化] 从 5 改为 20，减少 Worker 调度开销
+  private readonly BATCH_SIZE = 30; // [优化] 从 5 改为 20，减少 Worker 调度开销
   private readonly KLINE_DAYS = 150; // 应该至少要半年
 
-  private STOP_LOSS_INIT_PCT = 0.95;
-  private TRAILING_STOP_PCT = 0.90;
+  // 止损参数
+  private STOP_LOSS_INIT_PCT = 0.95;      // 买入价下跌 5% 止损
+  private TRAILING_STOP_PCT = 0.90;      // 最高价回落 10% 移动止损
+  
+  // [新增] 止盈参数
+  private TAKE_PROFIT_PCT = 1.15;         // 固定止盈：买入价上涨 15% 止盈
+  private TAKE_PROFIT_TRAILING = 0.92;     // 动态止盈：从最高点回落 8% 止盈（比移动止损更敏感）
+
   private MIN_STRATEGY_SCORE = 100;
   private STRONG_LOOKBACK = 10;
   private BOARD_RANK_PCT = 0.3;
@@ -494,6 +503,8 @@ export class OptimizedStrategyBacktest {
     options?: {
       stopLossInitPct?: number;
       trailingStopPct?: number;
+      takeProfitPct?: number;
+      takeProfitTrailing?: number;
       minStrategyScore?: number;
       strongLookback?: number;
       maxPositions?: number;
@@ -518,6 +529,8 @@ export class OptimizedStrategyBacktest {
 
     if (options?.stopLossInitPct !== undefined) this.STOP_LOSS_INIT_PCT = options.stopLossInitPct;
     if (options?.trailingStopPct !== undefined) this.TRAILING_STOP_PCT = options.trailingStopPct;
+    if (options?.takeProfitPct !== undefined) this.TAKE_PROFIT_PCT = options.takeProfitPct;
+    if (options?.takeProfitTrailing !== undefined) this.TAKE_PROFIT_TRAILING = options.takeProfitTrailing;
     if (options?.minStrategyScore !== undefined) this.MIN_STRATEGY_SCORE = options.minStrategyScore;
     if (options?.strongLookback !== undefined) this.STRONG_LOOKBACK = options.strongLookback;
     if (options?.maxPositions !== undefined) this.MAX_POSITIONS = options.maxPositions;
@@ -530,6 +543,8 @@ export class OptimizedStrategyBacktest {
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
       TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
+      TAKE_PROFIT_PCT: this.TAKE_PROFIT_PCT,
+      TAKE_PROFIT_TRAILING: this.TAKE_PROFIT_TRAILING,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
       STRONG_LOOKBACK: `${this.STRONG_LOOKBACK}天前`,
       SLIPPAGE: this.SLIPPAGE,
@@ -559,6 +574,8 @@ export class OptimizedStrategyBacktest {
       MIN_POSITION_RATIO: this.MIN_POSITION_RATIO,
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
       TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
+      TAKE_PROFIT_PCT: this.TAKE_PROFIT_PCT,
+      TAKE_PROFIT_TRAILING: this.TAKE_PROFIT_TRAILING,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
       STRONG_LOOKBACK: `${this.STRONG_LOOKBACK}天前`,
       MAX_WATCH_DAYS: this.MAX_WATCH_DAYS,
@@ -675,6 +692,12 @@ export class OptimizedStrategyBacktest {
       console.log(`[Debug][ executePendingOrders][${today}] ${order.secid} ${order.type} K线确认: date=${todayKLine.date} kp=${todayKLine.kp.toFixed(2)} sp=${todayKLine.sp.toFixed(2)} zg=${todayKLine.zg.toFixed(2)} zd=${todayKLine.zd.toFixed(2)}`);
 
       if (order.type === 'buy') {
+        // [新增] 剔除一字板：开盘即涨停且全天没有更高价格，无法买入
+        if (todayKLine.kp === todayKLine.zg && isLimitUpStock(order.secid, todayKLine.zdf)) {
+          console.log(`[OptBacktest] [${today}] ${order.secid} 买入跳过: 一字板 (开盘${todayKLine.kp.toFixed(2)}=最高${todayKLine.zg.toFixed(2)}, 涨幅${todayKLine.zdf.toFixed(2)}%)`);
+          skippedOrders.push({ secid: order.secid, type: order.type, reason: '一字板' });
+          continue;
+        }
         console.log(`[OptBacktest] [${today}] 执行买入: ${order.secid} | 开盘价: ${openPrice.toFixed(2)} | 原因: ${order.reason}`);
         this.executeBuy(order, today, openPrice);
       } else if (order.type === 'sell') {
@@ -733,7 +756,7 @@ export class OptimizedStrategyBacktest {
 
     this.availableCash -= totalCost;
     const stopLossPrice = adjustedPrice * this.STOP_LOSS_INIT_PCT;
-
+    const takeProfitPrice = adjustedPrice * this.TAKE_PROFIT_PCT;
     this.positions.set(order.secid, {
       secid: order.secid,
       boardCode: order.boardCode || '',
@@ -748,6 +771,10 @@ export class OptimizedStrategyBacktest {
       score: order.score,
       boardRank: order.boardRank,
       stockRank: order.stockRank,
+      // [新增]
+      peakPrice: adjustedPrice,            // 动态止盈基准
+      takeProfitPrice,                    // 固定止盈
+      takeProfitTrailingPrice: adjustedPrice * this.TAKE_PROFIT_TRAILING, // 动态止盈触发价
     });
 
     const paramsStr = this.formatStrategyParams(order.strategyType, order.strategyParams);
@@ -767,6 +794,7 @@ export class OptimizedStrategyBacktest {
       score: order.score,
       boardRank: order.boardRank,
       stockRank: order.stockRank,
+      boardCode: order.boardCode || '',
       strategyType: order.strategyType,
       strategyParams: order.strategyParams,
     });
@@ -808,6 +836,7 @@ export class OptimizedStrategyBacktest {
       score: position.score,
       boardRank: position.boardRank,
       stockRank: position.stockRank,
+      boardCode: position.boardCode || '',
       returnPct,
       strategyType: position.strategyType,
       strategyParams: position.strategyParams,
@@ -1004,35 +1033,68 @@ export class OptimizedStrategyBacktest {
       // [调试] 打印持仓卖出使用的K线收盘价，用于核对价格是否匹配
       console.log(`[Debug][ sellCheck][${today}] ${secid} K线确认: date=${kLast.date} kp=${kLast.kp.toFixed(2)} sp=${kLast.sp.toFixed(2)} zg=${kLast.zg.toFixed(2)} zd=${kLast.zd.toFixed(2)} → 使用收盘价=${currentPrice.toFixed(2)}`);
 
-      // 更新最高价和移动止损
+      // 1. 更新最高价（同时服务于移动止损和动态止盈）
       if (currentPrice > position.highestPrice) {
-        const oldHigh = position.highestPrice;
         position.highestPrice = currentPrice;
         position.stopLossPrice = currentPrice * this.TRAILING_STOP_PCT;
-        console.log(`[OptBacktest] [${today}] ${secid} 创新高: ${oldHigh.toFixed(2)} → ${currentPrice.toFixed(2)}, 移动止损更新为 ${position.stopLossPrice.toFixed(2)}`);
+        console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)}`);
+      }
+      if (currentPrice > position.peakPrice) {
+        position.peakPrice = currentPrice;
+        position.takeProfitTrailingPrice = currentPrice * this.TAKE_PROFIT_TRAILING;
+        console.log(`[OptBacktest] [${today}] ${secid} 动态止盈更新: ${position.takeProfitTrailingPrice.toFixed(2)}`);
       }
 
-      // 检查止损 —— 当天收盘价卖出
-      if (currentPrice < position.stopLossPrice) {
-        console.log(`[OptBacktest] [${today}] ${secid} 🔴 止损触发: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
-        this.executeSell(secid, today, currentPrice, position.quantity, `止损触发(${currentPrice.toFixed(2)} < ${position.stopLossPrice.toFixed(2)})`);
+      // 2. 固定止损（硬性风控，最先检查）
+      if (currentPrice < position.buyPrice * this.STOP_LOSS_INIT_PCT) {
+        console.log(`[OptBacktest] [${today}] ${secid} 🔴 固定止损: 当前${currentPrice.toFixed(2)} < 买入价${position.buyPrice.toFixed(2)}`);
+        this.executeSell(secid, today, currentPrice, position.quantity, '固定止损');
         continue;
       }
 
-      // 检查策略卖出信号 —— 当天收盘价卖出
+      // 3. 移动止损（保护利润）
+      if (currentPrice < position.stopLossPrice) {
+        console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
+        this.executeSell(secid, today, currentPrice, position.quantity, '移动止损');
+        continue;
+      }
+
+      // 3. [新增] 如果已经盈利 10% 以上，不再受 MACD 死叉影响（让利润奔跑）
+      const profitPct = (currentPrice - position.buyPrice) / position.buyPrice;
+      if (profitPct > 0.10) {
+        // 盈利 10% 以上，只认移动止损，忽略死叉
+        console.log(`[OptBacktest] [${today}] ${secid} 盈利${(profitPct*100).toFixed(1)}%，忽略策略信号`);
+        continue;
+      }
+
+      // 4. 固定止盈（达到目标收益率）
+      if (currentPrice >= position.takeProfitPrice) {
+        console.log(`[OptBacktest] [${today}] ${secid} 🟢 固定止盈: 当前${currentPrice.toFixed(2)} >= 目标${position.takeProfitPrice.toFixed(2)}`);
+        this.executeSell(secid, today, currentPrice, position.quantity, '固定止盈');
+        continue;
+      }
+
+      // 5. 动态止盈（从最高点大幅回落）
+      if (currentPrice < position.takeProfitTrailingPrice && position.peakPrice > position.buyPrice * 1.05) {
+        // 只有先盈利 5% 以上才启用动态止盈，避免刚买入就触发
+        console.log(`[OptBacktest] [${today}] ${secid} 🟢 动态止盈: 当前${currentPrice.toFixed(2)} 从高点${position.peakPrice.toFixed(2)} 回落`);
+        this.executeSell(secid, today, currentPrice, position.quantity, '动态止盈');
+        continue;
+      }
+
+      // 4. 策略信号（只在盈利 <10% 时生效）
       let hasSellSignal = false;
       let sellReason = '';
       if (position.strategyType === 'macd') {
         hasSellSignal = this.checkMACDSellSignal(klines, position.strategyParams as MACDStrategyResult);
-        sellReason = 'MACD卖出信号';
+        sellReason = 'MACD死叉';
       } else if (position.strategyType === 'rsi') {
         hasSellSignal = this.checkRSISellSignal(klines, position.strategyParams as RSIBacktestResult);
-        sellReason = 'RSI卖出信号';
+        sellReason = 'RSI超买';
       }
-
       if (hasSellSignal) {
-        console.log(`[OptBacktest] [${today}] ${secid} ✅ 策略卖出信号: ${sellReason}`);
         this.executeSell(secid, today, currentPrice, position.quantity, sellReason);
+        continue;
       }
 
       if (++sellCheckCount % 1 === 0) {
@@ -1374,7 +1436,7 @@ export class OptimizedStrategyBacktest {
     }
 
     // 3. 预计算每只股票的 boardCode 和是否需要查 boardStocks
-    const boardStockRequests: Array<{ date: string; boardCode: string | null; boardName: string; secid: string }> = [];
+    const boardStockRequests: Array<{ date: string; boardCode: string | null; boardName: string; secid: string, boardRank:number }> = [];
     const preComputed = new Map<string, {
       boardPass: boolean;
       boardRankPass: boolean;
@@ -1395,7 +1457,7 @@ export class OptimizedStrategyBacktest {
         } else {
           // 仍需查 boardStocks（通过板块名称查找）
           preComputed.set(stock.secid, { boardPass: true, boardRankPass: false, boardCode: null, boardRank: -1, stockRank: -1, nonLimitCount: 0 });
-          boardStockRequests.push({ date, boardCode: null, boardName: stock.bk, secid: stock.secid });
+          boardStockRequests.push({ date, boardCode: null, boardName: stock.bk, secid: stock.secid, boardRank: -1 });
         }
         continue;
       }
@@ -1426,7 +1488,7 @@ export class OptimizedStrategyBacktest {
       } else {
         // 需要查 boardStocks，收集请求
         if (boardCode) {
-          boardStockRequests.push({ date, boardCode, boardName: stock.bk, secid: stock.secid });
+          boardStockRequests.push({ date, boardCode, boardName: stock.bk, secid: stock.secid, boardRank });
         }
       }
     }
@@ -1467,8 +1529,12 @@ export class OptimizedStrategyBacktest {
       for (const req of boardStockRequests) {
         const key = `${req.date}_${req.boardCode}`;
         const stocks = boardStocksByKey[key] || [];
+        const stockRankInAll = stocks.findIndex(s => s.secid === req.secid);
         const nonLimitStocks = stocks.filter(s => !isLimitUpStock(s.secid, s.zf)).sort((a, b) => b.zf - a.zf);
-        const stockRank = nonLimitStocks.findIndex(s => s.secid === req.secid);
+        let stockRank = nonLimitStocks.findIndex(s => s.secid === req.secid);
+        if (stockRank == -1 && stockRankInAll != -1) {
+          stockRank = 1; // 应该是涨停了
+        }
         const boardRankPass = stockRank >= 0 && (stockRank + 1) <= nonLimitStocks.length * this.STOCK_RANK_PCT;
         
         const existing = preComputed.get(req.secid)!;
@@ -1476,10 +1542,14 @@ export class OptimizedStrategyBacktest {
           ...existing,
           boardRankPass: boardRankPass || stockRank < 0, // 找不到排名时宽松处理
           stockRank,
+          boardRank: req.boardRank,
           nonLimitCount: nonLimitStocks.length
         });
         // [调试] 打印个股排名回填结果
         console.log(`[Debug][ stockRank回填][${req.date}] ${req.secid} 板块=${req.boardName} 个股排名=${stockRank >= 0 ? stockRank + 1 : '未找到'} 板块内非涨停数=${nonLimitStocks.length} 通过=${boardRankPass || stockRank < 0}`);
+        if (stockRank < 0) {
+          console.log(`[Debug][ stockRank回填][${req.date}] ${req.secid} stockRank<0, nonLimitStocks内容:`, nonLimitStocks.map(s => `${s.secid}(${s.zf.toFixed(2)}%)`).join(', '));
+        }
       }
     }
 
@@ -1673,7 +1743,7 @@ export class OptimizedStrategyBacktest {
       if (!stats) {
         stats = {
           secid: buy.secid,
-          boardCode: '',
+          boardCode: buy.boardCode || '',
           strategyType: buy.strategyType || 'macd',
           strategyParams: buy.strategyParams || ({} as any),
           score: buy.score || 0,
@@ -1957,14 +2027,19 @@ export class OptimizedStrategyBacktest {
     const hist = macd.histogram;
     const i = closes.length - 1;
 
-    if (i < 2 || isNaN(dif[i]) || isNaN(dea[i])) return false;
+    if (i < 3 || isNaN(dif[i]) || isNaN(dea[i])) return false;
 
-    const deadCross = dif[i] < dea[i] && dif[i - 1] >= dea[i - 1];
-    if (deadCross) return true;
+    // [优化] 死叉必须连续 2 天确认，避免单日假死叉
+    const deadCrossToday = dif[i] < dea[i] && dif[i - 1] >= dea[i - 1];
+    const deadCrossYesterday = dif[i - 1] < dea[i - 1] && dif[i - 2] >= dea[i - 2];
+    
+    // 策略1：连续 2 天死叉才卖出
+    if (deadCrossToday && deadCrossYesterday) return true;
 
-    if (hist[i] > 0 && hist[i] < hist[i - 1] && hist[i - 1] < hist[i - 2]) {
-      const sharpShrink = hist[i] < hist[i - 1] * 0.7;
-      if (sharpShrink) return true;
+    // 策略2：柱状线连续 3 天显著缩短（动能衰竭），且 DIF 开始拐头向下
+    if (hist[i] > 0 && hist[i] < hist[i - 1] && hist[i - 1] < hist[i - 2] && hist[i - 2] < hist[i - 3]) {
+      const sharpShrink = hist[i] < hist[i - 1] * 0.6; // 从 0.7 改为 0.6，更严格
+      if (sharpShrink && dif[i] < dif[i - 1]) return true;
     }
 
     return false;
@@ -1975,8 +2050,15 @@ export class OptimizedStrategyBacktest {
     const rsi = calculateRSI(closes, params.rsiPeriod);
     const i = closes.length - 1;
 
-    if (i < 0 || isNaN(rsi[i])) return false;
-    if (rsi[i] >= params.sellThreshold) return true;
+    if (i < 1 || isNaN(rsi[i]) || isNaN(rsi[i - 1])) return false;
+
+    // [优化] RSI冲高回落卖出：前一天在超买区，今天RSI开始回落
+    const wasOverbought = rsi[i - 1] >= params.sellThreshold;
+    const isFalling = rsi[i] < rsi[i - 1];
+
+    if (wasOverbought && isFalling) {
+      return true;
+    }
 
     return false;
   }
