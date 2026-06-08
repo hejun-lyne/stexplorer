@@ -249,7 +249,14 @@ def read_cache(cache_key: str, max_age_hours: int = 168) -> Optional[Any]:
         if age_hours > max_age_hours:
             return None
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        # 自动还原 DataFrame
+        if isinstance(data, dict) and data.get("__type__") == "dataframe":
+            records = data.get("records", [])
+            if records:
+                return pd.DataFrame(records)
+            return pd.DataFrame()
+        return data
     except Exception:
         return None
 
@@ -260,7 +267,14 @@ def write_cache(cache_key: str, data: Any):
         path = _cache_path(cache_key)
         os.makedirs(_CACHE_DIR, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, cls=DateTimeEncoder)
+            # 自动序列化 DataFrame
+            if isinstance(data, pd.DataFrame):
+                json.dump(
+                    {"__type__": "dataframe", "records": df_to_records(data)},
+                    f, ensure_ascii=False, cls=DateTimeEncoder
+                )
+            else:
+                json.dump(data, f, ensure_ascii=False, cls=DateTimeEncoder)
     except Exception:
         pass
 
@@ -452,6 +466,31 @@ def _get_board_stocks_from_ths(code: str) -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"同花顺板块成分股获取失败: {code}, {e}")
         return []
+
+
+def _cached_dc_member(pro, ts_code: str, trade_date: str) -> Any:
+    """获取 dc_member，按板块一个文件缓存，trade_date 为 key
+
+    缓存结构: {trade_date: [records], ...}
+    """
+    cache_key = f"dc_member_{ts_code}"
+    cached = read_cache(cache_key, max_age_hours=24 * 7)
+
+    if isinstance(cached, dict) and trade_date in cached:
+        records = cached[trade_date]
+        if records:
+            return pd.DataFrame(records)
+        return pd.DataFrame()
+
+    df = safe_api_call(pro.dc_member, ts_code=ts_code, trade_date=trade_date)
+    if isinstance(df, dict) and df.get("error"):
+        return df
+    if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+        if not isinstance(cached, dict):
+            cached = {}
+        cached[trade_date] = df_to_records(df)
+        write_cache(cache_key, cached)
+    return df
 
 
 # ============ API 封装类 ============
@@ -1727,8 +1766,8 @@ class TushareAPI:
                 ts_code = f"{code}.DC" if not code.endswith(".DC") else code
                 debug_info["ts_code"] = ts_code
 
-                # 先尝试带 trade_date 查询
-                df = cached_api_call(f"dc_member_{ts_code}_{trade_date}", 24, pro.dc_member, ts_code=ts_code, trade_date=trade_date)
+                # 先尝试带 trade_date 查询（按板块缓存，trade_date 为 key）
+                df = _cached_dc_member(pro, ts_code, trade_date)
                 debug_info["dc_member_type"] = type(df).__name__
                 if isinstance(df, pd.DataFrame):
                     debug_info["dc_member_shape"] = df.shape
@@ -1954,11 +1993,10 @@ class TushareAPI:
         try:
             pro = get_pro()
             if concept_source == "dc":
-                # 东财概念：使用 dc_member（已有缓存机制）
+                # 东财概念：使用 dc_member（按板块缓存，trade_date 为 key）
                 ts_code = f"{concept_code}.DC" if not concept_code.endswith(".DC") else concept_code
                 trade_date = datetime.now().strftime('%Y%m%d')
-                df = cached_api_call(f"dc_member_{ts_code}", 24, pro.dc_member,
-                                      ts_code=ts_code, trade_date=trade_date)
+                df = _cached_dc_member(pro, ts_code, trade_date)
                 if isinstance(df, dict) and df.get("error"):
                     return []
                 if df is None or (isinstance(df, pd.DataFrame) and df.empty):

@@ -973,14 +973,6 @@ export class OptimizedStrategyBacktest {
 
       let failReason = '';
       if (mDayIndex < lastIndex) {
-        const mDayPrice = klines[mDayIndex].sp;
-        for (let j = mDayIndex + 1; j <= lastIndex; j++) {
-          const dropFromMDay = (mDayPrice - klines[j].sp) / mDayPrice;
-          if (dropFromMDay > 0.05) {
-            failReason = `M-Day后深度回调${(dropFromMDay*100).toFixed(1)}%`;
-            break;
-          }
-        }
         for (let j = mDayIndex + 1; j <= lastIndex; j++) {
           if (hasLongUpperShadow(klines[j])) {
             failReason = `M-Day后出现长上影线(${klines[j].date})`;
