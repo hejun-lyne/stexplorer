@@ -220,6 +220,8 @@ export interface StrategyPosition {
 
   // [新增] 出现买入信号当天K线实体最低价（用于时间止损）
   signalDayEntityLow: number;
+
+  consecutiveDeclineDays: number;  // 买入后连续下跌天数
 }
 
 export interface StrategyPendingOrder {
@@ -831,6 +833,7 @@ export class OptimizedStrategyBacktest {
       // [新增]
       takeProfitPrice,                    // 固定止盈
       signalDayEntityLow, // [新增] 保存买入当天实体最低价
+      consecutiveDeclineDays: 0,
     });
 
     const paramsStr = this.formatStrategyParams(order.strategyType, order.strategyParams);
@@ -1094,6 +1097,26 @@ export class OptimizedStrategyBacktest {
       const daysHeld = this.getTradeDaysDiff(position.buyDate, today);
       // const isProfitable = currentPrice > position.buyPrice;
       
+      // 连续下跌止损：买入后连续3天收盘价低于前一天，反弹逻辑不成立
+      if (daysHeld >= 3) {
+        const buyIndex = klines.findIndex(k => k.date === position.buyDate);
+        if (buyIndex >= 0) {
+          let declineDays = 0;
+          // 从买入后开始检查，最多检查3天
+          for (let i = buyIndex; i < klines.length && i < buyIndex + 3; i++) {
+            if (klines[i].sp < klines[i - 1].sp) {
+              declineDays++;
+            } else {
+              break; // 中断连续性
+            }
+          }
+          if (declineDays >= 3) {
+            console.log(`[OptBacktest] [${today}] ${secid} 🔴 连续下跌止损: 买入后连续${declineDays}个交易日收盘价下跌，反弹逻辑不成立`);
+            this.executeSell(secid, today, currentPrice, position.quantity, '连续下跌止损');
+            continue;
+          }
+        }
+      }
       // 档1：结构破坏（跌破买入实体）
       if (daysHeld >= this.STRUCTURE_BREAK_DAYS && currentPrice < position.signalDayEntityLow) {
         console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(结构破坏): 持仓${daysHeld}天, 当前${currentPrice.toFixed(2)} < 信号日实体最低${position.signalDayEntityLow.toFixed(2)}`);
