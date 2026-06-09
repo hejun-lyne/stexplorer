@@ -235,6 +235,7 @@ export interface StrategyPendingOrder {
   score?: number;
   boardRank?: number;
   stockRank?: number;
+  strongType?: 'limit_up' | 'new_high_60';
 }
 
 export interface StrategyTradeRecord {
@@ -288,6 +289,7 @@ export interface StockTradeStats {
   boardRank?: number;
   stockRank?: number;
   strategyParamsStr?: string;
+  strongType?: 'limit_up' | 'new_high_60';
 }
 
 export interface ScoreWinRateDistribution {
@@ -504,8 +506,7 @@ export class OptimizedStrategyBacktest {
   private STRUCTURE_BREAK_DAYS = 3;   // 结构破坏：持仓天数阈值
   private RANGE_BOUND_DAYS = 5;       // 横盘震荡：持仓天数阈值
   // [新增] 深度回调排除阈值
-  private MAX_PULLBACK_PCT = 0.12;    // 最近N天内从高点到低点回调超过该比例则排除
-  private MAX_PULLBACK_DAYS = 5;      // 深度回调计算天数
+  private MAX_PULLBACK_PCT = 0.12;    // 从strongStockDay到当天从高点到低点回调超过该比例则排除
   // [新增] 时间止盈参数
   private TIME_EXIT_MAX_DAYS = 5;     // 最大持有天数，资金效率止盈
   private TIME_EXIT_MIN_RETURN = 0.05; // 收益率低于该值触发资金效率止盈
@@ -533,7 +534,6 @@ export class OptimizedStrategyBacktest {
       structureBreakDays?: number;
       rangeBoundDays?: number;
       maxPullbackPct?: number;
-      maxPullbackDays?: number;
       timeExitMaxDays?: number;
       timeExitMinReturn?: number;
       profitIgnoreSignalPct?: number;
@@ -566,7 +566,6 @@ export class OptimizedStrategyBacktest {
     if (options?.structureBreakDays !== undefined) this.STRUCTURE_BREAK_DAYS = options.structureBreakDays;
     if (options?.rangeBoundDays !== undefined) this.RANGE_BOUND_DAYS = options.rangeBoundDays;
     if (options?.maxPullbackPct !== undefined) this.MAX_PULLBACK_PCT = options.maxPullbackPct;
-    if (options?.maxPullbackDays !== undefined) this.MAX_PULLBACK_DAYS = options.maxPullbackDays;
     if (options?.timeExitMaxDays !== undefined) this.TIME_EXIT_MAX_DAYS = options.timeExitMaxDays;
     if (options?.timeExitMinReturn !== undefined) this.TIME_EXIT_MIN_RETURN = options.timeExitMinReturn;
     if (options?.profitIgnoreSignalPct !== undefined) this.PROFIT_IGNORE_SIGNAL_PCT = options.profitIgnoreSignalPct;
@@ -589,7 +588,6 @@ export class OptimizedStrategyBacktest {
       STRUCTURE_BREAK_DAYS: this.STRUCTURE_BREAK_DAYS,
       RANGE_BOUND_DAYS: this.RANGE_BOUND_DAYS,
       MAX_PULLBACK_PCT: this.MAX_PULLBACK_PCT,
-      MAX_PULLBACK_DAYS: this.MAX_PULLBACK_DAYS,
       TIME_EXIT_MAX_DAYS: this.TIME_EXIT_MAX_DAYS,
       TIME_EXIT_MIN_RETURN: this.TIME_EXIT_MIN_RETURN,
       PROFIT_IGNORE_SIGNAL_PCT: this.PROFIT_IGNORE_SIGNAL_PCT,
@@ -935,6 +933,7 @@ export class OptimizedStrategyBacktest {
     boardCode: string;
     price: number;
     reason: string;
+    strongType?: 'limit_up' | 'new_high_60';
     strategyType: 'macd' | 'rsi';
     strategyParams: MACDStrategyResult | RSIBacktestResult;
   }>> {
@@ -944,6 +943,7 @@ export class OptimizedStrategyBacktest {
       boardCode: string;
       price: number;
       reason: string;
+      strongType?: 'limit_up' | 'new_high_60';
       strategyType: 'macd' | 'rsi';
       strategyParams: MACDStrategyResult | RSIBacktestResult;
     }> = [];
@@ -1032,6 +1032,7 @@ export class OptimizedStrategyBacktest {
         boardCode: item.boardCode,
         price: currentPrice,
         reason: `${item.strategyType.toUpperCase()}观察期买入 M-Day=${mDayKline.date} T-Day=${item.tDayDate}`,
+        strongType: item.strongType,
         strategyType: item.strategyType,
         strategyParams: item.strategyParams,
       });
@@ -1307,14 +1308,15 @@ export class OptimizedStrategyBacktest {
           invalidResults.push({ pass: false, reason: '停牌', secid: stock.secid });
         } else {
           // 在 filteredStocks 筛选后，进入 batch 前增加
-          const recentKlines = klines.slice(-this.MAX_PULLBACK_DAYS);
-          const highNDay = Math.max(...recentKlines.map(k => k.zg));
-          const lowNDay = Math.min(...recentKlines.map(k => k.zd));
-          const pullBackPct = (highNDay - lowNDay) / highNDay;
+          const strongStockIndex = klines.findIndex(k => k.date >= strongStockDay);
+          const rangeKlines = strongStockIndex >= 0 ? klines.slice(strongStockIndex) : klines;
+          const highRange = Math.max(...rangeKlines.map(k => k.zg));
+          const lowRange = Math.min(...rangeKlines.map(k => k.zd));
+          const pullBackPct = (highRange - lowRange) / highRange;
           
-          // 如果最近 N 天内从高点到低点的回调超过阈值，说明深度回调，排除
+          // 如果从 strongStockDay 到当天，从高点到低点的回调超过阈值，说明深度回调，排除
           if (pullBackPct > this.MAX_PULLBACK_PCT) {
-            console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}% (${this.MAX_PULLBACK_DAYS}天)`);
+            console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}% (${rangeKlines.length}天)`);
             continue;
           }
           // [优化] 只保留策略计算需要的字段，减少内存占用和后续传输
@@ -1491,6 +1493,7 @@ export class OptimizedStrategyBacktest {
       boardCode: string;
       price: number;
       reason: string;
+      strongType?: 'limit_up' | 'new_high_60';
       strategyType: 'macd' | 'rsi';
       strategyParams: MACDStrategyResult | RSIBacktestResult;
     }> = [];
@@ -1737,6 +1740,7 @@ export class OptimizedStrategyBacktest {
           boardCode: stock.bk,
           price: currentPrice,
           reason: screenResult.reason!,
+          strongType: screenResult.strongType,
           strategyType: screenResult.bestType!,
           strategyParams: screenResult.bestResult!,
         });
@@ -1804,6 +1808,7 @@ export class OptimizedStrategyBacktest {
           score: candidate.score,
           boardRank: computed?.boardRank,
           stockRank: computed?.stockRank,
+          strongType: candidate.strongType,
         });
         boardHoldings.set(candidate.boardCode, boardCount + 1);
         console.log(`[OptBacktest] [${today}] ${candidate.secid} ✅ 生成买入订单 (次日${nextDay}执行) | 评分${candidate.score.toFixed(1)} | 板块${candidate.boardCode}`);
@@ -1879,6 +1884,7 @@ export class OptimizedStrategyBacktest {
           boardRank: buy.boardRank,
           stockRank: buy.stockRank,
           strategyParamsStr: this.formatStrategyParams(buy.strategyType, buy.strategyParams),
+          strongType: buy.strongType,
           trades: [],
           totalTrades: 0,
           winTrades: 0,
