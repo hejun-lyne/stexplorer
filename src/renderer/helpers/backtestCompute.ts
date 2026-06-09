@@ -363,17 +363,15 @@ export function optimizeRSIStrategy(
   rsiPeriods: number[] = [12, 24],
   // 止损参数
   fixedStopLossPct: number = 0.05,
-  trailingStopLossPct: number = 0.06
+  trailingStopLossPct: number = 0.06,
+  // RSI 参数网格
+  buyThresholds: number[] = [35, 40, 45],
+  sellThresholds: number[] = [65, 70, 75, 80, 85]
 ): RSIBacktestResult[] {
   const testKlines = klines.slice(-120);
   const startIndex = klines.length - testKlines.length;
   const closes = testKlines.map(k => k.sp);
   const allResults: RSIBacktestResult[] = [];
-
-  // 参数网格：超卖买点 15-35，超买卖点 65-85
-  // 买入：强势股浅回调即可介入，不等深度超卖
-  const buyThresholds = [35, 40, 45]; // 35=浅回调，40=整理，45=强势横盘
-  const sellThresholds = [65, 70, 75, 80, 85]; // 75=温和止盈，80=标准超买，85=让利润奔跑
 
   for (const period of rsiPeriods) {
     const rsi = Indicators.calculateRSI(closes, period);
@@ -647,7 +645,13 @@ export function findTDay(
 
 export function batchBacktestAndScreen(
   items: BatchBacktestAndScreenItem[],
-  backtestParams: { fixedStopLossPct: number; trailingStopLossPct: number; strategyMode?: 'macd' | 'rsi' | 'both' },
+  backtestParams: {
+    fixedStopLossPct: number;
+    trailingStopLossPct: number;
+    strategyMode?: 'macd' | 'rsi' | 'both';
+    buyThresholds?: number[];
+    sellThresholds?: number[];
+  },
   screenParams: { strongStockDay:string, minStrategyScore: number; strongLookback: number }
 ): BatchBacktestAndScreenResult[] {
   const results: BatchBacktestAndScreenResult[] = [];
@@ -660,7 +664,14 @@ export function batchBacktestAndScreen(
       ? optimizeMACDStrategy(klines, backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
       : [];
     const rsiResults = strategyMode !== 'macd'
-      ? optimizeRSIStrategy(klines, [12, 24], backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
+      ? optimizeRSIStrategy(
+          klines,
+          [12, 24],
+          backtestParams.fixedStopLossPct,
+          backtestParams.trailingStopLossPct,
+          backtestParams.buyThresholds,
+          backtestParams.sellThresholds
+        )
       : [];
 
     let bestResult: MACDStrategyResult | RSIBacktestResult | null = null;

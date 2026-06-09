@@ -510,6 +510,8 @@ export class OptimizedStrategyBacktest {
   private TIME_EXIT_MAX_DAYS = 5;     // 最大持有天数，资金效率止盈
   private TIME_EXIT_MIN_RETURN = 0.05; // 收益率低于该值触发资金效率止盈
   private PROFIT_IGNORE_SIGNAL_PCT = 0.10; // 盈利超过该比例后忽略策略信号（让利润奔跑）
+  private RSI_BUY_THRESHOLDS = [35, 40, 45]; // RSI 买入阈值网格
+  private RSI_SELL_THRESHOLDS = [65, 70, 75, 80, 85]; // RSI 卖出阈值网格
 
   constructor(
     tradeDays: string[],
@@ -535,6 +537,8 @@ export class OptimizedStrategyBacktest {
       timeExitMaxDays?: number;
       timeExitMinReturn?: number;
       profitIgnoreSignalPct?: number;
+      buyThresholds?: number[];
+      sellThresholds?: number[];
     }
   ) {
     this.tradeDays = tradeDays;
@@ -566,6 +570,8 @@ export class OptimizedStrategyBacktest {
     if (options?.timeExitMaxDays !== undefined) this.TIME_EXIT_MAX_DAYS = options.timeExitMaxDays;
     if (options?.timeExitMinReturn !== undefined) this.TIME_EXIT_MIN_RETURN = options.timeExitMinReturn;
     if (options?.profitIgnoreSignalPct !== undefined) this.PROFIT_IGNORE_SIGNAL_PCT = options.profitIgnoreSignalPct;
+    if (options?.buyThresholds !== undefined) this.RSI_BUY_THRESHOLDS = options.buyThresholds;
+    if (options?.sellThresholds !== undefined) this.RSI_SELL_THRESHOLDS = options.sellThresholds;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
@@ -587,6 +593,8 @@ export class OptimizedStrategyBacktest {
       TIME_EXIT_MAX_DAYS: this.TIME_EXIT_MAX_DAYS,
       TIME_EXIT_MIN_RETURN: this.TIME_EXIT_MIN_RETURN,
       PROFIT_IGNORE_SIGNAL_PCT: this.PROFIT_IGNORE_SIGNAL_PCT,
+      RSI_BUY_THRESHOLDS: this.RSI_BUY_THRESHOLDS,
+      RSI_SELL_THRESHOLDS: this.RSI_SELL_THRESHOLDS,
     });
   }
 
@@ -1371,6 +1379,8 @@ export class OptimizedStrategyBacktest {
           fixedStopLossPct: 1 - this.STOP_LOSS_INIT_PCT,
           trailingStopLossPct: 1 - this.TRAILING_STOP_PCT,
           strategyMode: this.strategyMode,
+          buyThresholds: this.RSI_BUY_THRESHOLDS,
+          sellThresholds: this.RSI_SELL_THRESHOLDS,
         };
         const screenParams = {
           strongStockDay: strongStockDay,

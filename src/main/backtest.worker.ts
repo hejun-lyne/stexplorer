@@ -25,7 +25,7 @@ const methodMap: Record<string, (...args: any[]) => any> = {
     console.log(`[Worker] batchBacktestOptimize 开始，共 ${klinesBatch.length} 只股票`);
     const results = klinesBatch.map((klines, i) => {
       const macdResults = BacktestCompute.optimizeMACDStrategy(klines);
-      const rsiResults = BacktestCompute.optimizeRSIStrategy(klines, [6, 12]);
+      const rsiResults = BacktestCompute.optimizeRSIStrategy(klines, [12, 24]);
       if ((i + 1) % 5 === 0 || i === klinesBatch.length - 1) {
         console.log(`[Worker] batchBacktestOptimize 进度: ${i + 1}/${klinesBatch.length}`);
       }

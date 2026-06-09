@@ -1,6 +1,6 @@
 import React, { useCallback, useState, useEffect, useRef } from 'react';
 import { useDispatch } from 'react-redux';
-import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio, InputNumber, Modal, Button, List, Popconfirm, Space } from 'antd';
+import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio, InputNumber, Input, Modal, Button, List, Popconfirm, Space } from 'antd';
 import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
 import * as Services from '@/services';
@@ -482,6 +482,10 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [timeExitMaxDays, setTimeExitMaxDays] = useState(5);
     const [timeExitMinReturn, setTimeExitMinReturn] = useState(0.05);
     const [profitIgnoreSignalPct, setProfitIgnoreSignalPct] = useState(0.10);
+    const [buyThresholdsInput, setBuyThresholdsInput] = useState('35,40,45');
+    const [sellThresholdsInput, setSellThresholdsInput] = useState('65,70,75,80,85');
+
+    const parseThresholds = (s: string) => s.split(',').map(v => parseInt(v.trim(), 10)).filter(v => !isNaN(v));
 
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
@@ -539,6 +543,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setTimeExitMaxDays(params.timeExitMaxDays ?? 5);
               setTimeExitMinReturn(params.timeExitMinReturn ?? 0.05);
               setProfitIgnoreSignalPct(params.profitIgnoreSignalPct ?? 0.10);
+              setBuyThresholdsInput((params.buyThresholds ?? [35, 40, 45]).join(','));
+              setSellThresholdsInput((params.sellThresholds ?? [65, 70, 75, 80, 85]).join(','));
             }
           }
         } catch (e) {
@@ -636,6 +642,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setTimeExitMaxDays(p.timeExitMaxDays ?? 5);
         setTimeExitMinReturn(p.timeExitMinReturn ?? 0.05);
         setProfitIgnoreSignalPct(p.profitIgnoreSignalPct ?? 0.10);
+        setBuyThresholdsInput((p.buyThresholds ?? [35, 40, 45]).join(','));
+        setSellThresholdsInput((p.sellThresholds ?? [65, 70, 75, 80, 85]).join(','));
       }
 
       const baseOpts = getNetValueBaseOptions(darkMode, p?.initialCapital || 1000000);
@@ -813,6 +821,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             timeExitMaxDays,
             timeExitMinReturn,
             profitIgnoreSignalPct,
+            buyThresholds: parseThresholds(buyThresholdsInput),
+            sellThresholds: parseThresholds(sellThresholdsInput),
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -864,6 +874,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               timeExitMaxDays,
               timeExitMinReturn,
               profitIgnoreSignalPct,
+              buyThresholds: parseThresholds(buyThresholdsInput),
+              sellThresholds: parseThresholds(sellThresholdsInput),
             },
           });
           console.log('[Backtest] 回测结果已缓存到磁盘');
@@ -897,6 +909,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               timeExitMaxDays,
               timeExitMinReturn,
               profitIgnoreSignalPct,
+              buyThresholds: parseThresholds(buyThresholdsInput),
+              sellThresholds: parseThresholds(sellThresholdsInput),
             }
           );
         }
@@ -913,7 +927,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct, maxPullbackDays, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct, maxPullbackDays, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, buyThresholdsInput, sellThresholdsInput]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1153,6 +1167,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>分数:</span>
                       <InputNumber size="small" min={0} max={500} step={1} value={minStrategyScore} onChange={(v) => setMinStrategyScore(v ?? 100)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>RSI买:</span>
+                      <Input size="small" value={buyThresholdsInput} onChange={(e) => setBuyThresholdsInput(e.target.value)} disabled={running} style={{ width: 80 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>RSI卖:</span>
+                      <Input size="small" value={sellThresholdsInput} onChange={(e) => setSellThresholdsInput(e.target.value)} disabled={running} style={{ width: 100 }} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>回看:</span>
@@ -1441,7 +1463,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                             横盘{item.params?.rangeBoundDays || 5}天 | 
                             深度回调{(item.params?.maxPullbackPct || 0.12) * 100}%({item.params?.maxPullbackDays || 5}天) | 
                             效率{item.params?.timeExitMaxDays || 5}天/{(item.params?.timeExitMinReturn || 0.05) * 100}% | 
-                            忽略{(item.params?.profitIgnoreSignalPct || 0.10) * 100}%
+                            忽略{(item.params?.profitIgnoreSignalPct || 0.10) * 100}% | 
+                            RSI买[{(item.params?.buyThresholds ?? [35,40,45]).join(',')}] | 
+                            RSI卖[{(item.params?.sellThresholds ?? [65,70,75,80,85]).join(',')}]
                           </div>
                         </div>
                       }
