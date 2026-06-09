@@ -217,8 +217,6 @@ export interface StrategyPosition {
   
   // [新增] 止盈相关
   takeProfitPrice: number;     // 固定止盈目标价
-  peakPrice: number;           // 持仓期最高价（动态止盈用）
-  takeProfitTrailingPrice: number; // 动态止盈触发价
 
   // [新增] 出现买入信号当天K线实体最低价（用于时间止损）
   signalDayEntityLow: number;
@@ -494,7 +492,6 @@ export class OptimizedStrategyBacktest {
   
   // [新增] 止盈参数
   private TAKE_PROFIT_PCT = 1.15;         // 固定止盈：买入价上涨 15% 止盈
-  private TAKE_PROFIT_TRAILING = 0.92;     // 动态止盈：从最高点回落 8% 止盈（比移动止损更敏感）
 
   private MIN_STRATEGY_SCORE = 100;
   private STRONG_LOOKBACK = 10;
@@ -505,7 +502,8 @@ export class OptimizedStrategyBacktest {
   private STRUCTURE_BREAK_DAYS = 3;   // 结构破坏：持仓天数阈值
   private RANGE_BOUND_DAYS = 5;       // 横盘震荡：持仓天数阈值
   // [新增] 深度回调排除阈值
-  private MAX_PULLBACK_PCT = 0.12;    // 最近5天内从高点回调超过该比例则排除
+  private MAX_PULLBACK_PCT = 0.12;    // 最近N天内从高点到低点回调超过该比例则排除
+  private MAX_PULLBACK_DAYS = 5;      // 深度回调计算天数
 
   constructor(
     tradeDays: string[],
@@ -515,7 +513,6 @@ export class OptimizedStrategyBacktest {
       stopLossInitPct?: number;
       trailingStopPct?: number;
       takeProfitPct?: number;
-      takeProfitTrailing?: number;
       minStrategyScore?: number;
       strongLookback?: number;
       maxPositions?: number;
@@ -528,6 +525,7 @@ export class OptimizedStrategyBacktest {
       structureBreakDays?: number;
       rangeBoundDays?: number;
       maxPullbackPct?: number;
+      maxPullbackDays?: number;
     }
   ) {
     this.tradeDays = tradeDays;
@@ -544,7 +542,6 @@ export class OptimizedStrategyBacktest {
     if (options?.stopLossInitPct !== undefined) this.STOP_LOSS_INIT_PCT = options.stopLossInitPct;
     if (options?.trailingStopPct !== undefined) this.TRAILING_STOP_PCT = options.trailingStopPct;
     if (options?.takeProfitPct !== undefined) this.TAKE_PROFIT_PCT = options.takeProfitPct;
-    if (options?.takeProfitTrailing !== undefined) this.TAKE_PROFIT_TRAILING = options.takeProfitTrailing;
     if (options?.minStrategyScore !== undefined) this.MIN_STRATEGY_SCORE = options.minStrategyScore;
     if (options?.strongLookback !== undefined) this.STRONG_LOOKBACK = options.strongLookback;
     if (options?.maxPositions !== undefined) this.MAX_POSITIONS = options.maxPositions;
@@ -556,12 +553,12 @@ export class OptimizedStrategyBacktest {
     if (options?.structureBreakDays !== undefined) this.STRUCTURE_BREAK_DAYS = options.structureBreakDays;
     if (options?.rangeBoundDays !== undefined) this.RANGE_BOUND_DAYS = options.rangeBoundDays;
     if (options?.maxPullbackPct !== undefined) this.MAX_PULLBACK_PCT = options.maxPullbackPct;
+    if (options?.maxPullbackDays !== undefined) this.MAX_PULLBACK_DAYS = options.maxPullbackDays;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
       TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
       TAKE_PROFIT_PCT: this.TAKE_PROFIT_PCT,
-      TAKE_PROFIT_TRAILING: this.TAKE_PROFIT_TRAILING,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
       STRONG_LOOKBACK: `${this.STRONG_LOOKBACK}天前`,
       SLIPPAGE: this.SLIPPAGE,
@@ -574,6 +571,7 @@ export class OptimizedStrategyBacktest {
       STRUCTURE_BREAK_DAYS: this.STRUCTURE_BREAK_DAYS,
       RANGE_BOUND_DAYS: this.RANGE_BOUND_DAYS,
       MAX_PULLBACK_PCT: this.MAX_PULLBACK_PCT,
+      MAX_PULLBACK_DAYS: this.MAX_PULLBACK_DAYS,
     });
   }
 
@@ -595,7 +593,6 @@ export class OptimizedStrategyBacktest {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
       TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
       TAKE_PROFIT_PCT: this.TAKE_PROFIT_PCT,
-      TAKE_PROFIT_TRAILING: this.TAKE_PROFIT_TRAILING,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
       STRONG_LOOKBACK: `${this.STRONG_LOOKBACK}天前`,
       MAX_WATCH_DAYS: this.MAX_WATCH_DAYS,
@@ -832,9 +829,7 @@ export class OptimizedStrategyBacktest {
       boardRank: order.boardRank,
       stockRank: order.stockRank,
       // [新增]
-      peakPrice: adjustedPrice,            // 动态止盈基准
       takeProfitPrice,                    // 固定止盈
-      takeProfitTrailingPrice: adjustedPrice * this.TAKE_PROFIT_TRAILING, // 动态止盈触发价
       signalDayEntityLow, // [新增] 保存买入当天实体最低价
     });
 
@@ -1121,12 +1116,6 @@ export class OptimizedStrategyBacktest {
         position.stopLossPrice = currentPrice * this.TRAILING_STOP_PCT;
         console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)}`);
       }
-      if (currentPrice > position.peakPrice) {
-        position.peakPrice = currentPrice;
-        position.takeProfitTrailingPrice = currentPrice * this.TAKE_PROFIT_TRAILING;
-        console.log(`[OptBacktest] [${today}] ${secid} 动态止盈更新: ${position.takeProfitTrailingPrice.toFixed(2)}`);
-      }
-
       // 2. 固定止损（硬性风控，最先检查）
       if (currentPrice < position.buyPrice * this.STOP_LOSS_INIT_PCT) {
         console.log(`[OptBacktest] [${today}] ${secid} 🔴 固定止损: 当前${currentPrice.toFixed(2)} < 买入价${position.buyPrice.toFixed(2)}`);
@@ -1153,14 +1142,6 @@ export class OptimizedStrategyBacktest {
       if (currentPrice >= position.takeProfitPrice) {
         console.log(`[OptBacktest] [${today}] ${secid} 🟢 固定止盈: 当前${currentPrice.toFixed(2)} >= 目标${position.takeProfitPrice.toFixed(2)}`);
         this.executeSell(secid, today, currentPrice, position.quantity, '固定止盈');
-        continue;
-      }
-
-      // 5. 动态止盈（从最高点大幅回落）
-      if (currentPrice < position.takeProfitTrailingPrice && position.peakPrice > position.buyPrice * 1.05) {
-        // 只有先盈利 5% 以上才启用动态止盈，避免刚买入就触发
-        console.log(`[OptBacktest] [${today}] ${secid} 🟢 动态止盈: 当前${currentPrice.toFixed(2)} 从高点${position.peakPrice.toFixed(2)} 回落`);
-        this.executeSell(secid, today, currentPrice, position.quantity, '动态止盈');
         continue;
       }
 
@@ -1272,13 +1253,14 @@ export class OptimizedStrategyBacktest {
           invalidResults.push({ pass: false, reason: '停牌', secid: stock.secid });
         } else {
           // 在 filteredStocks 筛选后，进入 batch 前增加
-          const high3Day = Math.max(...klines.slice(-5).map(k => k.zg));
-          const currentPrice = klines[klines.length - 1].sp;
-          const pullBackPct = (high3Day - currentPrice) / high3Day;
+          const recentKlines = klines.slice(-this.MAX_PULLBACK_DAYS);
+          const highNDay = Math.max(...recentKlines.map(k => k.zg));
+          const lowNDay = Math.min(...recentKlines.map(k => k.zd));
+          const pullBackPct = (highNDay - lowNDay) / highNDay;
           
-          // 如果最近 5 天内已从高点回调超过阈值，说明深度回调，排除
+          // 如果最近 N 天内从高点到低点的回调超过阈值，说明深度回调，排除
           if (pullBackPct > this.MAX_PULLBACK_PCT) {
-            console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}%`);
+            console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}% (${this.MAX_PULLBACK_DAYS}天)`);
             continue;
           }
           // [优化] 只保留策略计算需要的字段，减少内存占用和后续传输

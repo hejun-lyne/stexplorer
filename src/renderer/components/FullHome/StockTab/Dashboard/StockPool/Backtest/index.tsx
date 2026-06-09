@@ -470,7 +470,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [stopLossInitPct, setStopLossInitPct] = useState(0.95);
     const [trailingStopPct, setTrailingStopPct] = useState(0.95);
     const [takeProfitPct, setTakeProfitPct] = useState(1.15);
-    const [takeProfitTrailing, setTakeProfitTrailing] = useState(0.92);
     const [minStrategyScore, setMinStrategyScore] = useState(90);
     const [strongLookbackStart, setStrongLookbackStart] = useState(10);
     const [strongLookbackEnd, setStrongLookbackEnd] = useState(5);
@@ -479,6 +478,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [structureBreakDays, setStructureBreakDays] = useState(3);
     const [rangeBoundDays, setRangeBoundDays] = useState(5);
     const [maxPullbackPct, setMaxPullbackPct] = useState(0.12);
+    const [maxPullbackDays, setMaxPullbackDays] = useState(5);
 
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
@@ -524,7 +524,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setStopLossInitPct(params.stopLossInitPct ?? 0.95);
               setTrailingStopPct(params.trailingStopPct ?? 0.95);
               setTakeProfitPct(params.takeProfitPct ?? 1.15);
-              setTakeProfitTrailing(params.takeProfitTrailing ?? 0.92);
               setMinStrategyScore(params.minStrategyScore ?? 90);
               setStrongLookbackStart(params.strongLookbackStart ?? 10);
               setStrongLookbackEnd(params.strongLookbackEnd ?? 5);
@@ -533,6 +532,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setStructureBreakDays(params.structureBreakDays ?? 3);
               setRangeBoundDays(params.rangeBoundDays ?? 5);
               setMaxPullbackPct(params.maxPullbackPct ?? 0.12);
+              setMaxPullbackDays(params.maxPullbackDays ?? 5);
             }
           }
         } catch (e) {
@@ -618,7 +618,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setStopLossInitPct(p.stopLossInitPct ?? 0.95);
         setTrailingStopPct(p.trailingStopPct ?? 0.95);
         setTakeProfitPct(p.takeProfitPct ?? 1.15);
-        setTakeProfitTrailing(p.takeProfitTrailing ?? 0.92);
         setMinStrategyScore(p.minStrategyScore ?? 90);
         setStrongLookbackStart(p.strongLookbackStart ?? 10);
         setStrongLookbackEnd(p.strongLookbackEnd ?? 5);
@@ -627,6 +626,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setStructureBreakDays(p.structureBreakDays ?? 3);
         setRangeBoundDays(p.rangeBoundDays ?? 5);
         setMaxPullbackPct(p.maxPullbackPct ?? 0.12);
+        setMaxPullbackDays(p.maxPullbackDays ?? 5);
       }
 
       const baseOpts = getNetValueBaseOptions(darkMode, p?.initialCapital || 1000000);
@@ -788,7 +788,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             stopLossInitPct,
             trailingStopPct,
             takeProfitPct,
-            takeProfitTrailing,
             minStrategyScore,
             strongLookback: strongLookbackStart,
             maxPositions,
@@ -801,6 +800,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             structureBreakDays,
             rangeBoundDays,
             maxPullbackPct,
+            maxPullbackDays,
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -840,7 +840,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               stopLossInitPct,
               trailingStopPct,
               takeProfitPct,
-              takeProfitTrailing,
               minStrategyScore,
               strongLookbackStart,
               strongLookbackEnd,
@@ -849,6 +848,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               structureBreakDays,
               rangeBoundDays,
               maxPullbackPct,
+              maxPullbackDays,
             },
           });
           console.log('[Backtest] 回测结果已缓存到磁盘');
@@ -870,7 +870,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               stopLossInitPct,
               trailingStopPct,
               takeProfitPct,
-              takeProfitTrailing,
               minStrategyScore,
               strongLookbackStart,
               strongLookbackEnd,
@@ -879,6 +878,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               structureBreakDays,
               rangeBoundDays,
               maxPullbackPct,
+              maxPullbackDays,
             }
           );
         }
@@ -895,7 +895,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, takeProfitTrailing, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct, maxPullbackDays]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1121,10 +1121,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       <InputNumber size="small" min={1.01} max={2.0} step={0.01} value={takeProfitPct} onChange={(v) => setTakeProfitPct(v ?? 1.15)} disabled={running} style={{ width: 55 }} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>盈轨:</span>
-                      <InputNumber size="small" min={0.5} max={0.99} step={0.01} value={takeProfitTrailing} onChange={(v) => setTakeProfitTrailing(v ?? 0.92)} disabled={running} style={{ width: 55 }} />
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>分数:</span>
                       <InputNumber size="small" min={0} max={500} step={1} value={minStrategyScore} onChange={(v) => setMinStrategyScore(v ?? 100)} disabled={running} style={{ width: 55 }} />
                     </div>
@@ -1153,6 +1149,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>深度回调:</span>
                       <InputNumber size="small" min={0} max={0.5} step={0.01} value={maxPullbackPct} onChange={(v) => setMaxPullbackPct(v ?? 0.12)} disabled={running} style={{ width: 55 }} />
+                      <InputNumber size="small" min={1} max={30} step={1} value={maxPullbackDays} onChange={(v) => setMaxPullbackDays(v ?? 5)} disabled={running} style={{ width: 45 }} />
+                      <span style={{ fontSize: 12 }}>天</span>
                     </div>
                   </div>
                 )}
@@ -1407,12 +1405,11 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                             止损{(item.params?.stopLossInitPct || 0.95) * 100}% | 
                             追踪{(item.params?.trailingStopPct || 0.95) * 100}% | 
                             止盈{((item.params?.takeProfitPct || 1.15) * 100).toFixed(0)}% | 
-                            盈轨{(item.params?.takeProfitTrailing || 0.92) * 100}% | 
                             分数{item.params?.minStrategyScore || 100} | 
                             回看{item.params?.strongLookbackStart || 10}-{item.params?.strongLookbackEnd || 5} | 
                             结构破坏{item.params?.structureBreakDays || 3}天 | 
                             横盘{item.params?.rangeBoundDays || 5}天 | 
-                            深度回调{(item.params?.maxPullbackPct || 0.12) * 100}%
+                            深度回调{(item.params?.maxPullbackPct || 0.12) * 100}%({item.params?.maxPullbackDays || 5}天)
                           </div>
                         </div>
                       }
