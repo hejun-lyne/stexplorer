@@ -2942,26 +2942,20 @@ class TushareAPI:
             pro = get_pro()
             date_str = date.replace('-', '')
 
-            # 1. 检查缓存
-            cache_key = f"strong_stocks_{date_str}"
-            cached = read_cache(cache_key, max_age_hours=24)
-            if cached is not None:
-                return cached
-
-            # 2. 获取当日全市场日线
+            # 1. 获取当日全市场日线
             today_df = safe_api_call(pro.daily, trade_date=date_str)
             if isinstance(today_df, dict) and today_df.get("error"):
                 return today_df
             if today_df is None or today_df.empty:
                 return {"error": "No daily data"}
 
-            # 3. 获取涨停数据
+            # 2. 获取涨停数据
             limit_df = safe_api_call(pro.limit_list, trade_date=date_str)
             limit_codes = set()
             if isinstance(limit_df, pd.DataFrame) and not limit_df.empty:
                 limit_codes = set(limit_df[limit_df['limit'] == 'U']['ts_code'].tolist())
 
-            # 4. 获取最近60个交易日
+            # 3. 获取最近60个交易日
             start_60 = (datetime.strptime(date_str, '%Y%m%d') - timedelta(days=90)).strftime('%Y%m%d')
             cal_df = safe_api_call(pro.trade_cal, exchange='SSE', start_date=start_60, end_date=date_str, is_open='1')
             if isinstance(cal_df, dict) and cal_df.get("error"):
@@ -2975,28 +2969,22 @@ class TushareAPI:
             today_idx = trade_dates.index(date_str) if date_str in trade_dates else len(trade_dates) - 1
             hist_dates = trade_dates[max(0, today_idx - 60):today_idx]
 
-            # 5. 获取历史数据计算60日最高价（带缓存）
+            # 4. 获取历史数据计算60日最高价
             hist_frames = []
             for hd in hist_dates:
-                cache_key_daily = f"daily_all_{hd}"
-                cached_daily = read_cache(cache_key_daily, max_age_hours=8760)
-                if cached_daily and isinstance(cached_daily, list):
-                    hist_frames.append(pd.DataFrame(cached_daily))
-                else:
-                    df = safe_api_call(pro.daily, trade_date=hd)
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        write_cache(cache_key_daily, df_to_records(df))
-                        hist_frames.append(df)
+                df = safe_api_call(pro.daily, trade_date=hd)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    hist_frames.append(df)
 
             high_60 = {}
             if hist_frames:
                 hist_df = pd.concat(hist_frames, ignore_index=True)
                 high_60 = hist_df.groupby('ts_code')['high'].max().to_dict()
 
-            # 6. 获取股票名称和行业（带缓存复用）
+            # 5. 获取股票名称和行业（带缓存复用）
             name_map, industry_map = _get_stock_basic_maps()
 
-            # 7. 筛选：涨停 或 60日新高
+            # 6. 筛选：涨停 或 60日新高
             stocks = []
             for _, row in today_df.iterrows():
                 tc = str(row['ts_code'])
@@ -3038,16 +3026,13 @@ class TushareAPI:
                         "ltsz": 0,
                     })
 
-            result = {
+            return {
                 "stocks": stocks,
                 "date": date_str,
                 "count": len(stocks),
                 "limit_up_count": len([s for s in stocks if s['strongType'] == 'limit_up']),
                 "new_high_count": len([s for s in stocks if s['strongType'] == 'new_high_60']),
             }
-
-            write_cache(cache_key, result)
-            return result
         except Exception as e:
             return {"error": str(e)}
 
