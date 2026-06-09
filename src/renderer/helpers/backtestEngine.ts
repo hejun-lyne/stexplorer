@@ -513,6 +513,7 @@ export class OptimizedStrategyBacktest {
   private PROFIT_IGNORE_SIGNAL_PCT = 0.10; // 盈利超过该比例后忽略策略信号（让利润奔跑）
   private RSI_BUY_THRESHOLDS = [35, 40, 45]; // RSI 买入阈值网格
   private RSI_SELL_THRESHOLDS = [65, 70, 75, 80, 85]; // RSI 卖出阈值网格
+  private FILTER_STRONG_TYPE: 'limit_up' | 'new_high_60' | 'both' = 'both'; // 强势股票筛选类型
 
   constructor(
     tradeDays: string[],
@@ -539,6 +540,7 @@ export class OptimizedStrategyBacktest {
       profitIgnoreSignalPct?: number;
       buyThresholds?: number[];
       sellThresholds?: number[];
+      filterStrongType?: 'limit_up' | 'new_high_60' | 'both';
     }
   ) {
     this.tradeDays = tradeDays;
@@ -571,6 +573,7 @@ export class OptimizedStrategyBacktest {
     if (options?.profitIgnoreSignalPct !== undefined) this.PROFIT_IGNORE_SIGNAL_PCT = options.profitIgnoreSignalPct;
     if (options?.buyThresholds !== undefined) this.RSI_BUY_THRESHOLDS = options.buyThresholds;
     if (options?.sellThresholds !== undefined) this.RSI_SELL_THRESHOLDS = options.sellThresholds;
+    if (options?.filterStrongType !== undefined) this.FILTER_STRONG_TYPE = options.filterStrongType;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
@@ -593,6 +596,7 @@ export class OptimizedStrategyBacktest {
       PROFIT_IGNORE_SIGNAL_PCT: this.PROFIT_IGNORE_SIGNAL_PCT,
       RSI_BUY_THRESHOLDS: this.RSI_BUY_THRESHOLDS,
       RSI_SELL_THRESHOLDS: this.RSI_SELL_THRESHOLDS,
+      FILTER_STRONG_TYPE: this.FILTER_STRONG_TYPE,
     });
   }
 
@@ -875,6 +879,7 @@ export class OptimizedStrategyBacktest {
       boardCode: order.boardCode || '',
       strategyType: order.strategyType,
       strategyParams: order.strategyParams,
+      strongType: order.strongType,
     });
   }
 
@@ -1244,8 +1249,11 @@ export class OptimizedStrategyBacktest {
     await this.waitIfPaused();
     if (this.isCancelled()) return true;
 
-    const strongStocks = await dataProvider.getStrongStocks(strongStockDay);
-    console.log(`[OptBacktest] [${today}] ${strongStockDay} 强势股票数量: ${strongStocks.length}`); 
+    let strongStocks = await dataProvider.getStrongStocks(strongStockDay);
+    if (this.FILTER_STRONG_TYPE !== 'both') {
+      strongStocks = strongStocks.filter((s: any) => s.strongType === this.FILTER_STRONG_TYPE);
+    }
+    console.log(`[OptBacktest] [${today}] ${strongStockDay} 强势股票数量: ${strongStocks.length} (筛选后${this.FILTER_STRONG_TYPE})`); 
 
     const tStrong1 = performance.now();
     console.log(`[Perf] [${today}] 强势股票IO: ${(tStrong1 - tStrong0).toFixed(1)}ms (${strongStocks.length}只)`);
@@ -1448,22 +1456,25 @@ export class OptimizedStrategyBacktest {
             const result = workerResults[workerIdx++];
             mergedResults.push(result);
 
-            const { stock, klines } = items[i];
-            const lastDate = klines[klines.length - 1]?.date;
-            if (lastDate) {
-              const key = getScreenCacheKey(stock.secid);
-              const file = fileCache.get(key) || {};
-              file[lastDate] = {
-                params: {
-                  fixedStopLossPct: backtestParams.fixedStopLossPct,
-                  trailingStopLossPct: backtestParams.trailingStopLossPct,
-                  minStrategyScore: screenParams.minStrategyScore,
-                  strategyMode: backtestParams.strategyMode,
-                },
-                result,
-              };
-              fileCache.set(key, file);
-              await WriteCache(key, file);
+            if (false) {
+              // 不写缓存了
+              const { stock, klines } = items[i];
+              const lastDate = klines[klines.length - 1]?.date;
+              if (lastDate) {
+                const key = getScreenCacheKey(stock.secid);
+                const file = fileCache.get(key) || {};
+                file[lastDate] = {
+                  params: {
+                    fixedStopLossPct: backtestParams.fixedStopLossPct,
+                    trailingStopLossPct: backtestParams.trailingStopLossPct,
+                    minStrategyScore: screenParams.minStrategyScore,
+                    strategyMode: backtestParams.strategyMode,
+                  },
+                  result,
+                };
+                fileCache.set(key, file);
+                await WriteCache(key, file);
+              }
             }
           }
         }

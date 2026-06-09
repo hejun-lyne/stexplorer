@@ -483,6 +483,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [profitIgnoreSignalPct, setProfitIgnoreSignalPct] = useState(0.10);
     const [buyThresholdsInput, setBuyThresholdsInput] = useState('35,40,45');
     const [sellThresholdsInput, setSellThresholdsInput] = useState('65,70,75,80,85');
+    const [filterStrongType, setFilterStrongType] = useState<'limit_up' | 'new_high_60' | 'both'>('both');
 
     const parseThresholds = (s: string) => s.split(',').map(v => parseInt(v.trim(), 10)).filter(v => !isNaN(v));
 
@@ -543,6 +544,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setProfitIgnoreSignalPct(params.profitIgnoreSignalPct ?? 0.10);
               setBuyThresholdsInput((params.buyThresholds ?? [35, 40, 45]).join(','));
               setSellThresholdsInput((params.sellThresholds ?? [65, 70, 75, 80, 85]).join(','));
+              setFilterStrongType(params.filterStrongType ?? 'both');
             }
           }
         } catch (e) {
@@ -641,6 +643,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setProfitIgnoreSignalPct(p.profitIgnoreSignalPct ?? 0.10);
         setBuyThresholdsInput((p.buyThresholds ?? [35, 40, 45]).join(','));
         setSellThresholdsInput((p.sellThresholds ?? [65, 70, 75, 80, 85]).join(','));
+        setFilterStrongType(p.filterStrongType ?? 'both');
       }
 
       const baseOpts = getNetValueBaseOptions(darkMode, p?.initialCapital || 1000000);
@@ -819,6 +822,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             profitIgnoreSignalPct,
             buyThresholds: parseThresholds(buyThresholdsInput),
             sellThresholds: parseThresholds(sellThresholdsInput),
+            filterStrongType,
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -871,6 +875,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               profitIgnoreSignalPct,
               buyThresholds: parseThresholds(buyThresholdsInput),
               sellThresholds: parseThresholds(sellThresholdsInput),
+              filterStrongType,
             },
           });
           console.log('[Backtest] 回测结果已缓存到磁盘');
@@ -905,6 +910,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               profitIgnoreSignalPct,
               buyThresholds: parseThresholds(buyThresholdsInput),
               sellThresholds: parseThresholds(sellThresholdsInput),
+              filterStrongType,
             }
           );
         }
@@ -921,7 +927,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, buyThresholdsInput, sellThresholdsInput]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, buyThresholdsInput, sellThresholdsInput, filterStrongType]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1119,6 +1125,18 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <Radio.Button value="macd">MACD</Radio.Button>
                     <Radio.Button value="rsi">RSI</Radio.Button>
                     <Radio.Button value="both">MACD+RSI</Radio.Button>
+                  </Radio.Group>
+                )}
+                {strategyType === 'optimized' && (
+                  <Radio.Group
+                    value={filterStrongType}
+                    onChange={(e) => setFilterStrongType(e.target.value)}
+                    style={{ marginRight: 10 }}
+                    disabled={running}
+                  >
+                    <Radio.Button value="both">全部强势</Radio.Button>
+                    <Radio.Button value="limit_up">涨停</Radio.Button>
+                    <Radio.Button value="new_high_60">60日新高</Radio.Button>
                   </Radio.Group>
                 )}
                 {strategyType === 'optimized' && (
