@@ -479,6 +479,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [rangeBoundDays, setRangeBoundDays] = useState(5);
     const [maxPullbackPct, setMaxPullbackPct] = useState(0.12);
     const [maxPullbackDays, setMaxPullbackDays] = useState(5);
+    const [timeExitMaxDays, setTimeExitMaxDays] = useState(5);
+    const [timeExitMinReturn, setTimeExitMinReturn] = useState(0.05);
+    const [profitIgnoreSignalPct, setProfitIgnoreSignalPct] = useState(0.10);
 
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
@@ -533,6 +536,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setRangeBoundDays(params.rangeBoundDays ?? 5);
               setMaxPullbackPct(params.maxPullbackPct ?? 0.12);
               setMaxPullbackDays(params.maxPullbackDays ?? 5);
+              setTimeExitMaxDays(params.timeExitMaxDays ?? 5);
+              setTimeExitMinReturn(params.timeExitMinReturn ?? 0.05);
+              setProfitIgnoreSignalPct(params.profitIgnoreSignalPct ?? 0.10);
             }
           }
         } catch (e) {
@@ -627,6 +633,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setRangeBoundDays(p.rangeBoundDays ?? 5);
         setMaxPullbackPct(p.maxPullbackPct ?? 0.12);
         setMaxPullbackDays(p.maxPullbackDays ?? 5);
+        setTimeExitMaxDays(p.timeExitMaxDays ?? 5);
+        setTimeExitMinReturn(p.timeExitMinReturn ?? 0.05);
+        setProfitIgnoreSignalPct(p.profitIgnoreSignalPct ?? 0.10);
       }
 
       const baseOpts = getNetValueBaseOptions(darkMode, p?.initialCapital || 1000000);
@@ -801,6 +810,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             rangeBoundDays,
             maxPullbackPct,
             maxPullbackDays,
+            timeExitMaxDays,
+            timeExitMinReturn,
+            profitIgnoreSignalPct,
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -849,6 +861,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               rangeBoundDays,
               maxPullbackPct,
               maxPullbackDays,
+              timeExitMaxDays,
+              timeExitMinReturn,
+              profitIgnoreSignalPct,
             },
           });
           console.log('[Backtest] 回测结果已缓存到磁盘');
@@ -879,6 +894,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               rangeBoundDays,
               maxPullbackPct,
               maxPullbackDays,
+              timeExitMaxDays,
+              timeExitMinReturn,
+              profitIgnoreSignalPct,
             }
           );
         }
@@ -895,7 +913,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct, maxPullbackDays]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, maxPullbackPct, maxPullbackDays, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1119,6 +1137,18 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>止盈:</span>
                       <InputNumber size="small" min={1.01} max={2.0} step={0.01} value={takeProfitPct} onChange={(v) => setTakeProfitPct(v ?? 1.15)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>忽略:</span>
+                      <InputNumber size="small" min={0} max={0.5} step={0.01} value={profitIgnoreSignalPct} onChange={(v) => setProfitIgnoreSignalPct(v ?? 0.10)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>效率天:</span>
+                      <InputNumber size="small" min={1} max={30} step={1} value={timeExitMaxDays} onChange={(v) => setTimeExitMaxDays(v ?? 5)} disabled={running} style={{ width: 50 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>效率收:</span>
+                      <InputNumber size="small" min={0} max={0.5} step={0.01} value={timeExitMinReturn} onChange={(v) => setTimeExitMinReturn(v ?? 0.05)} disabled={running} style={{ width: 55 }} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>分数:</span>
@@ -1409,7 +1439,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                             回看{item.params?.strongLookbackStart || 10}-{item.params?.strongLookbackEnd || 5} | 
                             结构破坏{item.params?.structureBreakDays || 3}天 | 
                             横盘{item.params?.rangeBoundDays || 5}天 | 
-                            深度回调{(item.params?.maxPullbackPct || 0.12) * 100}%({item.params?.maxPullbackDays || 5}天)
+                            深度回调{(item.params?.maxPullbackPct || 0.12) * 100}%({item.params?.maxPullbackDays || 5}天) | 
+                            效率{item.params?.timeExitMaxDays || 5}天/{(item.params?.timeExitMinReturn || 0.05) * 100}% | 
+                            忽略{(item.params?.profitIgnoreSignalPct || 0.10) * 100}%
                           </div>
                         </div>
                       }

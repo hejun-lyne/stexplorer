@@ -506,6 +506,10 @@ export class OptimizedStrategyBacktest {
   // [新增] 深度回调排除阈值
   private MAX_PULLBACK_PCT = 0.12;    // 最近N天内从高点到低点回调超过该比例则排除
   private MAX_PULLBACK_DAYS = 5;      // 深度回调计算天数
+  // [新增] 时间止盈参数
+  private TIME_EXIT_MAX_DAYS = 5;     // 最大持有天数，资金效率止盈
+  private TIME_EXIT_MIN_RETURN = 0.05; // 收益率低于该值触发资金效率止盈
+  private PROFIT_IGNORE_SIGNAL_PCT = 0.10; // 盈利超过该比例后忽略策略信号（让利润奔跑）
 
   constructor(
     tradeDays: string[],
@@ -528,6 +532,9 @@ export class OptimizedStrategyBacktest {
       rangeBoundDays?: number;
       maxPullbackPct?: number;
       maxPullbackDays?: number;
+      timeExitMaxDays?: number;
+      timeExitMinReturn?: number;
+      profitIgnoreSignalPct?: number;
     }
   ) {
     this.tradeDays = tradeDays;
@@ -556,6 +563,9 @@ export class OptimizedStrategyBacktest {
     if (options?.rangeBoundDays !== undefined) this.RANGE_BOUND_DAYS = options.rangeBoundDays;
     if (options?.maxPullbackPct !== undefined) this.MAX_PULLBACK_PCT = options.maxPullbackPct;
     if (options?.maxPullbackDays !== undefined) this.MAX_PULLBACK_DAYS = options.maxPullbackDays;
+    if (options?.timeExitMaxDays !== undefined) this.TIME_EXIT_MAX_DAYS = options.timeExitMaxDays;
+    if (options?.timeExitMinReturn !== undefined) this.TIME_EXIT_MIN_RETURN = options.timeExitMinReturn;
+    if (options?.profitIgnoreSignalPct !== undefined) this.PROFIT_IGNORE_SIGNAL_PCT = options.profitIgnoreSignalPct;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
@@ -574,6 +584,9 @@ export class OptimizedStrategyBacktest {
       RANGE_BOUND_DAYS: this.RANGE_BOUND_DAYS,
       MAX_PULLBACK_PCT: this.MAX_PULLBACK_PCT,
       MAX_PULLBACK_DAYS: this.MAX_PULLBACK_DAYS,
+      TIME_EXIT_MAX_DAYS: this.TIME_EXIT_MAX_DAYS,
+      TIME_EXIT_MIN_RETURN: this.TIME_EXIT_MIN_RETURN,
+      PROFIT_IGNORE_SIGNAL_PCT: this.PROFIT_IGNORE_SIGNAL_PCT,
     });
   }
 
@@ -1153,11 +1166,21 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
-      // 3. [新增] 如果已经盈利 10% 以上，不再受 MACD 死叉影响（让利润奔跑）
+      // [新增] 档2.5：最大持有N天且收益率低于阈值，资金效率止盈
+      if (daysHeld >= this.TIME_EXIT_MAX_DAYS) {
+        const returnPct = (currentPrice - position.buyPrice) / position.buyPrice;
+        if (returnPct < this.TIME_EXIT_MIN_RETURN) {
+          console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止盈: 持仓${daysHeld}天, 收益率${(returnPct*100).toFixed(2)}% < ${(this.TIME_EXIT_MIN_RETURN*100).toFixed(0)}%，资金效率止盈`);
+          this.executeSell(secid, today, currentPrice, position.quantity, `时间止盈(持有${daysHeld}天收益<${(this.TIME_EXIT_MIN_RETURN*100).toFixed(0)}%)`);
+          continue;
+        }
+      }
+
+      // 3. [新增] 如果已经盈利超过阈值，不再受 MACD 死叉影响（让利润奔跑）
       const profitPct = (currentPrice - position.buyPrice) / position.buyPrice;
-      if (profitPct > 0.10) {
-        // 盈利 10% 以上，只认移动止损，忽略死叉
-        console.log(`[OptBacktest] [${today}] ${secid} 盈利${(profitPct*100).toFixed(1)}%，忽略策略信号`);
+      if (profitPct > this.PROFIT_IGNORE_SIGNAL_PCT) {
+        // 盈利超过阈值，只认移动止损，忽略死叉
+        console.log(`[OptBacktest] [${today}] ${secid} 盈利${(profitPct*100).toFixed(1)}% > ${(this.PROFIT_IGNORE_SIGNAL_PCT*100).toFixed(0)}%，忽略策略信号`);
         continue;
       }
 
@@ -1194,7 +1217,7 @@ export class OptimizedStrategyBacktest {
     const tStrong0 = performance.now();
     const rawDates: string[] = [];
     const base = dayjs(today, 'YYYY-MM-DD');
-    for (let d = 1; d <= 20; d++) {
+    for (let d = 1; d <= 40; d++) {
       rawDates.push(base.subtract(d, 'day').format('YYYY-MM-DD'));
     }
 
@@ -1371,25 +1394,13 @@ export class OptimizedStrategyBacktest {
         const uncachedIndices: number[] = [];
         const uncachedItems: typeof items = [];
 
-        // 预加载本 batch 涉及的所有股票缓存文件（减少 IO 次数）
+        // 初始化文件缓存（用于后续写入），不读取上一次缓存结果
         const fileCache = new Map<string, StockScreenCacheFile>();
-        for (const { stock, klines } of items) {
-          const lastDate = klines[klines.length - 1]?.date;
-          if (lastDate) {
-            const key = getScreenCacheKey(stock.secid);
-            if (!fileCache.has(key)) {
-              const file = await ReadCache<StockScreenCacheFile>(key);
-              fileCache.set(key, file || {});
-            }
-            const entry = fileCache.get(key)![lastDate];
-            if (entry &&
-                entry.params.fixedStopLossPct === backtestParams.fixedStopLossPct &&
-                entry.params.trailingStopLossPct === backtestParams.trailingStopLossPct &&
-                entry.params.minStrategyScore === screenParams.minStrategyScore &&
-                entry.params.strategyMode === backtestParams.strategyMode) {
-              cachedResults.push(entry.result);
-              continue;
-            }
+        for (let i = 0; i < items.length; i++) {
+          const { stock, klines } = items[i];
+          const key = getScreenCacheKey(stock.secid);
+          if (!fileCache.has(key)) {
+            fileCache.set(key, {});
           }
           uncachedIndices.push(cachedResults.length);
           uncachedItems.push({ stock, klines });
