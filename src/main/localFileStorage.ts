@@ -193,7 +193,7 @@ function getFilePath(table: string, id?: number | string | object): string {
     } else if(table.indexOf('board_stocks_cache') >= 0) {
       return path.join(dataDir, 'board_stocks_cache', `${table}.json`);
     }
-    return path.join(dataDir, `${table}.json`);
+    return path.join(dataDir, `${table}_${id}.json`);
   }
   return path.join(dataDir, filename);
 }
