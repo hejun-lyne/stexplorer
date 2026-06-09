@@ -1952,17 +1952,29 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
-    def get_boards_by_date_batch(dates: List[str]) -> Dict[str, Any]:
-        """批量获取多个交易日的全市场板块数据（industry + concept 合并）"""
+    def get_boards_by_date_batch(dates: List[str], bk_type: Optional[str] = None) -> Dict[str, Any]:
+        """批量获取多个交易日的全市场板块数据
+        
+        Args:
+            dates: 交易日期数组 (YYYYMMDD)
+            bk_type: 板块类型，"industry"(行业板块) 或 "concept"(概念板块)。
+                    不传则默认合并 industry + concept
+        """
         result = {}
         for date in dates:
-            industry = TushareAPI.get_boards_by_date(bk_type="industry", date=date)
-            concept = TushareAPI.get_boards_by_date(bk_type="concept", date=date)
-            all_boards = []
-            if isinstance(industry, dict) and industry.get("boards"):
-                all_boards.extend(industry["boards"])
-            if isinstance(concept, dict) and concept.get("boards"):
-                all_boards.extend(concept["boards"])
+            if bk_type:
+                data = TushareAPI.get_boards_by_date(bk_type=bk_type, date=date)
+                all_boards = []
+                if isinstance(data, dict) and data.get("boards"):
+                    all_boards.extend(data["boards"])
+            else:
+                industry = TushareAPI.get_boards_by_date(bk_type="industry", date=date)
+                concept = TushareAPI.get_boards_by_date(bk_type="concept", date=date)
+                all_boards = []
+                if isinstance(industry, dict) and industry.get("boards"):
+                    all_boards.extend(industry["boards"])
+                if isinstance(concept, dict) and concept.get("boards"):
+                    all_boards.extend(concept["boards"])
             result[date] = {"boards": all_boards, "count": len(all_boards), "date": date}
         return result
 

@@ -128,7 +128,7 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
         ]),
         makeWorkerExec('optimizeRSIStrategy', [
           klines,
-          [6, 12, 24],
+          [12, 24],
           fixedStopLossPct / 100,
           trailingStopLossPct / 100,
         ]),

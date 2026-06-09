@@ -175,7 +175,7 @@ export async function optimizeMACDStrategy(
 
 export async function optimizeRSIStrategy(
   klines: Stock.KLineItem[],
-  rsiPeriods: number[] = [6, 12],
+  rsiPeriods: number[] = [12, 24],
   fixedStopLossPct: number = 0.05,
   trailingStopLossPct: number = 0.06,
   secid?: string
@@ -1111,31 +1111,31 @@ export class OptimizedStrategyBacktest {
       // const isProfitable = currentPrice > position.buyPrice;
       
       // 连续下跌止损：买入后连续3天收盘价低于前一天，反弹逻辑不成立
-      if (daysHeld >= 3) {
-        const buyIndex = klines.findIndex(k => k.date === position.buyDate);
-        if (buyIndex >= 0) {
-          let declineDays = 0;
-          // 从买入后开始检查，最多检查3天
-          for (let i = buyIndex; i < klines.length && i < buyIndex + 3; i++) {
-            if (klines[i].sp < klines[i - 1].sp) {
-              declineDays++;
-            } else {
-              break; // 中断连续性
-            }
-          }
-          if (declineDays >= 3) {
-            console.log(`[OptBacktest] [${today}] ${secid} 🔴 连续下跌止损: 买入后连续${declineDays}个交易日收盘价下跌，反弹逻辑不成立`);
-            this.executeSell(secid, today, currentPrice, position.quantity, '连续下跌止损');
-            continue;
-          }
-        }
-      }
+      // if (daysHeld >= 3) {
+      //   const buyIndex = klines.findIndex(k => k.date === position.buyDate);
+      //   if (buyIndex >= 0) {
+      //     let declineDays = 0;
+      //     // 从买入后开始检查，最多检查3天
+      //     for (let i = buyIndex; i < klines.length && i < buyIndex + 3; i++) {
+      //       if (klines[i].sp < klines[i - 1].sp) {
+      //         declineDays++;
+      //       } else {
+      //         break; // 中断连续性
+      //       }
+      //     }
+      //     if (declineDays >= 3) {
+      //       console.log(`[OptBacktest] [${today}] ${secid} 🔴 连续下跌止损: 买入后连续${declineDays}个交易日收盘价下跌，反弹逻辑不成立`);
+      //       this.executeSell(secid, today, currentPrice, position.quantity, '连续下跌止损');
+      //       continue;
+      //     }
+      //   }
+      // }
       // 档1：结构破坏（跌破买入实体）
-      if (daysHeld >= this.STRUCTURE_BREAK_DAYS && currentPrice < position.signalDayEntityLow) {
-        console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(结构破坏): 持仓${daysHeld}天, 当前${currentPrice.toFixed(2)} < 信号日实体最低${position.signalDayEntityLow.toFixed(2)}`);
-        this.executeSell(secid, today, currentPrice, position.quantity, `时间止损-结构破坏(${daysHeld}天)`);
-        continue;
-      }
+      // if (daysHeld >= this.STRUCTURE_BREAK_DAYS && currentPrice < position.signalDayEntityLow) {
+      //   console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(结构破坏): 持仓${daysHeld}天, 当前${currentPrice.toFixed(2)} < 信号日实体最低${position.signalDayEntityLow.toFixed(2)}`);
+      //   this.executeSell(secid, today, currentPrice, position.quantity, `时间止损-结构破坏(${daysHeld}天)`);
+      //   continue;
+      // }
 
       // 档2：横盘震荡（未脱离成本区，资金效率止损）
       const buyEntityRange = position.buyPrice * 0.03; // ±3% 视为成本区

@@ -3545,7 +3545,7 @@ export async function CheckStockBacktestSignals(
     const bestMACD = macdResults[0];
 
     // 3. RSI回测 —— 传入止损参数
-    const rsiResults = optimizeRSIStrategy(ks, [6, 12], fixedStopLossPct, trailingStopLossPct);
+    const rsiResults = optimizeRSIStrategy(ks, [12, 24], fixedStopLossPct, trailingStopLossPct);
     const bestRSI = rsiResults[0];
 
     // 验证MA最近3根K线

@@ -59,7 +59,7 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
           const code = s.secid?.split('.')[1] || '';
           if (code.startsWith('688') || code.startsWith('689')) return false;
           if (code.startsWith('8') || code.startsWith('9')) return false;
-          // if (s.zx < 10000 || s.zx > 100000) return false;
+          if (s.zx < 10 || s.zx > 100) return false;
           return true;
         });
 
@@ -253,7 +253,7 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
       try {
         if (!dates || dates.length === 0) return {};
         console.log(`[DataProvider] 批量获取全板块: ${dates.length} 个日期`);
-        const result = await Services.Tushare.GetBoardsByDateBatchFromTushare(dates);
+        const result = await Services.Tushare.GetBoardsByDateBatchFromTushare(dates, "industry");
         console.log(`[DataProvider] 批量全板块返回: ${Object.keys(result).length} 个日期`);
         return result;
       } catch (e) {

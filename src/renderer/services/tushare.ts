@@ -495,11 +495,12 @@ export async function GetBoardStocksByDateFromTushare(
 /**
  * 批量获取多个交易日的全市场板块数据（industry + concept 合并）
  * @param dates 交易日期数组 (YYYYMMDD)
+ * @param bk_type 板块类型，"industry"(行业板块) 或 "concept"(概念板块)。不传则默认合并
  * @returns 按日期分组的全市场板块数据
  */
-export async function GetBoardsByDateBatchFromTushare(dates: string[]): Promise<Record<string, Array<{ code: string; name: string; zf: number }>>> {
+export async function GetBoardsByDateBatchFromTushare(dates: string[], bk_type?: string): Promise<Record<string, Array<{ code: string; name: string; zf: number }>>> {
   try {
-    const result = await callTushare('get_boards_by_date_batch', { dates });
+    const result = await callTushare('get_boards_by_date_batch', { dates, bk_type });
 
     if (result.error || typeof result !== 'object') {
       console.error('批量获取板块数据失败:', result.error || 'Invalid response');
