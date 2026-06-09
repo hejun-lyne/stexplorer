@@ -372,7 +372,7 @@ export function optimizeRSIStrategy(
 
   // 参数网格：超卖买点 15-35，超买卖点 65-85
   // 买入：强势股浅回调即可介入，不等深度超卖
-  const buyThresholds = [25, 30, 35, 40, 45]; // 35=浅回调，40=整理，45=强势横盘
+  const buyThresholds = [25, 30, 35]; // 35=浅回调，40=整理，45=强势横盘
   const sellThresholds = [60, 65, 70, 75, 80, 85]; // 75=温和止盈，80=标准超买，85=让利润奔跑
 
   for (const period of rsiPeriods) {
