@@ -355,6 +355,7 @@ export interface WatchListItem {
   tDayDate: string;
   strongType: 'limit_up' | 'new_high_60';
   maxWatchDays: number;
+  strongStockDay: string;
 }
 
 export class OptimizedStrategyBacktest {
@@ -988,6 +989,19 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
+      // [新增] 观察期间深度回调检查：从强势参考日到当天，若高点到低点的回调超过阈值则踢出
+      const strongStockIndex = klines.findIndex(k => k.date >= item.strongStockDay);
+      const rangeKlines = strongStockIndex >= 0 ? klines.slice(strongStockIndex) : klines;
+      const highRange = Math.max(...rangeKlines.map(k => k.zg));
+      const lowRange = Math.min(...rangeKlines.map(k => k.zd));
+      const pullBackPct = (highRange - lowRange) / highRange;
+
+      if (pullBackPct > this.MAX_PULLBACK_PCT) {
+        console.log(`[OptBacktest] [${today}] ${secid} 观察踢出: 观察期间深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天)`);
+        this.watchList.delete(secid);
+        continue;
+      }
+
       const daysInWatch = this.getTradeDaysDiff(item.addedDate, today);
 
       let mDayIndex = -1;
@@ -1252,6 +1266,18 @@ export class OptimizedStrategyBacktest {
     let strongStocks = await dataProvider.getStrongStocks(strongStockDay);
     if (this.FILTER_STRONG_TYPE !== 'both') {
       strongStocks = strongStocks.filter((s: any) => s.strongType === this.FILTER_STRONG_TYPE);
+    }
+    // [新增] 排除60日新高但strongDay当天收阴线的股票（冲高回落，不够强势）
+    const beforeFilterCount = strongStocks.length;
+    strongStocks = strongStocks.filter((s: any) => {
+      if (s.strongType === 'new_high_60' && s.jk !== undefined && s.zx !== undefined && s.zx < s.jk) {
+        console.log(`[OptBacktest] [${today}] ${s.secid} 排除: 60日新高但${strongStockDay}收阴线(${s.zx.toFixed(2)} < ${s.jk.toFixed(2)})`);
+        return false;
+      }
+      return true;
+    });
+    if (strongStocks.length < beforeFilterCount) {
+      console.log(`[OptBacktest] [${today}] 60日新高收阴线排除: ${beforeFilterCount - strongStocks.length} 只`);
     }
     console.log(`[OptBacktest] [${today}] ${strongStockDay} 强势股票数量: ${strongStocks.length} (筛选后${this.FILTER_STRONG_TYPE})`); 
 
@@ -1534,7 +1560,8 @@ export class OptimizedStrategyBacktest {
           }
           continue;
         }
-        itemsToCheck.push({ type: 'candidate', stock, klines, screenResult });
+        // itemsToCheck.push({ type: 'candidate', stock, klines, screenResult });
+        itemsToCheck.push({ type: 'watch', stock, klines, screenResult }); // 也加入watchList
       }
     }
 
@@ -1740,6 +1767,7 @@ export class OptimizedStrategyBacktest {
           tDayDate: screenResult.tDayDate!,
           strongType: screenResult.strongType!,
           maxWatchDays: this.MAX_WATCH_DAYS,
+          strongStockDay: strongStockDay,
         });
         const watchParamsStr = this.formatStrategyParams(screenResult.bestType, screenResult.bestResult);
         console.log(`[OptBacktest] [${today}] ${stock.secid} 👀 加入观察列表 (评分${screenResult.score!.toFixed(1)})${watchParamsStr ? ' | ' + watchParamsStr : ''}`);

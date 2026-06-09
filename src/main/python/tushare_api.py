@@ -2992,6 +2992,7 @@ class TushareAPI:
                 market = '1' if code.startswith('6') else '0'
                 secid = f"{market}.{code}"
                 close = _to_float(row['close'])
+                open = _to_float(row['open'])
                 high = _to_float(row['high'])
                 low = _to_float(row['low'])
                 pre_close = _to_float(row['pre_close'])
@@ -3016,6 +3017,7 @@ class TushareAPI:
                         "code": code,
                         "name": name_map.get(tc, ''),
                         "zx": close,
+                        "jk": open,
                         "zdf": zdf,
                         "zg": high,
                         "zd": low,
@@ -3122,6 +3124,7 @@ class TushareAPI:
                     market = '1' if code.startswith('6') else '0'
                     secid = f"{market}.{code}"
                     close = _to_float(row['close'])
+                    open = _to_float(row['open'])
                     high = _to_float(row['high'])
                     low = _to_float(row['low'])
                     pre_close = _to_float(row['pre_close'])
@@ -3144,6 +3147,7 @@ class TushareAPI:
                             "code": code,
                             "name": name_map.get(tc, ''),
                             "zx": close,
+                            "jk": open,
                             "zdf": zdf,
                             "zg": high,
                             "zd": low,
