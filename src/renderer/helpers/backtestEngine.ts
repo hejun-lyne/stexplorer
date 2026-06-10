@@ -383,6 +383,8 @@ export class OptimizedStrategyBacktest {
   private boardStocksRequestLock = new Map<string, Promise<Array<{ secid: string; zf: number }> | null>>();
   // [新增] 每日最大回撤阈值缓存，避免同一天重复计算涨跌比ma5
   private maxPullbackPctCache: Map<string, number> = new Map();
+  // [新增] 每日市场风险偏好缓存（high/mid/low），供止损参数动态选择使用
+  private dailyRiskPreference: Map<string, 'high' | 'mid' | 'low'> = new Map();
 
     /** [优化] 带请求锁的全市场板块查询 */
   private async getAllBoardsCached(
@@ -494,9 +496,13 @@ export class OptimizedStrategyBacktest {
   private readonly BATCH_SIZE = 30; // [优化] 从 5 改为 20，减少 Worker 调度开销
   private readonly KLINE_DAYS = 150; // 应该至少要半年
 
-  // 止损参数
-  private STOP_LOSS_INIT_PCT = 0.95;      // 买入价下跌 5% 止损
-  private TRAILING_STOP_PCT = 0.90;      // 最高价回落 10% 移动止损
+  // 止损参数（根据市场风险偏好高/中/低动态选择）
+  private STOP_LOSS_INIT_PCT_HIGH = 0.93;  // 高偏好：买入价下跌 7% 止损
+  private STOP_LOSS_INIT_PCT_MID = 0.95;   // 中偏好：买入价下跌 5% 止损
+  private STOP_LOSS_INIT_PCT_LOW = 0.97;   // 低偏好：买入价下跌 3% 止损
+  private TRAILING_STOP_PCT_HIGH = 0.88;   // 高偏好：最高价回落 12% 移动止损
+  private TRAILING_STOP_PCT_MID = 0.90;    // 中偏好：最高价回落 10% 移动止损
+  private TRAILING_STOP_PCT_LOW = 0.92;    // 低偏好：最高价回落 8% 移动止损
   
   // [新增] 止盈参数
   private TAKE_PROFIT_PCT = 1.15;         // 固定止盈：买入价上涨 15% 止盈
@@ -531,8 +537,12 @@ export class OptimizedStrategyBacktest {
     initialCapital: number = 1000000,
     workerExecutor?: (method: string, args?: any[]) => Promise<any>,
     options?: {
-      stopLossInitPct?: number;
-      trailingStopPct?: number;
+      stopLossInitPctHigh?: number;
+      stopLossInitPctMid?: number;
+      stopLossInitPctLow?: number;
+      trailingStopPctHigh?: number;
+      trailingStopPctMid?: number;
+      trailingStopPctLow?: number;
       takeProfitPct?: number;
       minStrategyScore?: number;
       strongLookback?: number;
@@ -570,8 +580,12 @@ export class OptimizedStrategyBacktest {
       ? Math.min(options?.workerCount || 6, 8)
       : 1;
 
-    if (options?.stopLossInitPct !== undefined) this.STOP_LOSS_INIT_PCT = options.stopLossInitPct;
-    if (options?.trailingStopPct !== undefined) this.TRAILING_STOP_PCT = options.trailingStopPct;
+    if (options?.stopLossInitPctHigh !== undefined) this.STOP_LOSS_INIT_PCT_HIGH = options.stopLossInitPctHigh;
+    if (options?.stopLossInitPctMid !== undefined) this.STOP_LOSS_INIT_PCT_MID = options.stopLossInitPctMid;
+    if (options?.stopLossInitPctLow !== undefined) this.STOP_LOSS_INIT_PCT_LOW = options.stopLossInitPctLow;
+    if (options?.trailingStopPctHigh !== undefined) this.TRAILING_STOP_PCT_HIGH = options.trailingStopPctHigh;
+    if (options?.trailingStopPctMid !== undefined) this.TRAILING_STOP_PCT_MID = options.trailingStopPctMid;
+    if (options?.trailingStopPctLow !== undefined) this.TRAILING_STOP_PCT_LOW = options.trailingStopPctLow;
     if (options?.takeProfitPct !== undefined) this.TAKE_PROFIT_PCT = options.takeProfitPct;
     if (options?.minStrategyScore !== undefined) this.MIN_STRATEGY_SCORE = options.minStrategyScore;
     if (options?.strongLookback !== undefined) this.STRONG_LOOKBACK = options.strongLookback;
@@ -597,8 +611,12 @@ export class OptimizedStrategyBacktest {
     if (options?.filterStrongType !== undefined) this.FILTER_STRONG_TYPE = options.filterStrongType;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
-      STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
-      TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
+      STOP_LOSS_INIT_PCT_HIGH: this.STOP_LOSS_INIT_PCT_HIGH,
+      STOP_LOSS_INIT_PCT_MID: this.STOP_LOSS_INIT_PCT_MID,
+      STOP_LOSS_INIT_PCT_LOW: this.STOP_LOSS_INIT_PCT_LOW,
+      TRAILING_STOP_PCT_HIGH: this.TRAILING_STOP_PCT_HIGH,
+      TRAILING_STOP_PCT_MID: this.TRAILING_STOP_PCT_MID,
+      TRAILING_STOP_PCT_LOW: this.TRAILING_STOP_PCT_LOW,
       TAKE_PROFIT_PCT: this.TAKE_PROFIT_PCT,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
       STRONG_LOOKBACK: `${this.STRONG_LOOKBACK}天前`,
@@ -723,6 +741,42 @@ export class OptimizedStrategyBacktest {
     return result;
   }
 
+  private async getRiskPreference(today: string, dataProvider: StrategyDataProvider): Promise<'high' | 'mid' | 'low'> {
+    // 先检查缓存
+    const cached = this.dailyRiskPreference.get(today);
+    if (cached) {
+      return cached;
+    }
+
+    const todayIndex = this.tradeDays.indexOf(today);
+    if (todayIndex < 0) {
+      this.dailyRiskPreference.set(today, 'mid');
+      return 'mid';
+    }
+
+    const startIndex = Math.max(0, todayIndex - 4);
+    const recentDates = this.tradeDays.slice(startIndex, todayIndex + 1);
+
+    let result: 'high' | 'mid' | 'low' = 'mid';
+    try {
+      const rates = await dataProvider.getUpRatio(recentDates);
+      if (!rates || rates.length === 0) {
+        result = 'mid';
+      } else {
+        const ma5 = rates.reduce((sum, r) => sum + r, 0) / rates.length;
+        if (ma5 > this.UP_DOWN_RATE_HIGH_THRESH) result = 'high';
+        else if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) result = 'low';
+        else result = 'mid';
+      }
+    } catch (e) {
+      console.error(`[OptBacktest] [${today}] 获取涨跌比失败，使用默认风险偏好:`, e);
+      result = 'mid';
+    }
+
+    this.dailyRiskPreference.set(today, result);
+    return result;
+  }
+
   private async getMaxPullbackPct(today: string, dataProvider: StrategyDataProvider): Promise<number> {
     // 先检查缓存
     const cached = this.maxPullbackPctCache.get(today);
@@ -730,41 +784,29 @@ export class OptimizedStrategyBacktest {
       return cached;
     }
 
-    // 1. 获取最近5个交易日的涨跌比
-    const todayIndex = this.tradeDays.indexOf(today);
-    if (todayIndex < 0) {
-      this.maxPullbackPctCache.set(today, 0.3);
-      return 0.3;
-    }
+    const riskPref = await this.getRiskPreference(today, dataProvider);
+    let result: number;
+    if (riskPref === 'high') result = this.PULLBACK_PCT_HIGH;
+    else if (riskPref === 'low') result = this.PULLBACK_PCT_LOW;
+    else result = this.PULLBACK_PCT_MID;
 
-    const startIndex = Math.max(0, todayIndex - 4);
-    const recentDates = this.tradeDays.slice(startIndex, todayIndex + 1);
-
-    let result = 0.3;
-    try {
-      const rates = await dataProvider.getUpRatio(recentDates);
-      console.log(`[OptBacktest] [${today}] getMaxPullbackPct 验证 — dates=${JSON.stringify(recentDates)}, rates=${JSON.stringify(rates)}`);
-      if (!rates || rates.length === 0) {
-        result = 0.3;
-      } else {
-        const ma5 = rates.reduce((sum, r) => sum + r, 0) / rates.length;
-        console.log(`[OptBacktest] [${today}] getMaxPullbackPct 验证 — ma5=${ma5.toFixed(3)}, highThresh=${this.UP_DOWN_RATE_HIGH_THRESH}, lowThresh=${this.UP_DOWN_RATE_LOW_THRESH}`);
-
-        // 2. ma5 > 阈值，市场风险偏好高
-        if (ma5 > this.UP_DOWN_RATE_HIGH_THRESH) result = this.PULLBACK_PCT_HIGH;
-        // 3. ma5 < 阈值，市场风险偏好低
-        else if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) result = this.PULLBACK_PCT_LOW;
-        // 4. 其他情况，市场风险偏好一般
-        else result = this.PULLBACK_PCT_MID;
-      }
-    } catch (e) {
-      console.error(`[OptBacktest] [${today}] 获取涨跌比失败，使用默认回撤阈值:`, e);
-      result = 0.3;
-    }
-    console.log(`[OptBacktest] [${today}] getMaxPullbackPct 验证 — result=${result}`);
-
+    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
     this.maxPullbackPctCache.set(today, result);
     return result;
+  }
+
+  private getDailyStopLossPct(today: string): number {
+    const riskPref = this.dailyRiskPreference.get(today) || 'mid';
+    if (riskPref === 'high') return this.STOP_LOSS_INIT_PCT_HIGH;
+    if (riskPref === 'low') return this.STOP_LOSS_INIT_PCT_LOW;
+    return this.STOP_LOSS_INIT_PCT_MID;
+  }
+
+  private getDailyTrailingStopPct(today: string): number {
+    const riskPref = this.dailyRiskPreference.get(today) || 'mid';
+    if (riskPref === 'high') return this.TRAILING_STOP_PCT_HIGH;
+    if (riskPref === 'low') return this.TRAILING_STOP_PCT_LOW;
+    return this.TRAILING_STOP_PCT_MID;
   }
 
   // ===== 阶段1: 执行待处理订单 =====
@@ -909,8 +951,11 @@ export class OptimizedStrategyBacktest {
     }
 
     this.availableCash -= totalCost;
-    const stopLossPrice = adjustedPrice * this.STOP_LOSS_INIT_PCT;
+    const dailyStopLossPct = this.getDailyStopLossPct(date);
+    const dailyTrailingStopPct = this.getDailyTrailingStopPct(date);
+    const stopLossPrice = adjustedPrice * dailyStopLossPct;
     const takeProfitPrice = adjustedPrice * this.TAKE_PROFIT_PCT;
+    console.log(`[OptBacktest] [${date}] ${order.secid} 买入止损配置: 固定止损=${((1 - dailyStopLossPct) * 100).toFixed(1)}%, 移动止损=${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%`);
     this.positions.set(order.secid, {
       secid: order.secid,
       boardCode: order.boardCode || '',
@@ -1261,15 +1306,18 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
+      const dailyStopLossPct = this.getDailyStopLossPct(today);
+      const dailyTrailingStopPct = this.getDailyTrailingStopPct(today);
+
       // 1. 更新最高价（同时服务于移动止损和动态止盈）
       if (currentPrice > position.highestPrice) {
         position.highestPrice = currentPrice;
-        position.stopLossPrice = currentPrice * this.TRAILING_STOP_PCT;
-        console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)}`);
+        position.stopLossPrice = currentPrice * dailyTrailingStopPct;
+        console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);
       }
       // 2. 固定止损（硬性风控，最先检查）
-      if (currentPrice < position.buyPrice * this.STOP_LOSS_INIT_PCT) {
-        console.log(`[OptBacktest] [${today}] ${secid} 🔴 固定止损: 当前${currentPrice.toFixed(2)} < 买入价${position.buyPrice.toFixed(2)}`);
+      if (currentPrice < position.buyPrice * dailyStopLossPct) {
+        console.log(`[OptBacktest] [${today}] ${secid} 🔴 固定止损: 当前${currentPrice.toFixed(2)} < 买入价${position.buyPrice.toFixed(2)} (跌幅${((1 - dailyStopLossPct) * 100).toFixed(1)}%)`);
         this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '固定止损');
         continue;
       }
@@ -1503,8 +1551,8 @@ export class OptimizedStrategyBacktest {
           batchPhaseStartPercent + Math.round((batchIndex / totalBatches) * batchPercentRange * 0.3)
         );
         const backtestParams = {
-          fixedStopLossPct: 1 - this.STOP_LOSS_INIT_PCT,
-          trailingStopLossPct: 1 - this.TRAILING_STOP_PCT,
+          fixedStopLossPct: 1 - this.STOP_LOSS_INIT_PCT_MID,
+          trailingStopLossPct: 1 - this.TRAILING_STOP_PCT_MID,
           strategyMode: this.strategyMode,
           buyThresholds: this.RSI_BUY_THRESHOLDS,
           sellThresholds: this.RSI_SELL_THRESHOLDS,
