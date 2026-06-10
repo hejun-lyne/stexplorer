@@ -289,8 +289,8 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
           const ymd = date.replace(/-/g, '');
           // 兼容两种键格式：YYYYMMDD 和 YYYY-MM-DD
           const dayData = result[ymd] ?? result[date];
-          if (dayData && typeof dayData.up_ratio === 'number') {
-            return dayData.up_ratio;
+          if (dayData && typeof dayData.up_in_total === 'number') {
+            return dayData.up_in_total;
           }
           console.warn(`[DataProvider] 涨跌比缺失: date=${date}, ymd=${ymd}, keys=${Object.keys(result).slice(0, 10)}`);
           return 0;
@@ -501,6 +501,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [rangeBoundDays, setRangeBoundDays] = useState(5);
     const [upDownRateHighThresh, setUpDownRateHighThresh] = useState(1.5);
     const [upDownRateLowThresh, setUpDownRateLowThresh] = useState(1.0);
+    const [pullbackPctHigh, setPullbackPctHigh] = useState(0.4);
+    const [pullbackPctMid, setPullbackPctMid] = useState(0.3);
+    const [pullbackPctLow, setPullbackPctLow] = useState(0.2);
     const [sellAtOpen, setSellAtOpen] = useState(false);
     const [timeExitMaxDays, setTimeExitMaxDays] = useState(5);
     const [timeExitMinReturn, setTimeExitMinReturn] = useState(0.05);
@@ -564,6 +567,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setRangeBoundDays(params.rangeBoundDays ?? 5);
               setUpDownRateHighThresh(params.upDownRateHighThresh ?? 1.5);
               setUpDownRateLowThresh(params.upDownRateLowThresh ?? 1.0);
+              setPullbackPctHigh(params.pullbackPctHigh ?? 0.4);
+              setPullbackPctMid(params.pullbackPctMid ?? 0.3);
+              setPullbackPctLow(params.pullbackPctLow ?? 0.2);
               setSellAtOpen(params.sellAtOpen ?? false);
               setTimeExitMaxDays(params.timeExitMaxDays ?? 5);
               setTimeExitMinReturn(params.timeExitMinReturn ?? 0.05);
@@ -665,6 +671,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setRangeBoundDays(p.rangeBoundDays ?? 5);
         setUpDownRateHighThresh(p.upDownRateHighThresh ?? 1.5);
         setUpDownRateLowThresh(p.upDownRateLowThresh ?? 1.0);
+        setPullbackPctHigh(p.pullbackPctHigh ?? 0.4);
+        setPullbackPctMid(p.pullbackPctMid ?? 0.3);
+        setPullbackPctLow(p.pullbackPctLow ?? 0.2);
         setSellAtOpen(p.sellAtOpen ?? false);
         setTimeExitMaxDays(p.timeExitMaxDays ?? 5);
         setTimeExitMinReturn(p.timeExitMinReturn ?? 0.05);
@@ -846,6 +855,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             rangeBoundDays,
             upDownRateHighThresh,
             upDownRateLowThresh,
+            pullbackPctHigh,
+            pullbackPctMid,
+            pullbackPctLow,
             sellAtOpen,
             timeExitMaxDays,
             timeExitMinReturn,
@@ -901,6 +913,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               rangeBoundDays,
               upDownRateHighThresh,
               upDownRateLowThresh,
+              pullbackPctHigh,
+              pullbackPctMid,
+              pullbackPctLow,
               sellAtOpen,
               timeExitMaxDays,
               timeExitMinReturn,
@@ -938,6 +953,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               rangeBoundDays,
               upDownRateHighThresh,
               upDownRateLowThresh,
+              pullbackPctHigh,
+              pullbackPctMid,
+              pullbackPctLow,
               sellAtOpen,
               timeExitMaxDays,
               timeExitMinReturn,
@@ -961,7 +979,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, upDownRateHighThresh, upDownRateLowThresh, sellAtOpen, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, buyThresholdsInput, sellThresholdsInput, filterStrongType]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, upDownRateHighThresh, upDownRateLowThresh, pullbackPctHigh, pullbackPctMid, pullbackPctLow, sellAtOpen, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, buyThresholdsInput, sellThresholdsInput, filterStrongType]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1246,12 +1264,24 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       <InputNumber size="small" min={1} max={30} step={1} value={rangeBoundDays} onChange={(v) => setRangeBoundDays(v ?? 5)} disabled={running} style={{ width: 50 }} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>涨跌比高:</span>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>涨比高:</span>
                       <InputNumber size="small" min={0.5} max={5} step={0.1} value={upDownRateHighThresh} onChange={(v) => setUpDownRateHighThresh(v ?? 1.5)} disabled={running} style={{ width: 55 }} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>涨跌比低:</span>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>涨比低:</span>
                       <InputNumber size="small" min={0.1} max={3} step={0.1} value={upDownRateLowThresh} onChange={(v) => setUpDownRateLowThresh(v ?? 1.0)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>回撤高:</span>
+                      <InputNumber size="small" min={0.05} max={1} step={0.05} value={pullbackPctHigh} onChange={(v) => setPullbackPctHigh(v ?? 0.4)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>回撤中:</span>
+                      <InputNumber size="small" min={0.05} max={1} step={0.05} value={pullbackPctMid} onChange={(v) => setPullbackPctMid(v ?? 0.3)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>回撤低:</span>
+                      <InputNumber size="small" min={0.05} max={1} step={0.05} value={pullbackPctLow} onChange={(v) => setPullbackPctLow(v ?? 0.2)} disabled={running} style={{ width: 55 }} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>次日开盘卖:</span>
@@ -1514,7 +1544,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                             回看{item.params?.strongLookbackStart || 10}-{item.params?.strongLookbackEnd || 5} | 
                             结构破坏{item.params?.structureBreakDays || 3}天 | 
                             横盘{item.params?.rangeBoundDays || 5}天 | 
-                            涨跌比高{item.params?.upDownRateHighThresh || 1.5} | 涨跌比低{item.params?.upDownRateLowThresh || 1.0} | 开盘卖{item.params?.sellAtOpen ? '是' : '否'} | 
+                            涨跌比高{item.params?.upDownRateHighThresh || 1.5} | 涨跌比低{item.params?.upDownRateLowThresh || 1.0} | 
+                            回撤高{(item.params?.pullbackPctHigh ?? 0.4) * 100}% | 回撤中{(item.params?.pullbackPctMid ?? 0.3) * 100}% | 回撤低{(item.params?.pullbackPctLow ?? 0.2) * 100}% | 开盘卖{item.params?.sellAtOpen ? '是' : '否'} | 
                             效率{item.params?.timeExitMaxDays || 5}天/{(item.params?.timeExitMinReturn || 0.05) * 100}% | 
                             忽略{(item.params?.profitIgnoreSignalPct || 0.10) * 100}% | 
                             RSI买[{(item.params?.buyThresholds ?? [35,40,45]).join(',')}] | 

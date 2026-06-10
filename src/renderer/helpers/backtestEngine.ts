@@ -512,6 +512,10 @@ export class OptimizedStrategyBacktest {
   // [新增] 涨跌比阈值配置（用于动态计算最大回撤阈值）
   private UP_DOWN_RATE_HIGH_THRESH = 1.5;  // ma5 > 该阈值，市场风险偏好高
   private UP_DOWN_RATE_LOW_THRESH = 1.0;   // ma5 < 该阈值，市场风险偏好低
+  // [新增] 深度回调阈值配置（根据市场风险偏好动态选择）
+  private PULLBACK_PCT_HIGH = 0.4;   // 风险偏好高时的最大回撤阈值
+  private PULLBACK_PCT_MID = 0.3;    // 风险偏好一般时的最大回撤阈值
+  private PULLBACK_PCT_LOW = 0.2;    // 风险偏好低时的最大回撤阈值
   // [新增] 卖出时机配置
   private SELL_AT_OPEN = false;            // true=次日开盘卖, false=当日收盘卖
   // [新增] 时间止盈参数
@@ -543,6 +547,9 @@ export class OptimizedStrategyBacktest {
       rangeBoundDays?: number;
       upDownRateHighThresh?: number;
       upDownRateLowThresh?: number;
+      pullbackPctHigh?: number;
+      pullbackPctMid?: number;
+      pullbackPctLow?: number;
       sellAtOpen?: boolean;
       timeExitMaxDays?: number;
       timeExitMinReturn?: number;
@@ -578,6 +585,9 @@ export class OptimizedStrategyBacktest {
     if (options?.rangeBoundDays !== undefined) this.RANGE_BOUND_DAYS = options.rangeBoundDays;
     if (options?.upDownRateHighThresh !== undefined) this.UP_DOWN_RATE_HIGH_THRESH = options.upDownRateHighThresh;
     if (options?.upDownRateLowThresh !== undefined) this.UP_DOWN_RATE_LOW_THRESH = options.upDownRateLowThresh;
+    if (options?.pullbackPctHigh !== undefined) this.PULLBACK_PCT_HIGH = options.pullbackPctHigh;
+    if (options?.pullbackPctMid !== undefined) this.PULLBACK_PCT_MID = options.pullbackPctMid;
+    if (options?.pullbackPctLow !== undefined) this.PULLBACK_PCT_LOW = options.pullbackPctLow;
     if (options?.sellAtOpen !== undefined) this.SELL_AT_OPEN = options.sellAtOpen;
     if (options?.timeExitMaxDays !== undefined) this.TIME_EXIT_MAX_DAYS = options.timeExitMaxDays;
     if (options?.timeExitMinReturn !== undefined) this.TIME_EXIT_MIN_RETURN = options.timeExitMinReturn;
@@ -603,6 +613,9 @@ export class OptimizedStrategyBacktest {
       RANGE_BOUND_DAYS: this.RANGE_BOUND_DAYS,
       UP_DOWN_RATE_HIGH_THRESH: this.UP_DOWN_RATE_HIGH_THRESH,
       UP_DOWN_RATE_LOW_THRESH: this.UP_DOWN_RATE_LOW_THRESH,
+      PULLBACK_PCT_HIGH: this.PULLBACK_PCT_HIGH,
+      PULLBACK_PCT_MID: this.PULLBACK_PCT_MID,
+      PULLBACK_PCT_LOW: this.PULLBACK_PCT_LOW,
       SELL_AT_OPEN: this.SELL_AT_OPEN,
       TIME_EXIT_MAX_DAYS: this.TIME_EXIT_MAX_DAYS,
       TIME_EXIT_MIN_RETURN: this.TIME_EXIT_MIN_RETURN,
@@ -738,11 +751,11 @@ export class OptimizedStrategyBacktest {
         console.log(`[OptBacktest] [${today}] getMaxPullbackPct 验证 — ma5=${ma5.toFixed(3)}, highThresh=${this.UP_DOWN_RATE_HIGH_THRESH}, lowThresh=${this.UP_DOWN_RATE_LOW_THRESH}`);
 
         // 2. ma5 > 阈值，市场风险偏好高
-        if (ma5 > this.UP_DOWN_RATE_HIGH_THRESH) result = 0.4;
+        if (ma5 > this.UP_DOWN_RATE_HIGH_THRESH) result = this.PULLBACK_PCT_HIGH;
         // 3. ma5 < 阈值，市场风险偏好低
-        else if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) result = 0.3;
+        else if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) result = this.PULLBACK_PCT_LOW;
         // 4. 其他情况，市场风险偏好一般
-        else result = 0.2;
+        else result = this.PULLBACK_PCT_MID;
       }
     } catch (e) {
       console.error(`[OptBacktest] [${today}] 获取涨跌比失败，使用默认回撤阈值:`, e);
