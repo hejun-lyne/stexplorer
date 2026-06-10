@@ -1167,6 +1167,8 @@ export class OptimizedStrategyBacktest {
       if (pullBackPct < minPullbackPct) {
         console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但较浅回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(minPullbackPct * 100).toFixed(0)}%，忽略买入`);
         continue;
+      } else {
+        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且回调满足 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(minPullbackPct * 100).toFixed(0)}%，可以买入`);
       }
 
       let failReason = '';
