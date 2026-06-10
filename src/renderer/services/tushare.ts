@@ -1072,11 +1072,11 @@ export async function BatchGetStrongStocksFromTushare(startDate: string, endDate
 }
 
 /**
- * 批量获取多个交易日的市场涨跌比数据
+ * 批量获取多个交易日的市场上涨占比数据
  * @param dates 交易日期数组 (YYYYMMDD)
  * @returns 按日期分组的市场情绪数据
  */
-export async function GetUpDownRateFromTushare(dates: string[]): Promise<Record<string, any>> {
+export async function GetUpRatioFromTushare(dates: string[]): Promise<Record<string, any>> {
   if (!dates || dates.length === 0) {
     return {};
   }

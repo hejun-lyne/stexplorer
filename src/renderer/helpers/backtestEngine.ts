@@ -342,7 +342,7 @@ export interface StrategyDataProvider {
   getAllBoardsBatch(dates: string[]): Promise<Record<string, Array<{ code: string; name: string; zf: number }>>>;
   getBoardStocksBatch(requests: Array<{ date: string; boardCode: string | null; boardName: string }>): Promise<Record<string, Array<{ secid: string; zf: number }>>>;
   // 获取指定日期的涨跌比
-  getUpDownRate(dates: string[]): Promise<number[]>;
+  getUpRatio(dates: string[]): Promise<number[]>;
   filterTradeDays(dates: string[]): Promise<string[]>;
 }
 
@@ -619,6 +619,8 @@ export class OptimizedStrategyBacktest {
     options?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean }
   ): Promise<StrategyBacktestResult> {
     this.cancelOptions = options;
+    // 需要对tradeDays过滤
+    this.tradeDays = await dataProvider.filterTradeDays(this.tradeDays);
     const totalDays = this.tradeDays.length;
     const dayPercentStep = totalDays > 0 ? 90 / totalDays : 0;
 
@@ -727,7 +729,7 @@ export class OptimizedStrategyBacktest {
 
     let result = 0.3;
     try {
-      const rates = await dataProvider.getUpDownRate(recentDates);
+      const rates = await dataProvider.getUpRatio(recentDates);
       console.log(`[OptBacktest] [${today}] getMaxPullbackPct 验证 — dates=${JSON.stringify(recentDates)}, rates=${JSON.stringify(rates)}`);
       if (!rates || rates.length === 0) {
         result = 0.3;
@@ -1122,7 +1124,7 @@ export class OptimizedStrategyBacktest {
         score: item.score,
         boardCode: item.boardCode,
         price: currentPrice,
-        reason: `${item.strategyType.toUpperCase()}观察期买入 M-Day=${mDayKline.date} T-Day=${item.tDayDate}`,
+        reason: `${item.strategyType.toUpperCase()}观察期买入 M-Day=${mDayKline.date} T-Day=${item.tDayDate}, 回调=${(pullBackPct * 100).toFixed(1)}%`,
         strongType: item.strongType,
         strategyType: item.strategyType,
         strategyParams: item.strategyParams,
@@ -1383,7 +1385,7 @@ export class OptimizedStrategyBacktest {
     const batchTasks: Array<{
       batchStart: number;
       batch: Stock.DetailItem[];
-      validItems: Array<{ stock: Stock.DetailItem; klines: Stock.KLineItem[]; batchIndex: number }>;
+      validItems: Array<{ stock: Stock.DetailItem; klines: Stock.KLineItem[]; batchIndex: number; pullBackPct?: number }>;
       klinesList: Stock.KLineItem[][];
     }> = [];
 
@@ -1400,7 +1402,7 @@ export class OptimizedStrategyBacktest {
       const klinesMap = await dataProvider.getKLines(batchSecids, today, this.KLINE_DAYS);
       const tKFetch1 = performance.now();
       console.log(`[PerfKLine] 批量IPC ${batchSecids.length}只: ${(tKFetch1-tKFetch0).toFixed(1)}ms`);
-      const validItems: Array<{ stock: Stock.DetailItem; klines: Stock.KLineItem[]; batchIndex: number }> = [];
+      const validItems: Array<{ stock: Stock.DetailItem; klines: Stock.KLineItem[]; batchIndex: number; pullBackPct?: number }> = [];
       const invalidResults: Array<{ pass: false; reason: string; secid: string }> = [];
 
       // [优化] 大数据量反序列化后，分批处理避免阻塞UI
@@ -1437,7 +1439,7 @@ export class OptimizedStrategyBacktest {
             zg: k.zg,
             zd: k.zd,
           }));
-          validItems.push({ stock, klines: liteKlines, batchIndex: i });
+          validItems.push({ stock, klines: liteKlines, batchIndex: i, pullBackPct });
         }
         // [优化] 每处理5只让出一次，避免106只同步循环阻塞UI
         if (i % 5 === 0) {
@@ -1620,6 +1622,7 @@ export class OptimizedStrategyBacktest {
       stock: Stock.DetailItem;
       klines: Stock.KLineItem[];
       screenResult: BatchBacktestAndScreenResult['screenResult'];
+      pullBackPct?: number;
     }> = [];
 
     for (let i = 0; i < batchTasks.length; i++) {
@@ -1632,12 +1635,12 @@ export class OptimizedStrategyBacktest {
           if (screenResult.reason === '最近3天无买入信号' &&
               !this.positions.has(stock.secid) &&
               !this.watchList.has(stock.secid)) {
-            itemsToCheck.push({ type: 'watch', stock, klines, screenResult });
+            itemsToCheck.push({ type: 'watch', stock, klines, screenResult, pullBackPct: b.validItems[j].pullBackPct });
           }
           continue;
         }
         // itemsToCheck.push({ type: 'candidate', stock, klines, screenResult });
-        itemsToCheck.push({ type: 'watch', stock, klines, screenResult }); // 也加入watchList
+        itemsToCheck.push({ type: 'watch', stock, klines, screenResult, pullBackPct: b.validItems[j].pullBackPct }); // 也加入watchList
       }
     }
 
@@ -1849,17 +1852,18 @@ export class OptimizedStrategyBacktest {
         console.log(`[OptBacktest] [${today}] ${stock.secid} 👀 加入观察列表 (评分${screenResult.score!.toFixed(1)})${watchParamsStr ? ' | ' + watchParamsStr : ''}`);
       } else {
         const currentPrice = klines[klines.length - 1].sp;
+        const pullBackStr = item.pullBackPct !== undefined ? `, 回调=${(item.pullBackPct * 100).toFixed(1)}%` : '';
         buyCandidates.push({
           secid: stock.secid,
           score: screenResult.score!,
           boardCode: stock.bk,
           price: currentPrice,
-          reason: screenResult.reason!,
+          reason: `${screenResult.reason!}${pullBackStr}`,
           strongType: screenResult.strongType,
           strategyType: screenResult.bestType!,
           strategyParams: screenResult.bestResult!,
         });
-        console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}${computed.boardRank >= 0 ? ` | 板块排名=${computed.boardRank + 1}` : ''}${computed.stockRank >= 0 ? ` | 个股排名=${computed.stockRank + 1}` : ''}`);
+        console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}${pullBackStr}${computed.boardRank >= 0 ? ` | 板块排名=${computed.boardRank + 1}` : ''}${computed.stockRank >= 0 ? ` | 个股排名=${computed.stockRank + 1}` : ''}`);
       }
     }
 

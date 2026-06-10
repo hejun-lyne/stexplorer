@@ -2325,6 +2325,7 @@ class TushareAPI:
                 "flat_count": 100,       # 平盘家数
                 "total_count": 4800,     # 总交易家数
                 "up_down_ratio": 2.13,   # 涨跌比 = up_count / down_count
+                "up_in_total": 0.5,     # 上涨比例 = up_count / (up_count + down_count)
                 "limit_up_count": 80,    # 涨停家数
                 "limit_down_count": 5,   # 跌停家数
                 "up_limit_ratio": 1.67,  # 涨跌停比 = limit_up_count / limit_down_count
@@ -2410,7 +2411,9 @@ class TushareAPI:
                 strong_type = "low"
             else:
                 strong_type = "neutral"
-
+            
+            # 6. 计算上涨占比
+            up_ratio = round(up_count / total_count, 2) if total_count > 0 else 999.0
             result = {
                 "date": target_date,
                 "up_count": up_count,
@@ -2418,6 +2421,7 @@ class TushareAPI:
                 "flat_count": flat_count,
                 "total_count": total_count,
                 "up_down_ratio": up_down_ratio,
+                "up_in_total": up_ratio,
                 "limit_up_count": limit_up_count,
                 "limit_down_count": limit_down_count,
                 "up_limit_ratio": limit_ratio,

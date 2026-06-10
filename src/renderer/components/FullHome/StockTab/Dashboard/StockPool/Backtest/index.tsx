@@ -279,18 +279,18 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
       }
     }
 
-    async getUpDownRate(dates: string[]): Promise<number[]> {
+    async getUpRatio(dates: string[]): Promise<number[]> {
       try {
         if (!dates || dates.length === 0) return [];
         console.log(`[DataProvider] 批量获取涨跌比: ${dates.length} 天`);
-        const result = await Services.Tushare.GetUpDownRateFromTushare(dates);
+        const result = await Services.Tushare.GetUpRatioFromTushare(dates);
         // 按输入日期顺序提取 up_down_ratio（Python 返回键为 YYYYMMDD）
         return dates.map((date) => {
           const ymd = date.replace(/-/g, '');
           // 兼容两种键格式：YYYYMMDD 和 YYYY-MM-DD
           const dayData = result[ymd] ?? result[date];
-          if (dayData && typeof dayData.up_down_ratio === 'number') {
-            return dayData.up_down_ratio;
+          if (dayData && typeof dayData.up_ratio === 'number') {
+            return dayData.up_ratio;
           }
           console.warn(`[DataProvider] 涨跌比缺失: date=${date}, ymd=${ymd}, keys=${Object.keys(result).slice(0, 10)}`);
           return 0;
