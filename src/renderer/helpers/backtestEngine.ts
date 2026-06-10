@@ -767,14 +767,40 @@ export class OptimizedStrategyBacktest {
       return cached;
     }
 
-    // 回撤比例过滤 = 20% - (上涨占比MA5 - 0.50) × 2
-    // # MA5=0.55 → 9%, MA5=0.50 → 8%, MA5=0.45 → 7%
+    // 阈值 = 0.20 - (MA5 - 0.50) × 0.60
+    // → 情绪强：17%（收紧，趋势市中只买强势股）
+    // → 情绪弱：23%（放宽，恐慌市中捡便宜做反弹）
+
+    const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
+    const result = this.PULLBACK_PCT - (riskPref - 0.5) * this.PULLBACK_PCT;
+
+    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
+    this.maxPullbackPctCache.set(today, result);
+    return result;
+  }
+
+  // 你原本想的：回撤大 = 趋势破坏 = 不能买
+  //          （这是趋势跟随逻辑，适用于美股等趋势市场）
+
+  // A股现实：回撤大 = 超跌 = 反弹在即 = 应该买
+  //        （这是均值回归逻辑，适用于A股等震荡市场）
+
+  private async getMinPullbackPct(today: string, dataProvider: StrategyDataProvider): Promise<number> {
+    // 先检查缓存
+    // const cached = this.maxPullbackPctCache.get(today);
+    // if (cached !== undefined) {
+    //   return cached;
+    // }
+
+    // 阈值 = 0.10 + (MA5 - 0.50) × 0.6
+    // → 情绪强：回撤>14%买入（放宽，强市中跌10%已算深调
+    // → 情绪弱：回撤>7%买入（收紧，弱市中跌6%就算弱势）
 
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
     const result = this.PULLBACK_PCT + (riskPref - 0.5) * 0.6;
 
-    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
-    this.maxPullbackPctCache.set(today, result);
+    // console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
+    // this.maxPullbackPctCache.set(today, result);
     return result;
   }
 
@@ -1131,9 +1157,15 @@ export class OptimizedStrategyBacktest {
       const lowRange = Math.min(...rangeKlines.map(k => k.zd));
       const pullBackPct = (highRange - lowRange) / highRange;
 
-      const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
-      if (pullBackPct > maxPullbackPct) {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
+      // const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
+      // if (pullBackPct > maxPullbackPct) {
+      //   console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
+      //   continue;
+      // }
+
+      const minPullbackPct = await this.getMinPullbackPct(today, dataProvider);
+      if (pullBackPct < minPullbackPct) {
+        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但较浅回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(minPullbackPct * 100).toFixed(0)}%，忽略买入`);
         continue;
       }
 
