@@ -341,7 +341,8 @@ export interface StrategyDataProvider {
   // [新增] 批量接口
   getAllBoardsBatch(dates: string[]): Promise<Record<string, Array<{ code: string; name: string; zf: number }>>>;
   getBoardStocksBatch(requests: Array<{ date: string; boardCode: string | null; boardName: string }>): Promise<Record<string, Array<{ secid: string; zf: number }>>>;
-  
+  // 获取指定日期的涨跌比
+  getUpDownRate(dates: string[]): Promise<number[]>;
   filterTradeDays(dates: string[]): Promise<string[]>;
 }
 
@@ -506,8 +507,11 @@ export class OptimizedStrategyBacktest {
   // [新增] 时间止损参数
   private STRUCTURE_BREAK_DAYS = 3;   // 结构破坏：持仓天数阈值
   private RANGE_BOUND_DAYS = 5;       // 横盘震荡：持仓天数阈值
-  // [新增] 深度回调排除阈值
-  private MAX_PULLBACK_PCT = 0.12;    // 从strongStockDay到当天从高点到低点回调超过该比例则排除
+  // [新增] 涨跌比阈值配置（用于动态计算最大回撤阈值）
+  private UP_DOWN_RATE_HIGH_THRESH = 1.5;  // ma5 > 该阈值，市场风险偏好高
+  private UP_DOWN_RATE_LOW_THRESH = 1.0;   // ma5 < 该阈值，市场风险偏好低
+  // [新增] 卖出时机配置
+  private SELL_AT_OPEN = false;            // true=次日开盘卖, false=当日收盘卖
   // [新增] 时间止盈参数
   private TIME_EXIT_MAX_DAYS = 5;     // 最大持有天数，资金效率止盈
   private TIME_EXIT_MIN_RETURN = 0.05; // 收益率低于该值触发资金效率止盈
@@ -535,7 +539,9 @@ export class OptimizedStrategyBacktest {
       strategyMode?: 'macd' | 'rsi' | 'both';
       structureBreakDays?: number;
       rangeBoundDays?: number;
-      maxPullbackPct?: number;
+      upDownRateHighThresh?: number;
+      upDownRateLowThresh?: number;
+      sellAtOpen?: boolean;
       timeExitMaxDays?: number;
       timeExitMinReturn?: number;
       profitIgnoreSignalPct?: number;
@@ -568,7 +574,9 @@ export class OptimizedStrategyBacktest {
     if (options?.strategyMode !== undefined) this.strategyMode = options.strategyMode;
     if (options?.structureBreakDays !== undefined) this.STRUCTURE_BREAK_DAYS = options.structureBreakDays;
     if (options?.rangeBoundDays !== undefined) this.RANGE_BOUND_DAYS = options.rangeBoundDays;
-    if (options?.maxPullbackPct !== undefined) this.MAX_PULLBACK_PCT = options.maxPullbackPct;
+    if (options?.upDownRateHighThresh !== undefined) this.UP_DOWN_RATE_HIGH_THRESH = options.upDownRateHighThresh;
+    if (options?.upDownRateLowThresh !== undefined) this.UP_DOWN_RATE_LOW_THRESH = options.upDownRateLowThresh;
+    if (options?.sellAtOpen !== undefined) this.SELL_AT_OPEN = options.sellAtOpen;
     if (options?.timeExitMaxDays !== undefined) this.TIME_EXIT_MAX_DAYS = options.timeExitMaxDays;
     if (options?.timeExitMinReturn !== undefined) this.TIME_EXIT_MIN_RETURN = options.timeExitMinReturn;
     if (options?.profitIgnoreSignalPct !== undefined) this.PROFIT_IGNORE_SIGNAL_PCT = options.profitIgnoreSignalPct;
@@ -591,7 +599,9 @@ export class OptimizedStrategyBacktest {
       STRATEGY_MODE: this.strategyMode,
       STRUCTURE_BREAK_DAYS: this.STRUCTURE_BREAK_DAYS,
       RANGE_BOUND_DAYS: this.RANGE_BOUND_DAYS,
-      MAX_PULLBACK_PCT: this.MAX_PULLBACK_PCT,
+      UP_DOWN_RATE_HIGH_THRESH: this.UP_DOWN_RATE_HIGH_THRESH,
+      UP_DOWN_RATE_LOW_THRESH: this.UP_DOWN_RATE_LOW_THRESH,
+      SELL_AT_OPEN: this.SELL_AT_OPEN,
       TIME_EXIT_MAX_DAYS: this.TIME_EXIT_MAX_DAYS,
       TIME_EXIT_MIN_RETURN: this.TIME_EXIT_MIN_RETURN,
       PROFIT_IGNORE_SIGNAL_PCT: this.PROFIT_IGNORE_SIGNAL_PCT,
@@ -694,6 +704,32 @@ export class OptimizedStrategyBacktest {
     onProgress?.('回测完成！', 100);
     console.log(`[OptBacktest] ====== 回测结束 ======\n`);
     return result;
+  }
+
+  private async getMaxPullbackPct(today: string, dataProvider: StrategyDataProvider): Promise<number> {
+    // 1. 获取最近5个交易日的涨跌比
+    const todayIndex = this.tradeDays.indexOf(today);
+    if (todayIndex < 0) return 0.3;
+
+    const startIndex = Math.max(0, todayIndex - 4);
+    const recentDates = this.tradeDays.slice(startIndex, todayIndex + 1);
+
+    try {
+      const rates = await dataProvider.getUpDownRate(recentDates);
+      if (!rates || rates.length === 0) return 0.3;
+
+      const ma5 = rates.reduce((sum, r) => sum + r, 0) / rates.length;
+
+      // 2. ma5 > 阈值，市场风险偏好高
+      if (ma5 > this.UP_DOWN_RATE_HIGH_THRESH) return 0.4;
+      // 3. ma5 < 阈值，市场风险偏好低
+      if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) return 0.2;
+      // 4. 其他情况，市场风险偏好一般
+      return 0.3;
+    } catch (e) {
+      console.error(`[OptBacktest] [${today}] 获取涨跌比失败，使用默认回撤阈值:`, e);
+      return 0.3;
+    }
   }
 
   // ===== 阶段1: 执行待处理订单 =====
@@ -930,6 +966,22 @@ export class OptimizedStrategyBacktest {
     console.log(`[OptBacktest] [${date}] ${secid} 已从持仓移除`);
   }
 
+  private queueOrExecuteSell(secid: string, date: string, price: number, quantity: number, reason: string) {
+    if (this.SELL_AT_OPEN) {
+      // 次日开盘卖：加入待处理订单队列
+      this.pendingOrders.push({
+        secid,
+        type: 'sell',
+        reason,
+        signalDate: date,
+      });
+      console.log(`[OptBacktest] [${date}] ${secid} 卖出已排队: ${reason}（次日开盘执行）`);
+    } else {
+      // 当日收盘卖：立即执行
+      this.executeSell(secid, date, price, quantity, reason);
+    }
+  }
+
   private async checkWatchList(
     today: string,
     dataProvider: StrategyDataProvider
@@ -996,8 +1048,9 @@ export class OptimizedStrategyBacktest {
       const lowRange = Math.min(...rangeKlines.map(k => k.zd));
       const pullBackPct = (highRange - lowRange) / highRange;
 
-      if (pullBackPct > this.MAX_PULLBACK_PCT) {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察踢出: 观察期间深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天)`);
+      const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
+      if (pullBackPct > maxPullbackPct) {
+        console.log(`[OptBacktest] [${today}] ${secid} 观察踢出: 观察期间深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%`);
         this.watchList.delete(secid);
         continue;
       }
@@ -1170,7 +1223,7 @@ export class OptimizedStrategyBacktest {
       const inCostZone = Math.abs(currentPrice - position.buyPrice) <= buyEntityRange;
       if (daysHeld >= this.RANGE_BOUND_DAYS && inCostZone) {
         console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(横盘): 持仓${daysHeld}天, 仍在成本区±3%(${currentPrice.toFixed(2)} vs ${position.buyPrice.toFixed(2)})`);
-        this.executeSell(secid, today, currentPrice, position.quantity, `时间止损-横盘(${daysHeld}天)`);
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `时间止损-横盘(${daysHeld}天)`);
         continue;
       }
 
@@ -1183,14 +1236,14 @@ export class OptimizedStrategyBacktest {
       // 2. 固定止损（硬性风控，最先检查）
       if (currentPrice < position.buyPrice * this.STOP_LOSS_INIT_PCT) {
         console.log(`[OptBacktest] [${today}] ${secid} 🔴 固定止损: 当前${currentPrice.toFixed(2)} < 买入价${position.buyPrice.toFixed(2)}`);
-        this.executeSell(secid, today, currentPrice, position.quantity, '固定止损');
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '固定止损');
         continue;
       }
 
       // 3. 移动止损（保护利润）
       if (currentPrice < position.stopLossPrice) {
         console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
-        this.executeSell(secid, today, currentPrice, position.quantity, '移动止损');
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '移动止损');
         continue;
       }
 
@@ -1199,7 +1252,7 @@ export class OptimizedStrategyBacktest {
         const returnPct = (currentPrice - position.buyPrice) / position.buyPrice;
         if (returnPct < this.TIME_EXIT_MIN_RETURN) {
           console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止盈: 持仓${daysHeld}天, 收益率${(returnPct*100).toFixed(2)}% < ${(this.TIME_EXIT_MIN_RETURN*100).toFixed(0)}%，资金效率止盈`);
-          this.executeSell(secid, today, currentPrice, position.quantity, `时间止盈(持有${daysHeld}天收益<${(this.TIME_EXIT_MIN_RETURN*100).toFixed(0)}%)`);
+          this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `时间止盈(持有${daysHeld}天收益<${(this.TIME_EXIT_MIN_RETURN*100).toFixed(0)}%)`);
           continue;
         }
       }
@@ -1215,7 +1268,7 @@ export class OptimizedStrategyBacktest {
       // 4. 固定止盈（达到目标收益率）
       if (currentPrice >= position.takeProfitPrice) {
         console.log(`[OptBacktest] [${today}] ${secid} 🟢 固定止盈: 当前${currentPrice.toFixed(2)} >= 目标${position.takeProfitPrice.toFixed(2)}`);
-        this.executeSell(secid, today, currentPrice, position.quantity, '固定止盈');
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '固定止盈');
         continue;
       }
 
@@ -1230,7 +1283,7 @@ export class OptimizedStrategyBacktest {
         sellReason = 'RSI超买';
       }
       if (hasSellSignal) {
-        this.executeSell(secid, today, currentPrice, position.quantity, sellReason);
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, sellReason);
         continue;
       }
 
@@ -1349,8 +1402,9 @@ export class OptimizedStrategyBacktest {
           const pullBackPct = (highRange - lowRange) / highRange;
           
           // 如果从 strongStockDay 到当天，从高点到低点的回调超过阈值，说明深度回调，排除
-          if (pullBackPct > this.MAX_PULLBACK_PCT) {
-            console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}% (${rangeKlines.length}天)`);
+          const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
+          if (pullBackPct > maxPullbackPct) {
+            console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%`);
             continue;
           }
           // [优化] 只保留策略计算需要的字段，减少内存占用和后续传输

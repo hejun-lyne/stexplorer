@@ -2301,6 +2301,137 @@ class TushareAPI:
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+    # ------------------ 市场情绪指标（涨跌比）------------------
+
+    @staticmethod
+    def get_up_down_ratio(date: Optional[str] = None) -> Dict[str, Any]:
+        """获取特定日期的市场涨跌比（市场情绪/风险偏好指标）
+
+        通过全市场日线数据统计上涨/下跌/平盘家数，并计算涨跌停家数、成交额等。
+        可用于判断当日市场整体风险偏好：涨跌比 > 2 为高风险偏好，< 0.5 为低风险偏好。
+
+        Args:
+            date: 交易日期(YYYYMMDD)，不传则默认最近交易日
+
+        Returns:
+            {
+                "date": "20240101",
+                "up_count": 3200,        # 上涨家数
+                "down_count": 1500,      # 下跌家数
+                "flat_count": 100,       # 平盘家数
+                "total_count": 4800,     # 总交易家数
+                "up_down_ratio": 2.13,   # 涨跌比 = up_count / down_count
+                "limit_up_count": 80,    # 涨停家数
+                "limit_down_count": 5,   # 跌停家数
+                "up_limit_ratio": 1.67,  # 涨跌停比 = limit_up_count / limit_down_count
+                "total_amount": 123456789000.0,  # 全市场成交额（元）
+                "avg_zdf": 0.85,         # 平均涨跌幅%
+                "median_zdf": 0.62,      # 涨跌幅中位数%
+                "up_5pct_count": 450,    # 涨幅>5%家数
+                "down_5pct_count": 120,  # 跌幅>5%家数
+                "strong_type": "high"    # 情绪判定: high(强)/neutral(中性)/low(弱)
+            }
+        """
+        try:
+            pro = get_pro()
+            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+
+            # 1. 获取全市场日线
+            daily_df = safe_api_call(pro.daily, trade_date=target_date)
+            if isinstance(daily_df, dict) and daily_df.get("error"):
+                return daily_df
+            if daily_df is None or daily_df.empty:
+                return {"error": f"No daily data available for date {target_date}"}
+
+            # 2. 统计涨跌分布
+            pct_chg = daily_df['pct_chg'].astype(float)
+            up_count = int((pct_chg > 0).sum())
+            down_count = int((pct_chg < 0).sum())
+            flat_count = int((pct_chg == 0).sum())
+            total_count = len(pct_chg)
+
+            up_5pct = int((pct_chg >= 5).sum())
+            down_5pct = int((pct_chg <= -5).sum())
+            up_7pct = int((pct_chg >= 7).sum())
+            down_7pct = int((pct_chg <= -7).sum())
+
+            avg_zdf = round(pct_chg.mean(), 2)
+            median_zdf = round(pct_chg.median(), 2)
+
+            # 3. 全市场成交额（daily 接口 amount 单位：千元 → 元）
+            total_amount = round(daily_df['amount'].astype(float).sum() * 1000, 2)
+
+            # 4. 获取涨跌停数据
+            limit_up_count = 0
+            limit_down_count = 0
+            try:
+                limit_df = safe_api_call(pro.limit_list, trade_date=target_date)
+                if isinstance(limit_df, pd.DataFrame) and not limit_df.empty:
+                    limit_up_count = int((limit_df['limit'] == 'U').sum())
+                    limit_down_count = int((limit_df['limit'] == 'D').sum())
+            except Exception:
+                pass
+
+            # 5. 计算情绪判定
+            up_down_ratio = round(up_count / down_count, 2) if down_count > 0 else 999.0
+            limit_ratio = round(limit_up_count / limit_down_count, 2) if limit_down_count > 0 else 999.0
+
+            if up_down_ratio >= 2 and limit_up_count >= 50:
+                strong_type = "high"
+            elif up_down_ratio <= 0.5 or limit_down_count >= 30:
+                strong_type = "low"
+            else:
+                strong_type = "neutral"
+
+            return {
+                "date": target_date,
+                "up_count": up_count,
+                "down_count": down_count,
+                "flat_count": flat_count,
+                "total_count": total_count,
+                "up_down_ratio": up_down_ratio,
+                "limit_up_count": limit_up_count,
+                "limit_down_count": limit_down_count,
+                "up_limit_ratio": limit_ratio,
+                "total_amount": total_amount,
+                "avg_zdf": avg_zdf,
+                "median_zdf": median_zdf,
+                "up_5pct_count": up_5pct,
+                "down_5pct_count": down_5pct,
+                "up_7pct_count": up_7pct,
+                "down_7pct_count": down_7pct,
+                "strong_type": strong_type,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def get_up_down_ratio_batch(dates: List[str]) -> Dict[str, Any]:
+        """批量获取多个交易日的市场涨跌比数据
+
+        Args:
+            dates: 交易日期数组 (YYYYMMDD)
+
+        Returns:
+            {
+                "20240101": { up_count, down_count, ... },
+                "20240102": { up_count, down_count, ... },
+                ...
+            }
+        """
+        result = {}
+        for date in dates:
+            try:
+                data = TushareAPI.get_up_down_ratio(date=date)
+                if isinstance(data, dict) and data.get("error"):
+                    result[date] = {"error": data["error"]}
+                else:
+                    result[date] = data
+            except Exception as e:
+                result[date] = {"error": str(e)}
+        return result
+
     # ------------------ 涨跌停数据 ------------------
 
     @staticmethod

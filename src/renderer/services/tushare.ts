@@ -1070,6 +1070,31 @@ export async function BatchGetStrongStocksFromTushare(startDate: string, endDate
     return {};
   }
 }
+
+/**
+ * 批量获取多个交易日的市场涨跌比数据
+ * @param dates 交易日期数组 (YYYYMMDD)
+ * @returns 按日期分组的市场情绪数据
+ */
+export async function GetUpDownRateFromTushare(dates: string[]): Promise<Record<string, any>> {
+  if (!dates || dates.length === 0) {
+    return {};
+  }
+
+  try {
+    const result = await callTushare('get_up_down_ratio_batch', { dates });
+
+    if (result.error || typeof result !== 'object') {
+      console.error('批量获取涨跌比数据失败:', result.error || 'Invalid response');
+      return {};
+    }
+
+    return result;
+  } catch (error) {
+    logError(error, 'GetUpDownRateFromTushare', '批量获取涨跌比数据失败');
+    return {};
+  }
+}
 // ==================== 综合查询 ====================
 
 export async function FromTushare(secid: string): Promise<any> {
