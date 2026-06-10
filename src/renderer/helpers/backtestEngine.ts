@@ -772,7 +772,7 @@ export class OptimizedStrategyBacktest {
     // → 情绪弱：23%（放宽，恐慌市中捡便宜做反弹）
 
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    const result = this.PULLBACK_PCT - (riskPref - 0.5) * 0.6;
+    const result = this.PULLBACK_PCT + (riskPref - 0.5) * 0.6;
 
     console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
     this.maxPullbackPctCache.set(today, result);
