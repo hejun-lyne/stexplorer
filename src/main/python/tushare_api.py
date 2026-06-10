@@ -733,15 +733,28 @@ class TushareAPI:
             last_date = _parse_date_str(last_date_str)
             if not last_date:
                 return False
+            # 检查截止日期是否满足
             if not end_date_std:
                 # 未指定 end_date：检查是否包含最新交易日
                 expected_last_str = _get_expected_last_trade_date(period)
                 expected_last = _parse_date_str(expected_last_str)
-                return expected_last is not None and last_date >= expected_last
+                if expected_last is None or last_date < expected_last:
+                    return False
             else:
                 # 指定了 end_date：检查缓存是否覆盖到 end_date
                 end_date_dt = _parse_date_str(end_date_std)
-                return end_date_dt is not None and last_date >= end_date_dt
+                if end_date_dt is None or last_date < end_date_dt:
+                    return False
+            # 检查 limit 是否满足：按 end_date 裁剪后数据量需 >= limit
+            if limit > 0:
+                data = cached_data[:]
+                if end_date_std:
+                    end_date_dt = _parse_date_str(end_date_std)
+                    if end_date_dt:
+                        data = [k for k in data if _parse_date_str(k.get('date', '')) <= end_date_dt]
+                if len(data) < limit:
+                    return False
+            return True
 
         def _slice_from_cache(cached_data: List[Dict]) -> List[Dict]:
             """从缓存数据中按 end_date 和 limit 裁剪"""
