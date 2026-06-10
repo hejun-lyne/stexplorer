@@ -772,7 +772,7 @@ export class OptimizedStrategyBacktest {
     // → 情绪弱：23%（放宽，恐慌市中捡便宜做反弹）
 
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    const result = this.PULLBACK_PCT - (riskPref - 0.5) * this.PULLBACK_PCT;
+    const result = this.PULLBACK_PCT - (riskPref - 0.5) * 0.6;
 
     console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
     this.maxPullbackPctCache.set(today, result);
@@ -1157,19 +1157,21 @@ export class OptimizedStrategyBacktest {
       const lowRange = Math.min(...rangeKlines.map(k => k.zd));
       const pullBackPct = (highRange - lowRange) / highRange;
 
-      // const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
-      // if (pullBackPct > maxPullbackPct) {
-      //   console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
-      //   continue;
-      // }
-
-      const minPullbackPct = await this.getMinPullbackPct(today, dataProvider);
-      if (pullBackPct < minPullbackPct) {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但较浅回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(minPullbackPct * 100).toFixed(0)}%，忽略买入`);
+      const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
+      if (pullBackPct > maxPullbackPct) {
+        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
         continue;
       } else {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且回调满足 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(minPullbackPct * 100).toFixed(0)}%，可以买入`);
+        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且浅度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，可以买入`);
       }
+
+      // const minPullbackPct = await this.getMinPullbackPct(today, dataProvider);
+      // if (pullBackPct < minPullbackPct) {
+      //   console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但较浅回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(minPullbackPct * 100).toFixed(0)}%，忽略买入`);
+      //   continue;
+      // } else {
+      //   console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且回调满足 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(minPullbackPct * 100).toFixed(0)}%，可以买入`);
+      // }
 
       let failReason = '';
       if (mDayIndex < lastIndex) {
