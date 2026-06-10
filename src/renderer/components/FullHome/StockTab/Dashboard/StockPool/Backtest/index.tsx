@@ -287,10 +287,12 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
         // 按输入日期顺序提取 up_down_ratio（Python 返回键为 YYYYMMDD）
         return dates.map((date) => {
           const ymd = date.replace(/-/g, '');
-          const dayData = result[ymd];
+          // 兼容两种键格式：YYYYMMDD 和 YYYY-MM-DD
+          const dayData = result[ymd] ?? result[date];
           if (dayData && typeof dayData.up_down_ratio === 'number') {
             return dayData.up_down_ratio;
           }
+          console.warn(`[DataProvider] 涨跌比缺失: date=${date}, ymd=${ymd}, keys=${Object.keys(result).slice(0, 10)}`);
           return 0;
         });
       } catch (e) {

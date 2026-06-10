@@ -381,6 +381,8 @@ export class OptimizedStrategyBacktest {
   // [新增] 请求锁：同一 key 的并发查询复用同一个 Promise，避免重复 IPC
   private boardRequestLock = new Map<string, Promise<Array<{ code: string; name: string; zf: number }> | null>>();
   private boardStocksRequestLock = new Map<string, Promise<Array<{ secid: string; zf: number }> | null>>();
+  // [新增] 每日最大回撤阈值缓存，避免同一天重复计算涨跌比ma5
+  private maxPullbackPctCache: Map<string, number> = new Map();
 
     /** [优化] 带请求锁的全市场板块查询 */
   private async getAllBoardsCached(
@@ -707,29 +709,47 @@ export class OptimizedStrategyBacktest {
   }
 
   private async getMaxPullbackPct(today: string, dataProvider: StrategyDataProvider): Promise<number> {
+    // 先检查缓存
+    const cached = this.maxPullbackPctCache.get(today);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     // 1. 获取最近5个交易日的涨跌比
     const todayIndex = this.tradeDays.indexOf(today);
-    if (todayIndex < 0) return 0.3;
+    if (todayIndex < 0) {
+      this.maxPullbackPctCache.set(today, 0.3);
+      return 0.3;
+    }
 
     const startIndex = Math.max(0, todayIndex - 4);
     const recentDates = this.tradeDays.slice(startIndex, todayIndex + 1);
 
+    let result = 0.3;
     try {
       const rates = await dataProvider.getUpDownRate(recentDates);
-      if (!rates || rates.length === 0) return 0.3;
+      console.log(`[OptBacktest] [${today}] getMaxPullbackPct 验证 — dates=${JSON.stringify(recentDates)}, rates=${JSON.stringify(rates)}`);
+      if (!rates || rates.length === 0) {
+        result = 0.3;
+      } else {
+        const ma5 = rates.reduce((sum, r) => sum + r, 0) / rates.length;
+        console.log(`[OptBacktest] [${today}] getMaxPullbackPct 验证 — ma5=${ma5.toFixed(3)}, highThresh=${this.UP_DOWN_RATE_HIGH_THRESH}, lowThresh=${this.UP_DOWN_RATE_LOW_THRESH}`);
 
-      const ma5 = rates.reduce((sum, r) => sum + r, 0) / rates.length;
-
-      // 2. ma5 > 阈值，市场风险偏好高
-      if (ma5 > this.UP_DOWN_RATE_HIGH_THRESH) return 0.4;
-      // 3. ma5 < 阈值，市场风险偏好低
-      if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) return 0.2;
-      // 4. 其他情况，市场风险偏好一般
-      return 0.3;
+        // 2. ma5 > 阈值，市场风险偏好高
+        if (ma5 > this.UP_DOWN_RATE_HIGH_THRESH) result = 0.4;
+        // 3. ma5 < 阈值，市场风险偏好低
+        else if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) result = 0.3;
+        // 4. 其他情况，市场风险偏好一般
+        else result = 0.2;
+      }
     } catch (e) {
       console.error(`[OptBacktest] [${today}] 获取涨跌比失败，使用默认回撤阈值:`, e);
-      return 0.3;
+      result = 0.3;
     }
+    console.log(`[OptBacktest] [${today}] getMaxPullbackPct 验证 — result=${result}`);
+
+    this.maxPullbackPctCache.set(today, result);
+    return result;
   }
 
   // ===== 阶段1: 执行待处理订单 =====
@@ -1041,20 +1061,6 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
-      // [新增] 观察期间深度回调检查：从强势参考日到当天，若高点到低点的回调超过阈值则踢出
-      const strongStockIndex = klines.findIndex(k => k.date >= item.strongStockDay);
-      const rangeKlines = strongStockIndex >= 0 ? klines.slice(strongStockIndex) : klines;
-      const highRange = Math.max(...rangeKlines.map(k => k.zg));
-      const lowRange = Math.min(...rangeKlines.map(k => k.zd));
-      const pullBackPct = (highRange - lowRange) / highRange;
-
-      const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
-      if (pullBackPct > maxPullbackPct) {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察踢出: 观察期间深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%`);
-        this.watchList.delete(secid);
-        continue;
-      }
-
       const daysInWatch = this.getTradeDaysDiff(item.addedDate, today);
 
       let mDayIndex = -1;
@@ -1071,6 +1077,19 @@ export class OptimizedStrategyBacktest {
 
       const lastIndex = klines.length - 1;
       const mDayKline = klines[mDayIndex];
+
+      // [新增] 观察期间深度回调检查：出现买入信号后，从强势参考日到当天若高点到低点的回调超过阈值则忽略本次买入
+      const strongStockIndex = klines.findIndex(k => k.date >= item.strongStockDay);
+      const rangeKlines = strongStockIndex >= 0 ? klines.slice(strongStockIndex) : klines;
+      const highRange = Math.max(...rangeKlines.map(k => k.zg));
+      const lowRange = Math.min(...rangeKlines.map(k => k.zd));
+      const pullBackPct = (highRange - lowRange) / highRange;
+
+      const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
+      if (pullBackPct > maxPullbackPct) {
+        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
+        continue;
+      }
 
       let failReason = '';
       if (mDayIndex < lastIndex) {
@@ -1402,11 +1421,14 @@ export class OptimizedStrategyBacktest {
           const pullBackPct = (highRange - lowRange) / highRange;
           
           // 如果从 strongStockDay 到当天，从高点到低点的回调超过阈值，说明深度回调，排除
-          const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
-          if (pullBackPct > maxPullbackPct) {
-            console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%`);
-            continue;
+          if (false) { // 应该根据买入当天进行过滤
+            const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
+            if (pullBackPct > maxPullbackPct) {
+              console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%`);
+              continue;
+            }
           }
+          
           // [优化] 只保留策略计算需要的字段，减少内存占用和后续传输
           const liteKlines = klines.map(k => ({
             date: k.date,

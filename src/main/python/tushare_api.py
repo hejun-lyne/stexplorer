@@ -2311,6 +2311,9 @@ class TushareAPI:
         通过全市场日线数据统计上涨/下跌/平盘家数，并计算涨跌停家数、成交额等。
         可用于判断当日市场整体风险偏好：涨跌比 > 2 为高风险偏好，< 0.5 为低风险偏好。
 
+        支持磁盘缓存：所有日期的涨跌比数据合并缓存到一个文件（up_down_ratio_map.json），
+        历史日期长期有效，当天数据缓存 1 小时。查询时优先命中缓存，未命中则请求后补充写入。
+
         Args:
             date: 交易日期(YYYYMMDD)，不传则默认最近交易日
 
@@ -2336,6 +2339,30 @@ class TushareAPI:
         try:
             pro = get_pro()
             target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+            today_str = datetime.now().strftime('%Y%m%d')
+            cache_key = "up_down_ratio_map"
+
+            # 读取统一缓存文件（历史日期长期有效，用大 max_age）
+            cached = read_cache(cache_key, max_age_hours=8760)
+            if not isinstance(cached, dict):
+                cached = {}
+
+            # 命中缓存检查
+            if target_date in cached:
+                # 历史日期直接命中；当天数据检查 1 小时时效
+                if target_date != today_str:
+                    print(f"[涨跌比缓存命中] {target_date}")
+                    return cached[target_date]
+                # 当天数据：检查文件修改时间是否超过 1 小时
+                path = _cache_path(cache_key)
+                if os.path.exists(path):
+                    mtime = os.path.getmtime(path)
+                    age_hours = (datetime.now().timestamp() - mtime) / 3600
+                    if age_hours <= 1:
+                        print(f"[涨跌比缓存命中] {target_date}")
+                        return cached[target_date]
+                # 当天缓存过期，移除后重新请求
+                cached.pop(target_date, None)
 
             # 1. 获取全市场日线
             daily_df = safe_api_call(pro.daily, trade_date=target_date)
@@ -2384,7 +2411,7 @@ class TushareAPI:
             else:
                 strong_type = "neutral"
 
-            return {
+            result = {
                 "date": target_date,
                 "up_count": up_count,
                 "down_count": down_count,
@@ -2403,6 +2430,12 @@ class TushareAPI:
                 "down_7pct_count": down_7pct,
                 "strong_type": strong_type,
             }
+
+            # 补充到统一缓存文件并写入
+            cached[target_date] = result
+            write_cache(cache_key, cached)
+            print(f"[涨跌比缓存更新] {target_date}，当前共 {len(cached)} 个日期")
+            return result
         except Exception as e:
             return {"error": str(e)}
 
@@ -2411,7 +2444,7 @@ class TushareAPI:
         """批量获取多个交易日的市场涨跌比数据
 
         Args:
-            dates: 交易日期数组 (YYYYMMDD)
+            dates: 交易日期数组 (YYYYMMDD 或 YYYY-MM-DD)
 
         Returns:
             {
@@ -2424,12 +2457,15 @@ class TushareAPI:
         for date in dates:
             try:
                 data = TushareAPI.get_up_down_ratio(date=date)
+                # 统一键为 YYYYMMDD
+                key = date.replace("-", "")
                 if isinstance(data, dict) and data.get("error"):
-                    result[date] = {"error": data["error"]}
+                    result[key] = {"error": data["error"]}
                 else:
-                    result[date] = data
+                    result[key] = data
             except Exception as e:
-                result[date] = {"error": str(e)}
+                key = date.replace("-", "")
+                result[key] = {"error": str(e)}
         return result
 
     # ------------------ 涨跌停数据 ------------------
