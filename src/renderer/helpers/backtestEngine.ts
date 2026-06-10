@@ -384,7 +384,7 @@ export class OptimizedStrategyBacktest {
   // [新增] 每日最大回撤阈值缓存，避免同一天重复计算涨跌比ma5
   private maxPullbackPctCache: Map<string, number> = new Map();
   // [新增] 每日市场风险偏好缓存（high/mid/low），供止损参数动态选择使用
-  private dailyRiskPreference: Map<string, 'high' | 'mid' | 'low'> = new Map();
+  private dailyRiskPreference: Map<string, {prefer: string, upRatioMA5: number}> = new Map();
 
     /** [优化] 带请求锁的全市场板块查询 */
   private async getAllBoardsCached(
@@ -741,17 +741,18 @@ export class OptimizedStrategyBacktest {
     return result;
   }
 
-  private async getRiskPreference(today: string, dataProvider: StrategyDataProvider): Promise<'high' | 'mid' | 'low'> {
+  private async getRiskPreference(today: string, dataProvider: StrategyDataProvider): Promise<{prefer: string, upRatioMA5: number}> {
     // 先检查缓存
     const cached = this.dailyRiskPreference.get(today);
     if (cached) {
       return cached;
     }
 
+    const defaultValue = {prefer: 'mid', upRatioMA5: 0.5};
     const todayIndex = this.tradeDays.indexOf(today);
     if (todayIndex < 0) {
-      this.dailyRiskPreference.set(today, 'mid');
-      return 'mid';
+      this.dailyRiskPreference.set(today, defaultValue);
+      return defaultValue;
     }
 
     const startIndex = Math.max(0, todayIndex - 4);
@@ -767,14 +768,17 @@ export class OptimizedStrategyBacktest {
         if (ma5 > this.UP_DOWN_RATE_HIGH_THRESH) result = 'high';
         else if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) result = 'low';
         else result = 'mid';
+        defaultValue.upRatioMA5 = ma5;
       }
     } catch (e) {
       console.error(`[OptBacktest] [${today}] 获取涨跌比失败，使用默认风险偏好:`, e);
       result = 'mid';
     }
+    defaultValue.prefer = result;
+    this.dailyRiskPreference.set(today, defaultValue);
+    console.log(`[OptBacktest] [${today}] dailyRiskPreference.upRatioMA5: ${defaultValue.upRatioMA5}`);
 
-    this.dailyRiskPreference.set(today, result);
-    return result;
+    return defaultValue;
   }
 
   private async getMaxPullbackPct(today: string, dataProvider: StrategyDataProvider): Promise<number> {
@@ -786,27 +790,33 @@ export class OptimizedStrategyBacktest {
 
     const riskPref = await this.getRiskPreference(today, dataProvider);
     let result: number;
-    if (riskPref === 'high') result = this.PULLBACK_PCT_HIGH;
-    else if (riskPref === 'low') result = this.PULLBACK_PCT_LOW;
+    if (riskPref.prefer === 'high') result = this.PULLBACK_PCT_HIGH;
+    else if (riskPref.prefer === 'low') result = this.PULLBACK_PCT_LOW;
     else result = this.PULLBACK_PCT_MID;
 
-    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
+    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref.upRatioMA5}, result=${result}`);
     this.maxPullbackPctCache.set(today, result);
     return result;
   }
 
   private getDailyStopLossPct(today: string): number {
-    const riskPref = this.dailyRiskPreference.get(today) || 'mid';
-    if (riskPref === 'high') return this.STOP_LOSS_INIT_PCT_HIGH;
-    if (riskPref === 'low') return this.STOP_LOSS_INIT_PCT_LOW;
-    return this.STOP_LOSS_INIT_PCT_MID;
+    // 固定止损 = 8% - (上涨占比MA5 - 0.50) × 2%
+    // # MA5=0.55 → 9%, MA5=0.50 → 8%, MA5=0.45 → 7%
+    const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
+    return this.STOP_LOSS_INIT_PCT_MID - (riskPref - 0.5) * 0.02;
+    // if (riskPref === 'high') return this.STOP_LOSS_INIT_PCT_HIGH;
+    // if (riskPref === 'low') return this.STOP_LOSS_INIT_PCT_LOW;
+    // return this.STOP_LOSS_INIT_PCT_MID;
   }
 
   private getDailyTrailingStopPct(today: string): number {
-    const riskPref = this.dailyRiskPreference.get(today) || 'mid';
-    if (riskPref === 'high') return this.TRAILING_STOP_PCT_HIGH;
-    if (riskPref === 'low') return this.TRAILING_STOP_PCT_LOW;
-    return this.TRAILING_STOP_PCT_MID;
+    // 移动止损 = 5% - (上涨占比MA5 - 0.50) × 4%
+    // # MA5=0.55 → 3%, MA5=0.50 → 5%, MA5=0.45 → 7%
+    const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
+    return this.TRAILING_STOP_PCT_MID + (riskPref - 0.5) * 0.04;
+    // if (riskPref === 'high') return this.TRAILING_STOP_PCT_HIGH;
+    // if (riskPref === 'low') return this.TRAILING_STOP_PCT_LOW;
+    // return this.TRAILING_STOP_PCT_MID;
   }
 
   // ===== 阶段1: 执行待处理订单 =====
@@ -1210,6 +1220,9 @@ export class OptimizedStrategyBacktest {
     const tStart = performance.now();
     this.boardCache.clear();
     this.boardStocksCache.clear();
+
+    // [修复] 提前计算当天市场风险偏好，确保 dailyRiskPreference 有值，供后续止损/回撤使用
+    await this.getRiskPreference(today, dataProvider);
 
     // ===== 阶段 2-0: 检查观察列表 =====
     const tWatch0 = performance.now();
