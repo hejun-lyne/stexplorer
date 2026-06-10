@@ -826,6 +826,9 @@ export class OptimizedStrategyBacktest {
       return false;
     }
 
+    // [修复] 提前计算当天市场风险偏好，确保 executeBuy 中 getDailyStopLossPct 能命中
+    await this.getRiskPreference(today, dataProvider);
+
     // [优化] 记录因停牌而跳过的订单，用于统计
     const skippedOrders: Array<{ secid: string; type: string; reason: string }> = [];
 
