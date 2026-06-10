@@ -771,7 +771,7 @@ export class OptimizedStrategyBacktest {
     // # MA5=0.55 → 9%, MA5=0.50 → 8%, MA5=0.45 → 7%
 
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    const result = this.PULLBACK_PCT + (riskPref - 0.5) * 2;
+    const result = this.PULLBACK_PCT + (riskPref - 0.5) * 0.6;
 
     console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
     this.maxPullbackPctCache.set(today, result);
