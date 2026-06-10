@@ -497,12 +497,8 @@ export class OptimizedStrategyBacktest {
   private readonly KLINE_DAYS = 150; // 应该至少要半年
 
   // 止损参数（根据市场风险偏好高/中/低动态选择）
-  private STOP_LOSS_INIT_PCT_HIGH = 0.93;  // 高偏好：买入价下跌 7% 止损
-  private STOP_LOSS_INIT_PCT_MID = 0.95;   // 中偏好：买入价下跌 5% 止损
-  private STOP_LOSS_INIT_PCT_LOW = 0.97;   // 低偏好：买入价下跌 3% 止损
-  private TRAILING_STOP_PCT_HIGH = 0.88;   // 高偏好：最高价回落 12% 移动止损
-  private TRAILING_STOP_PCT_MID = 0.90;    // 中偏好：最高价回落 10% 移动止损
-  private TRAILING_STOP_PCT_LOW = 0.92;    // 低偏好：最高价回落 8% 移动止损
+  private STOP_LOSS_INIT_PCT = 0.95;   // 固定止损基准：买入价下跌 5% 止损（根据市场风险偏好动态调整）
+  private TRAILING_STOP_PCT = 0.90;    // 移动止损基准：最高价回落 10%（根据市场风险偏好动态调整）
   
   // [新增] 止盈参数
   private TAKE_PROFIT_PCT = 1.15;         // 固定止盈：买入价上涨 15% 止盈
@@ -519,9 +515,7 @@ export class OptimizedStrategyBacktest {
   private UP_DOWN_RATE_HIGH_THRESH = 1.5;  // ma5 > 该阈值，市场风险偏好高
   private UP_DOWN_RATE_LOW_THRESH = 1.0;   // ma5 < 该阈值，市场风险偏好低
   // [新增] 深度回调阈值配置（根据市场风险偏好动态选择）
-  private PULLBACK_PCT_HIGH = 0.4;   // 风险偏好高时的最大回撤阈值
-  private PULLBACK_PCT_MID = 0.3;    // 风险偏好一般时的最大回撤阈值
-  private PULLBACK_PCT_LOW = 0.2;    // 风险偏好低时的最大回撤阈值
+  private PULLBACK_PCT = 0.3;    // 最大回撤基准：30%（根据市场风险偏好动态调整）
   // [新增] 卖出时机配置
   private SELL_AT_OPEN = false;            // true=次日开盘卖, false=当日收盘卖
   // [新增] 时间止盈参数
@@ -537,12 +531,8 @@ export class OptimizedStrategyBacktest {
     initialCapital: number = 1000000,
     workerExecutor?: (method: string, args?: any[]) => Promise<any>,
     options?: {
-      stopLossInitPctHigh?: number;
-      stopLossInitPctMid?: number;
-      stopLossInitPctLow?: number;
-      trailingStopPctHigh?: number;
-      trailingStopPctMid?: number;
-      trailingStopPctLow?: number;
+      stopLossInitPct?: number;
+      trailingStopPct?: number;
       takeProfitPct?: number;
       minStrategyScore?: number;
       strongLookback?: number;
@@ -557,9 +547,7 @@ export class OptimizedStrategyBacktest {
       rangeBoundDays?: number;
       upDownRateHighThresh?: number;
       upDownRateLowThresh?: number;
-      pullbackPctHigh?: number;
-      pullbackPctMid?: number;
-      pullbackPctLow?: number;
+      pullbackPct?: number;
       sellAtOpen?: boolean;
       timeExitMaxDays?: number;
       timeExitMinReturn?: number;
@@ -580,12 +568,8 @@ export class OptimizedStrategyBacktest {
       ? Math.min(options?.workerCount || 6, 8)
       : 1;
 
-    if (options?.stopLossInitPctHigh !== undefined) this.STOP_LOSS_INIT_PCT_HIGH = options.stopLossInitPctHigh;
-    if (options?.stopLossInitPctMid !== undefined) this.STOP_LOSS_INIT_PCT_MID = options.stopLossInitPctMid;
-    if (options?.stopLossInitPctLow !== undefined) this.STOP_LOSS_INIT_PCT_LOW = options.stopLossInitPctLow;
-    if (options?.trailingStopPctHigh !== undefined) this.TRAILING_STOP_PCT_HIGH = options.trailingStopPctHigh;
-    if (options?.trailingStopPctMid !== undefined) this.TRAILING_STOP_PCT_MID = options.trailingStopPctMid;
-    if (options?.trailingStopPctLow !== undefined) this.TRAILING_STOP_PCT_LOW = options.trailingStopPctLow;
+    if (options?.stopLossInitPct !== undefined) this.STOP_LOSS_INIT_PCT = options.stopLossInitPct;
+    if (options?.trailingStopPct !== undefined) this.TRAILING_STOP_PCT = options.trailingStopPct;
     if (options?.takeProfitPct !== undefined) this.TAKE_PROFIT_PCT = options.takeProfitPct;
     if (options?.minStrategyScore !== undefined) this.MIN_STRATEGY_SCORE = options.minStrategyScore;
     if (options?.strongLookback !== undefined) this.STRONG_LOOKBACK = options.strongLookback;
@@ -599,9 +583,7 @@ export class OptimizedStrategyBacktest {
     if (options?.rangeBoundDays !== undefined) this.RANGE_BOUND_DAYS = options.rangeBoundDays;
     if (options?.upDownRateHighThresh !== undefined) this.UP_DOWN_RATE_HIGH_THRESH = options.upDownRateHighThresh;
     if (options?.upDownRateLowThresh !== undefined) this.UP_DOWN_RATE_LOW_THRESH = options.upDownRateLowThresh;
-    if (options?.pullbackPctHigh !== undefined) this.PULLBACK_PCT_HIGH = options.pullbackPctHigh;
-    if (options?.pullbackPctMid !== undefined) this.PULLBACK_PCT_MID = options.pullbackPctMid;
-    if (options?.pullbackPctLow !== undefined) this.PULLBACK_PCT_LOW = options.pullbackPctLow;
+    if (options?.pullbackPct !== undefined) this.PULLBACK_PCT = options.pullbackPct;
     if (options?.sellAtOpen !== undefined) this.SELL_AT_OPEN = options.sellAtOpen;
     if (options?.timeExitMaxDays !== undefined) this.TIME_EXIT_MAX_DAYS = options.timeExitMaxDays;
     if (options?.timeExitMinReturn !== undefined) this.TIME_EXIT_MIN_RETURN = options.timeExitMinReturn;
@@ -611,12 +593,8 @@ export class OptimizedStrategyBacktest {
     if (options?.filterStrongType !== undefined) this.FILTER_STRONG_TYPE = options.filterStrongType;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
-      STOP_LOSS_INIT_PCT_HIGH: this.STOP_LOSS_INIT_PCT_HIGH,
-      STOP_LOSS_INIT_PCT_MID: this.STOP_LOSS_INIT_PCT_MID,
-      STOP_LOSS_INIT_PCT_LOW: this.STOP_LOSS_INIT_PCT_LOW,
-      TRAILING_STOP_PCT_HIGH: this.TRAILING_STOP_PCT_HIGH,
-      TRAILING_STOP_PCT_MID: this.TRAILING_STOP_PCT_MID,
-      TRAILING_STOP_PCT_LOW: this.TRAILING_STOP_PCT_LOW,
+      STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
+      TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
       TAKE_PROFIT_PCT: this.TAKE_PROFIT_PCT,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
       STRONG_LOOKBACK: `${this.STRONG_LOOKBACK}天前`,
@@ -631,9 +609,7 @@ export class OptimizedStrategyBacktest {
       RANGE_BOUND_DAYS: this.RANGE_BOUND_DAYS,
       UP_DOWN_RATE_HIGH_THRESH: this.UP_DOWN_RATE_HIGH_THRESH,
       UP_DOWN_RATE_LOW_THRESH: this.UP_DOWN_RATE_LOW_THRESH,
-      PULLBACK_PCT_HIGH: this.PULLBACK_PCT_HIGH,
-      PULLBACK_PCT_MID: this.PULLBACK_PCT_MID,
-      PULLBACK_PCT_LOW: this.PULLBACK_PCT_LOW,
+      PULLBACK_PCT: this.PULLBACK_PCT,
       SELL_AT_OPEN: this.SELL_AT_OPEN,
       TIME_EXIT_MAX_DAYS: this.TIME_EXIT_MAX_DAYS,
       TIME_EXIT_MIN_RETURN: this.TIME_EXIT_MIN_RETURN,
@@ -781,6 +757,9 @@ export class OptimizedStrategyBacktest {
     return defaultValue;
   }
 
+  // 情绪强 (MA5=0.55): 固定止损放宽到9%（给趋势空间），移动止损收紧到3%（利润锁定），允许的深度回调空间放宽到30%
+  // 情绪中 (MA5=0.50): 固定止损8%，移动止损5%（基准状态），允许深度回调空间20%
+  // 情绪弱 (MA5=0.45): 固定止损收窄到7%（快进快出），移动止损放宽到7%（等反弹），允许深度回调空间收窄到10%
   private async getMaxPullbackPct(today: string, dataProvider: StrategyDataProvider): Promise<number> {
     // 先检查缓存
     const cached = this.maxPullbackPctCache.get(today);
@@ -788,35 +767,29 @@ export class OptimizedStrategyBacktest {
       return cached;
     }
 
-    const riskPref = await this.getRiskPreference(today, dataProvider);
-    let result: number;
-    if (riskPref.prefer === 'high') result = this.PULLBACK_PCT_HIGH;
-    else if (riskPref.prefer === 'low') result = this.PULLBACK_PCT_LOW;
-    else result = this.PULLBACK_PCT_MID;
+    // 回撤比例过滤 = 20% - (上涨占比MA5 - 0.50) × 2
+    // # MA5=0.55 → 9%, MA5=0.50 → 8%, MA5=0.45 → 7%
 
-    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref.upRatioMA5}, result=${result}`);
+    const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
+    const result = this.PULLBACK_PCT + (riskPref - 0.5) * 2;
+
+    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
     this.maxPullbackPctCache.set(today, result);
     return result;
   }
 
   private getDailyStopLossPct(today: string): number {
-    // 固定止损 = 8% - (上涨占比MA5 - 0.50) × 2%
+    // 固定止损 = 8% - (上涨占比MA5 - 0.50) × 0.2
     // # MA5=0.55 → 9%, MA5=0.50 → 8%, MA5=0.45 → 7%
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    return this.STOP_LOSS_INIT_PCT_MID - (riskPref - 0.5) * 0.02;
-    // if (riskPref === 'high') return this.STOP_LOSS_INIT_PCT_HIGH;
-    // if (riskPref === 'low') return this.STOP_LOSS_INIT_PCT_LOW;
-    // return this.STOP_LOSS_INIT_PCT_MID;
+    return this.STOP_LOSS_INIT_PCT - (riskPref - 0.5) * 0.2;
   }
 
   private getDailyTrailingStopPct(today: string): number {
-    // 移动止损 = 5% - (上涨占比MA5 - 0.50) × 4%
+    // 移动止损 = 5% - (上涨占比MA5 - 0.50) × 0.4
     // # MA5=0.55 → 3%, MA5=0.50 → 5%, MA5=0.45 → 7%
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    return this.TRAILING_STOP_PCT_MID + (riskPref - 0.5) * 0.04;
-    // if (riskPref === 'high') return this.TRAILING_STOP_PCT_HIGH;
-    // if (riskPref === 'low') return this.TRAILING_STOP_PCT_LOW;
-    // return this.TRAILING_STOP_PCT_MID;
+    return this.TRAILING_STOP_PCT + (riskPref - 0.5) * 0.4;
   }
 
   // ===== 阶段1: 执行待处理订单 =====
@@ -1415,9 +1388,6 @@ export class OptimizedStrategyBacktest {
     if (this.isCancelled()) return true;
 
     let strongStocks = await dataProvider.getStrongStocks(strongStockDay);
-    if (this.FILTER_STRONG_TYPE !== 'both') {
-      strongStocks = strongStocks.filter((s: any) => s.strongType === this.FILTER_STRONG_TYPE);
-    }
     // [新增] 排除60日新高但strongDay当天收阴线的股票（冲高回落，不够强势）
     const beforeFilterCount = strongStocks.length;
     strongStocks = strongStocks.filter((s: any) => {
@@ -1454,6 +1424,10 @@ export class OptimizedStrategyBacktest {
     const tKick1 = performance.now();
     console.log(`[Perf] [${today}] 踢出观察: ${(tKick1 - tKick0).toFixed(1)}ms`);
 
+    // 先踢出，再过滤
+    if (this.FILTER_STRONG_TYPE !== 'both') {
+      strongStocks = strongStocks.filter((s: any) => s.strongType === this.FILTER_STRONG_TYPE);
+    }
     const filteredStocks = strongStocks.filter(s => !this.positions.has(s.secid));
     console.log(`[OptBacktest] [${today}] 排除已持仓后剩余 ${filteredStocks.length} 只`);
 
@@ -1567,8 +1541,8 @@ export class OptimizedStrategyBacktest {
           batchPhaseStartPercent + Math.round((batchIndex / totalBatches) * batchPercentRange * 0.3)
         );
         const backtestParams = {
-          fixedStopLossPct: 1 - this.STOP_LOSS_INIT_PCT_MID,
-          trailingStopLossPct: 1 - this.TRAILING_STOP_PCT_MID,
+          fixedStopLossPct: 1 - this.STOP_LOSS_INIT_PCT,
+          trailingStopLossPct: 1 - this.TRAILING_STOP_PCT,
           strategyMode: this.strategyMode,
           buyThresholds: this.RSI_BUY_THRESHOLDS,
           sellThresholds: this.RSI_SELL_THRESHOLDS,
