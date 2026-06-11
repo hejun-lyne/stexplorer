@@ -869,7 +869,9 @@ export class OptimizedStrategyBacktest {
       return this.STOP_LOSS_INIT_PCT;
 
     const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
-    return 1 - this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.04, 0.14);
+    const result = 1 - this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.04, 0.14);
+    console.log(`[OptBacktest] [${today}] getDailyStopLossPct — riskPref=${riskPref}, result=${result}`);
+    return result;
   }
 
   private getDailyTrailingStopPct(today: string): number {
@@ -879,7 +881,9 @@ export class OptimizedStrategyBacktest {
 
     const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
     const ratio = this.clamp(0.625 + (s - 0.5) * 0.40, 0.25, 0.65);
-    return 1 - (1 - this.getDailyStopLossPct(today)) * ratio;
+    const result = 1 - (1 - this.getDailyStopLossPct(today)) * ratio;
+    console.log(`[OptBacktest] [${today}] getDailyTrailingStopPct — riskPref=${riskPref}, result=${result}`);
+    return result;
   }
 
   // ===== 阶段1: 执行待处理订单 =====
@@ -1306,12 +1310,13 @@ export class OptimizedStrategyBacktest {
       }
 
       const currentPrice = klines[lastIndex].sp;
+      const upRatioMA5 = this.dailyRiskPreference.get(today)?.upRatioMA5 ?? 0.5;
       candidates.push({
         secid,
         score: item.score,
         boardCode: item.boardCode,
         price: currentPrice,
-        reason: `${item.strategyType.toUpperCase()}观察期买入 M-Day=${mDayKline.date} T-Day=${item.tDayDate}, 回调=${(pullBackPct * 100).toFixed(1)}%`,
+        reason: `${item.strategyType.toUpperCase()}观察期买入 M-Day=${mDayKline.date} T-Day=${item.tDayDate}, 回调=${(pullBackPct * 100).toFixed(1)}%, 评分=${item.score.toFixed(1)}, 市场情绪=${upRatioMA5.toFixed(2)}`,
         strongType: item.strongType,
         strategyType: item.strategyType,
         strategyParams: item.strategyParams,
@@ -1451,14 +1456,14 @@ export class OptimizedStrategyBacktest {
       // 2. 固定止损（硬性风控，最先检查）
       if (currentPrice < position.buyPrice * dailyStopLossPct) {
         console.log(`[OptBacktest] [${today}] ${secid} 🔴 固定止损: 当前${currentPrice.toFixed(2)} < 买入价${position.buyPrice.toFixed(2)} (跌幅${((1 - dailyStopLossPct) * 100).toFixed(1)}%)`);
-        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '固定止损');
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `固定止损(跌幅${((1 - dailyStopLossPct) * 100).toFixed(1)}%)`);
         continue;
       }
 
       // 3. 移动止损（保护利润）
       if (currentPrice < position.stopLossPrice) {
         console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
-        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '移动止损');
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `移动止损(回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);
         continue;
       }
 
@@ -2050,12 +2055,13 @@ export class OptimizedStrategyBacktest {
       } else {
         const currentPrice = klines[klines.length - 1].sp;
         const pullBackStr = item.pullBackPct !== undefined ? `, 回调=${(item.pullBackPct * 100).toFixed(1)}%` : '';
+        const upRatioMA5 = this.dailyRiskPreference.get(today)?.upRatioMA5 ?? 0.5;
         buyCandidates.push({
           secid: stock.secid,
           score: screenResult.score!,
           boardCode: stock.bk,
           price: currentPrice,
-          reason: `${screenResult.reason!}${pullBackStr}`,
+          reason: `${screenResult.reason!}${pullBackStr}, 评分=${screenResult.score!.toFixed(1)}, 市场情绪=${upRatioMA5.toFixed(2)}`,
           strongType: screenResult.strongType,
           strategyType: screenResult.bestType!,
           strategyParams: screenResult.bestResult!,
