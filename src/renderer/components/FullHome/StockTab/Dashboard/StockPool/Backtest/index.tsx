@@ -1063,8 +1063,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         { title: '策略得分', dataIndex: 'score', key: 'score', width: 90, render: (v: number) => (v || 0).toFixed(1) },
         { title: '策略参数', dataIndex: 'strategyParamsStr', key: 'strategyParamsStr', width: 240, render: (v?: string) => v || '-', ellipsis: true },
         { title: '强势原因', dataIndex: 'strongType', key: 'strongType', width: 100, render: (v?: string) => v === 'limit_up' ? '涨停' : v === 'new_high_60' ? '60日新高' : '-', ellipsis: true },
-        { title: '板块排名', dataIndex: 'boardRank', key: 'boardRank', width: 90, render: (v?: number) => v !== undefined && v >= 0 ? v + 1 : '-' },
-        { title: '个股排名', dataIndex: 'stockRank', key: 'stockRank', width: 90, render: (v?: number) => v !== undefined && v >= 0 ? v + 1 : '-' },
         { title: '交易次数', dataIndex: 'totalTrades', key: 'totalTrades', width: 90 },
         { title: '盈利', dataIndex: 'winTrades', key: 'winTrades', width: 80 },
         { title: '亏损', dataIndex: 'lossTrades', key: 'lossTrades', width: 80 },
@@ -1410,7 +1408,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       columns={stockStatsColumns}
                       dataSource={result.stockStats.map((s: any, i: number) => ({ ...s, key: i }))}
                       pagination={{ pageSize: 20, showSizeChanger: true }}
-                      scroll={{ x: 1340 }}
+                      scroll={{ x: 1160 }}
                       size="small"
                       expandable={{
                         expandedRowRender: (record: any) => (
