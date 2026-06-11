@@ -152,23 +152,23 @@ export async function optimizeMACDStrategy(
   secid?: string
 ): Promise<MACDStrategyResult[]> {
   const lastDate = klines[klines.length - 1]?.date;
-  const macdCacheKey = secid && lastDate
-    ? getCacheKey('macd', secid, lastDate, `${fixedStopLossPct}_${trailingStopLossPct}`)
-    : null;
-  if (macdCacheKey) {
-    const cached = await ReadCache<MACDStrategyResult[]>(macdCacheKey);
-    if (cached) {
-      console.log(`[Cache] MACD 命中缓存: ${secid} ${lastDate}`);
-      return cached;
-    }
-  }
+  // const macdCacheKey = secid && lastDate
+  //   ? getCacheKey('macd', secid, lastDate, `${fixedStopLossPct}_${trailingStopLossPct}`)
+  //   : null;
+  // if (macdCacheKey) {
+  //   const cached = await ReadCache<MACDStrategyResult[]>(macdCacheKey);
+  //   if (cached) {
+  //     console.log(`[Cache] MACD 命中缓存: ${secid} ${lastDate}`);
+  //     return cached;
+  //   }
+  // }
 
   const results = computeMACDStrategy(klines, fixedStopLossPct, trailingStopLossPct);
 
-  if (macdCacheKey) {
-    await WriteCache(macdCacheKey, results);
-    console.log(`[Cache] MACD 写入缓存: ${secid} ${lastDate} (${results.length} 组)`);
-  }
+  // if (macdCacheKey) {
+  //   await WriteCache(macdCacheKey, results);
+  //   console.log(`[Cache] MACD 写入缓存: ${secid} ${lastDate} (${results.length} 组)`);
+  // }
 
   return results;
 }
@@ -181,23 +181,23 @@ export async function optimizeRSIStrategy(
   secid?: string
 ): Promise<RSIBacktestResult[]> {
   const lastDate = klines[klines.length - 1]?.date;
-  const rsiCacheKey = secid && lastDate
-    ? getCacheKey('rsi', secid, lastDate, `${rsiPeriods.join('_')}_${fixedStopLossPct}_${trailingStopLossPct}`)
-    : null;
-  if (rsiCacheKey) {
-    const cached = await ReadCache<RSIBacktestResult[]>(rsiCacheKey);
-    if (cached) {
-      console.log(`[Cache] RSI 命中缓存: ${secid} ${lastDate}`);
-      return cached;
-    }
-  }
+  // const rsiCacheKey = secid && lastDate
+  //   ? getCacheKey('rsi', secid, lastDate, `${rsiPeriods.join('_')}_${fixedStopLossPct}_${trailingStopLossPct}`)
+  //   : null;
+  // if (rsiCacheKey) {
+  //   const cached = await ReadCache<RSIBacktestResult[]>(rsiCacheKey);
+  //   if (cached) {
+  //     console.log(`[Cache] RSI 命中缓存: ${secid} ${lastDate}`);
+  //     return cached;
+  //   }
+  // }
 
   const results = computeRSIStrategy(klines, rsiPeriods, fixedStopLossPct, trailingStopLossPct);
 
-  if (rsiCacheKey) {
-    await WriteCache(rsiCacheKey, results);
-    console.log(`[Cache] RSI 写入缓存: ${secid} ${lastDate} (${results.length} 组)`);
-  }
+  // if (rsiCacheKey) {
+  //   await WriteCache(rsiCacheKey, results);
+  //   console.log(`[Cache] RSI 写入缓存: ${secid} ${lastDate} (${results.length} 组)`);
+  // }
 
   return results;
 }
@@ -540,6 +540,8 @@ export class OptimizedStrategyBacktest {
   private RSI_BUY_THRESHOLDS = [35, 40, 45]; // RSI 买入阈值网格
   private RSI_SELL_THRESHOLDS = [65, 70, 75, 80, 85]; // RSI 卖出阈值网格
   private FILTER_STRONG_TYPE: 'limit_up' | 'new_high_60' | 'both' = 'both'; // 强势股票筛选类型
+  /** Sigmoid陡度系数（控制变化速度） */
+  private STEEPNESS = 20;  // 默认10，推荐20，激进30
 
   constructor(
     tradeDays: string[],
@@ -570,6 +572,7 @@ export class OptimizedStrategyBacktest {
       buyThresholds?: number[];
       sellThresholds?: number[];
       filterStrongType?: 'limit_up' | 'new_high_60' | 'both';
+      steepness?: number;
     }
   ) {
     this.tradeDays = tradeDays;
@@ -600,6 +603,7 @@ export class OptimizedStrategyBacktest {
     if (options?.upDownRateLowThresh !== undefined) this.UP_DOWN_RATE_LOW_THRESH = options.upDownRateLowThresh;
     if (options?.pullbackPct !== undefined) this.PULLBACK_PCT = options.pullbackPct;
     if (options?.sellAtOpen !== undefined) this.SELL_AT_OPEN = options.sellAtOpen;
+    if (options?.steepness !== undefined) this.STEEPNESS = options.steepness;
     if (options?.timeExitMaxDays !== undefined) this.TIME_EXIT_MAX_DAYS = options.timeExitMaxDays;
     if (options?.timeExitMinReturn !== undefined) this.TIME_EXIT_MIN_RETURN = options.timeExitMinReturn;
     if (options?.profitIgnoreSignalPct !== undefined) this.PROFIT_IGNORE_SIGNAL_PCT = options.profitIgnoreSignalPct;
@@ -789,9 +793,6 @@ export class OptimizedStrategyBacktest {
 //   固定止损: 5.76% ~ 14.96%
 //   移动止损: 1.10% ~ 10.43%
 //   移动/固定比: 19.2% ~ 69.8%
-
-/** Sigmoid陡度系数（控制变化速度） */
-  private STEEPNESS = 20;  // 默认10，推荐20，激进30
   /** Sigmoid激活函数：将任意实数压缩到(0, 1) */
   private sigmoid(x: number): number {
     return 1 / (1 + Math.exp(-x));
@@ -811,9 +812,8 @@ export class OptimizedStrategyBacktest {
     const indexKline = await dataProvider.getKLines([BENCHMARK_INDEX], endDate, 60);
     // 1. 获取基准指数在特定时间段下跌indexDrawdown;
     const klines = indexKline[BENCHMARK_INDEX];
-    const startIndex = klines.findIndex(k => k.date >= endDate);
-    const endIndex = klines.findIndex(k => k.date >= startDate);
-    const rangeKlines = klines.slice(startIndex, endIndex - startIndex + 1);
+    const startIndex = klines.findIndex(k => k.date >= startDate);
+    const rangeKlines = klines.slice(startIndex);
     const highRange = Math.max(...rangeKlines.map(k => k.zg));
     const lowRange = Math.min(...rangeKlines.map(k => k.zd));
     const indexDrawdown = (highRange - lowRange) / highRange;
@@ -859,7 +859,7 @@ export class OptimizedStrategyBacktest {
     // 中心11.5%，情绪强→3%，情绪弱→25%
     const result = this.clamp(this.PULLBACK_PCT - (s - 0.5) * 0.22, 0.03, 0.25);
 
-    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
+    console.log(`[OptBacktest] [${today}] getMinPullbackPct — riskPref=${riskPref}, result=${result}`);
     return result;
   }
 
@@ -1265,7 +1265,7 @@ export class OptimizedStrategyBacktest {
   
       // 相对回撤超过窗口上限 → 跑输太多 → 不买入
        ;
-      if (relativeDrawdown <= maxPullbackPct) {
+      if (relativeDrawdown > maxPullbackPct) {
         console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
         continue;
       } else {
