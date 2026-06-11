@@ -323,7 +323,7 @@ export interface BacktestResult {
 }
 
 export interface DataProvider {
-    getStrongStocks(date: string): Promise<Stock.DetailItem[]>;
+    getStrongStocks(date: string, strongType:string): Promise<Stock.DetailItem[]>;
     getKLines(secids: string[], endDate: string, days?: number): Promise<Stock.KLineItem[]>;
     getBoardData(name: string, endDate: string): Promise<Stock.BoardItem | null>;
 }
