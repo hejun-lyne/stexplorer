@@ -399,7 +399,7 @@ export class OptimizedStrategyBacktest {
   private boardRequestLock = new Map<string, Promise<Array<{ code: string; name: string; zf: number }> | null>>();
   private boardStocksRequestLock = new Map<string, Promise<Array<{ secid: string; zf: number }> | null>>();
   // [新增] 每日市场风险偏好缓存（high/mid/low），供止损参数动态选择使用
-  private dailyRiskPreference: Map<string, {prefer: string, upRatioMA5: number}> = new Map();
+  private dailyRiskPreference: Map<string, {prefer: string, upRatio: number, upRatioMA5: number}> = new Map();
 
     /** [优化] 带请求锁的全市场板块查询 */
   private async getAllBoardsCached(
@@ -736,14 +736,14 @@ export class OptimizedStrategyBacktest {
     return result;
   }
 
-  private async getRiskPreference(today: string, dataProvider: StrategyDataProvider): Promise<{prefer: string, upRatioMA5: number}> {
+  private async getRiskPreference(today: string, dataProvider: StrategyDataProvider): Promise<{prefer: string, upRatio: number, upRatioMA5: number}> {
     // 先检查缓存
     const cached = this.dailyRiskPreference.get(today);
     if (cached) {
       return cached;
     }
 
-    const defaultValue = {prefer: 'mid', upRatioMA5: 0.5};
+    const defaultValue = {prefer: 'mid', upRatio: 0.5, upRatioMA5: 0.5};
     const todayIndex = this.tradeDays.indexOf(today);
     if (todayIndex < 0) {
       this.dailyRiskPreference.set(today, defaultValue);
@@ -764,6 +764,7 @@ export class OptimizedStrategyBacktest {
         else if (ma5 < this.UP_DOWN_RATE_LOW_THRESH) result = 'low';
         else result = 'mid';
         defaultValue.upRatioMA5 = ma5;
+        defaultValue.upRatio = rates[rates.length - 1];
       }
     } catch (e) {
       console.error(`[OptBacktest] [${today}] 获取涨跌比失败，使用默认风险偏好:`, e);
@@ -864,13 +865,45 @@ export class OptimizedStrategyBacktest {
   }
 
   private getDailyStopLossPct(today: string): number {
-    const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
+    const riskPref = this.dailyRiskPreference.get(today);
     if (Number.isNaN(riskPref)) 
       return this.STOP_LOSS_INIT_PCT;
 
-    const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
-    const result = 1 - this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.04, 0.14);
-    console.log(`[OptBacktest] [${today}] getDailyStopLossPct — riskPref=${riskPref}, result=${result}`);
+    // 第一层：MA5绝对水平（原有逻辑）
+    const upRatioMA5 = riskPref?.upRatioMA5 || 0.5;
+    const s = this.sigmoid((upRatioMA5 - 0.50) * this.STEEPNESS);
+    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.05, 0.14);
+
+    // 第二层：当日情绪突变检测（关键！提前1-2天感知拐点）
+    let emergency = 0.2; // 默认不限制（取大值让第一层生效）
+    const yesterday = this.tradeDays[this.tradeDays.indexOf(today) - 1];
+    const riskPrefYesterday = this.dailyRiskPreference.get(yesterday);
+    const upRatioMA5Yesterday = riskPrefYesterday?.upRatioMA5 || 0.5;
+    
+    // 二层：MA5变化率惩罚（关键修正！）
+    let penalty = 0;
+    const ma5Diff = upRatioMA5 - upRatioMA5Yesterday; // MA5变化（百分点）
+    
+    if (ma5Diff < -0.02) {
+      // MA5暴跌2pp+ → 趋势急转 → 大幅收紧2%
+      penalty = 0.02;
+    } else if (ma5Diff < -0.01) {
+      // MA5下降1-2pp → 趋势恶化 → 中度收紧1%
+      penalty = 0.01;
+    } else if (ma5Diff < 0) {
+      // MA5轻微下降 → 趋势转弱 → 轻度收紧0.5%
+      penalty = 0.005;
+    }
+    // MA5在上升 → 无惩罚
+
+    // 极端恐慌备份：当日上涨比例<25%（备用保险）
+    const upRatioToday = riskPref?.upRatio || 0.5;
+    if (upRatioToday < 0.25) {
+      penalty = Math.max(penalty, 0.03); // 至少收紧3%
+    }
+    const result = 1 - this.clamp(based - penalty, 0.05, 0.14);
+
+    console.log(`[OptBacktest] [${today}] getDailyStopLossPct — upRatio=${upRatioToday} — upRatioMA5=${upRatioMA5}, result=${result}`);
     return result;
   }
 
@@ -1381,11 +1414,11 @@ export class OptimizedStrategyBacktest {
       await this.waitIfPaused();
       if (this.isCancelled()) return true;
 
-      // A股T+1，今天买入的不能今天卖出
-      if (position.buyDate === today) {
-        console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: 今日买入的股票`);
-        continue;
-      }
+      // A股T+1，今天买入的不能今天卖出（次日卖出）
+      // if (position.buyDate === today) {
+      //   console.log(`[OptBacktest] [${today}] ${secid} 卖出检查跳过: 今日买入的股票`);
+      //   continue;
+      // }
 
       const klines = sellKlinesMap[secid];
       if (!klines || klines.length === 0) {
