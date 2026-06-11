@@ -872,38 +872,42 @@ export class OptimizedStrategyBacktest {
     // 第一层：MA5绝对水平（原有逻辑）
     const upRatioMA5 = riskPref?.upRatioMA5 || 0.5;
     const s = this.sigmoid((upRatioMA5 - 0.50) * this.STEEPNESS);
-    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.05, 0.14);
+    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.08, 0.14);
 
-    // 第二层：当日情绪突变检测（关键！提前1-2天感知拐点）
-    let emergency = 0.2; // 默认不限制（取大值让第一层生效）
-    const yesterday = this.tradeDays[this.tradeDays.indexOf(today) - 1];
-    const riskPrefYesterday = this.dailyRiskPreference.get(yesterday);
-    const upRatioMA5Yesterday = riskPrefYesterday?.upRatioMA5 || 0.5;
-    
-    // 二层：MA5变化率惩罚（关键修正！）
-    let penalty = 0;
-    const ma5Diff = upRatioMA5 - upRatioMA5Yesterday; // MA5变化（百分点）
-    
-    if (ma5Diff < -0.02) {
-      // MA5暴跌2pp+ → 趋势急转 → 大幅收紧2%
-      penalty = 0.02;
-    } else if (ma5Diff < -0.01) {
-      // MA5下降1-2pp → 趋势恶化 → 中度收紧1%
-      penalty = 0.01;
-    } else if (ma5Diff < 0) {
-      // MA5轻微下降 → 趋势转弱 → 轻度收紧0.5%
-      penalty = 0.005;
+    // 当弱市下限从5%提到7%后，惩罚机制几乎被下限完全架空
+    if (false) {
+      // 第二层：当日情绪突变检测（关键！提前1-2天感知拐点）
+      let emergency = 0.2; // 默认不限制（取大值让第一层生效）
+      const yesterday = this.tradeDays[this.tradeDays.indexOf(today) - 1];
+      const riskPrefYesterday = this.dailyRiskPreference.get(yesterday);
+      const upRatioMA5Yesterday = riskPrefYesterday?.upRatioMA5 || 0.5;
+      
+      // 二层：MA5变化率惩罚（关键修正！）
+      let penalty = 0;
+      const ma5Diff = upRatioMA5 - upRatioMA5Yesterday; // MA5变化（百分点）
+      
+      if (ma5Diff < -0.02) {
+        // MA5暴跌2pp+ → 趋势急转 → 大幅收紧2%
+        penalty = 0.02;
+      } else if (ma5Diff < -0.01) {
+        // MA5下降1-2pp → 趋势恶化 → 中度收紧1%
+        penalty = 0.01;
+      } else if (ma5Diff < 0) {
+        // MA5轻微下降 → 趋势转弱 → 轻度收紧0.5%
+        penalty = 0.005;
+      }
+      // MA5在上升 → 无惩罚
+
+      // 极端恐慌备份：当日上涨比例<25%（备用保险）
+      const upRatioToday = riskPref?.upRatio || 0.5;
+      if (upRatioToday < 0.25) {
+        penalty = Math.max(penalty, 0.03); // 至少收紧3%
+      }
+      const result = 1 - this.clamp(based - penalty, 0.08, 0.14);
     }
-    // MA5在上升 → 无惩罚
-
-    // 极端恐慌备份：当日上涨比例<25%（备用保险）
-    const upRatioToday = riskPref?.upRatio || 0.5;
-    if (upRatioToday < 0.25) {
-      penalty = Math.max(penalty, 0.03); // 至少收紧3%
-    }
-    const result = 1 - this.clamp(based - penalty, 0.05, 0.14);
-
-    console.log(`[OptBacktest] [${today}] getDailyStopLossPct — upRatio=${upRatioToday} — upRatioMA5=${upRatioMA5}, result=${result}`);
+    
+    const result = 1 - based;
+    console.log(`[OptBacktest] [${today}] getDailyStopLossPct — upRatioMA5=${upRatioMA5}, result=${result}`);
     return result;
   }
 
@@ -913,7 +917,7 @@ export class OptimizedStrategyBacktest {
       return this.TRAILING_STOP_PCT;
 
     const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
-    const ratio = this.clamp(0.625 + (s - 0.5) * 0.40, 0.25, 0.65);
+    const ratio = this.clamp(0.75 + (s - 0.5) * 0.30, 0.4, 0.9);
     const result = 1 - (1 - this.getDailyStopLossPct(today)) * ratio;
     console.log(`[OptBacktest] [${today}] getDailyTrailingStopPct — riskPref=${riskPref}, result=${result}`);
     return result;
@@ -1491,15 +1495,29 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
+      const profitPct = (currentPrice - position.buyPrice) / position.buyPrice;
+
       // 3. 移动止损（保护利润）
       // 3.1 更新移动止损价格(因为dailyTrailingStopPct更新了)
-      position.stopLossPrice = position.highestPrice * dailyTrailingStopPct;
-      console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${(dailyTrailingStopPct * 100).toFixed(1)}%)`);
-      if (currentPrice < position.stopLossPrice) {
-        console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
-        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `移动止损(回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);
-        continue;
+      if (profitPct < 0.05) {
+        // 盈利不足5%：移动止损不启动
+        console.log(`[OptBacktest] [${today}] ${secid} 盈利不足5%：移动止损不启动 盈利：${profitPct.toFixed(2)}`);
+      } else {
+        if (profitPct > 0.15) {
+          // 盈利>15%：收紧保护
+          position.stopLossPrice = position.highestPrice * (1 - (1 -dailyTrailingStopPct) * 0.6);
+        } else {
+          position.stopLossPrice = position.highestPrice * dailyTrailingStopPct;
+        }
+        
+        console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${(dailyTrailingStopPct * 100).toFixed(1)}%)`);
+        if (currentPrice < position.stopLossPrice) {
+          console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
+          this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `移动止损(回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);
+          continue;
+        }
       }
+      
 
       // [新增] 档2.5：最大持有N天且收益率低于阈值，资金效率止盈
       if (daysHeld >= this.TIME_EXIT_MAX_DAYS) {
@@ -1512,7 +1530,6 @@ export class OptimizedStrategyBacktest {
       }
 
       // 3. [新增] 如果已经盈利超过阈值，不再受 MACD 死叉影响（让利润奔跑）
-      const profitPct = (currentPrice - position.buyPrice) / position.buyPrice;
       if (profitPct > this.PROFIT_IGNORE_SIGNAL_PCT) {
         // 盈利超过阈值，只认移动止损，忽略死叉
         console.log(`[OptBacktest] [${today}] ${secid} 盈利${(profitPct*100).toFixed(1)}% > ${(this.PROFIT_IGNORE_SIGNAL_PCT*100).toFixed(0)}%，忽略策略信号`);
