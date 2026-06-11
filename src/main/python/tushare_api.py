@@ -3139,6 +3139,16 @@ class TushareAPI:
             if isinstance(limit_df, pd.DataFrame) and not limit_df.empty:
                 limit_codes = set(limit_df[limit_df['limit'] == 'U']['ts_code'].tolist())
 
+            # 2.5 获取当日市值数据（daily_basic：total_mv/circ_mv 单位万元）
+            basic_df = safe_api_call(pro.daily_basic, trade_date=date_str)
+            mv_map = {}
+            if isinstance(basic_df, pd.DataFrame) and not basic_df.empty:
+                for _, r in basic_df.iterrows():
+                    mv_map[str(r['ts_code'])] = {
+                        'total_mv': _to_float(r.get('total_mv', 0)) / 10000,   # 万元 → 亿
+                        'circ_mv': _to_float(r.get('circ_mv', 0)) / 10000,     # 万元 → 亿
+                    }
+
             # 3. 获取最近60个交易日
             start_60 = (datetime.strptime(date_str, '%Y%m%d') - timedelta(days=90)).strftime('%Y%m%d')
             cal_df = safe_api_call(pro.trade_cal, exchange='SSE', start_date=start_60, end_date=date_str, is_open='1')
@@ -3209,7 +3219,8 @@ class TushareAPI:
                         "cje": round(amount, 2),
                         "strongType": "limit_up" if is_limit else "new_high_60",
                         "hybk": industry_map.get(tc, ''),
-                        "ltsz": 0,
+                        "ltsz": mv_map.get(tc, {}).get('circ_mv', 0),
+                        "zsz": mv_map.get(tc, {}).get('total_mv', 0),
                     })
 
             return {

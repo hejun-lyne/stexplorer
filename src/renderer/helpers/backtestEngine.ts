@@ -222,6 +222,7 @@ export interface StrategyPosition {
   signalDayEntityLow: number;
 
   consecutiveDeclineDays: number;  // 买入后连续下跌天数
+  pullBackPct?: number;             // 买入时深度回调比例
 }
 
 export interface StrategyPendingOrder {
@@ -236,6 +237,7 @@ export interface StrategyPendingOrder {
   boardRank?: number;
   stockRank?: number;
   strongType?: 'limit_up' | 'new_high_60';
+  pullBackPct?: number;
 }
 
 export interface StrategyTradeRecord {
@@ -254,6 +256,7 @@ export interface StrategyTradeRecord {
   returnPct?: number;
   strategyType?: 'macd' | 'rsi';
   strategyParams?: MACDStrategyResult | RSIBacktestResult;
+  pullBackPct?: number;
 }
 
 export interface StrategyDailyValue {
@@ -316,6 +319,18 @@ export interface RankWinRateDistribution {
   avgReturnPct: number;
 }
 
+export interface PullBackWinRateDistribution {
+  pullBackRange: string;
+  minPullBack: number;
+  maxPullBack: number;
+  count: number;
+  uniqueCount: number;
+  winTrades: number;
+  lossTrades: number;
+  winRate: number;
+  avgReturnPct: number;
+}
+
 export interface StrategyBacktestResult {
   totalReturn: number;
   annualizedReturn: number;
@@ -331,6 +346,7 @@ export interface StrategyBacktestResult {
   scoreDistribution: ScoreWinRateDistribution[];
   boardRankDistribution: RankWinRateDistribution[];
   stockRankDistribution: RankWinRateDistribution[];
+  pullBackDistribution: PullBackWinRateDistribution[];
 }
 
 export interface StrategyDataProvider {
@@ -357,6 +373,7 @@ export interface WatchListItem {
   strongType: 'limit_up' | 'new_high_60';
   maxWatchDays: number;
   strongStockDay: string;
+  zsz: number; // 增加市值指标
 }
 
 export class OptimizedStrategyBacktest {
@@ -381,8 +398,6 @@ export class OptimizedStrategyBacktest {
   // [新增] 请求锁：同一 key 的并发查询复用同一个 Promise，避免重复 IPC
   private boardRequestLock = new Map<string, Promise<Array<{ code: string; name: string; zf: number }> | null>>();
   private boardStocksRequestLock = new Map<string, Promise<Array<{ secid: string; zf: number }> | null>>();
-  // [新增] 每日最大回撤阈值缓存，避免同一天重复计算涨跌比ma5
-  private maxPullbackPctCache: Map<string, number> = new Map();
   // [新增] 每日市场风险偏好缓存（high/mid/low），供止损参数动态选择使用
   private dailyRiskPreference: Map<string, {prefer: string, upRatioMA5: number}> = new Map();
 
@@ -757,25 +772,74 @@ export class OptimizedStrategyBacktest {
     return defaultValue;
   }
 
-  // 情绪强 (MA5=0.55): 固定止损放宽到9%（给趋势空间），移动止损收紧到3%（利润锁定），允许的深度回调空间放宽到30%
-  // 情绪中 (MA5=0.50): 固定止损8%，移动止损5%（基准状态），允许深度回调空间20%
-  // 情绪弱 (MA5=0.45): 固定止损收窄到7%（快进快出），移动止损放宽到7%（等反弹），允许深度回调空间收窄到10%
-  private async getMaxPullbackPct(today: string, dataProvider: StrategyDataProvider): Promise<number> {
-    // 先检查缓存
-    const cached = this.maxPullbackPctCache.get(today);
-    if (cached !== undefined) {
-      return cached;
-    }
+// 固定止损 = 0.05 + sigmoid((MA5 - 0.50) × 14) × 0.10
+//          范围: [5%, 15%]
+//          中性点(MA5=0.50): 约8.5%
 
-    // 阈值 = 0.20 - (MA5 - 0.50) × 0.60
-    // → 情绪强：17%（收紧，趋势市中只买强势股）
-    // → 情绪弱：23%（放宽，恐慌市中捡便宜做反弹）
+// 移动止损 = 固定止损 × (0.15 + sigmoid((MA5 - 0.50) × 14) × 0.55)
+//          范围: 固定止损的 15% ~ 70%
+//          自动保证: 移动止损 < 固定止损
 
+// 【中性点 MA5=0.50】
+//   固定止损 = 10.00%
+//   移动止损 = 4.25%
+//   移动/固定 = 42.5%
+
+// 【过去一年实际范围 MA5=0.322~0.888】
+//   固定止损: 5.76% ~ 14.96%
+//   移动止损: 1.10% ~ 10.43%
+//   移动/固定比: 19.2% ~ 69.8%
+
+/** Sigmoid陡度系数（控制变化速度） */
+  private STEEPNESS = 20;  // 默认10，推荐20，激进30
+  /** Sigmoid激活函数：将任意实数压缩到(0, 1) */
+  private sigmoid(x: number): number {
+    return 1 / (1 + Math.exp(-x));
+  }
+
+  /** 将数值限制在[min, max]范围内 */
+  private  clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  private async getRelativeMarketPullbackPct(startDate: string, endDate: string, dataProvider: StrategyDataProvider): Promise<number> {
+
+    /** 基准指数代码 */
+    const BENCHMARK_INDEX = "1.000300"; // 沪深300（可改为中证500/1000）
+    // 波动率缩放系数（个股波动率 / 指数波动率）
+    
+    const indexKline = await dataProvider.getKLines([BENCHMARK_INDEX], endDate, 60);
+    // 1. 获取基准指数在特定时间段下跌indexDrawdown;
+    const klines = indexKline[BENCHMARK_INDEX];
+    const startIndex = klines.findIndex(k => k.date >= endDate);
+    const endIndex = klines.findIndex(k => k.date >= startDate);
+    const rangeKlines = klines.slice(startIndex, endIndex - startIndex + 1);
+    const highRange = Math.max(...rangeKlines.map(k => k.zg));
+    const lowRange = Math.min(...rangeKlines.map(k => k.zd));
+    const indexDrawdown = (highRange - lowRange) / highRange;
+
+    return indexDrawdown;
+  }
+
+    /**
+ * 回撤过滤阈值 - 趋势跟随版
+ * 
+ * 情绪强(MA5高) → 放宽到20~25%（强市中允许较大回调，趋势可能延续）
+ * 情绪弱(MA5低) → 收紧到5~10%（弱市中跌5%可能就废了）
+ * 
+ * 中性点MA5=0.50 → 15%
+ * 范围: [5%, 25%]
+ * 
+ * 使用方式: 当前回撤 > 阈值 → 不买入（趋势被破坏）
+ */
+  private async getMaxPullbackPct(today: string): Promise<number> {
+    // * 情绪强→收紧(强市中不做弱势股)，情绪弱→放宽(弱市中强势股也会放大回调)
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    const result = this.PULLBACK_PCT + (riskPref - 0.5) * 0.6;
+    const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
+    // 中心15%，情绪强→25%，情绪弱→5%
+    const result = this.clamp(this.PULLBACK_PCT - (s - 0.5) * 0.10, 0.03, 0.12)
 
     console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
-    this.maxPullbackPctCache.set(today, result);
     return result;
   }
 
@@ -786,36 +850,36 @@ export class OptimizedStrategyBacktest {
   //        （这是均值回归逻辑，适用于A股等震荡市场）
 
   private async getMinPullbackPct(today: string, dataProvider: StrategyDataProvider): Promise<number> {
-    // 先检查缓存
-    // const cached = this.maxPullbackPctCache.get(today);
-    // if (cached !== undefined) {
-    //   return cached;
-    // }
 
-    // 阈值 = 0.10 + (MA5 - 0.50) × 0.6
-    // → 情绪强：回撤>14%买入（放宽，强市中跌10%已算深调
-    // → 情绪弱：回撤>7%买入（收紧，弱市中跌6%就算弱势）
-
+    // * 中性点MA5=0.50 → 11.5%
+    // * 范围: [3%, 25%]
+    // * 情绪强→收紧(强市中跌一点算弱)，情绪弱→放宽(弱市中深跌才过滤)
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    const result = this.PULLBACK_PCT + (riskPref - 0.5) * 0.6;
+    const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
+    // 中心11.5%，情绪强→3%，情绪弱→25%
+    const result = this.clamp(this.PULLBACK_PCT - (s - 0.5) * 0.22, 0.03, 0.25);
 
-    // console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
-    // this.maxPullbackPctCache.set(today, result);
+    console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
     return result;
   }
 
   private getDailyStopLossPct(today: string): number {
-    // 固定止损 = 8% - (上涨占比MA5 - 0.50) × 0.2
-    // # MA5=0.55 → 9%, MA5=0.50 → 8%, MA5=0.45 → 7%
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    return this.STOP_LOSS_INIT_PCT - (riskPref - 0.5) * 0.2;
+    if (Number.isNaN(riskPref)) 
+      return this.STOP_LOSS_INIT_PCT;
+
+    const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
+    return 1 - this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.04, 0.14);
   }
 
   private getDailyTrailingStopPct(today: string): number {
-    // 移动止损 = 5% - (上涨占比MA5 - 0.50) × 0.4
-    // # MA5=0.55 → 3%, MA5=0.50 → 5%, MA5=0.45 → 7%
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
-    return this.TRAILING_STOP_PCT + (riskPref - 0.5) * 0.4;
+    if (Number.isNaN(riskPref)) 
+      return this.TRAILING_STOP_PCT;
+
+    const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
+    const ratio = this.clamp(0.625 + (s - 0.5) * 0.40, 0.25, 0.65);
+    return 1 - (1 - this.getDailyStopLossPct(today)) * ratio;
   }
 
   // ===== 阶段1: 执行待处理订单 =====
@@ -868,7 +932,7 @@ export class OptimizedStrategyBacktest {
       if (order.type === 'buy') {
         // [新增] 剔除一字板：开盘即涨停且全天没有更高价格，无法买入
         if (todayKLine.kp === todayKLine.zg && isLimitUpStock(order.secid, todayKLine.zdf)) {
-          console.log(`[OptBacktest] [${today}] ${order.secid} 买入跳过: 一字板 (开盘${todayKLine.kp.toFixed(2)}=最高${todayKLine.zg.toFixed(2)}, 涨幅${todayKLine.zdf.toFixed(2)}%) | 实体最低: ${buyDayEntityLow.toFixed(2)}`);
+          console.log(`[OptBacktest] [${today}] ${order.secid} 买入跳过: 一字板 (开盘${todayKLine.kp.toFixed(2)}=最高${todayKLine.zg.toFixed(2)}, 涨幅${todayKLine.zdf.toFixed(2)}%) | 实体最低: ${signalDayEntityLow.toFixed(2)}`);
           skippedOrders.push({ secid: order.secid, type: order.type, reason: '一字板' });
           continue;
         }
@@ -986,6 +1050,7 @@ export class OptimizedStrategyBacktest {
       takeProfitPrice,                    // 固定止盈
       signalDayEntityLow, // [新增] 保存买入当天实体最低价
       consecutiveDeclineDays: 0,
+      pullBackPct: order.pullBackPct,
     });
 
     const paramsStr = this.formatStrategyParams(order.strategyType, order.strategyParams);
@@ -1009,6 +1074,7 @@ export class OptimizedStrategyBacktest {
       strategyType: order.strategyType,
       strategyParams: order.strategyParams,
       strongType: order.strongType,
+      pullBackPct: order.pullBackPct,
     });
   }
 
@@ -1086,6 +1152,7 @@ export class OptimizedStrategyBacktest {
     strongType?: 'limit_up' | 'new_high_60';
     strategyType: 'macd' | 'rsi';
     strategyParams: MACDStrategyResult | RSIBacktestResult;
+    pullBackPct?: number;
   }>> {
     const candidates: Array<{
       secid: string;
@@ -1096,6 +1163,7 @@ export class OptimizedStrategyBacktest {
       strongType?: 'limit_up' | 'new_high_60';
       strategyType: 'macd' | 'rsi';
       strategyParams: MACDStrategyResult | RSIBacktestResult;
+      pullBackPct?: number;
     }> = [];
 
     // 预处理：移除已持仓、观察期满的股票
@@ -1143,7 +1211,7 @@ export class OptimizedStrategyBacktest {
       }
 
       if (mDayIndex < 0) {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察中 ${daysInWatch}/${item.maxWatchDays}，暂无买入信号`);
+        // console.log(`[OptBacktest] [${today}] ${secid} 观察中 ${daysInWatch}/${item.maxWatchDays}，暂无买入信号`);
         continue;
       }
 
@@ -1157,12 +1225,51 @@ export class OptimizedStrategyBacktest {
       const lowRange = Math.min(...rangeKlines.map(k => k.zd));
       const pullBackPct = (highRange - lowRange) / highRange;
 
-      const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
-      if (pullBackPct > maxPullbackPct) {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但深度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
+      
+      // 获取同一阶段市场的回撤情况
+      // 相对回撤 = 个股回撤 - 市场回撤
+      // >0: 个股跌得比市场多（跑输）
+      // <0: 个股跌得比市场少（跑赢）
+      const indexDrawdown = await this.getRelativeMarketPullbackPct(klines[strongStockIndex].date, klines[klines.length - 1].date, dataProvider);
+      // 2. 根据市值选择系数，返回 indexDrawdown / volScale;
+      const DEFAULT_VOL_SCALE = {
+        largeCap: 1.0, // 大盘股 >500亿
+        midCap: 1.2,  // 中盘股 100~500亿
+        smallCap: 1.4, // 小盘股 30~100亿
+        microCap: 1.8, // 微盘股 <30亿
+      };
+      let volScale = 1.0;
+      if (item.zsz < 30) volScale = DEFAULT_VOL_SCALE.microCap;
+      else if (item.zsz < 100) volScale = DEFAULT_VOL_SCALE.smallCap;
+      else if (item.zsz < 500) volScale = DEFAULT_VOL_SCALE.midCap;
+      else volScale = DEFAULT_VOL_SCALE.largeCap;
+      const relativeDrawdown = pullBackPct / volScale - indexDrawdown;
+
+      // 最大允许相对回撤（滑动窗口）
+      const maxPullbackPct = await this.getMaxPullbackPct(today);
+        
+      // ========== 实际数值参考 ==========
+
+      // 情绪强(MA5=0.60): maxRelativeDrawdown ≈ 4.3%
+      //   市场回撤-5%，个股回撤-8% → 相对回撤3% → 可以买入 ✓
+      //   市场回撤-5%，个股回撤-12% → 相对回撤7% → 不买入 ✗（跑输太多）
+
+      // 情绪中(MA5=0.50): maxRelativeDrawdown = 7.0%
+      //   市场回撤-10%，个股回撤-15% → 相对回撤5% → 可以买入 ✓
+      //   市场回撤-10%，个股回撤-20% → 相对回撤10% → 不买入 ✗
+
+      // 情绪弱(MA5=0.40): maxRelativeDrawdown ≈ 10.0%
+      //   市场回撤-15%，个股回撤-20% → 相对回撤5% → 可以买入 ✓
+      //   市场回撤-15%，个股回撤-8% → 相对回撤-7% → 可以买入 ✓（强势股！）
+      //   市场回撤-15%，个股回撤-30% → 相对回撤15% → 不买入 ✗（跌过头了）
+  
+      // 相对回撤超过窗口上限 → 跑输太多 → 不买入
+       ;
+      if (relativeDrawdown <= maxPullbackPct) {
+        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
         continue;
       } else {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且浅度回调 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，可以买入`);
+        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，可以买入`);
       }
 
       // const minPullbackPct = await this.getMinPullbackPct(today, dataProvider);
@@ -1208,6 +1315,7 @@ export class OptimizedStrategyBacktest {
         strongType: item.strongType,
         strategyType: item.strategyType,
         strategyParams: item.strategyParams,
+        pullBackPct,
       });
 
       const paramsStr = item.strategyType === 'macd'
@@ -1338,7 +1446,7 @@ export class OptimizedStrategyBacktest {
       if (currentPrice > position.highestPrice) {
         position.highestPrice = currentPrice;
         position.stopLossPrice = currentPrice * dailyTrailingStopPct;
-        console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);
+        console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${(dailyTrailingStopPct * 100).toFixed(1)}%)`);
       }
       // 2. 固定止损（硬性风控，最先检查）
       if (currentPrice < position.buyPrice * dailyStopLossPct) {
@@ -1448,10 +1556,10 @@ export class OptimizedStrategyBacktest {
     for (const stock of strongStocks) {
       if (this.watchList.has(stock.secid)) {
         const item = this.watchList.get(stock.secid)!;
-        const daysInWatch = this.getTradeDaysDiff(item.addedDate, today); // 这里保持同步，因为 today 和 addedDate 都应在 tradeDays 中
+        // const daysInWatch = this.getTradeDaysDiff(item.addedDate, today); // 这里保持同步，因为 today 和 addedDate 都应在 tradeDays 中
         this.watchList.delete(stock.secid);
         watchKicked++;
-        console.log(`[OptBacktest] [${today}] ${stock.secid} 出现在强势列表，从观察列表踢出(已观察${daysInWatch}个交易日)`);
+        // console.log(`[OptBacktest] [${today}] ${stock.secid} 出现在强势列表，从观察列表踢出(已观察${daysInWatch}个交易日)`);
       }
     }
     if (watchKicked > 0) {
@@ -1511,7 +1619,7 @@ export class OptimizedStrategyBacktest {
           
           // 如果从 strongStockDay 到当天，从高点到低点的回调超过阈值，说明深度回调，排除
           if (false) { // 应该根据买入当天进行过滤
-            const maxPullbackPct = await this.getMaxPullbackPct(today, dataProvider);
+            const maxPullbackPct = await this.getMaxPullbackPct(today);
             if (pullBackPct > maxPullbackPct) {
               console.log(`[OptBacktest] [${today}] ${stock.secid} 排除: 已深度回调 ${(pullBackPct*100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%`);
               continue;
@@ -1619,7 +1727,7 @@ export class OptimizedStrategyBacktest {
         }
 
         const cachedCount = items.length - uncachedItems.length;
-        console.log(`[OptBacktest] [${today}] batch ${batchIndex} 共 ${items.length} 只，聚合缓存命中 ${cachedCount} 只，实际计算 ${uncachedItems.length} 只`);
+        // console.log(`[OptBacktest] [${today}] batch ${batchIndex} 共 ${items.length} 只，聚合缓存命中 ${cachedCount} 只，实际计算 ${uncachedItems.length} 只`);
 
         let workerResults: BatchBacktestAndScreenResult[] = [];
         if (uncachedItems.length > 0) {
@@ -1634,7 +1742,7 @@ export class OptimizedStrategyBacktest {
             workerResults = batchBacktestAndScreen(uncachedItems, backtestParams, screenParams);
           }
           const tIpc1 = performance.now();
-          console.log(`[PerfWorker] batch ${batchIndex} IPC传输+计算: ${(tIpc1-tIpc0).toFixed(1)}ms (items=${uncachedItems.length})`);
+          // console.log(`[PerfWorker] batch ${batchIndex} IPC传输+计算: ${(tIpc1-tIpc0).toFixed(1)}ms (items=${uncachedItems.length})`);
         }
 
         // 合并缓存和Worker结果，并写入聚合缓存
@@ -1671,7 +1779,7 @@ export class OptimizedStrategyBacktest {
         }
 
         completedBatches++;
-        console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化+筛选完成 (${completedBatches}/${totalBatches})`);
+        // console.log(`[OptBacktest] [${today}] batch ${batchIndex} 优化+筛选完成 (${completedBatches}/${totalBatches})`);
         const pct = batchPhaseStartPercent + Math.round((completedBatches / totalBatches) * batchPercentRange);
         onProgress?.(
           `[${today}] 优化+筛选进度 ${completedBatches}/${totalBatches} batch (${Math.round(completedBatches / totalBatches * 100)}%)`,
@@ -1698,6 +1806,7 @@ export class OptimizedStrategyBacktest {
       strongType?: 'limit_up' | 'new_high_60';
       strategyType: 'macd' | 'rsi';
       strategyParams: MACDStrategyResult | RSIBacktestResult;
+      pullBackPct?: number;
     }> = [];
 
     // ===== 2-4 前置：批量预查询所有板块条件 =====
@@ -1934,6 +2043,7 @@ export class OptimizedStrategyBacktest {
           strongType: screenResult.strongType!,
           maxWatchDays: this.MAX_WATCH_DAYS,
           strongStockDay: strongStockDay,
+          zsz: stock.sz,
         });
         const watchParamsStr = this.formatStrategyParams(screenResult.bestType, screenResult.bestResult);
         console.log(`[OptBacktest] [${today}] ${stock.secid} 👀 加入观察列表 (评分${screenResult.score!.toFixed(1)})${watchParamsStr ? ' | ' + watchParamsStr : ''}`);
@@ -1949,6 +2059,7 @@ export class OptimizedStrategyBacktest {
           strongType: screenResult.strongType,
           strategyType: screenResult.bestType!,
           strategyParams: screenResult.bestResult!,
+          pullBackPct: item.pullBackPct,
         });
         console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}${pullBackStr}${computed.boardRank >= 0 ? ` | 板块排名=${computed.boardRank + 1}` : ''}${computed.stockRank >= 0 ? ` | 个股排名=${computed.stockRank + 1}` : ''}`);
       }
@@ -2015,6 +2126,7 @@ export class OptimizedStrategyBacktest {
           boardRank: computed?.boardRank,
           stockRank: computed?.stockRank,
           strongType: candidate.strongType,
+          pullBackPct: candidate.pullBackPct,
         });
         boardHoldings.set(candidate.boardCode, boardCount + 1);
         console.log(`[OptBacktest] [${today}] ${candidate.secid} ✅ 生成买入订单 (次日${nextDay}执行) | 评分${candidate.score.toFixed(1)} | 板块${candidate.boardCode}`);
@@ -2300,6 +2412,101 @@ export class OptimizedStrategyBacktest {
     };
   }
 
+  // [新增] 按深度回调区间统计胜率分布
+  private calculatePullBackDistribution(): PullBackWinRateDistribution[] {
+    const buyRecords = this.tradeRecords.filter(t => t.type === 'buy');
+    const sellRecords = this.tradeRecords.filter(t => t.type === 'sell');
+
+    const pullBackRanges = [
+      { label: '<5%', min: 0, max: 0.05 },
+      { label: '5%-10%', min: 0.05, max: 0.10 },
+      { label: '10%-15%', min: 0.10, max: 0.15 },
+      { label: '15%-20%', min: 0.15, max: 0.20 },
+      { label: '20%-30%', min: 0.20, max: 0.30 },
+      { label: '30%+', min: 0.30, max: Infinity },
+    ];
+
+    return pullBackRanges.map(r => {
+      let count = 0;
+      let winTrades = 0;
+      let lossTrades = 0;
+      let totalReturnPct = 0;
+      const uniqueSecids = new Set<string>();
+      const usedSellKeys = new Set<string>();
+
+      const sortedBuys = [...buyRecords].sort((a, b) => a.date.localeCompare(b.date));
+
+      for (const buy of sortedBuys) {
+        const pb = buy.pullBackPct;
+        if (pb === undefined || pb < r.min || pb >= r.max) continue;
+
+        const sell = sellRecords.find(s =>
+          s.secid === buy.secid &&
+          s.date > buy.date &&
+          !usedSellKeys.has(`${s.secid}_${s.date}`)
+        );
+
+        let actualSell: StrategyTradeRecord | undefined = sell;
+        if (!actualSell) {
+          const position = this.positions.get(buy.secid);
+          const lastPrice = this.lastPositionPrices.get(buy.secid);
+          if (position && lastPrice !== undefined && position.buyDate === buy.date) {
+            const adjustedPrice = lastPrice * (1 - this.SLIPPAGE);
+            const totalAmount = adjustedPrice * position.quantity;
+            const commission = totalAmount * this.COMMISSION;
+            const stampTax = totalAmount * this.STAMP_TAX;
+            const netAmount = totalAmount - commission - stampTax;
+            const pnl = netAmount - position.buyAmount;
+            const returnPct = position.buyAmount > 0 ? (pnl / position.buyAmount) * 100 : 0;
+            actualSell = {
+              date: this.tradeDays[this.tradeDays.length - 1] || buy.date,
+              secid: buy.secid,
+              type: 'sell',
+              price: adjustedPrice,
+              quantity: position.quantity,
+              amount: netAmount,
+              reason: '持仓期末结算',
+              pnl,
+              score: (position as any).score,
+              boardRank: (position as any).boardRank,
+              stockRank: (position as any).stockRank,
+              boardCode: position.boardCode,
+              returnPct,
+              strategyType: position.strategyType,
+              strategyParams: position.strategyParams,
+              pullBackPct: (position as any).pullBackPct,
+            } as StrategyTradeRecord;
+          }
+        }
+        if (!actualSell) continue;
+
+        usedSellKeys.add(`${actualSell.secid}_${actualSell.date}`);
+        uniqueSecids.add(buy.secid);
+        count++;
+        const returnPct = actualSell.returnPct || 0;
+        totalReturnPct += returnPct;
+        if ((actualSell.pnl || 0) > 0) {
+          winTrades++;
+        } else {
+          lossTrades++;
+        }
+      }
+
+      const totalTrades = winTrades + lossTrades;
+      return {
+        pullBackRange: r.label,
+        minPullBack: r.min,
+        maxPullBack: r.max === Infinity ? 9999 : r.max,
+        count,
+        uniqueCount: uniqueSecids.size,
+        winTrades,
+        lossTrades,
+        winRate: totalTrades > 0 ? winTrades / totalTrades : 0,
+        avgReturnPct: totalTrades > 0 ? totalReturnPct / totalTrades : 0,
+      };
+    });
+  }
+
   // ===== 结果计算 =====
   private calculateResult(): StrategyBacktestResult {
     const finalValue = this.dailyValues[this.dailyValues.length - 1]?.totalValue || this.initialCapital;
@@ -2353,6 +2560,7 @@ export class OptimizedStrategyBacktest {
         returnPct,
         strategyType: pos.strategyType,
         strategyParams: pos.strategyParams,
+        pullBackPct: (pos as any).pullBackPct,
       });
     }
 
@@ -2392,6 +2600,7 @@ export class OptimizedStrategyBacktest {
     const stockStats = this.calculateStockStats();
     const scoreDistribution = this.calculateScoreDistribution(stockStats);
     const { boardRankDistribution, stockRankDistribution } = this.calculateRankDistribution();
+    const pullBackDistribution = this.calculatePullBackDistribution();
 
     const result: StrategyBacktestResult = {
       totalReturn,
@@ -2408,6 +2617,7 @@ export class OptimizedStrategyBacktest {
       scoreDistribution,
       boardRankDistribution,
       stockRankDistribution,
+      pullBackDistribution,
     };
 
     console.log(`[OptBacktest] 结果指标:`, {
