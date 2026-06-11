@@ -983,6 +983,45 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       console.log(`[UI] 用户请求取消回测`);
     }, []);
 
+    const handleExportTrades = useCallback(async () => {
+      if (!result?.trades?.length) {
+        const { dialog } = window.contextModules.electron;
+        await dialog.showMessageBox({
+          title: '提示',
+          type: 'info',
+          message: '暂无交易明细可导出',
+        });
+        return;
+      }
+      try {
+        const { dialog, ipcRenderer } = window.contextModules.electron;
+        const defaultPath = `trades_${moment().format('YYYY-MM-DD_HHmmss')}.json`;
+        const { filePath, canceled } = await dialog.showSaveDialog({
+          title: '导出交易明细',
+          defaultPath,
+          filters: [{ name: 'JSON Files', extensions: ['json'] }],
+        });
+        if (canceled || !filePath) return;
+
+        const content = JSON.stringify(result.trades, null, 2);
+        await ipcRenderer.invoke('save-string-silently', { filePath, content });
+
+        await dialog.showMessageBox({
+          title: '导出成功',
+          type: 'info',
+          message: `交易明细已保存到 ${filePath}`,
+        });
+      } catch (error) {
+        console.error('导出交易明细失败:', error);
+        const { dialog } = window.contextModules.electron;
+        await dialog.showMessageBox({
+          title: '导出失败',
+          type: 'error',
+          message: '导出交易明细时出现错误',
+        });
+      }
+    }, [result]);
+
     useRenderEcharts(
       () => {
         if (chartOption) {
@@ -1392,9 +1431,18 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                   </Row>
                 </Card>
                 
-                <Card title="📝 交易明细" size="small" style={{ marginBottom: 16 }}>
-                  <Table 
-                    columns={tradeColumns} 
+                <Card
+                  title={
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>📝 交易明细</span>
+                      <Button size="small" onClick={handleExportTrades}>导出JSON</Button>
+                    </div>
+                  }
+                  size="small"
+                  style={{ marginBottom: 16 }}
+                >
+                  <Table
+                    columns={tradeColumns}
                     dataSource={result.trades.map((t: any, i: number) => ({ ...t, key: i }))}
                     pagination={{ pageSize: 20, showSizeChanger: true }}
                     scroll={{ x: 800 }}

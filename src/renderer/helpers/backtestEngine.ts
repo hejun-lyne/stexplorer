@@ -1450,8 +1450,6 @@ export class OptimizedStrategyBacktest {
       // 1. 更新最高价（同时服务于移动止损和动态止盈）
       if (currentPrice > position.highestPrice) {
         position.highestPrice = currentPrice;
-        position.stopLossPrice = currentPrice * dailyTrailingStopPct;
-        console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${(dailyTrailingStopPct * 100).toFixed(1)}%)`);
       }
       // 2. 固定止损（硬性风控，最先检查）
       if (currentPrice < position.buyPrice * dailyStopLossPct) {
@@ -1461,6 +1459,9 @@ export class OptimizedStrategyBacktest {
       }
 
       // 3. 移动止损（保护利润）
+      // 3.1 更新移动止损价格(因为dailyTrailingStopPct更新了)
+      position.stopLossPrice = position.highestPrice * dailyTrailingStopPct;
+      console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${(dailyTrailingStopPct * 100).toFixed(1)}%)`);
       if (currentPrice < position.stopLossPrice) {
         console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
         this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `移动止损(回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);

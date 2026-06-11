@@ -455,7 +455,7 @@ async function init() {
     app.setLoginItemSettings(config);
   });
   ipcMain.handle('save-string-silently', async (event, config) => {
-    const path = `${app.getAppPath()}/${config.fileName}`;
+    const path = config.filePath || `${app.getAppPath()}/${config.fileName}`;
     fs.writeFileSync(path, config.content);
     return path;
   });
