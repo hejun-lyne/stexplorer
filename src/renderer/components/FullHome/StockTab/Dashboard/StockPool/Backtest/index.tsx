@@ -39,7 +39,7 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
         return `${boardCode}|${date}`;
     }
 
-    async getStrongStocks(date: string, strongType:string): Promise<Stock.DetailItem[]> {
+    async getStrongStocks(date: string): Promise<Stock.DetailItem[]> {
       try {
         const queryDate = date.replace(/-/g, '');
         console.log(`[DataProvider] 获取强势股票: ${date}`);
@@ -60,7 +60,6 @@ class UnifiedDataProvider implements RSIStrategy.DataProvider, BacktestEngine.St
           if (code.startsWith('688') || code.startsWith('689')) return false;
           if (code.startsWith('8') || code.startsWith('9')) return false;
           if (s.zx < 10 || s.zx > 100) return false;
-          if (s.strongType !== strongType) return false;
           return true;
         });
 

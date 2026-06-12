@@ -350,7 +350,7 @@ export interface StrategyBacktestResult {
 }
 
 export interface StrategyDataProvider {
-  getStrongStocks(date: string, strongType:string): Promise<Stock.DetailItem[]>;
+  getStrongStocks(date: string): Promise<Stock.DetailItem[]>;
   getKLines(secids: string[], endDate: string, days?: number): Promise<Record<string, Stock.KLineItem[]>>;
   getAllBoards(associateBoardName: string, date: string): Promise<Array<{ code: string; name: string; zf: number }>>;
   getBoardStocks(date: string, boardCode: string | null, boardName: string): Promise<Array<{ secid: string; zf: number }>>;
@@ -872,7 +872,7 @@ export class OptimizedStrategyBacktest {
     // 第一层：MA5绝对水平（原有逻辑）
     const upRatioMA5 = riskPref?.upRatioMA5 || 0.5;
     const s = this.sigmoid((upRatioMA5 - 0.50) * this.STEEPNESS);
-    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.07, 0.14);
+    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.08, 0.14);
 
     // 当弱市下限从5%提到7%后，惩罚机制几乎被下限完全架空
     if (false) {
@@ -1578,31 +1578,29 @@ export class OptimizedStrategyBacktest {
       console.log(`[OptBacktest] [${today}] 可用交易日不足以获取强势股票，跳过强势股票筛选`);
       return false;
     }
+    const strongStockDay = tradeDays[this.STRONG_LOOKBACK - 1];
+
+    console.log(`[OptBacktest] [${today}] 阶段2-2: 获取强势股票 ${strongStockDay} 作为参考日`);
+    onProgress?.(`[${today}] 获取强势股票...`);
 
     if (this.isCancelled()) return true;
     await this.waitIfPaused();
     if (this.isCancelled()) return true;
 
-    const limitupStockDay = tradeDays[5 - 1];
-    const newHighStockDay = tradeDays[10 - 1];
-    console.log(`[OptBacktest] [${today}] 阶段2-2: 获取涨停股票 ${limitupStockDay} 新高股票 ${newHighStockDay} 作为参考日`);
-    onProgress?.(`[${today}] 获取强势股票...`);
-    let limitupStocks = await dataProvider.getStrongStocks(limitupStockDay, "limit_up");
-    let newHighStocks = await dataProvider.getStrongStocks(limitupStockDay, "new_high_60");
+    let strongStocks = await dataProvider.getStrongStocks(strongStockDay);
     // [新增] 排除60日新高但strongDay当天收阴线的股票（冲高回落，不够强势）
-    const beforeFilterCount = newHighStockDay.length;
-    newHighStocks = newHighStocks.filter((s: any) => {
+    const beforeFilterCount = strongStocks.length;
+    strongStocks = strongStocks.filter((s: any) => {
       if (s.strongType === 'new_high_60' && s.jk !== undefined && s.zx !== undefined && s.zx < s.jk) {
-        console.log(`[OptBacktest] [${today}] ${s.secid} 排除: 60日新高但${newHighStockDay}收阴线(${s.zx.toFixed(2)} < ${s.jk.toFixed(2)})`);
+        console.log(`[OptBacktest] [${today}] ${s.secid} 排除: 60日新高但${strongStockDay}收阴线(${s.zx.toFixed(2)} < ${s.jk.toFixed(2)})`);
         return false;
       }
       return true;
     });
-    if (newHighStocks.length < beforeFilterCount) {
-      console.log(`[OptBacktest] [${today}] 60日新高收阴线排除: ${beforeFilterCount - newHighStocks.length} 只`);
+    if (strongStocks.length < beforeFilterCount) {
+      console.log(`[OptBacktest] [${today}] 60日新高收阴线排除: ${beforeFilterCount - strongStocks.length} 只`);
     }
-    let strongStocks = limitupStocks.concat(newHighStocks);
-    console.log(`[OptBacktest] [${today}] 强势股票数量: ${strongStocks.length} (筛选后${this.FILTER_STRONG_TYPE})`); 
+    console.log(`[OptBacktest] [${today}] ${strongStockDay} 强势股票数量: ${strongStocks.length} (筛选后${this.FILTER_STRONG_TYPE})`); 
 
     const tStrong1 = performance.now();
     console.log(`[Perf] [${today}] 强势股票IO: ${(tStrong1 - tStrong0).toFixed(1)}ms (${strongStocks.length}只)`);
@@ -1669,7 +1667,7 @@ export class OptimizedStrategyBacktest {
           invalidResults.push({ pass: false, reason: '停牌', secid: stock.secid });
         } else {
           // 在 filteredStocks 筛选后，进入 batch 前增加
-          const strongStockIndex = klines.findIndex(k => k.date >= (stock.strongType === "limit_up" ? limitupStockDay : newHighStockDay));
+          const strongStockIndex = klines.findIndex(k => k.date >= strongStockDay);
           const rangeKlines = strongStockIndex >= 0 ? klines.slice(strongStockIndex) : klines;
           const highRange = Math.max(...rangeKlines.map(k => k.zg));
           const lowRange = Math.min(...rangeKlines.map(k => k.zd));
@@ -1750,14 +1748,13 @@ export class OptimizedStrategyBacktest {
           sellThresholds: this.RSI_SELL_THRESHOLDS,
         };
         const screenParams = {
-          limitupStockDay: limitupStockDay,
-          newHighStockDay: newHighStockDay,
+          strongStockDay: strongStockDay,
           minStrategyScore: this.MIN_STRATEGY_SCORE,
           strongLookback: this.STRONG_LOOKBACK,
         };
 
         const items = b.validItems.map(v => ({
-          stock: { secid: v.stock.secid, bk: v.stock.bk, strongType: v.stock.strongType },
+          stock: { secid: v.stock.secid, bk: v.stock.bk },
           klines: v.klines.map(k => ({
             date: k.date,
             kp: k.kp,
@@ -2100,8 +2097,8 @@ export class OptimizedStrategyBacktest {
           addedDate: today,
           tDayDate: screenResult.tDayDate!,
           strongType: screenResult.strongType!,
-          maxWatchDays: stock.strongType === "limit_up" ? 5 : 10,
-          strongStockDay: stock.strongType === "limit_up" ? limitupStockDay : newHighStockDay,
+          maxWatchDays: this.MAX_WATCH_DAYS,
+          strongStockDay: strongStockDay,
           zsz: stock.sz,
         });
         const watchParamsStr = this.formatStrategyParams(screenResult.bestType, screenResult.bestResult);
