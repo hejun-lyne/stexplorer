@@ -852,10 +852,11 @@ export class OptimizedStrategyBacktest {
  */
   private async getMaxPullbackPct(today: string): Promise<number> {
     // * 情绪强→收紧(强市中不做弱势股)，情绪弱→放宽(弱市中强势股也会放大回调)
+    // 如果市场很差，尽量不要交易
     const riskPref = this.dailyRiskPreference.get(today)?.upRatioMA5 || 0.5;
     const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
     // 中心15%，情绪强→25%，情绪弱→5%
-    const result = this.clamp(this.PULLBACK_PCT - (s - 0.5) * 0.10, 0.03, 0.12)
+    const result = this.clamp(this.PULLBACK_PCT - (s - 0.5) * 0.20, 0.1, 0.4)
 
     console.log(`[OptBacktest] [${today}] getMaxPullbackPct — riskPref=${riskPref}, result=${result}`);
     return result;
@@ -889,7 +890,7 @@ export class OptimizedStrategyBacktest {
     // 第一层：MA5绝对水平（原有逻辑）
     const upRatioMA5 = riskPref?.upRatioMA5 || 0.5;
     const s = this.sigmoid((upRatioMA5 - 0.50) * this.STEEPNESS);
-    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.05, 0.14);
+    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.07, 0.14);
 
     // 当弱市下限从5%提到7%后，惩罚机制几乎被下限完全架空
     // if (false) {
@@ -920,7 +921,7 @@ export class OptimizedStrategyBacktest {
       if (upRatioToday < 0.25) {
         penalty = Math.max(penalty, 0.03); // 至少收紧3%
       }
-      const result = 1 - this.clamp(based - penalty, 0.08, 0.14);
+      const result = 1 - this.clamp(based - penalty, 0.07, 0.14);
     // }
     
     // const result = 1 - based;
@@ -1262,6 +1263,13 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
+      const closes = klines.map(s => s.sp);
+      const ma5 = calculateMA(closes, 60);
+      if (closes[closes.length - 1] < ma5[ma5.length - 1]) {
+        console.log(`[OptBacktest] [${today}] ${secid} 观察跳过: 跌破60日均线`);
+        continue;
+      }
+
       const daysInWatch = this.getTradeDaysDiff(item.addedDate, today);
 
       let mDayIndex = -1;
@@ -1328,7 +1336,7 @@ export class OptimizedStrategyBacktest {
        ;
       let failReason = '';
       if (relativeDrawdown > maxPullbackPct) {
-        failReason = '相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%';
+        failReason = `相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%`;
       } else {
         console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，可以买入`);
       }
@@ -1553,17 +1561,18 @@ export class OptimizedStrategyBacktest {
 
       // 3. [新增] 如果已经盈利超过阈值，不再受 MACD 死叉影响（让利润奔跑）
       if (profitPct > this.PROFIT_IGNORE_SIGNAL_PCT) {
-        // 盈利超过阈值，只认移动止损，忽略死叉
+        // 盈利超过阈值，只认移动止损，忽略死叉 --> 不能只认移动止损
+        // 4. 固定止盈（达到目标收益率）
+        if (currentPrice >= position.takeProfitPrice) {
+          console.log(`[OptBacktest] [${today}] ${secid} 🟢 固定止盈: 当前${currentPrice.toFixed(2)} >= 目标${position.takeProfitPrice.toFixed(2)}`);
+          this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '固定止盈');
+          continue;
+        }
         console.log(`[OptBacktest] [${today}] ${secid} 盈利${(profitPct*100).toFixed(1)}% > ${(this.PROFIT_IGNORE_SIGNAL_PCT*100).toFixed(0)}%，忽略策略信号`);
         continue;
       }
 
-      // 4. 固定止盈（达到目标收益率）
-      if (currentPrice >= position.takeProfitPrice) {
-        console.log(`[OptBacktest] [${today}] ${secid} 🟢 固定止盈: 当前${currentPrice.toFixed(2)} >= 目标${position.takeProfitPrice.toFixed(2)}`);
-        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '固定止盈');
-        continue;
-      }
+      
 
       // 4. 策略信号（只在盈利 <10% 时生效）
       let hasSellSignal = false;
