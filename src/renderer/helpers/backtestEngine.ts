@@ -872,10 +872,10 @@ export class OptimizedStrategyBacktest {
     // 第一层：MA5绝对水平（原有逻辑）
     const upRatioMA5 = riskPref?.upRatioMA5 || 0.5;
     const s = this.sigmoid((upRatioMA5 - 0.50) * this.STEEPNESS);
-    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.08, 0.14);
+    const based = this.clamp((1 - this.STOP_LOSS_INIT_PCT) + (s - 0.5) * 0.12, 0.05, 0.14);
 
     // 当弱市下限从5%提到7%后，惩罚机制几乎被下限完全架空
-    if (false) {
+    // if (false) {
       // 第二层：当日情绪突变检测（关键！提前1-2天感知拐点）
       let emergency = 0.2; // 默认不限制（取大值让第一层生效）
       const yesterday = this.tradeDays[this.tradeDays.indexOf(today) - 1];
@@ -904,9 +904,9 @@ export class OptimizedStrategyBacktest {
         penalty = Math.max(penalty, 0.03); // 至少收紧3%
       }
       const result = 1 - this.clamp(based - penalty, 0.08, 0.14);
-    }
+    // }
     
-    const result = 1 - based;
+    // const result = 1 - based;
     console.log(`[OptBacktest] [${today}] getDailyStopLossPct — upRatioMA5=${upRatioMA5}, result=${result}`);
     return result;
   }
@@ -917,7 +917,7 @@ export class OptimizedStrategyBacktest {
       return this.TRAILING_STOP_PCT;
 
     const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
-    const ratio = this.clamp(0.75 + (s - 0.5) * 0.30, 0.4, 0.9);
+    const ratio = this.clamp(0.6 + (s - 0.5) * 0.30, 0.4, 0.7);
     const result = 1 - (1 - this.getDailyStopLossPct(today)) * ratio;
     console.log(`[OptBacktest] [${today}] getDailyTrailingStopPct — riskPref=${riskPref}, result=${result}`);
     return result;
@@ -1229,7 +1229,6 @@ export class OptimizedStrategyBacktest {
     const klinesMap = watchSecids.length > 0
       ? await dataProvider.getKLines(watchSecids, today, this.KLINE_DAYS)
       : {};
-
     for (const [secid, item] of this.watchList) {
       const klines = klinesMap[secid];
       if (!klines || klines.length < 60) {
@@ -1306,9 +1305,9 @@ export class OptimizedStrategyBacktest {
   
       // 相对回撤超过窗口上限 → 跑输太多 → 不买入
        ;
+      let failReason = '';
       if (relativeDrawdown > maxPullbackPct) {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号但相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，忽略买入`);
-        continue;
+        failReason = '相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%';
       } else {
         console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%，可以买入`);
       }
@@ -1321,20 +1320,21 @@ export class OptimizedStrategyBacktest {
       //   console.log(`[OptBacktest] [${today}] ${secid} 观察期出现信号且回调满足 ${(pullBackPct * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(minPullbackPct * 100).toFixed(0)}%，可以买入`);
       // }
 
-      let failReason = '';
-      if (mDayIndex < lastIndex) {
-        for (let j = mDayIndex + 1; j <= lastIndex; j++) {
-          if (hasLongUpperShadow(klines[j])) {
-            failReason = `M-Day后出现长上影线(${klines[j].date})`;
-            break;
-          }
-        }
-        if (!failReason) {
-          const mDayEntityLow = Math.min(mDayKline.kp, mDayKline.sp);
+      if(!failReason) {
+        if (mDayIndex < lastIndex) {
           for (let j = mDayIndex + 1; j <= lastIndex; j++) {
-            if (klines[j].sp < mDayEntityLow) {
-              failReason = `M-Day后跌破实体最低价(${klines[j].date})`;
+            if (hasLongUpperShadow(klines[j])) {
+              failReason = `M-Day后出现长上影线(${klines[j].date})`;
               break;
+            }
+          }
+          if (!failReason) {
+            const mDayEntityLow = Math.min(mDayKline.kp, mDayKline.sp);
+            for (let j = mDayIndex + 1; j <= lastIndex; j++) {
+              if (klines[j].sp < mDayEntityLow) {
+                failReason = `M-Day后跌破实体最低价(${klines[j].date})`;
+                break;
+              }
             }
           }
         }
@@ -1883,12 +1883,16 @@ export class OptimizedStrategyBacktest {
       for (let j = 0; j < batchResults.length; j++) {
         const { screenResult } = batchResults[j];
         const { stock, klines } = b.validItems[j];
+        // 如果持仓已经有则忽略
+        if (this.positions.has(stock.secid)) {
+          continue;
+        }
         if (!screenResult.pass) {
-          if (screenResult.reason === '最近3天无买入信号' &&
-              !this.positions.has(stock.secid) &&
-              !this.watchList.has(stock.secid)) {
-            itemsToCheck.push({ type: 'watch', stock, klines, screenResult, pullBackPct: b.validItems[j].pullBackPct });
-          }
+          // if (screenResult.reason === '最近3天无买入信号' &&
+          //     !this.positions.has(stock.secid) &&
+          //     !this.watchList.has(stock.secid)) {
+          //   itemsToCheck.push({ type: 'watch', stock, klines, screenResult, pullBackPct: b.validItems[j].pullBackPct });
+          // }
           continue;
         }
         // itemsToCheck.push({ type: 'candidate', stock, klines, screenResult });
@@ -1899,7 +1903,7 @@ export class OptimizedStrategyBacktest {
     // [优化] 当排名百分比为1时，跳过相关检查，不发起请求
     const skipBoardRankCheck = this.BOARD_RANK_PCT >= 1;
     const skipStockRankCheck = this.STOCK_RANK_PCT >= 1;
-    const uniqueDates = [...new Set(itemsToCheck.map(i => i.screenResult.tDayDate!))];
+    const uniqueDates = [strongStockDay];//[...new Set(itemsToCheck.map(i => i.screenResult.tDayDate!))];
 
     // 2. 批量预查 getAllBoards（按日期去重）
     let boardsByDate: Record<string, Array<{ code: string; name: string; zf: number }>> = {};
@@ -1942,11 +1946,11 @@ export class OptimizedStrategyBacktest {
 
     for (const item of itemsToCheck) {
       const { stock, screenResult } = item;
-      const date = screenResult.tDayDate!;
+      const date = strongStockDay;//screenResult.tDayDate!;
 
       if (skipBoardRankCheck) {
         // 板块排名检查已跳过，所有板块都通过
-        if (skipStockRankCheck || screenResult.strongType === 'limit_up') {
+        if (skipStockRankCheck || stock.strongType === 'limit_up') {
           preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode: null, boardRank: -1, boardZf: 0, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
         } else {
           // 仍需查 boardStocks（通过板块名称查找）
@@ -1981,7 +1985,7 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
-      if (screenResult.strongType === 'limit_up' || skipStockRankCheck) {
+      if (stock.strongType === 'limit_up' || skipStockRankCheck) {
         preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode, boardRank, boardZf, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
       } else {
         // 需要查 boardStocks，收集请求
@@ -2057,20 +2061,20 @@ export class OptimizedStrategyBacktest {
     console.log(`[Perf] [${today}] 板块预查询: ${(tPreBoard1 - tPreBoard0).toFixed(1)}ms (${uniqueDates}日期, ${boardStockRequests.length}股票需查成分股)`);
 
     // [新增] 统计有买入信号但因其他原因失败的分布
-    const signalFailStats: Record<string, number> = {};
-    let hasSignalButFailed = 0;
-    for (const item of itemsToCheck) {
-      const { screenResult } = item;
-      if (!screenResult.pass && screenResult.mDayIndex !== undefined && screenResult.mDayIndex >= 0) {
-        hasSignalButFailed++;
-        const reason = screenResult.reason || '未知原因';
-        signalFailStats[reason] = (signalFailStats[reason] || 0) + 1;
-      }
-    }
-    if (hasSignalButFailed > 0) {
-      console.log(`[OptBacktest] [${today}] 📊 有买入信号但筛选失败统计: ${hasSignalButFailed} 只`);
-      console.log(`[OptBacktest] [${today}] 📊 失败原因分布:`, signalFailStats);
-    }
+    // const signalFailStats: Record<string, number> = {};
+    // let hasSignalButFailed = 0;
+    // for (const item of itemsToCheck) {
+    //   const { screenResult } = item;
+    //   if (!screenResult.pass && screenResult.mDayIndex !== undefined && screenResult.mDayIndex >= 0) {
+    //     hasSignalButFailed++;
+    //     const reason = screenResult.reason || '未知原因';
+    //     signalFailStats[reason] = (signalFailStats[reason] || 0) + 1;
+    //   }
+    // }
+    // if (hasSignalButFailed > 0) {
+    //   console.log(`[OptBacktest] [${today}] 📊 有买入信号但筛选失败统计: ${hasSignalButFailed} 只`);
+    //   console.log(`[OptBacktest] [${today}] 📊 失败原因分布:`, signalFailStats);
+    // }
 
     // 6. 根据预计算结果分配（纯内存操作，零 IPC）
     for (const item of itemsToCheck) {
@@ -2088,6 +2092,7 @@ export class OptimizedStrategyBacktest {
       }
 
       if (type === 'watch') {
+        // 满足评分的强势股票加入候选列表
         this.watchList.set(stock.secid, {
           secid: stock.secid,
           boardCode: stock.bk,
@@ -2095,8 +2100,8 @@ export class OptimizedStrategyBacktest {
           strategyParams: screenResult.bestResult!,
           score: screenResult.score!,
           addedDate: today,
-          tDayDate: screenResult.tDayDate!,
-          strongType: screenResult.strongType!,
+          tDayDate: strongStockDay,// screenResult.tDayDate!,
+          strongType: stock.strongType!,
           maxWatchDays: this.MAX_WATCH_DAYS,
           strongStockDay: strongStockDay,
           zsz: stock.sz,
@@ -2113,7 +2118,7 @@ export class OptimizedStrategyBacktest {
           boardCode: stock.bk,
           price: currentPrice,
           reason: `${screenResult.reason!}${pullBackStr}, 评分=${screenResult.score!.toFixed(1)}, 市场情绪=${upRatioMA5.toFixed(2)}`,
-          strongType: screenResult.strongType,
+          strongType: stock.strongType,
           strategyType: screenResult.bestType!,
           strategyParams: screenResult.bestResult!,
           pullBackPct: item.pullBackPct,

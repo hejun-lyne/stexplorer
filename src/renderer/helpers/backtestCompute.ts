@@ -697,94 +697,112 @@ export function batchBacktestAndScreen(
     } else {
       
       let mDayIndex = -1;
-      if (bestType === 'macd') {
-        mDayIndex = checkMACDBuySignal(klines, bestResult as MACDStrategyResult, 3);
-      } else {
-        mDayIndex = checkRSIBuySignal(klines, bestResult as RSIBacktestResult, 3);
-      }
-
-      // 先计算 strongType 和 tDay，无论是否有买入信号（观察列表需要）
-      const strongType = detectStrongType(klines, screenParams.strongStockDay);
-      const tDayIndex = findTDay(klines, strongType, screenParams.strongStockDay, screenParams.strongLookback);
-      // 用strongStockDay兜底
-      const tDayDate = tDayIndex >= 0 ? klines[tDayIndex].date : screenParams.strongStockDay;
-
-      if (mDayIndex < 0) {
-        screenResult = {
-          pass: false,
-          reason: '最近3天无买入信号',
-          secid: stock.secid,
-          score: bestScore,
-          bestType: bestType!,
-          bestResult: bestResult!,
-          tDayDate,
-          strongType,
-        };
-      } else {
-        const lastIndex = klines.length - 1;
-        const mDayKline = klines[mDayIndex];
-
-        let failReason = '';
-        if (mDayIndex < lastIndex) {
-          for (let j = mDayIndex + 1; j <= lastIndex; j++) {
-            if (hasLongUpperShadow(klines[j])) {
-              failReason = `M-Day后出现长上影线(${klines[j].date})`;
-              break;
-            }
-          }
-          if (!failReason) {
-            const mDayEntityLow = Math.min(mDayKline.kp, mDayKline.sp);
-            for (let j = mDayIndex + 1; j <= lastIndex; j++) {
-              if (klines[j].sp < mDayEntityLow) {
-                failReason = `M-Day后跌破实体最低价(${klines[j].date})`;
-                break;
-              }
-            }
-          }
-        }
-
-        if (failReason) {
-          screenResult = { 
-            pass: false, 
-            reason: failReason, 
-            secid: stock.secid,
-            score: bestScore,
-            bestType: bestType!,
-            bestResult: bestResult!,
-            mDayIndex,
-            mDayDate: mDayKline.date,
-            strongType,
-          };
+      // 不再验证最近3天买点的逻辑
+      if (false) {
+        if (bestType === 'macd') {
+          mDayIndex = checkMACDBuySignal(klines, bestResult as MACDStrategyResult, 3);
         } else {
-          if (tDayIndex < 0) {
-            screenResult = { 
-              pass: false, 
-              reason: '未找到T-Day', 
-              secid: stock.secid,
-              score: bestScore,
-              bestType: bestType!,
-              bestResult: bestResult!,
-              mDayIndex,
-              mDayDate: mDayKline.date,
-              strongType,
-            };
-          } else {
-            screenResult = {
-              pass: true,
-              secid: stock.secid,
-              score: bestScore,
-              bestType: bestType!,
-              bestResult: bestResult!,
-              mDayIndex,
-              tDayIndex,
-              mDayDate: mDayKline.date,
-              tDayDate: klines[tDayIndex].date,
-              strongType,
-              reason: `${bestType?.toUpperCase()}策略得分${bestScore.toFixed(1)}, M-Day=${mDayKline.date}, T-Day=${klines[tDayIndex].date}`,
-            };
-          }
+          mDayIndex = checkRSIBuySignal(klines, bestResult as RSIBacktestResult, 3);
         }
       }
+      
+
+      // // 先计算 strongType 和 tDay，无论是否有买入信号（观察列表需要）
+      // const strongType = detectStrongType(klines, screenParams.strongStockDay);
+      // const tDayIndex = findTDay(klines, strongType, screenParams.strongStockDay, screenParams.strongLookback);
+      // // 用strongStockDay兜底
+      // const tDayDate = tDayIndex >= 0 ? klines[tDayIndex].date : screenParams.strongStockDay;
+
+      screenResult = {
+        pass: true,
+        secid: stock.secid,
+        score: bestScore,
+        bestType: bestType!,
+        bestResult: bestResult!,
+        mDayIndex,
+        // tDayIndex,
+        mDayDate: '',
+        // tDayDate: tDayDate,
+        // strongType,
+        reason: `${bestType?.toUpperCase()}策略得分${bestScore.toFixed(1)}`,
+      };
+
+    //   if (mDayIndex < 0) {
+    //     screenResult = {
+    //       pass: false,
+    //       reason: '最近3天无买入信号',
+    //       secid: stock.secid,
+    //       score: bestScore,
+    //       bestType: bestType!,
+    //       bestResult: bestResult!,
+    //       tDayDate,
+    //       strongType,
+    //     };
+    //   } else {
+    //     const lastIndex = klines.length - 1;
+    //     const mDayKline = klines[mDayIndex];
+
+    //     let failReason = '';
+    //     if (mDayIndex < lastIndex) {
+    //       for (let j = mDayIndex + 1; j <= lastIndex; j++) {
+    //         if (hasLongUpperShadow(klines[j])) {
+    //           failReason = `M-Day后出现长上影线(${klines[j].date})`;
+    //           break;
+    //         }
+    //       }
+    //       if (!failReason) {
+    //         const mDayEntityLow = Math.min(mDayKline.kp, mDayKline.sp);
+    //         for (let j = mDayIndex + 1; j <= lastIndex; j++) {
+    //           if (klines[j].sp < mDayEntityLow) {
+    //             failReason = `M-Day后跌破实体最低价(${klines[j].date})`;
+    //             break;
+    //           }
+    //         }
+    //       }
+    //     }
+
+    //     if (failReason) {
+    //       screenResult = { 
+    //         pass: false, 
+    //         reason: failReason, 
+    //         secid: stock.secid,
+    //         score: bestScore,
+    //         bestType: bestType!,
+    //         bestResult: bestResult!,
+    //         mDayIndex,
+    //         mDayDate: mDayKline.date,
+    //         strongType,
+    //       };
+    //     } else {
+    //       if (tDayIndex < 0) {
+    //         screenResult = { 
+    //           pass: false, 
+    //           reason: '未找到T-Day', 
+    //           secid: stock.secid,
+    //           score: bestScore,
+    //           bestType: bestType!,
+    //           bestResult: bestResult!,
+    //           mDayIndex,
+    //           mDayDate: mDayKline.date,
+    //           strongType,
+    //         };
+    //       } else {
+    //         screenResult = {
+    //           pass: true,
+    //           secid: stock.secid,
+    //           score: bestScore,
+    //           bestType: bestType!,
+    //           bestResult: bestResult!,
+    //           mDayIndex,
+    //           tDayIndex,
+    //           mDayDate: mDayKline.date,
+    //           tDayDate: klines[tDayIndex].date,
+    //           strongType,
+    //           reason: `${bestType?.toUpperCase()}策略得分${bestScore.toFixed(1)}, M-Day=${mDayKline.date}, T-Day=${klines[tDayIndex].date}`,
+    //         };
+    //       }
+    //     }
+    //   }
     }
 
     results.push({ macdResults, rsiResults, screenResult });
