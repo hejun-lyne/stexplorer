@@ -507,6 +507,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [timeExitMaxDays, setTimeExitMaxDays] = useState(5);
     const [timeExitMinReturn, setTimeExitMinReturn] = useState(0.05);
     const [profitIgnoreSignalPct, setProfitIgnoreSignalPct] = useState(0.10);
+    const [trailingStopStartPct, setTrailingStopStartPct] = useState(0.05);
+    const [trailingStopTightenPct, setTrailingStopTightenPct] = useState(0.15);
     const [buyThresholdsInput, setBuyThresholdsInput] = useState('35,40,45');
     const [sellThresholdsInput, setSellThresholdsInput] = useState('65,70,75,80,85');
     const [filterStrongType, setFilterStrongType] = useState<'limit_up' | 'new_high_60' | 'both'>('both');
@@ -571,6 +573,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setTimeExitMaxDays(params.timeExitMaxDays ?? 5);
               setTimeExitMinReturn(params.timeExitMinReturn ?? 0.05);
               setProfitIgnoreSignalPct(params.profitIgnoreSignalPct ?? 0.10);
+              setTrailingStopStartPct(params.trailingStopStartPct ?? 0.05);
+              setTrailingStopTightenPct(params.trailingStopTightenPct ?? 0.15);
               setBuyThresholdsInput((params.buyThresholds ?? [35, 40, 45]).join(','));
               setSellThresholdsInput((params.sellThresholds ?? [65, 70, 75, 80, 85]).join(','));
               setFilterStrongType(params.filterStrongType ?? 'both');
@@ -673,6 +677,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setTimeExitMaxDays(p.timeExitMaxDays ?? 5);
         setTimeExitMinReturn(p.timeExitMinReturn ?? 0.05);
         setProfitIgnoreSignalPct(p.profitIgnoreSignalPct ?? 0.10);
+        setTrailingStopStartPct(p.trailingStopStartPct ?? 0.05);
+        setTrailingStopTightenPct(p.trailingStopTightenPct ?? 0.15);
         setBuyThresholdsInput((p.buyThresholds ?? [35, 40, 45]).join(','));
         setSellThresholdsInput((p.sellThresholds ?? [65, 70, 75, 80, 85]).join(','));
         setFilterStrongType(p.filterStrongType ?? 'both');
@@ -854,6 +860,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             timeExitMaxDays,
             timeExitMinReturn,
             profitIgnoreSignalPct,
+            trailingStopStartPct,
+            trailingStopTightenPct,
             buyThresholds: parseThresholds(buyThresholdsInput),
             sellThresholds: parseThresholds(sellThresholdsInput),
             filterStrongType,
@@ -909,6 +917,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               timeExitMaxDays,
               timeExitMinReturn,
               profitIgnoreSignalPct,
+              trailingStopStartPct,
+              trailingStopTightenPct,
               buyThresholds: parseThresholds(buyThresholdsInput),
               sellThresholds: parseThresholds(sellThresholdsInput),
               filterStrongType,
@@ -946,6 +956,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               timeExitMaxDays,
               timeExitMinReturn,
               profitIgnoreSignalPct,
+              trailingStopStartPct,
+              trailingStopTightenPct,
               buyThresholds: parseThresholds(buyThresholdsInput),
               sellThresholds: parseThresholds(sellThresholdsInput),
               filterStrongType,
@@ -966,7 +978,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, pullbackPct, sellAtOpen, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, buyThresholdsInput, sellThresholdsInput, filterStrongType, steepness]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, pullbackPct, sellAtOpen, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, trailingStopStartPct, trailingStopTightenPct, buyThresholdsInput, sellThresholdsInput, filterStrongType, steepness]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1248,6 +1260,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>追踪:</span>
                       <InputNumber size="small" min={0.8} max={0.99} step={0.01} value={trailingStopPct} onChange={(v) => setTrailingStopPct(v ?? 0.90)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>移动启:</span>
+                      <InputNumber size="small" min={0} max={0.5} step={0.01} value={trailingStopStartPct} onChange={(v) => setTrailingStopStartPct(v ?? 0.05)} disabled={running} style={{ width: 55 }} />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>移动紧:</span>
+                      <InputNumber size="small" min={0} max={1} step={0.01} value={trailingStopTightenPct} onChange={(v) => setTrailingStopTightenPct(v ?? 0.15)} disabled={running} style={{ width: 55 }} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>止盈:</span>
@@ -1590,6 +1610,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                             回撤{((item.params?.pullbackPct ?? item.params?.pullbackPctMid ?? 0.3) * 100).toFixed(0)}% | 开盘卖{item.params?.sellAtOpen ? '是' : '否'} | 
                             效率{item.params?.timeExitMaxDays || 5}天/{(item.params?.timeExitMinReturn || 0.05) * 100}% | 
                             忽略{(item.params?.profitIgnoreSignalPct || 0.10) * 100}% | 
+                            移动启{(item.params?.trailingStopStartPct || 0.05) * 100}% | 
+                            移动紧{(item.params?.trailingStopTightenPct || 0.15) * 100}% | 
                             陡度{item.params?.steepness || 20} | 
                             RSI买[{(item.params?.buyThresholds ?? [35,40,45]).join(',')}] | 
                             RSI卖[{(item.params?.sellThresholds ?? [65,70,75,80,85]).join(',')}]

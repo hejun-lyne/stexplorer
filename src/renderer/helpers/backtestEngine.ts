@@ -518,6 +518,10 @@ export class OptimizedStrategyBacktest {
   // [新增] 止盈参数
   private TAKE_PROFIT_PCT = 1.15;         // 固定止盈：买入价上涨 15% 止盈
 
+  // [新增] 移动止损盈利阈值参数
+  private TRAILING_STOP_START_PCT = 0.05;  // 盈利低于该比例时移动止损不启动
+  private TRAILING_STOP_TIGHTEN_PCT = 0.15; // 盈利超过该比例时收紧移动止损保护
+
   private MIN_STRATEGY_SCORE = 100;
   private STRONG_LOOKBACK = 10;
   private BOARD_RANK_PCT = 0.3;
@@ -569,6 +573,8 @@ export class OptimizedStrategyBacktest {
       timeExitMaxDays?: number;
       timeExitMinReturn?: number;
       profitIgnoreSignalPct?: number;
+      trailingStopStartPct?: number;
+      trailingStopTightenPct?: number;
       buyThresholds?: number[];
       sellThresholds?: number[];
       filterStrongType?: 'limit_up' | 'new_high_60' | 'both';
@@ -607,6 +613,8 @@ export class OptimizedStrategyBacktest {
     if (options?.timeExitMaxDays !== undefined) this.TIME_EXIT_MAX_DAYS = options.timeExitMaxDays;
     if (options?.timeExitMinReturn !== undefined) this.TIME_EXIT_MIN_RETURN = options.timeExitMinReturn;
     if (options?.profitIgnoreSignalPct !== undefined) this.PROFIT_IGNORE_SIGNAL_PCT = options.profitIgnoreSignalPct;
+    if (options?.trailingStopStartPct !== undefined) this.TRAILING_STOP_START_PCT = options.trailingStopStartPct;
+    if (options?.trailingStopTightenPct !== undefined) this.TRAILING_STOP_TIGHTEN_PCT = options.trailingStopTightenPct;
     if (options?.buyThresholds !== undefined) this.RSI_BUY_THRESHOLDS = options.buyThresholds;
     if (options?.sellThresholds !== undefined) this.RSI_SELL_THRESHOLDS = options.sellThresholds;
     if (options?.filterStrongType !== undefined) this.FILTER_STRONG_TYPE = options.filterStrongType;
@@ -615,6 +623,8 @@ export class OptimizedStrategyBacktest {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
       TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
       TAKE_PROFIT_PCT: this.TAKE_PROFIT_PCT,
+      TRAILING_STOP_START_PCT: this.TRAILING_STOP_START_PCT,
+      TRAILING_STOP_TIGHTEN_PCT: this.TRAILING_STOP_TIGHTEN_PCT,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
       STRONG_LOOKBACK: `${this.STRONG_LOOKBACK}天前`,
       SLIPPAGE: this.SLIPPAGE,
@@ -659,6 +669,8 @@ export class OptimizedStrategyBacktest {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
       TRAILING_STOP_PCT: this.TRAILING_STOP_PCT,
       TAKE_PROFIT_PCT: this.TAKE_PROFIT_PCT,
+      TRAILING_STOP_START_PCT: this.TRAILING_STOP_START_PCT,
+      TRAILING_STOP_TIGHTEN_PCT: this.TRAILING_STOP_TIGHTEN_PCT,
       MIN_STRATEGY_SCORE: this.MIN_STRATEGY_SCORE,
       STRONG_LOOKBACK: `${this.STRONG_LOOKBACK}天前`,
       MAX_WATCH_DAYS: this.MAX_WATCH_DAYS,
@@ -1499,13 +1511,13 @@ export class OptimizedStrategyBacktest {
 
       // 3. 移动止损（保护利润）
       // 3.1 更新移动止损价格(因为dailyTrailingStopPct更新了)
-      if (profitPct < 0.05) {
-        // 盈利不足5%：移动止损不启动
-        console.log(`[OptBacktest] [${today}] ${secid} 盈利不足5%：移动止损不启动 盈利：${profitPct.toFixed(2)}`);
+      if (profitPct < this.TRAILING_STOP_START_PCT) {
+        // 盈利低于阈值：移动止损不启动
+        console.log(`[OptBacktest] [${today}] ${secid} 盈利不足${(this.TRAILING_STOP_START_PCT * 100).toFixed(0)}%：移动止损不启动 盈利：${(profitPct * 100).toFixed(2)}%`);
       } else {
-        if (profitPct > 0.15) {
-          // 盈利>15%：收紧保护
-          position.stopLossPrice = position.highestPrice * (1 - (1 -dailyTrailingStopPct) * 0.6);
+        if (profitPct > this.TRAILING_STOP_TIGHTEN_PCT) {
+          // 盈利超过阈值：收紧保护
+          position.stopLossPrice = position.highestPrice * (1 - (1 - dailyTrailingStopPct) * 0.6);
         } else {
           position.stopLossPrice = position.highestPrice * dailyTrailingStopPct;
         }
