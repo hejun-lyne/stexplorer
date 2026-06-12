@@ -339,6 +339,7 @@ export class StrongStockBacktest {
     private dailyValues: DailyValue[] = [];
     private tradeDays: string[];
     private cancelOptions?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean };
+    private onPartialResultCallback?: (result: BacktestResult) => void;
 
     private readonly MAX_POSITIONS = 8;
     private readonly POSITION_RATIO = 0.125;
@@ -368,9 +369,10 @@ export class StrongStockBacktest {
     public async run(
         dataProvider: DataProvider,
         onProgress?: (message: string, percent?: number) => void,
-        options?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean }
+        options?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean; onPartialResult?: (result: BacktestResult) => void }
     ): Promise<BacktestResult> {
         this.cancelOptions = options;
+        this.onPartialResultCallback = options?.onPartialResult;
         const totalDays = this.tradeDays.length;
         const dayPercentStep = totalDays > 0 ? 90 / totalDays : 0;
 
@@ -437,6 +439,11 @@ export class StrongStockBacktest {
             if (await this.recordDailyValue(today, dataProvider)) {
                 onProgress?.('回测已取消', 100);
                 return this.calculateResult();
+            }
+
+            // [新增] 实时推送当前部分结果给 UI
+            if (this.onPartialResultCallback) {
+                this.onPartialResultCallback(this.calculateResult(true));
             }
 
             console.log(`[Backtest] [${today}] 日终状态: 持仓 ${this.positions.size} 只 | 观察 ${this.watchList.size} 只 | 净值 ${this.dailyValues[this.dailyValues.length - 1]?.totalValue.toFixed(2)}`);
@@ -1064,7 +1071,7 @@ export class StrongStockBacktest {
         return false;
     }
 
-    private calculateResult(): BacktestResult {
+    private calculateResult(silent: boolean = false): BacktestResult {
         const finalValue = this.dailyValues[this.dailyValues.length - 1]?.totalValue || this.initialCapital;
         const totalReturn = (finalValue - this.initialCapital) / this.initialCapital;
         const days = this.dailyValues.length;
@@ -1132,31 +1139,33 @@ export class StrongStockBacktest {
             dailyValues: this.dailyValues
         };
 
-        console.log(`[Backtest] 结果指标:`, {
-            初始资金: this.initialCapital,
-            最终资金: finalValue.toFixed(2),
-            总收益率: (totalReturn * 100).toFixed(2) + '%',
-            年化收益率: (annualizedReturn * 100).toFixed(2) + '%',
-            最大回撤: (maxDrawdown * 100).toFixed(2) + '%',
-            回撤区间: `${peakDate} → ${troughDate}`,
-            胜率: (winRate * 100).toFixed(2) + '%',
-            盈亏比: profitFactor.toFixed(2),
-            夏普比率: sharpeRatio.toFixed(2),
-            总交易次数: sellTrades.length,
-            平均持仓天数: avgHoldingDays.toFixed(1)
-        });
+        if (!silent) {
+            console.log(`[Backtest] 结果指标:`, {
+                初始资金: this.initialCapital,
+                最终资金: finalValue.toFixed(2),
+                总收益率: (totalReturn * 100).toFixed(2) + '%',
+                年化收益率: (annualizedReturn * 100).toFixed(2) + '%',
+                最大回撤: (maxDrawdown * 100).toFixed(2) + '%',
+                回撤区间: `${peakDate} → ${troughDate}`,
+                胜率: (winRate * 100).toFixed(2) + '%',
+                盈亏比: profitFactor.toFixed(2),
+                夏普比率: sharpeRatio.toFixed(2),
+                总交易次数: sellTrades.length,
+                平均持仓天数: avgHoldingDays.toFixed(1)
+            });
 
-        console.log(`[Backtest] 买卖记录汇总:`);
-        console.table(this.tradeRecords.map(t => ({
-            日期: t.date,
-            股票: t.secid,
-            方向: t.type,
-            价格: t.price.toFixed(2),
-            数量: t.quantity,
-            金额: t.amount.toFixed(2),
-            盈亏: t.pnl !== undefined ? (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) : '-',
-            原因: t.reason
-        })));
+            console.log(`[Backtest] 买卖记录汇总:`);
+            console.table(this.tradeRecords.map(t => ({
+                日期: t.date,
+                股票: t.secid,
+                方向: t.type,
+                价格: t.price.toFixed(2),
+                数量: t.quantity,
+                金额: t.amount.toFixed(2),
+                盈亏: t.pnl !== undefined ? (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) : '-',
+                原因: t.reason
+            })));
+        }
 
         return result;
     }

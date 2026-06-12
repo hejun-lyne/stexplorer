@@ -391,6 +391,8 @@ export class OptimizedStrategyBacktest {
   private dailyValues: StrategyDailyValue[] = [];
   private tradeDays: string[];
   private cancelOptions?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean };
+  private pendingOrderReviewCallback?: (orders: StrategyPendingOrder[]) => Promise<StrategyPendingOrder[]>;
+  private onPartialResultCallback?: (result: StrategyBacktestResult) => void;
   private workerExecutor?: (method: string, args?: any[]) => Promise<any>;
   private filterTradeDaysCache: Map<string, string[]> = new Map();
   // [新增] 持仓最后收盘价，用于回测结束时统计持仓盈亏
@@ -657,9 +659,11 @@ export class OptimizedStrategyBacktest {
   public async run(
     dataProvider: StrategyDataProvider,
     onProgress?: (message: string, percent?: number) => void,
-    options?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean }
+    options?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean; onPendingOrdersReview?: (orders: StrategyPendingOrder[]) => Promise<StrategyPendingOrder[]>; onPartialResult?: (result: StrategyBacktestResult) => void }
   ): Promise<StrategyBacktestResult> {
     this.cancelOptions = options;
+    this.pendingOrderReviewCallback = options?.onPendingOrdersReview;
+    this.onPartialResultCallback = options?.onPartialResult;
     // 需要对tradeDays过滤
     this.tradeDays = await dataProvider.filterTradeDays(this.tradeDays);
     const totalDays = this.tradeDays.length;
@@ -738,6 +742,13 @@ export class OptimizedStrategyBacktest {
       if (await this.recordDailyValue(today, dataProvider)) {
         onProgress?.('回测已取消', 100);
         return this.calculateResult();
+      }
+
+      // [新增] 实时推送当前部分结果给 UI，便于展示动态更新的净值/交易统计
+      if (this.onPartialResultCallback) {
+        const partialResult = this.calculateResult(true);
+        this.onPartialResultCallback(partialResult);
+        await yieldToMain();
       }
 
       console.log(`[OptBacktest] [${today}] 日终状态: 持仓 ${this.positions.size} 只 | 净值 ${this.dailyValues[this.dailyValues.length - 1]?.totalValue.toFixed(2)}`);
@@ -942,7 +953,7 @@ export class OptimizedStrategyBacktest {
   }
 
   // ===== 阶段1: 执行待处理订单 =====
-    private async executePendingOrders(today: string, dataProvider: StrategyDataProvider): Promise<boolean> {
+  private async executePendingOrders(today: string, dataProvider: StrategyDataProvider): Promise<boolean> {
     if (this.pendingOrders.length === 0) {
       console.log(`[OptBacktest] [${today}] 无待执行订单`);
       return false;
@@ -951,11 +962,14 @@ export class OptimizedStrategyBacktest {
     // [修复] 提前计算当天市场风险偏好，确保 executeBuy 中 getDailyStopLossPct 能命中
     await this.getRiskPreference(today, dataProvider);
 
-    // [优化] 记录因停牌而跳过的订单，用于统计
+    // [优化] 记录因停牌/一字板而跳过的订单，用于统计
     const skippedOrders: Array<{ secid: string; type: string; reason: string }> = [];
 
     const secidsToFetch = this.pendingOrders.map(o => o.secid);
     const klinesMap = await dataProvider.getKLines(secidsToFetch, today, 5);
+
+    // 第一步：验证所有待处理订单，筛选出可执行订单
+    const executableOrders: StrategyPendingOrder[] = [];
     for (const order of this.pendingOrders) {
       if (this.isCancelled()) return true;
       await this.waitIfPaused();
@@ -967,15 +981,8 @@ export class OptimizedStrategyBacktest {
         skippedOrders.push({ secid: order.secid, type: order.type, reason: '无K线数据' });
         continue;
       }
-      
+
       const todayKLine = klines.find(k => k.date === today);
-      if (!todayKLine) {
-        console.log(`[OptBacktest] [${today}] 订单执行失败:未获取到今日K线数据`);
-        continue;
-      }
-      const signalKLine = klines[klines.indexOf(todayKLine) - 1];
-      
-      // [优化] 明确检测停牌：最近K线不是今天，说明今日停牌
       if (!todayKLine) {
         const lastKline = klines[klines.length - 1];
         console.log(`[OptBacktest] [${today}] 订单执行跳过: ${order.secid} 停牌 (最近交易日: ${lastKline?.date || '无'})`);
@@ -983,18 +990,43 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
+      // [新增] 剔除一字板：开盘即涨停且全天没有更高价格，无法买入
+      if (order.type === 'buy' && todayKLine.kp === todayKLine.zg && isLimitUpStock(order.secid, todayKLine.zdf)) {
+        const signalKLine = klines[klines.indexOf(todayKLine) - 1];
+        const signalDayEntityLow = signalKLine ? Math.min(signalKLine.kp, signalKLine.sp) : 0;
+        console.log(`[OptBacktest] [${today}] ${order.secid} 买入跳过: 一字板 (开盘${todayKLine.kp.toFixed(2)}=最高${todayKLine.zg.toFixed(2)}, 涨幅${todayKLine.zdf.toFixed(2)}%) | 实体最低: ${signalDayEntityLow.toFixed(2)}`);
+        skippedOrders.push({ secid: order.secid, type: order.type, reason: '一字板' });
+        continue;
+      }
+
+      executableOrders.push(order);
+    }
+
+    // [新增] UI 交互：让用户决定执行或取消可执行订单
+    let ordersToExecute = executableOrders;
+    if (this.pendingOrderReviewCallback && executableOrders.length > 0) {
+      console.log(`[OptBacktest] [${today}] 等待用户确认 ${executableOrders.length} 笔待执行订单`);
+      ordersToExecute = await this.pendingOrderReviewCallback(executableOrders);
+      console.log(`[OptBacktest] [${today}] 用户确认执行 ${ordersToExecute.length}/${executableOrders.length} 笔订单`);
+      if (this.isCancelled()) return true;
+    }
+
+    // 第二步：执行用户确认的订单
+    for (const order of ordersToExecute) {
+      if (this.isCancelled()) return true;
+      await this.waitIfPaused();
+      if (this.isCancelled()) return true;
+
+      const klines = klinesMap[order.secid];
+      const todayKLine = klines.find(k => k.date === today)!;
+      const signalKLine = klines[klines.indexOf(todayKLine) - 1];
       const openPrice = todayKLine.kp;
-      const signalDayEntityLow = Math.min(signalKLine.kp, signalKLine.sp); // [新增]
+      const signalDayEntityLow = signalKLine ? Math.min(signalKLine.kp, signalKLine.sp) : 0;
+
       // [调试] 打印K线原始数据，用于核对价格是否匹配
       console.log(`[Debug][ executePendingOrders][${today}] ${order.secid} ${order.type} K线确认: date=${todayKLine.date} kp=${todayKLine.kp.toFixed(2)} sp=${todayKLine.sp.toFixed(2)} zg=${todayKLine.zg.toFixed(2)} zd=${todayKLine.zd.toFixed(2)}`);
 
       if (order.type === 'buy') {
-        // [新增] 剔除一字板：开盘即涨停且全天没有更高价格，无法买入
-        if (todayKLine.kp === todayKLine.zg && isLimitUpStock(order.secid, todayKLine.zdf)) {
-          console.log(`[OptBacktest] [${today}] ${order.secid} 买入跳过: 一字板 (开盘${todayKLine.kp.toFixed(2)}=最高${todayKLine.zg.toFixed(2)}, 涨幅${todayKLine.zdf.toFixed(2)}%) | 实体最低: ${signalDayEntityLow.toFixed(2)}`);
-          skippedOrders.push({ secid: order.secid, type: order.type, reason: '一字板' });
-          continue;
-        }
         console.log(`[OptBacktest] [${today}] 执行买入: ${order.secid} | 开盘价: ${openPrice.toFixed(2)} | 原因: ${order.reason}`);
         this.executeBuy(order, today, openPrice, signalDayEntityLow);
       } else if (order.type === 'sell') {
@@ -1006,8 +1038,8 @@ export class OptimizedStrategyBacktest {
           console.log(`[OptBacktest] [${today}] 卖出订单忽略: ${order.secid} 无持仓`);
         }
       }
-      
-      // [优化] 每执行/跳过一个订单让出一次，避免订单多的时候卡
+
+      // [优化] 每执行一个订单让出一次，避免订单多的时候卡
       await yieldToMain(1);
     }
 
@@ -1318,7 +1350,6 @@ export class OptimizedStrategyBacktest {
       const maxPullbackPct = await this.getMaxPullbackPct(today);
         
       // ========== 实际数值参考 ==========
-
       // 情绪强(MA5=0.60): maxRelativeDrawdown ≈ 4.3%
       //   市场回撤-5%，个股回撤-8% → 相对回撤3% → 可以买入 ✓
       //   市场回撤-5%，个股回撤-12% → 相对回撤7% → 不买入 ✗（跑输太多）
@@ -1333,7 +1364,6 @@ export class OptimizedStrategyBacktest {
       //   市场回撤-15%，个股回撤-30% → 相对回撤15% → 不买入 ✗（跌过头了）
   
       // 相对回撤超过窗口上限 → 跑输太多 → 不买入
-       ;
       let failReason = '';
       if (relativeDrawdown > maxPullbackPct) {
         failReason = `相对回调 ${(relativeDrawdown * 100).toFixed(1)}% (${rangeKlines.length}天) 阈值=${(maxPullbackPct * 100).toFixed(0)}%`;
@@ -2638,7 +2668,7 @@ export class OptimizedStrategyBacktest {
   }
 
   // ===== 结果计算 =====
-  private calculateResult(): StrategyBacktestResult {
+  private calculateResult(silent: boolean = false): StrategyBacktestResult {
     const finalValue = this.dailyValues[this.dailyValues.length - 1]?.totalValue || this.initialCapital;
     const totalReturn = (finalValue - this.initialCapital) / this.initialCapital;
     const days = this.dailyValues.length;
@@ -2753,31 +2783,33 @@ export class OptimizedStrategyBacktest {
       marketCapDistribution,
     };
 
-    console.log(`[OptBacktest] 结果指标:`, {
-      初始资金: this.initialCapital,
-      最终资金: finalValue.toFixed(2),
-      总收益率: (totalReturn * 100).toFixed(2) + '%',
-      年化收益率: (annualizedReturn * 100).toFixed(2) + '%',
-      最大回撤: (maxDrawdown * 100).toFixed(2) + '%',
-      回撤区间: `${peakDate} → ${troughDate}`,
-      胜率: (winRate * 100).toFixed(2) + '%',
-      盈亏比: profitFactor.toFixed(2),
-      夏普比率: sharpeRatio.toFixed(2),
-      总交易次数: allSellTrades.length,
-      平均持仓天数: avgHoldingDays.toFixed(1)
-    });
+    if (!silent) {
+      console.log(`[OptBacktest] 结果指标:`, {
+        初始资金: this.initialCapital,
+        最终资金: finalValue.toFixed(2),
+        总收益率: (totalReturn * 100).toFixed(2) + '%',
+        年化收益率: (annualizedReturn * 100).toFixed(2) + '%',
+        最大回撤: (maxDrawdown * 100).toFixed(2) + '%',
+        回撤区间: `${peakDate} → ${troughDate}`,
+        胜率: (winRate * 100).toFixed(2) + '%',
+        盈亏比: profitFactor.toFixed(2),
+        夏普比率: sharpeRatio.toFixed(2),
+        总交易次数: allSellTrades.length,
+        平均持仓天数: avgHoldingDays.toFixed(1)
+      });
 
-    console.log(`[OptBacktest] 买卖记录汇总:`);
-    console.table(this.tradeRecords.map(t => ({
-      日期: t.date,
-      股票: t.secid,
-      方向: t.type,
-      价格: t.price.toFixed(2),
-      数量: t.quantity,
-      金额: t.amount.toFixed(2),
-      盈亏: t.pnl !== undefined ? (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) : '-',
-      原因: t.reason
-    })));
+      console.log(`[OptBacktest] 买卖记录汇总:`);
+      console.table(this.tradeRecords.map(t => ({
+        日期: t.date,
+        股票: t.secid,
+        方向: t.type,
+        价格: t.price.toFixed(2),
+        数量: t.quantity,
+        金额: t.amount.toFixed(2),
+        盈亏: t.pnl !== undefined ? (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) : '-',
+        原因: t.reason
+      })));
+    }
 
     return result;
   }
