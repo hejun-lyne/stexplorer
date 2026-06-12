@@ -1178,6 +1178,18 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         )},
     ];
 
+    const marketCapDistributionColumns = [
+        { title: '市值区间', dataIndex: 'marketCapRange', key: 'marketCapRange', width: 120 },
+        { title: '交易次数', dataIndex: 'count', key: 'count', width: 90 },
+        { title: '涉及股票数', dataIndex: 'uniqueCount', key: 'uniqueCount', width: 100 },
+        { title: '盈利次数', dataIndex: 'winTrades', key: 'winTrades', width: 90 },
+        { title: '亏损次数', dataIndex: 'lossTrades', key: 'lossTrades', width: 90 },
+        { title: '胜率', dataIndex: 'winRate', key: 'winRate', width: 100, render: (v: number) => `${(v * 100).toFixed(1)}%` },
+        { title: '平均收益率', dataIndex: 'avgReturnPct', key: 'avgReturnPct', width: 120, render: (v: number) => (
+            <span style={{ color: (v || 0) >= 0 ? '#cf1322' : '#3f8600' }}>{(v || 0) >= 0 ? '+' : ''}{(v || 0).toFixed(2)}%</span>
+        )},
+    ];
+
     return (
         <div className={styles.content}>
           <div className={styles.toolbar}>
@@ -1532,6 +1544,17 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     <Table 
                       columns={pullBackDistributionColumns}
                       dataSource={result.pullBackDistribution.map((d: any, i: number) => ({ ...d, key: i }))}
+                      pagination={false}
+                      size="small"
+                    />
+                  </Card>
+                )}
+
+                {result.marketCapDistribution && result.marketCapDistribution.length > 0 && (
+                  <Card title="📊 总市值与胜率关系" size="small" style={{ marginBottom: 16 }}>
+                    <Table 
+                      columns={marketCapDistributionColumns}
+                      dataSource={result.marketCapDistribution.map((d: any, i: number) => ({ ...d, key: i }))}
                       pagination={false}
                       size="small"
                     />

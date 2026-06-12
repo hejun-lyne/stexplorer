@@ -223,6 +223,7 @@ export interface StrategyPosition {
 
   consecutiveDeclineDays: number;  // 买入后连续下跌天数
   pullBackPct?: number;             // 买入时深度回调比例
+  zsz?: number;                     // 总市值（亿元）
 }
 
 export interface StrategyPendingOrder {
@@ -238,6 +239,7 @@ export interface StrategyPendingOrder {
   stockRank?: number;
   strongType?: 'limit_up' | 'new_high_60';
   pullBackPct?: number;
+  zsz?: number; // 总市值（亿元）
 }
 
 export interface StrategyTradeRecord {
@@ -257,6 +259,7 @@ export interface StrategyTradeRecord {
   strategyType?: 'macd' | 'rsi';
   strategyParams?: MACDStrategyResult | RSIBacktestResult;
   pullBackPct?: number;
+  zsz?: number; // 总市值（亿元）
 }
 
 export interface StrategyDailyValue {
@@ -293,6 +296,7 @@ export interface StockTradeStats {
   stockRank?: number;
   strategyParamsStr?: string;
   strongType?: 'limit_up' | 'new_high_60';
+  zsz?: number; // 总市值（亿元）
 }
 
 export interface ScoreWinRateDistribution {
@@ -347,6 +351,7 @@ export interface StrategyBacktestResult {
   boardRankDistribution: RankWinRateDistribution[];
   stockRankDistribution: RankWinRateDistribution[];
   pullBackDistribution: PullBackWinRateDistribution[];
+  marketCapDistribution: MarketCapWinRateDistribution[];
 }
 
 export interface StrategyDataProvider {
@@ -1104,6 +1109,7 @@ export class OptimizedStrategyBacktest {
       signalDayEntityLow, // [新增] 保存买入当天实体最低价
       consecutiveDeclineDays: 0,
       pullBackPct: order.pullBackPct,
+      zsz: order.zsz,
     });
 
     const paramsStr = this.formatStrategyParams(order.strategyType, order.strategyParams);
@@ -1128,6 +1134,7 @@ export class OptimizedStrategyBacktest {
       strategyParams: order.strategyParams,
       strongType: order.strongType,
       pullBackPct: order.pullBackPct,
+      zsz: order.zsz,
     });
   }
 
@@ -1206,6 +1213,7 @@ export class OptimizedStrategyBacktest {
     strategyType: 'macd' | 'rsi';
     strategyParams: MACDStrategyResult | RSIBacktestResult;
     pullBackPct?: number;
+    zsz?: number;
   }>> {
     const candidates: Array<{
       secid: string;
@@ -1217,6 +1225,7 @@ export class OptimizedStrategyBacktest {
       strategyType: 'macd' | 'rsi';
       strategyParams: MACDStrategyResult | RSIBacktestResult;
       pullBackPct?: number;
+      zsz?: number;
     }> = [];
 
     // 预处理：移除已持仓、观察期满的股票
@@ -1370,6 +1379,7 @@ export class OptimizedStrategyBacktest {
         strategyType: item.strategyType,
         strategyParams: item.strategyParams,
         pullBackPct,
+        zsz: item.zsz,
       });
 
       const paramsStr = item.strategyType === 'macd'
@@ -2134,6 +2144,7 @@ export class OptimizedStrategyBacktest {
           strategyType: screenResult.bestType!,
           strategyParams: screenResult.bestResult!,
           pullBackPct: item.pullBackPct,
+          zsz: stock.sz,
         });
         console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}${pullBackStr}${computed.boardRank >= 0 ? ` | 板块排名=${computed.boardRank + 1}` : ''}${computed.stockRank >= 0 ? ` | 个股排名=${computed.stockRank + 1}` : ''}`);
       }
@@ -2201,6 +2212,7 @@ export class OptimizedStrategyBacktest {
           stockRank: computed?.stockRank,
           strongType: candidate.strongType,
           pullBackPct: candidate.pullBackPct,
+          zsz: candidate.zsz,
         });
         boardHoldings.set(candidate.boardCode, boardCount + 1);
         console.log(`[OptBacktest] [${today}] ${candidate.secid} ✅ 生成买入订单 (次日${nextDay}执行) | 评分${candidate.score.toFixed(1)} | 板块${candidate.boardCode}`);
@@ -2277,6 +2289,7 @@ export class OptimizedStrategyBacktest {
           stockRank: buy.stockRank,
           strategyParamsStr: this.formatStrategyParams(buy.strategyType, buy.strategyParams),
           strongType: buy.strongType,
+          zsz: buy.zsz,
           trades: [],
           totalTrades: 0,
           winTrades: 0,
@@ -2549,6 +2562,7 @@ export class OptimizedStrategyBacktest {
               strategyType: position.strategyType,
               strategyParams: position.strategyParams,
               pullBackPct: (position as any).pullBackPct,
+              zsz: (position as any).zsz,
             } as StrategyTradeRecord;
           }
         }
@@ -2577,6 +2591,39 @@ export class OptimizedStrategyBacktest {
         lossTrades,
         winRate: totalTrades > 0 ? winTrades / totalTrades : 0,
         avgReturnPct: totalTrades > 0 ? totalReturnPct / totalTrades : 0,
+      };
+    });
+  }
+
+  // [新增] 按总市值区间统计胜率分布
+  private calculateMarketCapDistribution(stockStats: StockTradeStats[]): MarketCapWinRateDistribution[] {
+    const ranges = [
+      { label: '<30亿', min: 0, max: 30 },
+      { label: '30-100亿', min: 30, max: 100 },
+      { label: '100-300亿', min: 100, max: 300 },
+      { label: '300-500亿', min: 300, max: 500 },
+      { label: '500-1000亿', min: 500, max: 1000 },
+      { label: '1000亿+', min: 1000, max: Infinity },
+    ];
+
+    return ranges.map(r => {
+      const items = stockStats.filter(s => s.zsz !== undefined && s.zsz >= r.min && s.zsz < r.max && s.totalTrades > 0);
+      const totalTrades = items.reduce((sum, s) => sum + s.totalTrades, 0);
+      const winTrades = items.reduce((sum, s) => sum + s.winTrades, 0);
+      const lossTrades = items.reduce((sum, s) => sum + s.lossTrades, 0);
+      const totalReturn = items.reduce((sum, s) => sum + s.avgReturnPct * s.totalTrades, 0);
+      const uniqueSecids = new Set(items.map(s => s.secid));
+
+      return {
+        marketCapRange: r.label,
+        minMarketCap: r.min,
+        maxMarketCap: r.max === Infinity ? 99999 : r.max,
+        count: totalTrades,
+        uniqueCount: uniqueSecids.size,
+        winTrades,
+        lossTrades,
+        winRate: totalTrades > 0 ? winTrades / totalTrades : 0,
+        avgReturnPct: totalTrades > 0 ? totalReturn / totalTrades : 0,
       };
     });
   }
@@ -2635,6 +2682,7 @@ export class OptimizedStrategyBacktest {
         strategyType: pos.strategyType,
         strategyParams: pos.strategyParams,
         pullBackPct: (pos as any).pullBackPct,
+        zsz: (pos as any).zsz,
       });
     }
 
@@ -2675,6 +2723,7 @@ export class OptimizedStrategyBacktest {
     const scoreDistribution = this.calculateScoreDistribution(stockStats);
     const { boardRankDistribution, stockRankDistribution } = this.calculateRankDistribution();
     const pullBackDistribution = this.calculatePullBackDistribution();
+    const marketCapDistribution = this.calculateMarketCapDistribution(stockStats);
 
     const result: StrategyBacktestResult = {
       totalReturn,
@@ -2692,6 +2741,7 @@ export class OptimizedStrategyBacktest {
       boardRankDistribution,
       stockRankDistribution,
       pullBackDistribution,
+      marketCapDistribution,
     };
 
     console.log(`[OptBacktest] 结果指标:`, {
