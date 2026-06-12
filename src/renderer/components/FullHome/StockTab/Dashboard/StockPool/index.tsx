@@ -22,7 +22,7 @@ import KTrain from './KTrain';
 import Backtest from './Backtest';
 
 export interface StockPoolProps {
-  onOpenStock: (secid: string, name: string, firstQSAppear?: string) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string) => void;
 }
 const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
   const [activeKey, setActiveKey] = useState('stocks');

@@ -391,7 +391,7 @@ export class OptimizedStrategyBacktest {
   private dailyValues: StrategyDailyValue[] = [];
   private tradeDays: string[];
   private cancelOptions?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean };
-  private pendingOrderReviewCallback?: (orders: StrategyPendingOrder[]) => Promise<StrategyPendingOrder[]>;
+  private pendingOrderReviewCallback?: (orders: StrategyPendingOrder[], today: string) => Promise<StrategyPendingOrder[]>;
   private onPartialResultCallback?: (result: StrategyBacktestResult) => void;
   private workerExecutor?: (method: string, args?: any[]) => Promise<any>;
   private filterTradeDaysCache: Map<string, string[]> = new Map();
@@ -659,8 +659,8 @@ export class OptimizedStrategyBacktest {
   public async run(
     dataProvider: StrategyDataProvider,
     onProgress?: (message: string, percent?: number) => void,
-    options?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean; onPendingOrdersReview?: (orders: StrategyPendingOrder[]) => Promise<StrategyPendingOrder[]>; onPartialResult?: (result: StrategyBacktestResult) => void }
-  ): Promise<StrategyBacktestResult> {
+    options?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean; onPendingOrdersReview?: (orders: StrategyPendingOrder[], today: string) => Promise<StrategyPendingOrder[]>; onPartialResult?: (result: StrategyBacktestResult) => void }
+  ) {
     this.cancelOptions = options;
     this.pendingOrderReviewCallback = options?.onPendingOrdersReview;
     this.onPartialResultCallback = options?.onPartialResult;
@@ -1006,7 +1006,7 @@ export class OptimizedStrategyBacktest {
     let ordersToExecute = executableOrders;
     if (this.pendingOrderReviewCallback && executableOrders.length > 0) {
       console.log(`[OptBacktest] [${today}] 等待用户确认 ${executableOrders.length} 笔待执行订单`);
-      ordersToExecute = await this.pendingOrderReviewCallback(executableOrders);
+      ordersToExecute = await this.pendingOrderReviewCallback(executableOrders, today);
       console.log(`[OptBacktest] [${today}] 用户确认执行 ${ordersToExecute.length}/${executableOrders.length} 笔订单`);
       if (this.isCancelled()) return true;
     }

@@ -40,6 +40,7 @@ export interface StockTabId {
   tid: string; // secid
   name: string; // stock name
   firstQSAppear?: string; // 首次出现在强势股票时间
+  backtestDate?: string; // 回测参考日期（打开详情时日K只显示到该日期的前一个交易日）
   change: number; // 涨跌幅
   type?: StockMarketType;
 }
@@ -85,7 +86,7 @@ export interface StockTabProps {
   onNoteChange: (tid: string, title?: string, changed?: boolean) => void;
   onStrategyChange: (tid: string, title?: string, changed?: boolean) => void;
   onNewSite: (url: string) => void;
-  onNewStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
+  onNewStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType) => void;
   onAppendRefer: (tab: NoteTabId, url: string, text: string) => void;
   activeTabid: string | undefined;
 }
@@ -292,6 +293,7 @@ const StockTab: React.FC<StockTabProps> = React.memo(
                           secid={tab.tid}
                           name={tab.name}
                           firstQSAppear={tab.firstQSAppear}
+                          backtestDate={tab.backtestDate}
                           onChangeUpdate={onStockChange}
                           onOpenStock={onNewStock}
                           onOpenUrl={onNewSite}

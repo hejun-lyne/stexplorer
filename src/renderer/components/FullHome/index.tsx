@@ -69,17 +69,21 @@ const FullHome: React.FC<FullHomeProps> = () => {
   const [kview, setKView] = useState(false);
   const dispatch = useDispatch();
   // 打开详情
-  const openStock = useCallback((secid: string, name: string, firstQSAppear?: string, change?: number, type?: StockMarketType) => {
+  const openStock = useCallback((secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType) => {
     const tab = homeCaches.stockTabs.find((s) => s.tid === secid);
     if (!tab) {
       homeCaches.stockTabs.push({
         tid: secid,
         name: name,
         firstQSAppear: firstQSAppear,
+        backtestDate,
         change: change || 0,
         type: type || StockMarketType.AB,
       });
       dispatch(syncStockOnDetailedAction(secid, true));
+    } else if (backtestDate) {
+      // [新增] 从回测打开同一股票时更新回测日期
+      tab.backtestDate = backtestDate;
     }
     setStockTabs(homeCaches.stockTabs);
     if (!kview) {

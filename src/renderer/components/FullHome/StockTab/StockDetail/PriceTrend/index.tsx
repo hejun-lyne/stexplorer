@@ -59,6 +59,7 @@ export interface PriceTrendProps {
   toDate?: string;
   onTimelineDate?: string;
   firstQSAppear?: string;
+  backtestDate?: string;
   updateKLineData: (ks: Stock.KLineItem[]) => void;
   updateTrendData?: (trends: Stock.TrendItem[]) => void;
   updateKType?: (ktype: KLineType) => void;
@@ -1454,6 +1455,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     activePeriod,
     toDate,
     firstQSAppear,
+    backtestDate,
     onTimelineDate,
     updateKLineData,
     updateKType,
@@ -1688,6 +1690,19 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       dgwy: DefaultKTypes.map((_) => [[], [], []]),
       choumas: DefaultKTypes.map((_) => [] as Stock.ChouMaItem[]),
     });
+    // [新增] 根据回测日期计算应该展示到哪一个交易日（前一个交易日）
+    const dayKlines = klineData.klines[DefaultKTypes.indexOf(KLineType.Day)];
+    const displayToDate = useMemo(() => {
+      if (trainMode) return toDate;
+      if (backtestDate && dayKlines.length > 0) {
+        for (let i = dayKlines.length - 1; i >= 0; i--) {
+          if (dayKlines[i].date < backtestDate) {
+            return dayKlines[i].date;
+          }
+        }
+      }
+      return undefined;
+    }, [trainMode, toDate, backtestDate, dayKlines]);
     const [linePoints, setLinePoints] = useState([] as { x: any; y: any }[]);
     const { run: runCalculateTech } = useRequest((ks: Stock.KLineItem[], kIndex:number, tt:TechIndicatorType) => makeWorkerExec('calculateIndicators', [ks, tt, kIndex,]), {
       throwOnError: true,
@@ -1803,7 +1818,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           bkks = data.bkklines[currentBK][kIndex];
         }
         if (chartOptions[kIndex]) {
-          updateKChart(chartOptions[kIndex][0], data.klines[kIndex], toDate, bkks);
+          updateKChart(chartOptions[kIndex][0], data.klines[kIndex], displayToDate, bkks);
           updateCChart(chartOptions[kIndex][1], data.chans[kIndex], data.clines[kIndex]);
           runCalculateTech(data.klines[kIndex], kIndex, techType);
           // 🔧 关键修复：K线数据变了必须触发 React 重渲染，
@@ -1822,7 +1837,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
               linePoints,
               [],
               false,
-              toDate,
+              displayToDate,
               bkks
             ),
             setupClineChart(
@@ -2501,17 +2516,17 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     );
 
     useEffect(() => {
-      console.log(toDate);
+      console.log(displayToDate);
       for (let i = 1; i < DefaultKTypes.length; i++) {
         if (chartOptions[i]) {
-          updateKChart(chartOptions[i][0], klineData.klines[i], toDate);
+          updateKChart(chartOptions[i][0], klineData.klines[i], displayToDate);
           // handeKline({ ks: klineData.klines[i], kt: DefaultKTypes[i] });
         }
       }
       setChartOptions({
         ...chartOptions,
       });
-    }, [toDate]);
+    }, [displayToDate]);
 
     const chartWrapperRef = useRef<HTMLDivElement>(null);
     const { CheckableTag } = Tag;

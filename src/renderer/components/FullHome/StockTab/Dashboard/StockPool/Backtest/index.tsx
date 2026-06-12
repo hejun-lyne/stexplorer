@@ -17,7 +17,7 @@ import { setBacktestMarksAction } from '@/actions/stock';
 const { ipcRenderer, makeWorkerExec } = window.contextModules.electron;
 
 export interface BacktestProps {
-  onOpenStock: (secid: string, name: string) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string) => void;
   active: boolean;
 }
 
@@ -453,6 +453,54 @@ function updateNetValueOptions(
   return { ...opts };
 }
 
+// ==================== 净值曲线子组件 ====================
+
+interface NetValueChartProps {
+  chartOption: any;
+  result: any;
+  initialCapital: number;
+}
+
+const NetValueChart: React.FC<NetValueChartProps> = ({ chartOption, result, initialCapital }) => {
+  const { darkMode, lowKey } = useHomeContext();
+  const { ref: chartRef, chartInstance: chart } = useResizeEchart(-1);
+
+  useRenderEcharts(
+    () => {
+      if (chartOption) {
+        chartOption.darkMode = darkMode;
+        chart?.setOption(chartOption, true);
+      }
+    },
+    chart,
+    [darkMode, lowKey, chartOption]
+  );
+
+  useEffect(() => {
+    if (result && chart) {
+      requestAnimationFrame(() => {
+        chart.resize();
+      });
+    }
+  }, [result, chart]);
+
+  const chartOptionRef = useRef(chartOption);
+  chartOptionRef.current = chartOption;
+
+  useEffect(() => {
+    if (chartOptionRef.current && result) {
+      const updated = updateNetValueOptions(chartOptionRef.current, darkMode, result.dailyValues, initialCapital);
+      chart?.setOption(updated, true);
+    }
+  }, [darkMode, result, initialCapital, chart]);
+
+  return (
+    <Card title="📈 每日净值曲线" size="small" style={{ marginBottom: 16 }}>
+      <div ref={chartRef} style={{ width: '100%', height: 320, position: 'relative' }} />
+    </Card>
+  );
+};
+
 // ==================== 主组件 ====================
 
 type StrategyType = 'rsi' | 'optimized';
@@ -517,7 +565,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     // 待执行订单 UI 交互状态
     const [pendingOrders, setPendingOrders] = useState<BacktestEngine.StrategyPendingOrder[]>([]);
     const [pendingOrderDecisions, setPendingOrderDecisions] = useState<Record<number, boolean>>({});
-    const [pendingOrderModalVisible, setPendingOrderModalVisible] = useState(false);
+    const [pendingOrderReviewVisible, setPendingOrderReviewVisible] = useState(false);
+    const [currentBacktestDate, setCurrentBacktestDate] = useState<string>('');
     const pendingOrderResolveRef = useRef<((orders: BacktestEngine.StrategyPendingOrder[]) => void) | null>(null);
 
     const parseThresholds = (s: string) => s.split(',').map(v => parseInt(v.trim(), 10)).filter(v => !isNaN(v));
@@ -525,7 +574,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
 
-    const { ref: chartRef, chartInstance: chart } = useResizeEchart(-1);
     const [chartOption, setChartOption] = useState<any>(undefined);
 
     // 缓存 key
@@ -888,11 +936,12 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             {
               onShouldCancel: () => cancelledRef.current,
               onShouldPause: () => pausedRef.current,
-              onPendingOrdersReview: (orders) => new Promise((resolve) => {
+              onPendingOrdersReview: (orders, today) => new Promise((resolve) => {
                 setPendingOrders(orders);
                 setPendingOrderDecisions({});
+                setCurrentBacktestDate(today);
                 pendingOrderResolveRef.current = resolve;
-                setPendingOrderModalVisible(true);
+                setPendingOrderReviewVisible(true);
               }),
             }
           );
@@ -1026,14 +1075,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
     const handleConfirmPendingOrders = useCallback(() => {
       const approvedOrders = pendingOrders.filter((_, index) => pendingOrderDecisions[index]);
-      setPendingOrderModalVisible(false);
+      setPendingOrderReviewVisible(false);
       pendingOrderResolveRef.current?.(approvedOrders);
       pendingOrderResolveRef.current = null;
     }, [pendingOrders, pendingOrderDecisions]);
 
     const handleCancelBacktestFromPendingOrders = useCallback(() => {
       cancelBacktest();
-      setPendingOrderModalVisible(false);
+      setPendingOrderReviewVisible(false);
       pendingOrderResolveRef.current?.([]);
       pendingOrderResolveRef.current = null;
     }, [cancelBacktest]);
@@ -1076,35 +1125,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         });
       }
     }, [result]);
-
-    useRenderEcharts(
-      () => {
-        if (chartOption) {
-          chartOption.darkMode = darkMode;
-          chart?.setOption(chartOption, true);
-        }
-      },
-      chart,
-      [darkMode, lowKey, chartOption]
-    );
-
-    useEffect(() => {
-      if (result && chart) {
-        requestAnimationFrame(() => {
-          chart.resize();
-        });
-      }
-    }, [result, chart]);
-
-    const chartOptionRef = useRef(chartOption);
-    chartOptionRef.current = chartOption;
-
-    useEffect(() => {
-      if (chartOptionRef.current && result) {
-        const updated = updateNetValueOptions(chartOptionRef.current, darkMode, result.dailyValues, initialCapital);
-        setChartOption({ ...updated });
-      }
-    }, [darkMode, result, initialCapital]);
 
     const tradeColumns = [
         { title: '日期', dataIndex: 'date', key: 'date', width: 100 },
@@ -1428,11 +1448,132 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               </div>
             )}
 
+            {pendingOrderReviewVisible && (
+              <div style={{ padding: '0 16px 16px' }}>
+                <Card
+                  title={
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                      <span>待执行订单确认 ({pendingOrders.length} 笔)</span>
+                      <Space size="small">
+                        <Button size="small" danger onClick={handleCancelBacktestFromPendingOrders}>
+                          取消回测
+                        </Button>
+                        <Button size="small" onClick={() => handleAllPendingOrdersDecision(false)}>
+                          全部取消
+                        </Button>
+                        <Button size="small" type="primary" onClick={() => handleAllPendingOrdersDecision(true)}>
+                          全部执行
+                        </Button>
+                        <Button
+                          size="small"
+                          type="primary"
+                          disabled={!pendingOrders.every((_, index) => pendingOrderDecisions[index] !== undefined)}
+                          onClick={handleConfirmPendingOrders}
+                        >
+                          确认 ({pendingOrders.filter((_, index) => pendingOrderDecisions[index]).length}/{pendingOrders.length})
+                        </Button>
+                      </Space>
+                    </div>
+                  }
+                  size="small"
+                >
+                  <div style={{ marginBottom: 12, color: '#666', fontSize: 13 }}>
+                    请对每笔订单选择「执行」或「取消」，全部决定后点击「确认」继续回测。
+                  </div>
+                  <Table
+                    dataSource={pendingOrders.map((order, index) => ({ ...order, key: index }))}
+                    columns={[
+                      {
+                        title: '股票',
+                        dataIndex: 'secid',
+                        key: 'secid',
+                        width: 110,
+                        render: (secid: string) => (
+                          <a onClick={() => onOpenStock(secid, secid, undefined, undefined, currentBacktestDate)}>{secid}</a>
+                        ),
+                      },
+                      {
+                        title: '方向',
+                        dataIndex: 'type',
+                        key: 'type',
+                        width: 80,
+                        render: (type: string) => (
+                          <Tag color={type === 'buy' ? '#f5222d' : '#52c41a'}>
+                            {type === 'buy' ? '买入' : '卖出'}
+                          </Tag>
+                        ),
+                      },
+                      { title: '信号日期', dataIndex: 'signalDate', key: 'signalDate', width: 100 },
+                      { title: '原因', dataIndex: 'reason', key: 'reason', minWidth: 200, ellipsis: true },
+                      {
+                        title: '策略',
+                        dataIndex: 'strategyType',
+                        key: 'strategyType',
+                        width: 80,
+                        render: (v?: string) => v?.toUpperCase() || '-',
+                      },
+                      {
+                        title: '评分',
+                        dataIndex: 'score',
+                        key: 'score',
+                        width: 80,
+                        render: (v?: number) => (v !== undefined ? v.toFixed(1) : '-'),
+                      },
+                      {
+                        title: '板块排名',
+                        dataIndex: 'boardRank',
+                        key: 'boardRank',
+                        width: 90,
+                        render: (v?: number) => (v !== undefined ? v + 1 : '-'),
+                      },
+                      {
+                        title: '个股排名',
+                        dataIndex: 'stockRank',
+                        key: 'stockRank',
+                        width: 90,
+                        render: (v?: number) => (v !== undefined ? v + 1 : '-'),
+                      },
+                      {
+                        title: '操作',
+                        key: 'action',
+                        width: 140,
+                        fixed: 'right' as const,
+                        render: (_: any, record: any) => {
+                          const index = record.key as number;
+                          const decision = pendingOrderDecisions[index];
+                          return (
+                            <Space size="small">
+                              <Button
+                                size="small"
+                                type={decision === true ? 'primary' : 'default'}
+                                onClick={() => handlePendingOrderDecision(index, true)}
+                              >
+                                执行
+                              </Button>
+                              <Button
+                                size="small"
+                                danger={decision === false}
+                                type={decision === false ? 'primary' : 'default'}
+                                onClick={() => handlePendingOrderDecision(index, false)}
+                              >
+                                取消
+                              </Button>
+                            </Space>
+                          );
+                        },
+                      },
+                    ]}
+                    pagination={false}
+                    size="small"
+                    scroll={{ x: 800 }}
+                  />
+                </Card>
+              </div>
+            )}
+
             {result && (
               <div style={{ padding: 16 }}>
-                <Card title="📈 每日净值曲线" size="small" style={{ marginBottom: 16 }}>
-                  <div ref={chartRef} style={{ width: '100%', height: 320, position: 'relative' }} />
-                </Card>
+                <NetValueChart chartOption={chartOption} result={result} initialCapital={initialCapital} />
 
                 <Card title="📊 回测结果汇总" size="small" style={{ marginBottom: 16 }}>
                   <Row gutter={[16, 16]}>
@@ -1687,116 +1828,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             )}
           </Modal>
 
-          {/* 待执行订单确认弹窗 */}
-          <Modal
-            title={`待执行订单确认 (${pendingOrders.length} 笔)`}
-            open={pendingOrderModalVisible}
-            closable={false}
-            maskClosable={false}
-            width={960}
-            footer={[
-              <Button key="cancel-backtest" danger onClick={handleCancelBacktestFromPendingOrders}>
-                取消回测
-              </Button>,
-              <Button key="all-cancel" onClick={() => handleAllPendingOrdersDecision(false)}>
-                全部取消
-              </Button>,
-              <Button key="all-execute" type="primary" onClick={() => handleAllPendingOrdersDecision(true)}>
-                全部执行
-              </Button>,
-              <Button
-                key="confirm"
-                type="primary"
-                disabled={!pendingOrders.every((_, index) => pendingOrderDecisions[index] !== undefined)}
-                onClick={handleConfirmPendingOrders}
-              >
-                确认 ({pendingOrders.filter((_, index) => pendingOrderDecisions[index]).length}/{pendingOrders.length})
-              </Button>,
-            ]}
-          >
-            <div style={{ marginBottom: 12, color: '#666', fontSize: 13 }}>
-              请对每笔订单选择「执行」或「取消」，全部决定后点击「确认」继续回测。
-            </div>
-            <Table
-              dataSource={pendingOrders.map((order, index) => ({ ...order, key: index }))}
-              columns={[
-                { title: '股票', dataIndex: 'secid', key: 'secid', width: 110 },
-                {
-                  title: '方向',
-                  dataIndex: 'type',
-                  key: 'type',
-                  width: 80,
-                  render: (type: string) => (
-                    <Tag color={type === 'buy' ? '#f5222d' : '#52c41a'}>
-                      {type === 'buy' ? '买入' : '卖出'}
-                    </Tag>
-                  ),
-                },
-                { title: '信号日期', dataIndex: 'signalDate', key: 'signalDate', width: 100 },
-                { title: '原因', dataIndex: 'reason', key: 'reason', minWidth: 200, ellipsis: true },
-                {
-                  title: '策略',
-                  dataIndex: 'strategyType',
-                  key: 'strategyType',
-                  width: 80,
-                  render: (v?: string) => v?.toUpperCase() || '-',
-                },
-                {
-                  title: '评分',
-                  dataIndex: 'score',
-                  key: 'score',
-                  width: 80,
-                  render: (v?: number) => (v !== undefined ? v.toFixed(1) : '-'),
-                },
-                {
-                  title: '板块排名',
-                  dataIndex: 'boardRank',
-                  key: 'boardRank',
-                  width: 90,
-                  render: (v?: number) => (v !== undefined ? v + 1 : '-'),
-                },
-                {
-                  title: '个股排名',
-                  dataIndex: 'stockRank',
-                  key: 'stockRank',
-                  width: 90,
-                  render: (v?: number) => (v !== undefined ? v + 1 : '-'),
-                },
-                {
-                  title: '操作',
-                  key: 'action',
-                  width: 140,
-                  fixed: 'right' as const,
-                  render: (_: any, record: any) => {
-                    const index = record.key as number;
-                    const decision = pendingOrderDecisions[index];
-                    return (
-                      <Space size="small">
-                        <Button
-                          size="small"
-                          type={decision === true ? 'primary' : 'default'}
-                          onClick={() => handlePendingOrderDecision(index, true)}
-                        >
-                          执行
-                        </Button>
-                        <Button
-                          size="small"
-                          danger={decision === false}
-                          type={decision === false ? 'primary' : 'default'}
-                          onClick={() => handlePendingOrderDecision(index, false)}
-                        >
-                          取消
-                        </Button>
-                      </Space>
-                    );
-                  },
-                },
-              ]}
-              pagination={false}
-              size="small"
-              scroll={{ x: 800 }}
-            />
-          </Modal>
         </div>
       );
 }

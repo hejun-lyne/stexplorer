@@ -40,12 +40,13 @@ export interface StockDetailProps {
   active: boolean;
   name: string;
   firstQSAppear?: string;
+  backtestDate?: string;
   onChangeUpdate: (tid: string, change: number) => void;
-  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string) => void;
   onOpenUrl: (url: string) => void;
 }
 
-const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSAppear, onChangeUpdate, onOpenStock, onOpenUrl }) => {
+const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSAppear, backtestDate, onChangeUpdate, onOpenStock, onOpenUrl }) => {
   const config = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]);
   const stock = useSelector((store: StoreState) => store.stock.stocksMapping[secid]);
   const [tDetail, setDetails] = useState<Stock.DetailItem>({ secid, code:Helpers.Stock.GetStockCode(secid), name, market:Helpers.Stock.GetStockType(secid) } as Stock.DetailItem);
@@ -188,7 +189,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
           >
             <div className={styles.left}>
               <RealTime stock={nDetails} />
-              <BanKuai secid={(nDetails.secid} active={active} openBankuai={onOpenStock} />
+              <BanKuai secid={nDetails.secid} active={active} openBankuai={onOpenStock} />
               <TradeRecord showSeats={true} stock={nDetails} active={active} />
             </div>
             <div className={styles.right} ref={rightRef}>
@@ -213,6 +214,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
                   trainMode={trainMode}
                   activePeriod={activePeriod}
                   toDate={trainMode ? toDate : undefined}
+                  backtestDate={backtestDate}
                   firstQSAppear={firstQSAppear}
                   onTimelineDate={timelineDate}
                   updateKLineData={updateKlines}
