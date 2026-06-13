@@ -324,10 +324,17 @@ export function optimizeMACDStrategy(
               const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
               const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
 
-              // 评分：收益 × 胜率 × 交易次数系数 / (1 + |回撤|/10) / (1 + 持仓天数/20)
-              // 偏好：高收益、高胜率、低回撤、适中持仓天数
-              const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) 
-                / (1 + Math.abs(maxDrawdown) / 10) 
+              // 原代码：
+              // const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) 
+              //   / (1 + Math.abs(maxDrawdown) / 10) 
+              //   / (1 + Math.abs(avgHold - 5) / 10);
+
+              // 修改为：
+              const score = 
+                Math.sign(totalReturn) * Math.pow(Math.abs(totalReturn), 0.5)   // 收益开根号，弱化高收益
+                * Math.pow(winRate / 100, 2)                                      // 胜率平方，高胜率优势放大
+                * Math.min(trades.length, 15) 
+                / Math.pow(1 + Math.abs(maxDrawdown) / 5, 2)                    // 回撤惩罚加重（平方+系数收紧）
                 / (1 + Math.abs(avgHold - 5) / 10);
 
               allResults.push({
@@ -461,9 +468,16 @@ export function optimizeRSIStrategy(
           const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
           const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
 
-          // 综合评分：收益 × 胜率 × 交易次数系数 / (1 + |回撤|/10)
-          // 避免"押中一次大行情"的极端策略胜出
-          const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) / (1 + Math.abs(maxDrawdown) / 10);
+          // 原代码：
+          // const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) 
+          //   / (1 + Math.abs(maxDrawdown) / 10);
+
+          // 修改为：
+          const score = 
+            Math.sign(totalReturn) * Math.pow(Math.abs(totalReturn), 0.5)   // 收益开根号
+            * Math.pow(winRate / 100, 2)                                      // 胜率平方
+            * Math.min(trades.length, 15) 
+            / Math.pow(1 + Math.abs(maxDrawdown) / 5, 2);                   // 回撤惩罚加重
 
           allResults.push({
             rsiPeriod: period,
