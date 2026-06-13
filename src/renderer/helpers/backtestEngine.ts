@@ -1035,7 +1035,7 @@ export class OptimizedStrategyBacktest {
       return this.TRAILING_STOP_PCT;
 
     const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
-    const stoploss = this.clamp((1 - this.TRAILING_STOP_PCT) + (s - 0.5) * 0.30, 0.4, 0.7);
+    const stoploss = this.clamp((1 - this.TRAILING_STOP_PCT) + (s - 0.5) * 0.30, 0.04, 0.07);
     const result = 1 - stoploss;
     // console.log(`[OptBacktest] [${today}] getDailyTrailingStopPct — riskPref=${riskPref}, result=${result}`);
     return result;
