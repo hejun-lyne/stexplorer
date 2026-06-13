@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState, useEffect, useLayoutEffect } from 'react';
+import React, { useCallback, useRef, useState, useEffect, useLayoutEffect, useMemo } from 'react';
 import { StoreState } from '@/reducers/types';
 import { useInterval, useRequest, useSize, useThrottleFn } from 'ahooks';
 import ChartCard from '@/components/Card/ChartCard';
@@ -533,6 +533,26 @@ function updateTechSeries(options:any, ks: Stock.KLineItem[], seriesIndex = 3) {
 function getTechSeries(techType: TechIndicatorType, ks: Stock.KLineItem[]) {
   const {names, values} = Tech.calculateIndicators(ks, techType);
   return getTechSeriesWithResult(techType, values, names);
+}
+function filterKlinesByToDate(klines: Stock.KLineItem[], toDate?: string) {
+  if (!toDate) {
+    return klines;
+  }
+  let idx = -1;
+  const day = toDate.substring(0, 10);
+  klines.find((k, i) => {
+    if (k.date.length == toDate.length) {
+      if (k.date == toDate) {
+        idx = i;
+        return true;
+      }
+    } else if (k.date.startsWith(day)) {
+      idx = i;
+      return true;
+    }
+    return false;
+  });
+  return klines.slice(0, idx + 1);
 }
 function getKSeries(data: any[], markPoints: any[], markLines: any[]) {
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
@@ -1116,24 +1136,7 @@ function setupKlineChart(
   toDate?: string,
   bkks?: Stock.KLineItem[]
 ) {
-  let _klines = klines;
-  if (toDate) {
-    let idx = -1;
-    const day = toDate.substring(0, 10);
-    klines.find((k, i) => {
-      if (k.date.length == toDate.length) {
-        if (k.date == toDate) {
-          idx = i;
-          return true;
-        }
-      } else if (k.date.startsWith(day)) {
-        idx = i;
-        return true;
-      }
-      return false;
-    });
-    _klines = klines.slice(0, idx + 1);
-  }
+  const _klines = filterKlinesByToDate(klines, toDate);
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
   const dates = _klines.map(({ date }) => date);
   const values = _klines.map((_, i) => {
@@ -1322,24 +1325,7 @@ function updateKChart(
   toDate?: string,
   bkks?: Stock.KLineItem[]
 ) {
-  let _klines = klines;
-  if (toDate) {
-    let idx = -1;
-    const day = toDate.substring(0, 10);
-    klines.find((k, i) => {
-      if (k.date.length == toDate.length) {
-        if (k.date == toDate) {
-          idx = i;
-          return true;
-        }
-      } else if (k.date.startsWith(day)) {
-        idx = i;
-        return true;
-      }
-      return false;
-    });
-    _klines = klines.slice(0, idx + 1);
-  }
+  const _klines = filterKlinesByToDate(klines, toDate);
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
   opts.visualMap[0].pieces[0].color = variableColors['--reduce-color'];
   opts.visualMap[0].pieces[1].color = variableColors['--increase-color'];
@@ -1820,7 +1806,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         if (chartOptions[kIndex]) {
           updateKChart(chartOptions[kIndex][0], data.klines[kIndex], displayToDate, bkks);
           updateCChart(chartOptions[kIndex][1], data.chans[kIndex], data.clines[kIndex]);
-          runCalculateTech(data.klines[kIndex], kIndex, techType);
+          runCalculateTech(filterKlinesByToDate(data.klines[kIndex], displayToDate), kIndex, techType);
           // 🔧 关键修复：K线数据变了必须触发 React 重渲染，
           // 否则 useRenderEcharts 不会执行，markPoint 不会被重新附加
           setChartOptions({ ...chartOptions });
@@ -2117,7 +2103,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const onTechIndicatorTypeChange = useCallback((value: TechIndicatorType) => {
       if (chartOptions[typeIndex]) {
         chartOptions[typeIndex][0].techType = value;
-        const ks = klineData.klines[typeIndex];
+        const ks = filterKlinesByToDate(klineData.klines[typeIndex], displayToDate);
         runCalculateTech(ks, typeIndex, value);
         // updateTechSeries(chartOptions[typeIndex][0], ks);
         // setChartOptions({
@@ -2126,7 +2112,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         
         setTechType(value);
       }
-    }, [typeIndex, chartOptions]);
+    }, [typeIndex, chartOptions, displayToDate]);
 
     const onMAPeriodTypeChange = useCallback(
       (value: MAPeriodType) => {
@@ -2520,6 +2506,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       for (let i = 1; i < DefaultKTypes.length; i++) {
         if (chartOptions[i]) {
           updateKChart(chartOptions[i][0], klineData.klines[i], displayToDate);
+          runCalculateTech(filterKlinesByToDate(klineData.klines[i], displayToDate), i, chartOptions[i][0].techType);
           // handeKline({ ks: klineData.klines[i], kt: DefaultKTypes[i] });
         }
       }

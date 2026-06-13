@@ -1295,12 +1295,12 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
-      const closes = klines.map(s => s.sp);
-      const ma5 = calculateMA(closes, 60);
-      if (closes[closes.length - 1] < ma5[ma5.length - 1]) {
-        console.log(`[OptBacktest] [${today}] ${secid} 观察跳过: 跌破60日均线`);
-        continue;
-      }
+      // const closes = klines.map(s => s.sp);
+      // const ma5 = calculateMA(closes, 60);
+      // if (closes[closes.length - 1] < ma5[ma5.length - 1]) {
+      //   console.log(`[OptBacktest] [${today}] ${secid} 观察跳过: 跌破60日均线`);
+      //   continue;
+      // }
 
       const daysInWatch = this.getTradeDaysDiff(item.addedDate, today);
 
