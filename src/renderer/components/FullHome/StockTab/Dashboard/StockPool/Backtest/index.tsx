@@ -569,6 +569,10 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [currentBacktestDate, setCurrentBacktestDate] = useState<string>('');
     const pendingOrderResolveRef = useRef<((orders: BacktestEngine.StrategyPendingOrder[]) => void) | null>(null);
 
+    // 断点续跑快照
+    const [savedSnapshot, setSavedSnapshot] = useState<BacktestEngine.BacktestSnapshot | null>(null);
+    const [resumeModalVisible, setResumeModalVisible] = useState(false);
+
     const parseThresholds = (s: string) => s.split(',').map(v => parseInt(v.trim(), 10)).filter(v => !isNaN(v));
 
     const cancelledRef = useRef(false);
@@ -657,6 +661,22 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     useEffect(() => {
       loadHistory();
     }, [loadHistory]);
+
+    // [新增] 组件挂载时检测是否存在断点续跑快照（仅优化策略支持）
+    useEffect(() => {
+      (async () => {
+        try {
+          const snapshot = await BacktestEngine.OptimizedStrategyBacktest.loadSnapshot();
+          if (snapshot && strategyType !== 'rsi') {
+            setSavedSnapshot(snapshot);
+            setResumeModalVisible(true);
+            console.log('[Backtest] 检测到未完成的回测快照:', snapshot.nodeType, snapshot.currentDate);
+          }
+        } catch (e) {
+          console.error('[Backtest] 读取回测快照失败:', e);
+        }
+      })();
+    }, []);
 
     // 保存到历史记录
     const saveToHistory = useCallback(async (
@@ -852,23 +872,51 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setPreloading(false);
       }
     }, [dates]);
+
+    // 实时接收回测部分结果并刷新图表
+    const handlePartialResult = useCallback((partialResult: any) => {
+      setResult(partialResult);
+      const baseOpts = getNetValueBaseOptions(darkMode, initialCapital);
+      const finalOpts = updateNetValueOptions(baseOpts, darkMode, partialResult.dailyValues, initialCapital);
+      setChartOption(finalOpts);
+    }, [darkMode, initialCapital]);
+
+    // 打开股票详情并带上回测买卖点标记
+    const handleOpenStockWithMarks = useCallback((secid: string) => {
+      if (result?.trades) {
+        const buyPoints = result.trades
+          .filter((t: any) => t.secid === secid && t.type === 'buy')
+          .map((t: any) => ({ x: t.date, y: t.price, t: 'bt' }));
+        const sellPoints = result.trades
+          .filter((t: any) => t.secid === secid && t.type === 'sell')
+          .map((t: any) => ({ x: t.date, y: t.price, t: 'bt' }));
+        dispatch(setBacktestMarksAction(secid, buyPoints, sellPoints));
+      }
+      onOpenStock(secid, secid, undefined, undefined, currentBacktestDate);
+    }, [result, currentBacktestDate, dispatch, onOpenStock]);
     
-    const startBacktest = useCallback(async () => {
+    const startBacktest = useCallback(async (resumeSnapshot?: BacktestEngine.BacktestSnapshot) => {
       if (!dates.length) {
         console.warn('[UI] 未选择日期，无法启动回测');
         return;
       }
 
       const strategyName = strategyType === 'rsi' ? 'RSI策略' : '优化策略';
-      console.log(`[UI] ====== 启动${strategyName}回测 ======`);
-      console.log(`[UI] 日期范围: ${dates[0]} ~ ${dates[dates.length - 1]} (${dates.length} 天)`);
+      const isContinue = !!resumeSnapshot;
+      console.log(`[UI] ====== ${isContinue ? '继续' : '启动'}${strategyName}回测 ======`);
+      if (!isContinue) {
+        console.log(`[UI] 日期范围: ${dates[0]} ~ ${dates[dates.length - 1]} (${dates.length} 天)`);
+      }
 
-      setProgress("开始执行回测...");
-      setProgressPercent(0);
+      setProgress(isContinue ? '正在从断点恢复回测...' : '开始执行回测...');
+      setProgressPercent(isContinue && resumeSnapshot
+        ? Math.round((resumeSnapshot.currentDayIndex / Math.max(1, resumeSnapshot.state.tradeDays.length)) * 90)
+        : 0);
       setResult(null);
       setChartOption(undefined);
       setRunning(true);
       setPaused(false);
+      setSavedSnapshot(null);
       cancelledRef.current = false;
       pausedRef.current = false;
 
@@ -886,12 +934,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             {
               onShouldCancel: () => cancelledRef.current,
               onShouldPause: () => pausedRef.current,
-              onPartialResult: (partialResult) => {
-                setResult(partialResult);
-                const baseOpts = getNetValueBaseOptions(darkMode, initialCapital);
-                const finalOpts = updateNetValueOptions(baseOpts, darkMode, partialResult.dailyValues, initialCapital);
-                setChartOption(finalOpts);
-              },
+              onPartialResult: handlePartialResult,
             }
           );
         } else {
@@ -900,7 +943,9 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
           // 传入回测引擎（替换原来的单workerExecutor）
           const { workerCount } = await ipcRenderer.invoke('get-worker-info');
-          const strategy = new BacktestEngine.OptimizedStrategyBacktest(dates, initialCapital, parallelWorkerExecutor, {
+          const strategy = isContinue && resumeSnapshot
+            ? BacktestEngine.OptimizedStrategyBacktest.fromSnapshot(resumeSnapshot, parallelWorkerExecutor)
+            : new BacktestEngine.OptimizedStrategyBacktest(dates, initialCapital, parallelWorkerExecutor, {
             stopLossInitPct,
             trailingStopPct,
             takeProfitPct,
@@ -943,6 +988,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 pendingOrderResolveRef.current = resolve;
                 setPendingOrderReviewVisible(true);
               }),
+              onPartialResult: handlePartialResult,
+              resumeFromSnapshot: isContinue ? resumeSnapshot : undefined,
             }
           );
         }
@@ -1158,18 +1205,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
     const stockStatsColumns = [
         { title: '股票', dataIndex: 'secid', key: 'secid', width: 110, fixed: 'left' as const, render: (secid: string) => (
-            <a onClick={() => {
-              if (result?.trades) {
-                const buyPoints = result.trades
-                  .filter((t: any) => t.secid === secid && t.type === 'buy')
-                  .map((t: any) => ({ x: t.date, y: t.price, t: 'bt' }));
-                const sellPoints = result.trades
-                  .filter((t: any) => t.secid === secid && t.type === 'sell')
-                  .map((t: any) => ({ x: t.date, y: t.price, t: 'bt' }));
-                dispatch(setBacktestMarksAction(secid, buyPoints, sellPoints));
-              }
-              onOpenStock(secid, secid);
-            }}>{secid}</a>
+            <a onClick={() => handleOpenStockWithMarks(secid)}>{secid}</a>
         ) },
         { title: '所属板块', dataIndex: 'boardCode', key: 'boardCode', width: 100, render: (v?: string) => v || '-' },
         { title: '策略', dataIndex: 'strategyType', key: 'strategyType', width: 80, render: (v: string) => v?.toUpperCase() || '-' },
@@ -1409,9 +1445,19 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 )}
               {!running && (
                 <>
-                  <a className={styles.abtn} onClick={startBacktest}>
+                  <a className={styles.abtn} onClick={() => startBacktest()}>
                     {strategyType === 'rsi' ? 'RSI策略回测强势股票' : `${optimizedSubStrategy === 'both' ? 'MACD+RSI' : optimizedSubStrategy.toUpperCase()}优化策略回测强势股票`}
                   </a>
+                  {savedSnapshot && strategyType !== 'rsi' && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      onClick={() => setResumeModalVisible(true)}
+                      style={{ marginLeft: 10 }}
+                    >
+                      继续上次回测
+                    </Button>
+                  )}
                   <Button
                     size="small"
                     onClick={() => { loadHistory(); setHistoryVisible(true); }}
@@ -1489,7 +1535,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                         key: 'secid',
                         width: 110,
                         render: (secid: string) => (
-                          <a onClick={() => onOpenStock(secid, secid, undefined, undefined, currentBacktestDate)}>{secid}</a>
+                          <a onClick={() => handleOpenStockWithMarks(secid)}>{secid}</a>
                         ),
                       },
                       {
@@ -1825,6 +1871,54 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                   </List.Item>
                 )}
               />
+            )}
+          </Modal>
+
+          {/* [新增] 断点续跑确认弹窗 */}
+          <Modal
+            title="检测到未完成的回测"
+            open={resumeModalVisible}
+            onCancel={() => setResumeModalVisible(false)}
+            footer={[
+              <Button
+                key="discard"
+                danger
+                onClick={async () => {
+                  await BacktestEngine.OptimizedStrategyBacktest.clearSnapshot();
+                  setSavedSnapshot(null);
+                  setResumeModalVisible(false);
+                }}
+              >
+                放弃并清空
+              </Button>,
+              <Button
+                key="continue"
+                type="primary"
+                onClick={() => {
+                  setResumeModalVisible(false);
+                  if (savedSnapshot) {
+                    startBacktest(savedSnapshot);
+                  }
+                }}
+              >
+                继续回测
+              </Button>,
+            ]}
+          >
+            {savedSnapshot && (
+              <div style={{ lineHeight: 1.8 }}>
+                <p>发现一次未完成的回测，可从上次保存的节点继续：</p>
+                <ul>
+                  <li>当前节点：{savedSnapshot.nodeType === 'pending-review' ? '待执行订单确认' : savedSnapshot.nodeType === 'day-start' ? '交易日开始' : savedSnapshot.nodeType === 'after-stage1' ? '阶段1结束' : savedSnapshot.nodeType === 'after-stage2' ? '阶段2结束' : '交易日结束'}</li>
+                  <li>当前日期：{savedSnapshot.currentDate}</li>
+                  <li>已处理交易日：{savedSnapshot.currentDayIndex} / {savedSnapshot.state.tradeDays.length}</li>
+                  <li>日期范围：{savedSnapshot.state.tradeDays[0]} ~ {savedSnapshot.state.tradeDays[savedSnapshot.state.tradeDays.length - 1]}</li>
+                  <li>保存时间：{new Date(savedSnapshot.createdAt).toLocaleString()}</li>
+                </ul>
+                {savedSnapshot.state.tradeDays[0] !== dates[0] || savedSnapshot.state.tradeDays[savedSnapshot.state.tradeDays.length - 1] !== dates[dates.length - 1] ? (
+                  <p style={{ color: '#ff4d4f' }}>注意：当前选择的日期范围与快照不一致，继续将使用快照中的日期范围。</p>
+                ) : null}
+              </div>
             )}
           </Modal>
 

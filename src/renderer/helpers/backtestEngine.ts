@@ -381,6 +381,68 @@ export interface WatchListItem {
   zsz: number; // 增加市值指标
 }
 
+// ===== 回测断点续跑快照 =====
+const BACKTEST_SNAPSHOT_VERSION = 1;
+const BACKTEST_SNAPSHOT_KEY = 'backtest_engine_snapshot';
+
+export type BacktestNodeType =
+  | 'day-start'        // 当天 stage1 开始前（pendingOrders 为当日待执行或空）
+  | 'pending-review'   // stage1 已过滤出可执行订单，等待用户确认前
+  | 'after-stage1'     // stage1 执行完毕（pendingOrders 已清空）
+  | 'after-stage2'     // stage2 信号生成完毕（pendingOrders 为次日待执行）
+  | 'day-end';         // stage3 净值记录完毕，可进入下一交易日
+
+export interface BacktestSnapshotParams {
+  initialCapital: number;
+  maxPositions: number;
+  positionRatio: number;
+  stopLossInitPct: number;
+  trailingStopPct: number;
+  takeProfitPct: number;
+  minStrategyScore: number;
+  strongLookback: number;
+  maxWatchDays: number;
+  boardRankPct: number;
+  stockRankPct: number;
+  strategyMode: 'macd' | 'rsi' | 'both';
+  structureBreakDays: number;
+  rangeBoundDays: number;
+  upDownRateHighThresh: number;
+  upDownRateLowThresh: number;
+  pullbackPct: number;
+  sellAtOpen: boolean;
+  timeExitMaxDays: number;
+  timeExitMinReturn: number;
+  profitIgnoreSignalPct: number;
+  trailingStopStartPct: number;
+  trailingStopTightenPct: number;
+  buyThresholds: number[];
+  sellThresholds: number[];
+  filterStrongType: 'limit_up' | 'new_high_60' | 'both';
+  steepness: number;
+}
+
+export interface BacktestSnapshot {
+  version: number;
+  createdAt: number;
+  nodeType: BacktestNodeType;
+  currentDayIndex: number;
+  currentDate: string;
+  params: BacktestSnapshotParams;
+  state: {
+    capital: number;
+    availableCash: number;
+    positions: [string, StrategyPosition][];
+    pendingOrders: StrategyPendingOrder[];
+    tradeRecords: StrategyTradeRecord[];
+    dailyValues: StrategyDailyValue[];
+    tradeDays: string[];
+    watchList: [string, WatchListItem][];
+    dailyRiskPreference: [string, { prefer: string; upRatio: number; upRatioMA5: number }][];
+    lastPositionPrices: [string, number][];
+  };
+}
+
 export class OptimizedStrategyBacktest {
   private initialCapital: number;
   private capital: number;
@@ -397,6 +459,12 @@ export class OptimizedStrategyBacktest {
   private filterTradeDaysCache: Map<string, string[]> = new Map();
   // [新增] 持仓最后收盘价，用于回测结束时统计持仓盈亏
   private lastPositionPrices = new Map<string, number>();
+
+  // [新增] 断点续跑相关状态
+  private currentDayIndex = 0;
+  private currentStage: 'stage1' | 'stage2' | 'stage3' | 'between' = 'between';
+  private stage1Reviewed = false;
+  private onSnapshotCallback?: (snapshot: BacktestSnapshot) => void;
 
     // [优化] 板块数据内存缓存
   private boardCache = new Map<string, Array<{ code: string; name: string; zf: number }>>();
@@ -659,13 +727,28 @@ export class OptimizedStrategyBacktest {
   public async run(
     dataProvider: StrategyDataProvider,
     onProgress?: (message: string, percent?: number) => void,
-    options?: { onShouldCancel?: () => boolean; onShouldPause?: () => boolean; onPendingOrdersReview?: (orders: StrategyPendingOrder[], today: string) => Promise<StrategyPendingOrder[]>; onPartialResult?: (result: StrategyBacktestResult) => void }
+    options?: {
+      onShouldCancel?: () => boolean;
+      onShouldPause?: () => boolean;
+      onPendingOrdersReview?: (orders: StrategyPendingOrder[], today: string) => Promise<StrategyPendingOrder[]>;
+      onPartialResult?: (result: StrategyBacktestResult) => void;
+      onSnapshot?: (snapshot: BacktestSnapshot) => void;
+      resumeFromSnapshot?: BacktestSnapshot;
+    }
   ) {
     this.cancelOptions = options;
     this.pendingOrderReviewCallback = options?.onPendingOrdersReview;
     this.onPartialResultCallback = options?.onPartialResult;
-    // 需要对tradeDays过滤
-    this.tradeDays = await dataProvider.filterTradeDays(this.tradeDays);
+    this.onSnapshotCallback = options?.onSnapshot;
+
+    let startIndex = 0;
+    if (options?.resumeFromSnapshot) {
+      console.log('[OptBacktest] 检测到断点续跑快照，正在恢复状态...');
+      startIndex = await this.applyResumeSnapshot(options.resumeFromSnapshot, dataProvider, onProgress);
+    } else {
+      // 需要对tradeDays过滤
+      this.tradeDays = await dataProvider.filterTradeDays(this.tradeDays);
+    }
     const totalDays = this.tradeDays.length;
     const dayPercentStep = totalDays > 0 ? 90 / totalDays : 0;
 
@@ -691,18 +774,24 @@ export class OptimizedStrategyBacktest {
       STOCK_RANK_PCT: this.STOCK_RANK_PCT,
     });
 
-    for (let i = 0; i < totalDays; i++) {
+    for (let i = startIndex; i < totalDays; i++) {
+      this.currentDayIndex = i;
+      this.currentStage = 'between';
+      this.stage1Reviewed = false;
+
+      // [新增] 每个交易日开始时保存断点快照
+      await this.saveSnapshot('day-start', i, this.tradeDays[i]);
 
       if (this.isCancelled()) {
         console.log(`[OptBacktest] 回测在第 ${i + 1}/${totalDays} 天被取消`);
         onProgress?.('回测已取消', 100);
-        return this.calculateResult();
+        return this.completeRun(this.calculateResult());
       }
       const cancelledDuringPause = await this.waitIfPaused();
       if (cancelledDuringPause) {
         console.log(`[OptBacktest] 回测在暂停期间被取消`);
         onProgress?.('回测已取消', 100);
-        return this.calculateResult();
+        return this.completeRun(this.calculateResult());
       }
 
       const today = this.tradeDays[i];
@@ -722,7 +811,7 @@ export class OptimizedStrategyBacktest {
       console.log(`[OptBacktest] [${today}] 阶段1: 执行待处理订单 ${this.pendingOrders.length} 笔`);
       if (await this.executePendingOrders(today, dataProvider)) {
         onProgress?.('回测已取消', 100);
-        return this.calculateResult();
+        return this.completeRun(this.calculateResult());
       }
 
       if (i < totalDays - 1) {
@@ -733,7 +822,7 @@ export class OptimizedStrategyBacktest {
           onProgress?.(msg, pct ?? Math.round(currentBase + dayPercentStep * 0.6));
         })) {
           onProgress?.('回测已取消', 100);
-          return this.calculateResult();
+          return this.completeRun(this.calculateResult());
         }
       }
 
@@ -741,7 +830,7 @@ export class OptimizedStrategyBacktest {
       console.log(`[OptBacktest] [${today}] 阶段3: 记录净值`);
       if (await this.recordDailyValue(today, dataProvider)) {
         onProgress?.('回测已取消', 100);
-        return this.calculateResult();
+        return this.completeRun(this.calculateResult());
       }
 
       // [新增] 实时推送当前部分结果给 UI，便于展示动态更新的净值/交易统计
@@ -761,7 +850,7 @@ export class OptimizedStrategyBacktest {
     const result = this.calculateResult();
     onProgress?.('回测完成！', 100);
     console.log(`[OptBacktest] ====== 回测结束 ======\n`);
-    return result;
+    return this.completeRun(result);
   }
 
   private async getRiskPreference(today: string, dataProvider: StrategyDataProvider): Promise<{prefer: string, upRatio: number, upRatioMA5: number}> {
@@ -946,14 +1035,17 @@ export class OptimizedStrategyBacktest {
       return this.TRAILING_STOP_PCT;
 
     const s = this.sigmoid((riskPref - 0.50) * this.STEEPNESS);
-    const ratio = this.clamp(0.6 + (s - 0.5) * 0.30, 0.4, 0.7);
-    const result = 1 - (1 - this.getDailyStopLossPct(today)) * ratio;
-    console.log(`[OptBacktest] [${today}] getDailyTrailingStopPct — riskPref=${riskPref}, result=${result}`);
+    const stoploss = this.clamp((1 - this.TRAILING_STOP_PCT) + (s - 0.5) * 0.30, 0.4, 0.7);
+    const result = 1 - stoploss;
+    // console.log(`[OptBacktest] [${today}] getDailyTrailingStopPct — riskPref=${riskPref}, result=${result}`);
     return result;
   }
 
   // ===== 阶段1: 执行待处理订单 =====
   private async executePendingOrders(today: string, dataProvider: StrategyDataProvider): Promise<boolean> {
+    this.currentStage = 'stage1';
+    this.stage1Reviewed = false;
+
     if (this.pendingOrders.length === 0) {
       console.log(`[OptBacktest] [${today}] 无待执行订单`);
       return false;
@@ -1005,8 +1097,11 @@ export class OptimizedStrategyBacktest {
     // [新增] UI 交互：让用户决定执行或取消可执行订单
     let ordersToExecute = executableOrders;
     if (this.pendingOrderReviewCallback && executableOrders.length > 0) {
+      // [新增] 在订单确认节点保存快照，崩溃/关闭后可从该节点恢复
+      await this.saveSnapshot('pending-review', this.currentDayIndex, today);
       console.log(`[OptBacktest] [${today}] 等待用户确认 ${executableOrders.length} 笔待执行订单`);
       ordersToExecute = await this.pendingOrderReviewCallback(executableOrders, today);
+      this.stage1Reviewed = true;
       console.log(`[OptBacktest] [${today}] 用户确认执行 ${ordersToExecute.length}/${executableOrders.length} 笔订单`);
       if (this.isCancelled()) return true;
     }
@@ -1048,6 +1143,8 @@ export class OptimizedStrategyBacktest {
     }
 
     this.pendingOrders = [];
+    // [新增] stage1 结束后保存快照，便于暂停后安全恢复
+    await this.saveSnapshot('after-stage1', this.currentDayIndex, today);
     return false;
   }
 
@@ -1439,6 +1536,7 @@ export class OptimizedStrategyBacktest {
     dayPercentStep: number,
     onProgress?: (message: string, percent?: number) => void
   ): Promise<boolean> {
+    this.currentStage = 'stage2';
     const tStart = performance.now();
     this.boardCache.clear();
     this.boardStocksCache.clear();
@@ -1544,9 +1642,9 @@ export class OptimizedStrategyBacktest {
       const dailyStopLossPct = this.getDailyStopLossPct(today);
       const dailyTrailingStopPct = this.getDailyTrailingStopPct(today);
 
-      // 1. 更新最高价（同时服务于移动止损和动态止盈）
-      if (currentPrice > position.highestPrice) {
-        position.highestPrice = currentPrice;
+      // 1. 更新最高价（使用当日最高价 zg 计算移动止损）
+      if (kLast.zg > position.highestPrice) {
+        position.highestPrice = kLast.zg;
       }
       // 2. 固定止损（硬性风控，最先检查）
       if (currentPrice < position.buyPrice * dailyStopLossPct) {
@@ -1559,23 +1657,12 @@ export class OptimizedStrategyBacktest {
 
       // 3. 移动止损（保护利润）
       // 3.1 更新移动止损价格(因为dailyTrailingStopPct更新了)
-      if (profitPct < this.TRAILING_STOP_START_PCT) {
-        // 盈利低于阈值：移动止损不启动
-        console.log(`[OptBacktest] [${today}] ${secid} 盈利不足${(this.TRAILING_STOP_START_PCT * 100).toFixed(0)}%：移动止损不启动 盈利：${(profitPct * 100).toFixed(2)}%`);
-      } else {
-        if (profitPct > this.TRAILING_STOP_TIGHTEN_PCT) {
-          // 盈利超过阈值：收紧保护
-          position.stopLossPrice = position.highestPrice * (1 - (1 - dailyTrailingStopPct) * 0.6);
-        } else {
-          position.stopLossPrice = position.highestPrice * dailyTrailingStopPct;
-        }
-        
-        console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${(dailyTrailingStopPct * 100).toFixed(1)}%)`);
-        if (currentPrice < position.stopLossPrice) {
-          console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
-          this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `移动止损(回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);
-          continue;
-        }
+      position.stopLossPrice = position.highestPrice * dailyTrailingStopPct;
+      console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${(dailyTrailingStopPct * 100).toFixed(1)}%)`);
+      if (currentPrice < position.stopLossPrice) {
+        console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `移动止损(回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);
+        continue;
       }
       
 
@@ -2260,11 +2347,14 @@ export class OptimizedStrategyBacktest {
       console.log(`[OptBacktest] [${today}] 无买入候选触发`);
     }
 
+    // [新增] stage2 结束后保存快照，pendingOrders 已包含次日待执行订单
+    await this.saveSnapshot('after-stage2', this.currentDayIndex, today);
     return false;
   }
 
   // ===== 阶段3: 记录净值 =====
   private async recordDailyValue(date: string, dataProvider: StrategyDataProvider): Promise<boolean> {
+    this.currentStage = 'stage3';
     let stockValue = 0;
     let positionDetails: Array<{ secid: string; close: number; quantity: number; value: number }> = [];
 
@@ -2306,6 +2396,8 @@ export class OptimizedStrategyBacktest {
     } else {
       console.log(`[OptBacktest] [${date}] 净值: ${totalValue.toFixed(2)} (空仓)`);
     }
+    // [新增] 当日结束后保存快照，下一交易日可从此恢复
+    await this.saveSnapshot('day-end', this.currentDayIndex, date);
     return false;
   }
 
@@ -2866,6 +2958,174 @@ export class OptimizedStrategyBacktest {
   // ===== K线形态判断 =====
 
 
+  // ===== 断点续跑工具 =====
+  private getSnapshotParams(): BacktestSnapshotParams {
+    return {
+      initialCapital: this.initialCapital,
+      maxPositions: this.MAX_POSITIONS,
+      positionRatio: this.POSITION_RATIO,
+      stopLossInitPct: this.STOP_LOSS_INIT_PCT,
+      trailingStopPct: this.TRAILING_STOP_PCT,
+      takeProfitPct: this.TAKE_PROFIT_PCT,
+      minStrategyScore: this.MIN_STRATEGY_SCORE,
+      strongLookback: this.STRONG_LOOKBACK,
+      maxWatchDays: this.MAX_WATCH_DAYS,
+      boardRankPct: this.BOARD_RANK_PCT,
+      stockRankPct: this.STOCK_RANK_PCT,
+      strategyMode: this.strategyMode,
+      structureBreakDays: this.STRUCTURE_BREAK_DAYS,
+      rangeBoundDays: this.RANGE_BOUND_DAYS,
+      upDownRateHighThresh: this.UP_DOWN_RATE_HIGH_THRESH,
+      upDownRateLowThresh: this.UP_DOWN_RATE_LOW_THRESH,
+      pullbackPct: this.PULLBACK_PCT,
+      sellAtOpen: this.SELL_AT_OPEN,
+      timeExitMaxDays: this.TIME_EXIT_MAX_DAYS,
+      timeExitMinReturn: this.TIME_EXIT_MIN_RETURN,
+      profitIgnoreSignalPct: this.PROFIT_IGNORE_SIGNAL_PCT,
+      trailingStopStartPct: this.TRAILING_STOP_START_PCT,
+      trailingStopTightenPct: this.TRAILING_STOP_TIGHTEN_PCT,
+      buyThresholds: this.RSI_BUY_THRESHOLDS,
+      sellThresholds: this.RSI_SELL_THRESHOLDS,
+      filterStrongType: this.FILTER_STRONG_TYPE,
+      steepness: this.STEEPNESS,
+    };
+  }
+
+  public getSnapshot(nodeType: BacktestNodeType, currentDayIndex: number, currentDate: string): BacktestSnapshot {
+    return {
+      version: BACKTEST_SNAPSHOT_VERSION,
+      createdAt: Date.now(),
+      nodeType,
+      currentDayIndex,
+      currentDate,
+      params: this.getSnapshotParams(),
+      state: {
+        capital: this.capital,
+        availableCash: this.availableCash,
+        positions: Array.from(this.positions.entries()),
+        pendingOrders: this.pendingOrders,
+        tradeRecords: this.tradeRecords,
+        dailyValues: this.dailyValues,
+        tradeDays: this.tradeDays,
+        watchList: Array.from(this.watchList.entries()),
+        dailyRiskPreference: Array.from(this.dailyRiskPreference.entries()),
+        lastPositionPrices: Array.from(this.lastPositionPrices.entries()),
+      },
+    };
+  }
+
+  public applySnapshot(snapshot: BacktestSnapshot): void {
+    if (snapshot.version !== BACKTEST_SNAPSHOT_VERSION) {
+      throw new Error(`不支持的快照版本: ${snapshot.version}`);
+    }
+    this.tradeDays = snapshot.state.tradeDays;
+    this.capital = snapshot.state.capital;
+    this.availableCash = snapshot.state.availableCash;
+    this.positions = new Map(snapshot.state.positions);
+    this.pendingOrders = snapshot.state.pendingOrders;
+    this.tradeRecords = snapshot.state.tradeRecords;
+    this.dailyValues = snapshot.state.dailyValues;
+    this.watchList = new Map(snapshot.state.watchList);
+    this.dailyRiskPreference = new Map(snapshot.state.dailyRiskPreference);
+    this.lastPositionPrices = new Map(snapshot.state.lastPositionPrices);
+    this.currentDayIndex = snapshot.currentDayIndex;
+  }
+
+  private async saveSnapshot(nodeType: BacktestNodeType, currentDayIndex: number, currentDate: string): Promise<void> {
+    try {
+      const snapshot = this.getSnapshot(nodeType, currentDayIndex, currentDate);
+      await WriteCache(BACKTEST_SNAPSHOT_KEY, snapshot);
+      this.onSnapshotCallback?.(snapshot);
+    } catch (error: any) {
+      console.error('[OptBacktest] 保存断点快照失败:', error);
+    }
+  }
+
+  public static fromSnapshot(
+    snapshot: BacktestSnapshot,
+    workerExecutor?: (method: string, args?: any[]) => Promise<any>
+  ): OptimizedStrategyBacktest {
+    const instance = new OptimizedStrategyBacktest(
+      snapshot.state.tradeDays,
+      snapshot.params.initialCapital,
+      workerExecutor,
+      snapshot.params
+    );
+    instance.applySnapshot(snapshot);
+    return instance;
+  }
+
+  public static async loadSnapshot(): Promise<BacktestSnapshot | null> {
+    return ReadCache<BacktestSnapshot>(BACKTEST_SNAPSHOT_KEY);
+  }
+
+  public static async clearSnapshot(): Promise<void> {
+    await WriteCache(BACKTEST_SNAPSHOT_KEY, null);
+  }
+
+  private async completeRun(result: StrategyBacktestResult): Promise<StrategyBacktestResult> {
+    await OptimizedStrategyBacktest.clearSnapshot();
+    return result;
+  }
+
+  private async applyResumeSnapshot(
+    snapshot: BacktestSnapshot,
+    dataProvider: StrategyDataProvider,
+    onProgress?: (message: string, percent?: number) => void
+  ): Promise<number> {
+    this.applySnapshot(snapshot);
+    const totalDays = this.tradeDays.length;
+    const dayPercentStep = totalDays > 0 ? 90 / totalDays : 0;
+    const { nodeType, currentDayIndex, currentDate } = snapshot;
+
+    console.log(`[OptBacktest] 恢复快照: nodeType=${nodeType}, currentDayIndex=${currentDayIndex}, currentDate=${currentDate}`);
+
+    if (currentDayIndex < 0 || currentDayIndex >= totalDays) {
+      return totalDays; // 已处理完所有交易日
+    }
+
+    switch (nodeType) {
+      case 'day-start':
+      case 'pending-review':
+        // 从当前交易日完整重跑
+        return currentDayIndex;
+      case 'after-stage1': {
+        // stage1 已完成，继续 stage2 + stage3
+        const today = this.tradeDays[currentDayIndex];
+        const nextDay = this.tradeDays[currentDayIndex + 1];
+        if (!nextDay) {
+          // 最后一个交易日，没有 nextDay，直接记录净值
+          await this.recordDailyValue(today, dataProvider);
+          return currentDayIndex + 1;
+        }
+        const currentBase = Math.round(currentDayIndex * dayPercentStep);
+        onProgress?.(`[${currentDayIndex + 1}/${totalDays}] ${today} 生成交易信号...`, Math.round(currentBase + dayPercentStep * 0.3));
+        const cancelledInStage2 = await this.generateSignals(today, nextDay, dataProvider, currentBase, dayPercentStep, (msg, pct) => {
+          onProgress?.(msg, pct ?? Math.round(currentBase + dayPercentStep * 0.6));
+        });
+        if (cancelledInStage2) return totalDays;
+        onProgress?.(`[${currentDayIndex + 1}/${totalDays}] ${today} 记录净值...`, Math.round(currentBase + dayPercentStep * 0.8));
+        const cancelledInStage3 = await this.recordDailyValue(today, dataProvider);
+        if (cancelledInStage3) return totalDays;
+        return currentDayIndex + 1;
+      }
+      case 'after-stage2': {
+        // stage1/stage2 已完成，继续 stage3
+        const today = this.tradeDays[currentDayIndex];
+        const currentBase = Math.round(currentDayIndex * dayPercentStep);
+        onProgress?.(`[${currentDayIndex + 1}/${totalDays}] ${today} 记录净值...`, Math.round(currentBase + dayPercentStep * 0.8));
+        const cancelledInStage3 = await this.recordDailyValue(today, dataProvider);
+        if (cancelledInStage3) return totalDays;
+        return currentDayIndex + 1;
+      }
+      case 'day-end':
+        // 当前交易日已全部完成，从下一个交易日开始
+        return currentDayIndex + 1;
+      default:
+        return currentDayIndex;
+    }
+  }
+
   // ===== 通用工具 =====
   private getTradeDaysDiff(date1: string, date2: string): number {
     const idx1 = this.tradeDays.indexOf(date1);
@@ -2879,7 +3139,22 @@ export class OptimizedStrategyBacktest {
   }
 
   private async waitIfPaused(): Promise<boolean> {
+    let enteredPause = false;
     while (this.cancelOptions?.onShouldPause?.()) {
+      if (!enteredPause) {
+        enteredPause = true;
+        // [新增] 进入暂停时保存快照，崩溃/关闭后可恢复
+        const nodeType: BacktestNodeType =
+          this.currentStage === 'stage1'
+            ? this.stage1Reviewed
+              ? 'after-stage1'
+              : 'pending-review'
+            : this.currentStage === 'stage3'
+            ? 'after-stage2'
+            : 'day-start';
+        await this.saveSnapshot(nodeType, this.currentDayIndex, this.tradeDays[this.currentDayIndex]);
+        console.log(`[OptBacktest] 回测已暂停并保存快照: ${nodeType}, 当前日期: ${this.tradeDays[this.currentDayIndex]}`);
+      }
       await new Promise(resolve => setTimeout(resolve, 500));
       if (this.isCancelled()) {
         return true;

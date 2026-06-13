@@ -1292,8 +1292,10 @@ function updateCChart(opts: any, chans: Stock.ChanItem[], chansLines: Stock.Chan
   const dates = chans.map(({ date }) => date);
   const values = chans.map((_, i) => [_.kp, _.sp, _.zd, _.zg, _.type, i == 0 ? 0 : chans[i - 1].sp, _.hsl, _.cje]);
   // K线
-  for (let i = 0; i < opts.xAxis.length - 1; i++) {
-    opts.xAxis[i].data = dates;
+  for (let i = 0; i < opts.xAxis.length; i++) {
+    if (opts.xAxis[i].type === 'category') {
+      opts.xAxis[i].data = dates;
+    }
   }
   opts.xAxis[0].data = dates;
   opts.series[0].data = values;
@@ -1357,8 +1359,10 @@ function updateKChart(
     };
   });
   // K线
-  for (let i = 0; i < opts.xAxis.length - 1; i++) {
-    opts.xAxis[i].data = dates;
+  for (let i = 0; i < opts.xAxis.length; i++) {
+    if (opts.xAxis[i].type === 'category') {
+      opts.xAxis[i].data = dates;
+    }
   }
   opts.xAxis[0].data = dates;
   opts.series[0].data = values;
