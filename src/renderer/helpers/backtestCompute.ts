@@ -474,8 +474,8 @@ export function optimizeRSIStrategy(
 
           // 修改为：
           const score = 
-            Math.sign(totalReturn) * Math.pow(Math.abs(totalReturn), 0.5)   // 收益开根号
-            * Math.pow(winRate / 100, 2)                                      // 胜率平方
+            // Math.sign(totalReturn) * Math.pow(Math.abs(totalReturn), 0.5)   // 收益开根号
+            Math.pow(winRate / 100, 2)                                      // 胜率平方
             * Math.min(trades.length, 15) 
             / Math.pow(1 + Math.abs(maxDrawdown) / 5, 2);                   // 回撤惩罚加重
 
