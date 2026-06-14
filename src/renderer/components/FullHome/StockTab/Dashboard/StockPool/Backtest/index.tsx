@@ -379,11 +379,11 @@ function getNetValueBaseOptions(darkMode: boolean, initialCapital: number) {
         markLine: {
           silent: true,
           symbol: 'none',
-          lineStyle: { type: 'dashed', color: '#999', width: 1 },
+          lineStyle: { type: 'dashed', color: darkMode ? '#b1afb3' : '#999', width: 1 },
           data: [
             {
               yAxis: initialCapital,
-              label: { formatter: '初始资金', position: 'end', color: '#999' },
+              label: { formatter: '初始资金', position: 'end', color: darkMode ? '#b1afb3' : '#999' },
             },
           ],
         },
@@ -430,6 +430,12 @@ function updateNetValueOptions(
   opts.yAxis.splitLine.lineStyle.color = darkMode ? 'rgba(255,255,255, 0.15)' : 'rgba(0, 0, 0, 0.15)';
   opts.xAxis.axisLine.lineStyle.color = darkMode ? '#b1afb3' : '#666';
   opts.xAxis.axisLabel.color = darkMode ? '#b1afb3' : '#666';
+  if (opts.series[0].markLine) {
+    opts.series[0].markLine.lineStyle.color = darkMode ? '#b1afb3' : '#999';
+    if (opts.series[0].markLine.data && opts.series[0].markLine.data[0]) {
+      opts.series[0].markLine.data[0].label.color = darkMode ? '#b1afb3' : '#999';
+    }
+  }
 
   const markPoints = [];
   if (peakIndex !== troughIndex && values[troughIndex] !== undefined) {
@@ -532,6 +538,8 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       strategyType: StrategyType;
       optimizedSubStrategy: OptimizedSubStrategy;
       params: any;
+      inProgress?: boolean;
+      snapshot?: BacktestEngine.BacktestSnapshot;
     }>>([]);
 
     // 优化策略参数
@@ -577,6 +585,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
+    const inProgressHistoryIdRef = useRef<string | null>(null);
 
     const [chartOption, setChartOption] = useState<any>(undefined);
 
@@ -662,20 +671,40 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       loadHistory();
     }, [loadHistory]);
 
-    // [新增] 组件挂载时检测是否存在断点续跑快照（仅优化策略支持）
+    // [新增] 组件挂载时检测是否存在进行中的回测历史记录（仅优化策略支持）
     useEffect(() => {
       (async () => {
         try {
-          const snapshot = await BacktestEngine.OptimizedStrategyBacktest.loadSnapshot();
-          if (snapshot && strategyType !== 'rsi') {
-            setSavedSnapshot(snapshot);
+          const cached = await electron.readCache(HISTORY_CACHE_KEY);
+          const list: any[] = cached?.data?.data || [];
+          const inProgressItem = list.find((item: any) => item.inProgress && item.snapshot);
+          if (inProgressItem && strategyType !== 'rsi') {
+            inProgressHistoryIdRef.current = inProgressItem.id;
+            setSavedSnapshot(inProgressItem.snapshot);
             setResumeModalVisible(true);
-            console.log('[Backtest] 检测到未完成的回测快照:', snapshot.nodeType, snapshot.currentDate);
+            console.log('[Backtest] 检测到未完成的回测历史记录:', inProgressItem.snapshot.nodeType, inProgressItem.snapshot.currentDate);
           }
         } catch (e) {
-          console.error('[Backtest] 读取回测快照失败:', e);
+          console.error('[Backtest] 读取回测历史记录失败:', e);
         }
       })();
+    }, []);
+
+    // 更新指定历史记录项
+    const updateHistoryItem = useCallback(async (id: string, updates: { result?: any; label?: string; inProgress?: boolean; snapshot?: BacktestEngine.BacktestSnapshot }) => {
+      try {
+        const cached = await electron.readCache(HISTORY_CACHE_KEY);
+        let list: any[] = cached?.data?.data || [];
+        if (!Array.isArray(list)) list = [];
+        const index = list.findIndex((item: any) => item.id === id);
+        if (index >= 0) {
+          list[index] = { ...list[index], ...updates };
+          await electron.writeCache(HISTORY_CACHE_KEY, list);
+          setHistoryList(list);
+        }
+      } catch (e) {
+        console.error('[Backtest] 更新历史记录失败:', e);
+      }
     }, []);
 
     // 保存到历史记录
@@ -920,6 +949,75 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
       cancelledRef.current = false;
       pausedRef.current = false;
 
+      const backtestParams = {
+        initialCapital,
+        maxPositions,
+        positionRatio,
+        stopLossInitPct,
+        trailingStopPct,
+        takeProfitPct,
+        minStrategyScore,
+        strongLookbackStart,
+        strongLookbackEnd,
+        boardRankPct,
+        stockRankPct,
+        structureBreakDays,
+        rangeBoundDays,
+        pullbackPct,
+        sellAtOpen,
+        timeExitMaxDays,
+        timeExitMinReturn,
+        profitIgnoreSignalPct,
+        trailingStopStartPct,
+        trailingStopTightenPct,
+        buyThresholds: parseThresholds(buyThresholdsInput),
+        sellThresholds: parseThresholds(sellThresholdsInput),
+        filterStrongType,
+        steepness,
+      };
+
+      // [新增] 为优化策略创建/复用进行中的历史记录项，用于断点续跑
+      const existingInProgressId = inProgressHistoryIdRef.current;
+      inProgressHistoryIdRef.current = null;
+      if (strategyType !== 'rsi') {
+        if (isContinue && existingInProgressId) {
+          inProgressHistoryIdRef.current = existingInProgressId;
+        } else {
+          try {
+            const cached = await electron.readCache(HISTORY_CACHE_KEY);
+            let list: any[] = cached?.data?.data || [];
+            if (!Array.isArray(list)) list = [];
+
+            const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            inProgressHistoryIdRef.current = id;
+            const dateRange = dates.length > 0 ? `${dates[0]} ~ ${dates[dates.length - 1]}` : '';
+            const strategyLabel = optimizedSubStrategy === 'both' ? 'MACD+RSI' : optimizedSubStrategy.toUpperCase();
+            const newItem = {
+              id,
+              timestamp: Date.now(),
+              label: `${dateRange} | ${strategyLabel} | 进行中...`,
+              result: null,
+              dates,
+              strategyType,
+              optimizedSubStrategy,
+              params: backtestParams,
+              inProgress: true,
+            };
+
+            list = [newItem, ...list];
+            if (list.length > MAX_HISTORY_COUNT) {
+              list = list.slice(0, MAX_HISTORY_COUNT);
+            }
+
+            await electron.writeCache(HISTORY_CACHE_KEY, list);
+            setHistoryList(list);
+            console.log('[Backtest] 已创建进行中的历史记录项:', id);
+          } catch (e) {
+            console.error('[Backtest] 创建进行中历史记录项失败:', e);
+          }
+        }
+      }
+
       try {
         let backtestResult: any;
 
@@ -990,6 +1088,11 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               }),
               onPartialResult: handlePartialResult,
               resumeFromSnapshot: isContinue ? resumeSnapshot : undefined,
+              onSnapshot: (snapshot) => {
+                if (inProgressHistoryIdRef.current) {
+                  updateHistoryItem(inProgressHistoryIdRef.current, { snapshot });
+                }
+              },
             }
           );
         }
@@ -1044,40 +1147,38 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           console.error('[Backtest] 缓存回测结果失败:', e);
         }
 
-        // 保存到历史记录（未取消时才保存）
-        if (!cancelledRef.current) {
-          await saveToHistory(
-            backtestResult,
-            dates,
-            strategyType,
-            optimizedSubStrategy,
-            {
-              initialCapital,
-              maxPositions,
-              positionRatio,
-              stopLossInitPct,
-              trailingStopPct,
-              takeProfitPct,
-              minStrategyScore,
-              strongLookbackStart,
-              strongLookbackEnd,
-              boardRankPct,
-              stockRankPct,
-              structureBreakDays,
-              rangeBoundDays,
-              pullbackPct,
-              sellAtOpen,
-              timeExitMaxDays,
-              timeExitMinReturn,
-              profitIgnoreSignalPct,
-              trailingStopStartPct,
-              trailingStopTightenPct,
-              buyThresholds: parseThresholds(buyThresholdsInput),
-              sellThresholds: parseThresholds(sellThresholdsInput),
-              filterStrongType,
-              steepness,
+        // [优化] 完成或更新进行中的历史记录项
+        if (strategyType !== 'rsi' && inProgressHistoryIdRef.current) {
+          if (cancelledRef.current) {
+            // 取消时移除进行中的历史记录项
+            try {
+              const cached = await electron.readCache(HISTORY_CACHE_KEY);
+              let list: any[] = cached?.data?.data || [];
+              if (!Array.isArray(list)) list = [];
+              list = list.filter((item: any) => item.id !== inProgressHistoryIdRef.current);
+              await electron.writeCache(HISTORY_CACHE_KEY, list);
+              setHistoryList(list);
+              console.log('[Backtest] 取消回测，已移除进行中的历史记录项');
+            } catch (e) {
+              console.error('[Backtest] 移除进行中历史记录项失败:', e);
             }
-          );
+          } else {
+            // 完成时更新为最终结果
+            const totalReturnPct = ((backtestResult?.totalReturn || 0) * 100).toFixed(2);
+            const tradeCount = backtestResult?.totalTrades || 0;
+            const dateRange = dates.length > 0 ? `${dates[0]} ~ ${dates[dates.length - 1]}` : '';
+            const strategyLabel = optimizedSubStrategy === 'both' ? 'MACD+RSI' : optimizedSubStrategy.toUpperCase();
+            await updateHistoryItem(inProgressHistoryIdRef.current, {
+              result: backtestResult,
+              label: `${dateRange} | ${strategyLabel} | 收益${totalReturnPct}% | ${tradeCount}笔`,
+              inProgress: false,
+            });
+            console.log('[Backtest] 回测完成，已更新历史记录项');
+          }
+          inProgressHistoryIdRef.current = null;
+        } else if (!cancelledRef.current) {
+          // RSI 策略走原来的保存逻辑
+          await saveToHistory(backtestResult, dates, strategyType, optimizedSubStrategy, backtestParams);
         }
 
         console.log(`[UI] ${strategyName}回测结果已接收，图表已生成`);
@@ -1092,7 +1193,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, pullbackPct, sellAtOpen, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, trailingStopStartPct, trailingStopTightenPct, buyThresholdsInput, sellThresholdsInput, filterStrongType, steepness]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, pullbackPct, sellAtOpen, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, trailingStopStartPct, trailingStopTightenPct, buyThresholdsInput, sellThresholdsInput, filterStrongType, steepness, updateHistoryItem, saveToHistory]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1306,13 +1407,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                   <a 
                     className={styles.abtn} 
                     onClick={handlePreload}
-                    style={{ marginRight: 10, color: '#1890ff' }}
+                    style={{ marginRight: 10, color: 'var(--primary-color)' }}
                   >
                     预生成强势数据
                   </a>
                 )}
                 {preloading && (
-                  <span style={{ marginRight: 10, color: '#1890ff', fontSize: 12 }}>
+                  <span style={{ marginRight: 10, color: 'var(--primary-color)', fontSize: 12 }}>
                     {preloadProgress}
                   </span>
                 )}
@@ -1488,7 +1589,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                   status={paused ? 'normal' : 'active'} 
                   strokeColor={{ from: '#108ee9', to: '#87d068' }} 
                 />
-                <div style={{ marginTop: 12, color: '#666', fontSize: 14 }}>
+                <div style={{ marginTop: 12, color: 'var(--secondary-text-color)', fontSize: 14 }}>
                   {progress}{paused ? ' (已暂停)' : ''}
                 </div>
               </div>
@@ -1523,7 +1624,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                   }
                   size="small"
                 >
-                  <div style={{ marginBottom: 12, color: '#666', fontSize: 13 }}>
+                  <div style={{ marginBottom: 12, color: 'var(--secondary-text-color)', fontSize: 13 }}>
                     请对每笔订单选择「执行」或「取消」，全部决定后点击「确认」继续回测。
                   </div>
                   <Table
@@ -1791,7 +1892,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             )}
 
             {!running && !result && (
-              <div style={{ padding: 40, textAlign: 'center', color: '#999' }}>
+              <div style={{ padding: 40, textAlign: 'center', color: 'var(--reverse-text-color)' }}>
                 选择日期范围后点击回测按钮开始
               </div>
             )}
@@ -1806,7 +1907,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             width={720}
           >
             {historyList.length === 0 ? (
-              <div style={{ padding: 40, textAlign: 'center', color: '#999' }}>
+              <div style={{ padding: 40, textAlign: 'center', color: 'var(--reverse-text-color)' }}>
                 暂无历史记录，完成一次回测后将自动保存
               </div>
             ) : (
@@ -1815,9 +1916,29 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 renderItem={(item) => (
                   <List.Item
                     actions={[
-                      <Button size="small" type="primary" onClick={() => loadHistoryItem(item)}>
-                        加载
-                      </Button>,
+                      item.inProgress ? (
+                        item.snapshot ? (
+                          <Button
+                            size="small"
+                            type="primary"
+                            onClick={() => {
+                              inProgressHistoryIdRef.current = item.id;
+                              setSavedSnapshot(item.snapshot);
+                              setResumeModalVisible(true);
+                            }}
+                          >
+                            继续
+                          </Button>
+                        ) : (
+                          <Button size="small" disabled>
+                            等待检查点
+                          </Button>
+                        )
+                      ) : (
+                        <Button size="small" type="primary" onClick={() => loadHistoryItem(item)}>
+                          加载
+                        </Button>
+                      ),
                       <Popconfirm
                         title="确认删除？"
                         onConfirm={() => deleteHistoryItem(item.id)}
@@ -1837,14 +1958,20 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                           <Tag color={item.strategyType === 'rsi' ? 'blue' : 'purple'}>
                             {item.strategyType === 'rsi' ? 'RSI' : (item.optimizedSubStrategy === 'both' ? 'MACD+RSI' : item.optimizedSubStrategy.toUpperCase())}
                           </Tag>
-                          <Tag color={(item.result?.totalReturn || 0) >= 0 ? 'red' : 'green'}>
-                            收益 {((item.result?.totalReturn || 0) * 100).toFixed(2)}%
-                          </Tag>
-                          <Tag>{item.result?.totalTrades || 0} 笔交易</Tag>
+                          {item.inProgress ? (
+                            <Tag color="orange">进行中</Tag>
+                          ) : (
+                            <>
+                              <Tag color={(item.result?.totalReturn || 0) >= 0 ? 'red' : 'green'}>
+                                收益 {((item.result?.totalReturn || 0) * 100).toFixed(2)}%
+                              </Tag>
+                              <Tag>{item.result?.totalTrades || 0} 笔交易</Tag>
+                            </>
+                          )}
                         </Space>
                       }
                       description={
-                        <div style={{ fontSize: 12, color: '#666' }}>
+                        <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
                           <div>日期: {item.dates[0]} ~ {item.dates[item.dates.length - 1]} ({item.dates.length}天)</div>
                           <div style={{ marginTop: 4 }}>
                             资金{item.params?.initialCapital?.toLocaleString() || 1000000} | 
@@ -1884,7 +2011,20 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                 key="discard"
                 danger
                 onClick={async () => {
-                  await BacktestEngine.OptimizedStrategyBacktest.clearSnapshot();
+                  // [优化] 从历史记录中移除进行中的项
+                  if (inProgressHistoryIdRef.current) {
+                    try {
+                      const cached = await electron.readCache(HISTORY_CACHE_KEY);
+                      let list: any[] = cached?.data?.data || [];
+                      if (!Array.isArray(list)) list = [];
+                      list = list.filter((item: any) => item.id !== inProgressHistoryIdRef.current);
+                      await electron.writeCache(HISTORY_CACHE_KEY, list);
+                      setHistoryList(list);
+                      inProgressHistoryIdRef.current = null;
+                    } catch (e) {
+                      console.error('[Backtest] 移除进行中历史记录项失败:', e);
+                    }
+                  }
                   setSavedSnapshot(null);
                   setResumeModalVisible(false);
                 }}

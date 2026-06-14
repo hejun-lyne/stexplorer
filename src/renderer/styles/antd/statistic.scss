@@ -1,0 +1,12 @@
+@import './variables';
+
+$prefix: $antPrefix + -statistic;
+
+.#{$prefix} {
+  &-title {
+    color: var(--secondary-text-color);
+  }
+  &-content {
+    color: $textColor;
+  }
+}

@@ -5,6 +5,14 @@ $prefix: $antPrefix + -card;
 .#{$prefix} {
   background: $componentBackground;
   color: $textColor;
+  &-head {
+    color: $textColor;
+    background: transparent;
+    border-bottom-color: $borderColor;
+  }
+  &-head-title {
+    color: $textColor;
+  }
   &-meta-title,
   &-meta-description {
     color: $textColor;

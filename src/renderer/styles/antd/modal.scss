@@ -24,7 +24,7 @@ $modalTypes: '&-confirm, &-info, &-success, &-error, &-warning';
     background-color: $componentBackground;
   }
   &-close {
-    color: $textColorSecondary;
+    color: var(--secondary-text-color);
     &:hover {
       color: $textColor;
     }

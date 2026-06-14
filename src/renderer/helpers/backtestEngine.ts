@@ -1,5 +1,6 @@
 import { Stock } from '@/types/stock';
-import { ReadCache, WriteCache } from '@/helpers/backtestCache';
+
+import { WriteCache } from '@/helpers/backtestCache';
 import dayjs from 'dayjs';
 import { calculateMA, calculateMACD, calculateRSI } from '@/helpers/tech';
 import {
@@ -383,7 +384,6 @@ export interface WatchListItem {
 
 // ===== 回测断点续跑快照 =====
 const BACKTEST_SNAPSHOT_VERSION = 1;
-const BACKTEST_SNAPSHOT_KEY = 'backtest_engine_snapshot';
 
 export type BacktestNodeType =
   | 'day-start'        // 当天 stage1 开始前（pendingOrders 为当日待执行或空）
@@ -3034,7 +3034,7 @@ export class OptimizedStrategyBacktest {
   private async saveSnapshot(nodeType: BacktestNodeType, currentDayIndex: number, currentDate: string): Promise<void> {
     try {
       const snapshot = this.getSnapshot(nodeType, currentDayIndex, currentDate);
-      await WriteCache(BACKTEST_SNAPSHOT_KEY, snapshot);
+      // [优化] 不再直接写入磁盘，而是通过回调交给 UI 保存到历史记录结构中
       this.onSnapshotCallback?.(snapshot);
     } catch (error: any) {
       console.error('[OptBacktest] 保存断点快照失败:', error);
@@ -3055,16 +3055,8 @@ export class OptimizedStrategyBacktest {
     return instance;
   }
 
-  public static async loadSnapshot(): Promise<BacktestSnapshot | null> {
-    return ReadCache<BacktestSnapshot>(BACKTEST_SNAPSHOT_KEY);
-  }
-
-  public static async clearSnapshot(): Promise<void> {
-    await WriteCache(BACKTEST_SNAPSHOT_KEY, null);
-  }
-
   private async completeRun(result: StrategyBacktestResult): Promise<StrategyBacktestResult> {
-    await OptimizedStrategyBacktest.clearSnapshot();
+    // [优化] 清理工作由 UI 通过 onSnapshot 回调完成，引擎不再直接操作存储
     return result;
   }
 
