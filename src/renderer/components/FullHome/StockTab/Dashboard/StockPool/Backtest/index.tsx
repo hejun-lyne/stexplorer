@@ -13,7 +13,6 @@ import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import { useRenderEcharts, useResizeEchart } from '@/utils/hooks';
 import { setBacktestMarksAction } from '@/actions/stock';
-import BKStockBrief from '@/components/FullHome/StockTab/BKDetail/BKStockBrief';
 
 const { ipcRenderer, makeWorkerExec } = window.contextModules.electron;
 
@@ -1641,29 +1640,6 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                         ),
                       },
                       {
-                        title: '日K线',
-                        key: 'kline',
-                        width: 320,
-                        render: (_: any, record: any) => {
-                          const order = record as BacktestEngine.StrategyPendingOrder;
-                          return (
-                            <div style={{ width: 300, height: 220, overflow: 'hidden' }}>
-                              <BKStockBrief
-                                ktype={Enums.KLineType.Day}
-                                mtype={Enums.MAPeriodType.Short}
-                                secid={order.secid}
-                                active={true}
-                                markdate={order.signalDate}
-                                openStock={(secid, name) => onOpenStock(secid, name, undefined, undefined, currentBacktestDate)}
-                                outRange={{ start: 0, end: 100 }}
-                                outArea={undefined}
-                                toDate={currentBacktestDate}
-                              />
-                            </div>
-                          );
-                        },
-                      },
-                      {
                         title: '方向',
                         dataIndex: 'type',
                         key: 'type',
@@ -1736,7 +1712,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     ]}
                     pagination={false}
                     size="small"
-                    scroll={{ x: 1400 }}
+                    scroll={{ x: 800 }}
                   />
                 </Card>
               </div>
