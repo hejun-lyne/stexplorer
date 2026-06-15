@@ -572,7 +572,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
     // 待执行订单 UI 交互状态
     const [pendingOrders, setPendingOrders] = useState<BacktestEngine.StrategyPendingOrder[]>([]);
-    const [pendingOrderDecisions, setPendingOrderDecisions] = useState<Record<number, boolean>>({});
+    const [pendingOrderDecisions, setPendingOrderDecisions] = useState<Record<number, 'execute' | 'watch' | 'cancel'>>({});
     const [pendingOrderReviewVisible, setPendingOrderReviewVisible] = useState(false);
     const [currentBacktestDate, setCurrentBacktestDate] = useState<string>('');
     const pendingOrderResolveRef = useRef<((orders: BacktestEngine.StrategyPendingOrder[]) => void) | null>(null);
@@ -1211,18 +1211,29 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     }, []);
 
     // 待执行订单交互回调
-    const handlePendingOrderDecision = useCallback((index: number, execute: boolean) => {
-      setPendingOrderDecisions(prev => ({ ...prev, [index]: execute }));
+    const handlePendingOrderDecision = useCallback((index: number, decision: 'execute' | 'watch' | 'cancel') => {
+      setPendingOrderDecisions(prev => ({ ...prev, [index]: decision }));
     }, []);
 
-    const handleAllPendingOrdersDecision = useCallback((execute: boolean) => {
-      const decisions: Record<number, boolean> = {};
-      pendingOrders.forEach((_, index) => { decisions[index] = execute; });
+    const handleAllPendingOrdersDecision = useCallback((decision: 'execute' | 'watch' | 'cancel') => {
+      const decisions: Record<number, 'execute' | 'watch' | 'cancel'> = {};
+      pendingOrders.forEach((order, index) => {
+        // 观察只对买入订单生效，卖出订单的观察视为取消
+        decisions[index] = decision === 'watch' && order.type === 'sell' ? 'cancel' : decision;
+      });
       setPendingOrderDecisions(decisions);
     }, [pendingOrders]);
 
     const handleConfirmPendingOrders = useCallback(() => {
-      const approvedOrders = pendingOrders.filter((_, index) => pendingOrderDecisions[index]);
+      // [新增] 执行/观察的订单传给引擎，取消的订单不传
+      const approvedOrders = pendingOrders
+        .map((order, index) => {
+          const decision = pendingOrderDecisions[index];
+          if (decision === 'cancel') return null;
+          if (decision === 'watch') return { ...order, watching: true };
+          return order;
+        })
+        .filter((order): order is BacktestEngine.StrategyPendingOrder => order !== null);
       setPendingOrderReviewVisible(false);
       pendingOrderResolveRef.current?.(approvedOrders);
       pendingOrderResolveRef.current = null;
@@ -1605,10 +1616,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                         <Button size="small" danger onClick={handleCancelBacktestFromPendingOrders}>
                           取消回测
                         </Button>
-                        <Button size="small" onClick={() => handleAllPendingOrdersDecision(false)}>
+                        <Button size="small" onClick={() => handleAllPendingOrdersDecision('cancel')}>
                           全部取消
                         </Button>
-                        <Button size="small" type="primary" onClick={() => handleAllPendingOrdersDecision(true)}>
+                        <Button size="small" onClick={() => handleAllPendingOrdersDecision('watch')}>
+                          全部观察
+                        </Button>
+                        <Button size="small" type="primary" onClick={() => handleAllPendingOrdersDecision('execute')}>
                           全部执行
                         </Button>
                         <Button
@@ -1617,7 +1631,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                           disabled={!pendingOrders.every((_, index) => pendingOrderDecisions[index] !== undefined)}
                           onClick={handleConfirmPendingOrders}
                         >
-                          确认 ({pendingOrders.filter((_, index) => pendingOrderDecisions[index]).length}/{pendingOrders.length})
+                          确认 ({pendingOrders.filter((_, index) => pendingOrderDecisions[index] === 'execute').length}/{pendingOrders.length})
                         </Button>
                       </Space>
                     </div>
@@ -1625,7 +1639,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                   size="small"
                 >
                   <div style={{ marginBottom: 12, color: 'var(--secondary-text-color)', fontSize: 13 }}>
-                    请对每笔订单选择「执行」或「取消」，全部决定后点击「确认」继续回测。
+                    请对每笔订单选择「执行」「观察」或「取消」，全部决定后点击「确认」继续回测。观察的买入订单次日会继续出现在待执行列表中。
                   </div>
                   <Table
                     dataSource={pendingOrders.map((order, index) => ({ ...order, key: index }))}
@@ -1683,28 +1697,52 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       {
                         title: '操作',
                         key: 'action',
-                        width: 140,
+                        width: 240,
                         fixed: 'right' as const,
                         render: (_: any, record: any) => {
                           const index = record.key as number;
+                          const order = record as BacktestEngine.StrategyPendingOrder;
                           const decision = pendingOrderDecisions[index];
+                          const isWatching = order.watching === true;
+                          const isSell = order.type === 'sell';
                           return (
                             <Space size="small">
                               <Button
                                 size="small"
-                                type={decision === true ? 'primary' : 'default'}
-                                onClick={() => handlePendingOrderDecision(index, true)}
+                                type={decision === 'execute' ? 'primary' : 'default'}
+                                onClick={() => handlePendingOrderDecision(index, 'execute')}
                               >
                                 执行
                               </Button>
-                              <Button
-                                size="small"
-                                danger={decision === false}
-                                type={decision === false ? 'primary' : 'default'}
-                                onClick={() => handlePendingOrderDecision(index, false)}
-                              >
-                                取消
-                              </Button>
+                              {!isSell && !isWatching && (
+                                <Button
+                                  size="small"
+                                  type={decision === 'watch' ? 'primary' : 'default'}
+                                  onClick={() => handlePendingOrderDecision(index, 'watch')}
+                                >
+                                  观察
+                                </Button>
+                              )}
+                              {!isSell && isWatching && (
+                                <Button
+                                  size="small"
+                                  danger={decision === 'cancel'}
+                                  type={decision === 'cancel' ? 'primary' : 'default'}
+                                  onClick={() => handlePendingOrderDecision(index, 'cancel')}
+                                >
+                                  取消观察
+                                </Button>
+                              )}
+                              {!(isSell || isWatching) && (
+                                <Button
+                                  size="small"
+                                  danger={decision === 'cancel'}
+                                  type={decision === 'cancel' ? 'primary' : 'default'}
+                                  onClick={() => handlePendingOrderDecision(index, 'cancel')}
+                                >
+                                  取消
+                                </Button>
+                              )}
                             </Space>
                           );
                         },
@@ -1712,7 +1750,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     ]}
                     pagination={false}
                     size="small"
-                    scroll={{ x: 800 }}
+                    scroll={{ x: 1100 }}
                   />
                 </Card>
               </div>

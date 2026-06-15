@@ -236,6 +236,7 @@ export interface StrategyPendingOrder {
   signalEntityLow?: number;      // [新增] 信号日K线实体最低价
   executePrice?: number;         // [新增] 指定执行价格（当日收盘卖使用收盘价，次日开盘卖不设置）
   canExecuteToday?: boolean;     // [新增] 当天是否可立即执行（用于 UI 区分保留/执行）
+  watching?: boolean;            // [新增] 买入订单是否处于观察状态（暂不执行，次日继续确认）
   boardCode?: string;
   strategyType?: 'macd' | 'rsi';
   strategyParams?: MACDStrategyResult | RSIBacktestResult;
@@ -1111,6 +1112,9 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
+      // [新增] 观察状态买入订单默认保留，但仍检查当天是否可执行（用户可随时改为执行）
+      const isWatching = order.watching === true;
+
       if (!klines || klines.length === 0) {
         console.log(`[OptBacktest] [${today}] 待买入订单保留: ${order.secid} 未获取到K线数据，等待${pendingDays}/${this.MAX_PENDING_DAYS}天`);
         reviewableOrders.push({ ...order, canExecuteToday: false });
@@ -1143,10 +1147,15 @@ export class OptimizedStrategyBacktest {
 
       reviewableOrders.push({ ...order, canExecuteToday: true });
       executableOrders.push(order);
+      // [新增] 观察状态买入订单即使当天可执行也保留，等待用户后续决定
+      if (isWatching) {
+        remainingOrders.push(order);
+      }
     }
 
     // [新增] UI 交互：让用户决定执行/保留或取消待处理订单
-    let ordersToExecute = executableOrders;
+    // [新增] 无确认回调时，观察状态买入订单不自动执行
+    let ordersToExecute = executableOrders.filter(o => !(o.type === 'buy' && o.watching === true));
     if (this.pendingOrderReviewCallback && reviewableOrders.length > 0) {
       // [新增] 在订单确认节点保存快照，崩溃/关闭后可从该节点恢复
       await this.saveSnapshot('pending-review', this.currentDayIndex, today);
@@ -1155,17 +1164,32 @@ export class OptimizedStrategyBacktest {
       this.stage1Reviewed = true;
       // 只认可 reviewableOrders 范围内的批准结果
       const approvedInReviewable = approvedOrders.filter(ao => reviewableOrders.some(ro => ro.secid === ao.secid));
-      const approvedSecids = new Set(approvedInReviewable.map(o => o.secid));
+      const approvedMap = new Map(approvedInReviewable.map(o => [o.secid, o.watching === true]));
+      const approvedSecids = new Set(approvedMap.keys());
       // 用户未批准的保留类买入订单从 remainingOrders 中移除（当日收盘卖订单由 stage2 末尾单独确认，此处保留）
       for (let i = remainingOrders.length - 1; i >= 0; i--) {
         if (remainingOrders[i].type === 'buy' && !approvedSecids.has(remainingOrders[i].secid)) {
-          console.log(`[OptBacktest] [${today}] ${remainingOrders[i].secid} 用户取消保留，从待买入列表移除`);
+          console.log(`[OptBacktest] [${today}] ${remainingOrders[i].secid} 用户取消保留/观察，从待买入列表移除`);
           remainingOrders.splice(i, 1);
         }
       }
-      // 只执行用户批准且当天可执行的订单
-      ordersToExecute = executableOrders.filter(o => approvedSecids.has(o.secid));
-      console.log(`[OptBacktest] [${today}] 用户确认执行 ${ordersToExecute.length}/${executableOrders.length} 笔可执行订单，当前待买入列表剩余${remainingOrders.length}笔`);
+      // [新增] 同步 approvedOrders 中的 watching 标记到 remainingOrders
+      for (const order of remainingOrders) {
+        if (order.type === 'buy') {
+          order.watching = approvedMap.get(order.secid) === true;
+        }
+      }
+      // 只执行用户批准、当天可执行且非观察状态的订单
+      ordersToExecute = executableOrders.filter(o => approvedSecids.has(o.secid) && approvedMap.get(o.secid) !== true);
+      const executedSecids = new Set(ordersToExecute.map(o => o.secid));
+      // [新增] 已执行的观察订单从 remainingOrders 中移除，避免次日重复出现
+      for (let i = remainingOrders.length - 1; i >= 0; i--) {
+        if (executedSecids.has(remainingOrders[i].secid)) {
+          remainingOrders.splice(i, 1);
+        }
+      }
+      const watchCount = Array.from(approvedMap.values()).filter(v => v).length;
+      console.log(`[OptBacktest] [${today}] 用户确认执行 ${ordersToExecute.length}/${executableOrders.length} 笔可执行订单，观察 ${watchCount} 笔，当前待买入列表剩余${remainingOrders.length}笔`);
       if (this.isCancelled()) return true;
     }
 
