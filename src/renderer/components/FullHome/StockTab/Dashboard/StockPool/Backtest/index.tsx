@@ -1226,12 +1226,12 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
 
     const handleConfirmPendingOrders = useCallback(() => {
       // [新增] 执行/观察的订单传给引擎，取消的订单不传
+      // 注意：必须显式设置 watching，避免沿用订单对象上旧的状态
       const approvedOrders = pendingOrders
         .map((order, index) => {
           const decision = pendingOrderDecisions[index];
           if (decision === 'cancel') return null;
-          if (decision === 'watch') return { ...order, watching: true };
-          return order;
+          return { ...order, watching: decision === 'watch' };
         })
         .filter((order): order is BacktestEngine.StrategyPendingOrder => order !== null);
       setPendingOrderReviewVisible(false);

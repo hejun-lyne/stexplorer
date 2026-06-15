@@ -1052,6 +1052,7 @@ export class OptimizedStrategyBacktest {
     this.currentStage = 'stage1';
     this.stage1Reviewed = false;
 
+    console.log(`[OptBacktest] [${today}] 阶段1开始: 待处理订单 ${this.pendingOrders.length} 笔`, this.pendingOrders.map(o => `${o.secid}:${o.type}${o.watching ? '(watch)' : ''}`));
     if (this.pendingOrders.length === 0) {
       console.log(`[OptBacktest] [${today}] 无待执行订单`);
       return false;
@@ -1130,8 +1131,8 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
-      // [新增] 开盘价跌破信号日开盘价则放弃买入
-      if (order.signalOpenPrice !== undefined && todayKLine.kp < order.signalOpenPrice) {
+      // [新增] 开盘价跌破信号日开盘价则放弃买入（观察状态订单除外，用户明确选择继续观察）
+      if (!isWatching && order.signalOpenPrice !== undefined && todayKLine.kp < order.signalOpenPrice) {
         console.log(`[OptBacktest] [${today}] ${order.secid} 待买入订单移除: 开盘价${todayKLine.kp.toFixed(2)} 跌破信号日开盘价${order.signalOpenPrice.toFixed(2)}，等待${pendingDays}/${this.MAX_PENDING_DAYS}天`);
         skippedOrders.push({ secid: order.secid, type: order.type, reason: '跌破信号日开盘价' });
         continue;
@@ -1238,6 +1239,7 @@ export class OptimizedStrategyBacktest {
     }
 
     this.pendingOrders = remainingOrders;
+    console.log(`[OptBacktest] [${today}] 阶段1结束: 剩余待处理订单 ${this.pendingOrders.length} 笔`, this.pendingOrders.map(o => `${o.secid}:${o.type}${o.watching ? '(watch)' : ''}`));
     // [新增] stage1 结束后保存快照，便于暂停后安全恢复
     await this.saveSnapshot('after-stage1', this.currentDayIndex, today);
     return false;
