@@ -1105,16 +1105,18 @@ export class OptimizedStrategyBacktest {
         continue;
       }
 
+      // [新增] 观察状态买入订单：不检查过期天数，持续保留直到用户取消观察
+      const isWatching = order.watching === true;
+
       // buy 订单：先检查已等待天数（最大 MAX_PENDING_DAYS 个交易日）
       const pendingDays = await this.getTradeDaysDiffAsync(order.signalDate, today, dataProvider);
-      if (pendingDays > this.MAX_PENDING_DAYS) {
+      if (!isWatching && pendingDays > this.MAX_PENDING_DAYS) {
         console.log(`[OptBacktest] [${today}] ${order.secid} 待买入订单过期: 已等待${pendingDays}个交易日，超过最大${this.MAX_PENDING_DAYS}天`);
         skippedOrders.push({ secid: order.secid, type: order.type, reason: `待买入过期(${pendingDays}天)` });
         continue;
       }
 
       // [新增] 观察状态买入订单默认保留，但仍检查当天是否可执行（用户可随时改为执行）
-      const isWatching = order.watching === true;
 
       if (!klines || klines.length === 0) {
         console.log(`[OptBacktest] [${today}] 待买入订单保留: ${order.secid} 未获取到K线数据，等待${pendingDays}/${this.MAX_PENDING_DAYS}天`);
@@ -1180,6 +1182,17 @@ export class OptimizedStrategyBacktest {
           order.watching = approvedMap.get(order.secid) === true;
         }
       }
+      // [修复] 用户新选择观察的可执行买入订单，加入 remainingOrders 保留到次日（避免重复）
+      const remainingSecids = new Set(remainingOrders.map(o => o.secid));
+      for (const order of executableOrders) {
+        if (order.type === 'buy' && approvedSecids.has(order.secid) && approvedMap.get(order.secid) === true && !remainingSecids.has(order.secid)) {
+          order.watching = true;
+          remainingOrders.push(order);
+          remainingSecids.add(order.secid);
+          console.log(`[OptBacktest] [${today}] ${order.secid} 新选择观察，加入待买入列表保留`);
+        }
+      }
+      console.log(`[OptBacktest] [${today}] 同步后 remainingOrders:`, remainingOrders.map(o => `${o.secid}:${o.type}${o.watching ? '(watch)' : ''}`));
       // 只执行用户批准、当天可执行且非观察状态的订单
       ordersToExecute = executableOrders.filter(o => approvedSecids.has(o.secid) && approvedMap.get(o.secid) !== true);
       const executedSecids = new Set(ordersToExecute.map(o => o.secid));

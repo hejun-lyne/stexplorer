@@ -1234,6 +1234,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
           return { ...order, watching: decision === 'watch' };
         })
         .filter((order): order is BacktestEngine.StrategyPendingOrder => order !== null);
+      console.log('[UI] 用户确认待执行订单:', approvedOrders.map(o => `${o.secid}:${o.type}${o.watching ? '(watch)' : ''}`));
       setPendingOrderReviewVisible(false);
       pendingOrderResolveRef.current?.(approvedOrders);
       pendingOrderResolveRef.current = null;
@@ -1665,6 +1666,16 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                         ),
                       },
                       { title: '信号日期', dataIndex: 'signalDate', key: 'signalDate', width: 100 },
+                      {
+                        title: '执行方式',
+                        key: 'execType',
+                        width: 100,
+                        render: (_: any, record: any) => {
+                          const order = record as BacktestEngine.StrategyPendingOrder;
+                          if (order.type === 'buy') return '次日开盘';
+                          return order.executePrice !== undefined ? '当日收盘' : '次日开盘';
+                        },
+                      },
                       { title: '原因', dataIndex: 'reason', key: 'reason', minWidth: 200, ellipsis: true },
                       {
                         title: '策略',
@@ -1733,7 +1744,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                                   取消观察
                                 </Button>
                               )}
-                              {!(isSell || isWatching) && (
+                              {!isWatching && (
                                 <Button
                                   size="small"
                                   danger={decision === 'cancel'}
@@ -1750,7 +1761,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     ]}
                     pagination={false}
                     size="small"
-                    scroll={{ x: 1100 }}
+                    scroll={{ x: 1200 }}
                   />
                 </Card>
               </div>
