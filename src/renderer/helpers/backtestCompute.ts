@@ -454,30 +454,48 @@ export function optimizeRSIStrategy(
           }
         }
 
+        
+
         // 过滤：至少交易 3 次才有统计意义
         if (trades.length >= 3) {
-          const returns = trades.map(t => t.returnPct);
+          // 1. 末端缓冲：最后 5 天禁止开新仓（在循环条件中体现）
+          // 2. 剔除最后一笔交易计算核心指标
+          const effectiveTrades = trades.length > 3 ? trades.slice(0, -1) : trades;
+          if (effectiveTrades.length < 3) continue; // 不够统计意义直接丢弃
+
+          // 3. 用 effectiveTrades 算指标
+          const returns = effectiveTrades.map(t => t.returnPct);
           const wins = returns.filter(r => r > 0);
           const losses = returns.filter(r => r <= 0);
-
           const totalReturn = returns.reduce((a, b) => a + b, 0);
           const winRate = (wins.length / returns.length) * 100;
-          const avgReturn = totalReturn / returns.length;
           const maxDrawdown = Math.min(...returns);
+
           const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
           const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 1;
+          const avgReturn = totalReturn / returns.length;
           const profitFactor = avgLoss === 0 ? 999 : avgWin / avgLoss;
 
           // 原代码：
           // const score = totalReturn * (winRate / 100) * Math.min(trades.length, 15) 
           //   / (1 + Math.abs(maxDrawdown) / 10);
 
+          // 4. 收益集中度惩罚（基于原始 trades 检测末端暴利）
+          const lastReturn = trades[trades.length - 1]?.returnPct || 0;
+          const totalAbsReturn = trades.reduce((sum, t) => sum + Math.abs(t.returnPct), 0);
+          const lastTradeRatio = totalAbsReturn > 0 ? Math.abs(lastReturn) / totalAbsReturn : 0;
+          let concentrationPenalty = 1;
+          if (lastTradeRatio > 0.5) concentrationPenalty = 0.3;  // 最后一笔占一半以上，打3折
+          else if (lastTradeRatio > 0.35) concentrationPenalty = 0.6;
+
           // 修改为：
+          // 5. 评分（以 RSI 为例，MACD/MA 同理）
           const score = 
-            // Math.sign(totalReturn) * Math.pow(Math.abs(totalReturn), 0.5)   // 收益开根号
-            Math.pow(winRate / 100, 2)                                      // 胜率平方
-            * Math.min(trades.length, 15) 
-            / Math.pow(1 + Math.abs(maxDrawdown) / 5, 2);                   // 回撤惩罚加重
+            Math.sign(totalReturn) * Math.pow(Math.abs(totalReturn), 0.5)
+            * Math.pow(winRate / 100, 2)
+            * Math.log2(Math.min(effectiveTrades.length, 8) + 1)
+            / Math.pow(1 + Math.abs(maxDrawdown) / 5, 2)
+            * concentrationPenalty;  // 应用惩罚
 
           allResults.push({
             rsiPeriod: period,

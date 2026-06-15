@@ -234,6 +234,7 @@ export interface StrategyPendingOrder {
   signalDate: string;
   signalOpenPrice?: number;      // [新增] 信号日开盘价（买入订单保留条件判断用）
   signalEntityLow?: number;      // [新增] 信号日K线实体最低价
+  executePrice?: number;         // [新增] 指定执行价格（当日收盘卖使用收盘价，次日开盘卖不设置）
   canExecuteToday?: boolean;     // [新增] 当天是否可立即执行（用于 UI 区分保留/执行）
   boardCode?: string;
   strategyType?: 'macd' | 'rsi';
@@ -1081,6 +1082,11 @@ export class OptimizedStrategyBacktest {
 
       // sell 订单：当天可执行才 review & 执行；停牌/无K线直接跳过
       if (order.type === 'sell') {
+        // [修复] 当日收盘卖订单不在 stage1 处理，由 stage2 末尾统一确认执行
+        if (order.executePrice !== undefined) {
+          remainingOrders.push(order);
+          continue;
+        }
         if (!klines || klines.length === 0) {
           console.log(`[OptBacktest] [${today}] 卖出订单执行失败: ${order.secid} 未获取到K线数据`);
           skippedOrders.push({ secid: order.secid, type: order.type, reason: '无K线数据' });
@@ -1150,9 +1156,9 @@ export class OptimizedStrategyBacktest {
       // 只认可 reviewableOrders 范围内的批准结果
       const approvedInReviewable = approvedOrders.filter(ao => reviewableOrders.some(ro => ro.secid === ao.secid));
       const approvedSecids = new Set(approvedInReviewable.map(o => o.secid));
-      // 用户未批准的保留类订单从 remainingOrders 中移除
+      // 用户未批准的保留类买入订单从 remainingOrders 中移除（当日收盘卖订单由 stage2 末尾单独确认，此处保留）
       for (let i = remainingOrders.length - 1; i >= 0; i--) {
-        if (!approvedSecids.has(remainingOrders[i].secid)) {
+        if (remainingOrders[i].type === 'buy' && !approvedSecids.has(remainingOrders[i].secid)) {
           console.log(`[OptBacktest] [${today}] ${remainingOrders[i].secid} 用户取消保留，从待买入列表移除`);
           remainingOrders.splice(i, 1);
         }
@@ -1190,8 +1196,10 @@ export class OptimizedStrategyBacktest {
       } else if (order.type === 'sell') {
         const position = this.positions.get(order.secid);
         if (position) {
-          console.log(`[OptBacktest] [${today}] 执行卖出: ${order.secid} | 开盘价: ${openPrice.toFixed(2)} | 持仓成本: ${position.buyPrice.toFixed(2)} | 原因: ${order.reason}`);
-          this.executeSell(order.secid, today, openPrice, position.quantity, order.reason);
+          const execPrice = order.executePrice ?? openPrice;
+          const priceLabel = order.executePrice !== undefined ? '收盘价' : '开盘价';
+          console.log(`[OptBacktest] [${today}] 执行卖出: ${order.secid} | ${priceLabel}: ${execPrice.toFixed(2)} | 持仓成本: ${position.buyPrice.toFixed(2)} | 原因: ${order.reason}`);
+          this.executeSell(order.secid, today, execPrice, position.quantity, order.reason);
         } else {
           console.log(`[OptBacktest] [${today}] 卖出订单忽略: ${order.secid} 无持仓`);
         }
@@ -1378,19 +1386,15 @@ export class OptimizedStrategyBacktest {
   }
 
   private queueOrExecuteSell(secid: string, date: string, price: number, quantity: number, reason: string) {
-    if (this.SELL_AT_OPEN) {
-      // 次日开盘卖：加入待处理订单队列
-      this.pendingOrders.push({
-        secid,
-        type: 'sell',
-        reason,
-        signalDate: date,
-      });
-      console.log(`[OptBacktest] [${date}] ${secid} 卖出已排队: ${reason}（次日开盘执行）`);
-    } else {
-      // 当日收盘卖：立即执行
-      this.executeSell(secid, date, price, quantity, reason);
-    }
+    // [修复] 卖出订单统一进入待执行队列，经过用户确认后再执行
+    this.pendingOrders.push({
+      secid,
+      type: 'sell',
+      reason,
+      signalDate: date,
+      executePrice: this.SELL_AT_OPEN ? undefined : price,
+    });
+    console.log(`[OptBacktest] [${date}] ${secid} 卖出已排队: ${reason}（${this.SELL_AT_OPEN ? '次日开盘' : '当日收盘'}执行）`);
   }
 
   private async checkWatchList(
@@ -2428,8 +2432,92 @@ export class OptimizedStrategyBacktest {
       console.log(`[OptBacktest] [${today}] 无买入候选触发`);
     }
 
+    // [修复] 阶段2-5：对当日收盘卖出的订单进行用户确认并立即执行
+    if (this.pendingOrders.some(o => o.type === 'sell' && o.executePrice !== undefined)) {
+      if (await this.executeIntradaySellOrders(today, dataProvider)) {
+        return true;
+      }
+    }
+
     // [新增] stage2 结束后保存快照，pendingOrders 已包含次日待执行订单
     await this.saveSnapshot('after-stage2', this.currentDayIndex, today);
+    return false;
+  }
+
+  // [新增] 执行当日收盘卖订单（在 stage2 末尾调用，经过用户确认）
+  private async executeIntradaySellOrders(today: string, dataProvider: StrategyDataProvider): Promise<boolean> {
+    const indices: number[] = [];
+    const intradaySellOrders: StrategyPendingOrder[] = [];
+    this.pendingOrders.forEach((o, idx) => {
+      // [修复] 处理所有带执行价格的收盘卖订单（含崩溃恢复遗留的订单）
+      if (o.type === 'sell' && o.executePrice !== undefined) {
+        indices.push(idx);
+        intradaySellOrders.push(o);
+      }
+    });
+
+    if (intradaySellOrders.length === 0) return false;
+
+    console.log(`[OptBacktest] [${today}] 阶段2-5: 处理当日收盘卖订单 ${intradaySellOrders.length} 笔`);
+
+    const secidsToFetch = intradaySellOrders.map(o => o.secid);
+    const klinesMap = await dataProvider.getKLines(secidsToFetch, today, 5);
+
+    const reviewableOrders: StrategyPendingOrder[] = [];
+    for (const order of intradaySellOrders) {
+      if (this.isCancelled()) return true;
+      await this.waitIfPaused();
+      if (this.isCancelled()) return true;
+
+      const klines = klinesMap[order.secid];
+      const todayKLine = klines?.find(k => k.date === today);
+      if (!klines || klines.length === 0) {
+        console.log(`[OptBacktest] [${today}] 当日收盘卖订单跳过: ${order.secid} 未获取到K线数据`);
+        continue;
+      }
+      if (!todayKLine) {
+        const lastKline = klines[klines.length - 1];
+        console.log(`[OptBacktest] [${today}] 当日收盘卖订单跳过: ${order.secid} 停牌 (最近交易日: ${lastKline?.date || '无'})`);
+        continue;
+      }
+      reviewableOrders.push({ ...order, canExecuteToday: true });
+    }
+
+    let ordersToExecute = reviewableOrders;
+    if (this.pendingOrderReviewCallback && reviewableOrders.length > 0) {
+      // 在确认前保存快照，若暂停/崩溃可从 stage2 重新生成信号并再次确认
+      await this.saveSnapshot('after-stage1', this.currentDayIndex, today);
+      console.log(`[OptBacktest] [${today}] 等待用户确认 ${reviewableOrders.length} 笔当日收盘卖订单`);
+      const approvedOrders = await this.pendingOrderReviewCallback(reviewableOrders, today);
+      // 只认可 reviewableOrders 范围内的批准结果
+      const approvedInReviewable = approvedOrders.filter(ao => reviewableOrders.some(ro => ro.secid === ao.secid));
+      const approvedSecids = new Set(approvedInReviewable.map(o => o.secid));
+      ordersToExecute = reviewableOrders.filter(o => approvedSecids.has(o.secid));
+      console.log(`[OptBacktest] [${today}] 用户确认执行 ${ordersToExecute.length}/${reviewableOrders.length} 笔当日收盘卖订单`);
+      if (this.isCancelled()) return true;
+    }
+
+    for (const order of ordersToExecute) {
+      if (this.isCancelled()) return true;
+      await this.waitIfPaused();
+      if (this.isCancelled()) return true;
+
+      const position = this.positions.get(order.secid);
+      if (!position) {
+        console.log(`[OptBacktest] [${today}] 当日收盘卖订单忽略: ${order.secid} 无持仓`);
+        continue;
+      }
+      const execPrice = order.executePrice!;
+      console.log(`[OptBacktest] [${today}] 执行当日收盘卖: ${order.secid} | 收盘价: ${execPrice.toFixed(2)} | 持仓成本: ${position.buyPrice.toFixed(2)} | 原因: ${order.reason}`);
+      this.executeSell(order.secid, today, execPrice, position.quantity, order.reason);
+      await yieldToMain(1);
+    }
+
+    // 从 pendingOrders 中移除所有当日收盘卖订单（无论是否执行/确认）
+    for (let i = indices.length - 1; i >= 0; i--) {
+      this.pendingOrders.splice(indices[i], 1);
+    }
+
     return false;
   }
 
@@ -3222,6 +3310,8 @@ export class OptimizedStrategyBacktest {
             ? this.stage1Reviewed
               ? 'after-stage1'
               : 'pending-review'
+            : this.currentStage === 'stage2'
+            ? 'after-stage1'
             : this.currentStage === 'stage3'
             ? 'after-stage2'
             : 'day-start';

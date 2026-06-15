@@ -27,6 +27,7 @@ export interface BKStockBriefProps {
   openStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   outRange: { start: number; end: number };
   outArea: { start: string; end: string } | null | undefined;
+  toDate?: string; // [新增] 限制K线显示截止日期（回测场景使用）
 }
 const reduceColor = '#388e3c';
 const increaseColor = '#d32f2f';
@@ -673,8 +674,23 @@ function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[
   return { ...opts };
 }
 
+function sliceKlinesToDate(ks: Stock.KLineItem[], toDate: string): Stock.KLineItem[] {
+  if (!toDate || !ks.length) return ks;
+  let stopIndex = -1;
+  for (let i = ks.length - 1; i >= 0; i--) {
+    if (ks[i].date <= toDate) {
+      stopIndex = i;
+      break;
+    }
+  }
+  if (stopIndex >= 0) {
+    return ks.slice(0, stopIndex + 1);
+  }
+  return ks;
+}
+
 const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
-  ({ ktype, mtype, secid, markdate, active, moveTop, remove, openStock, outRange, outArea }) => {
+  ({ ktype, mtype, secid, markdate, active, moveTop, remove, openStock, outRange, outArea, toDate }) => {
     const config = useSelector((state: StoreState) => state.stock.stockConfigsMapping[secid]);
     const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
     const { darkMode } = useHomeContext();
@@ -762,16 +778,11 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
         }
         if (ontrain && trainDate.length > 0) {
           // 截断数据
-          let stopIndex = -1;
-          for (let i = ks.length - 1; i >= 0; i--) {
-            if (ks[i].date == trainDate) {
-              stopIndex = i;
-              break;
-            }
-          }
-          if (stopIndex > 0) {
-            ks = ks.slice(0, stopIndex + 1);
-          }
+          ks = sliceKlinesToDate(ks, trainDate);
+        }
+        if (toDate && toDate.length > 0) {
+          // [新增] 按回测日期截断，避免显示未来K线
+          ks = sliceKlinesToDate(ks, toDate);
         }
         // 准备数据
         const sps = ks.map((_) => _.sp);

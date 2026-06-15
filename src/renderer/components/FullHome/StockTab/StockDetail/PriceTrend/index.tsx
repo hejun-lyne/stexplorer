@@ -554,6 +554,17 @@ function filterKlinesByToDate(klines: Stock.KLineItem[], toDate?: string) {
   });
   return klines.slice(0, idx + 1);
 }
+function calcDisplayToDate(trainMode: boolean, toDate: string | undefined, backtestDate: string | undefined, dayKlines: Stock.KLineItem[]) {
+  if (trainMode) return toDate;
+  if (backtestDate && dayKlines.length > 0) {
+    for (let i = dayKlines.length - 1; i >= 0; i--) {
+      if (dayKlines[i].date < backtestDate) {
+        return dayKlines[i].date;
+      }
+    }
+  }
+  return undefined;
+}
 function getKSeries(data: any[], markPoints: any[], markLines: any[]) {
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
   return {
@@ -1462,7 +1473,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const backtestMarks = useSelector((state: StoreState) => state.stock.backtestMarks[secid]);
     const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
     const isStock = Helpers.Stock.GetStockType(secid) == StockMarketType.AB;
-    const [typeIndex, setTypeIndex] = useState(0);
+    const [typeIndex, setTypeIndex] = useState(backtestDate ? DefaultKTypes.indexOf(KLineType.Day) : 0);
     const { darkMode } = useHomeContext();
     const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
     const increaseColor = variableColors['--increase-color'];
@@ -1629,7 +1640,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     });
     useEffect(() => {
       if (!trendData.trends.length) {
-        if (!requestTrends) {
+        if (!backtestDate && !requestTrends) {
           setRequestTrends(true);
           runGetTrends(kLineApiSourceSetting, secid);
         }
@@ -1637,7 +1648,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           runGetBankuais(secid);
         // }
       }
-      if (active && Utils.JudgeWorkDayTime(new Date().getTime())) {
+      if (!backtestDate && active && Utils.JudgeWorkDayTime(new Date().getTime())) {
         const es = Helpers.Stock.SingleStockTrendPush(secid, (data) => {
           if (!data.length) {
             return;
@@ -1682,17 +1693,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     });
     // [新增] 根据回测日期计算应该展示到哪一个交易日（前一个交易日）
     const dayKlines = klineData.klines[DefaultKTypes.indexOf(KLineType.Day)];
-    const displayToDate = useMemo(() => {
-      if (trainMode) return toDate;
-      if (backtestDate && dayKlines.length > 0) {
-        for (let i = dayKlines.length - 1; i >= 0; i--) {
-          if (dayKlines[i].date < backtestDate) {
-            return dayKlines[i].date;
-          }
-        }
-      }
-      return undefined;
-    }, [trainMode, toDate, backtestDate, dayKlines]);
+    const displayToDate = useMemo(() => calcDisplayToDate(trainMode, toDate, backtestDate, dayKlines), [trainMode, toDate, backtestDate, dayKlines]);
     const [linePoints, setLinePoints] = useState([] as { x: any; y: any }[]);
     const { run: runCalculateTech } = useRequest((ks: Stock.KLineItem[], kIndex:number, tt:TechIndicatorType) => makeWorkerExec('calculateIndicators', [ks, tt, kIndex,]), {
       throwOnError: true,
@@ -1803,14 +1804,16 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
 
     const { run: updateKLineOption } = useThrottleFn(
       (kIndex: number, data: any) => {
+        const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
+        const _displayToDate = calcDisplayToDate(trainMode, toDate, backtestDate, data.klines[dayIndex]);
         let bkks = [];
         if (currentBK && data.bkklines[currentBK] && data.bkklines[currentBK][kIndex]) {
           bkks = data.bkklines[currentBK][kIndex];
         }
         if (chartOptions[kIndex]) {
-          updateKChart(chartOptions[kIndex][0], data.klines[kIndex], displayToDate, bkks);
+          updateKChart(chartOptions[kIndex][0], data.klines[kIndex], _displayToDate, bkks);
           updateCChart(chartOptions[kIndex][1], data.chans[kIndex], data.clines[kIndex]);
-          runCalculateTech(filterKlinesByToDate(data.klines[kIndex], displayToDate), kIndex, techType);
+          runCalculateTech(filterKlinesByToDate(data.klines[kIndex], _displayToDate), kIndex, techType);
           // 🔧 关键修复：K线数据变了必须触发 React 重渲染，
           // 否则 useRenderEcharts 不会执行，markPoint 不会被重新附加
           setChartOptions({ ...chartOptions });
@@ -1827,7 +1830,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
               linePoints,
               [],
               false,
-              displayToDate,
+              _displayToDate,
               bkks
             ),
             setupClineChart(
@@ -1902,6 +1905,26 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         }
       }
     }, [trainMode]);
+
+    useEffect(() => {
+      // [回测] 需要日线数据来计算 displayToDate（回测日期的前一个交易日）
+      if (backtestDate) {
+        const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
+        if (!requestKLines[dayIndex] && !klineData.klines[dayIndex].length) {
+          const newRequestKLines = [...requestKLines];
+          newRequestKLines[dayIndex] = true;
+          setRequestKLines(newRequestKLines);
+          runGetKline(kLineApiSourceSetting, secid, KLineType.Day, klineData.count[dayIndex]);
+        }
+      }
+    }, [backtestDate]);
+
+    useEffect(() => {
+      // [回测] 从非回测切换到回测时，自动切到日K线
+      if (backtestDate && typeIndex === 0) {
+        setTypeIndex(DefaultKTypes.indexOf(KLineType.Day));
+      }
+    }, [backtestDate]);
 
     // 定时更新
     // useInterval(
@@ -2506,8 +2529,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     );
 
     useEffect(() => {
-      console.log(displayToDate);
-      for (let i = 1; i < DefaultKTypes.length; i++) {
+      for (let i = 0; i < DefaultKTypes.length; i++) {
         if (chartOptions[i]) {
           updateKChart(chartOptions[i][0], klineData.klines[i], displayToDate);
           runCalculateTech(filterKlinesByToDate(klineData.klines[i], displayToDate), i, chartOptions[i][0].techType);
