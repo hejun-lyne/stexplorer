@@ -370,10 +370,10 @@ export function optimizeMACDStrategy(
             }
           }
         }
-        }
       }
     }
   }
+}
 
   allResults.sort((a, b) => b.score - a.score);
   return allResults;
