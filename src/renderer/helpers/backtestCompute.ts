@@ -199,28 +199,40 @@ export function backtestMABounce(
 }
 
 // ===== MACD 策略参数优化回测 =====
+export interface MACDStrategyParams {
+  fastPeriods?: number[];
+  slowPeriods?: number[];
+  signalPeriods?: number[];
+  aboveZeroOptions?: boolean[];
+  belowZeroOptions?: boolean[];
+  priorNegOptions?: boolean[];
+}
+
 export function optimizeMACDStrategy(
   klines: Stock.KLineItem[],
   // 止损参数
   fixedStopLossPct: number = 0.05,
-  trailingStopLossPct: number = 0.06
+  trailingStopLossPct: number = 0.06,
+  macdParams?: MACDStrategyParams
 ): MACDStrategyResult[] {
   const closes = klines.map(k => k.sp);
   const allResults: MACDStrategyResult[] = [];
 
   // 参数网格
-  const fastPeriods = [8, 12];        // 2 个：灵敏 + 标准
-  const slowPeriods = [21, 26];       // 2 个：短趋势 + 标准趋势
-  const signalPeriods = [9];            // 1 个：固定
-  const aboveZeroOptions =  [true, false];      // 是否要求零轴上方金叉
-  const priorNegOptions = [true, false];      // 是否要求金叉前 MACD 曾为负
+  const fastPeriods = macdParams?.fastPeriods ?? [8, 12];        // 2 个：灵敏 + 标准
+  const slowPeriods = macdParams?.slowPeriods ?? [21, 26];       // 2 个：短趋势 + 标准趋势
+  const signalPeriods = macdParams?.signalPeriods ?? [9];            // 1 个：固定
+  const aboveZeroOptions = macdParams?.aboveZeroOptions ?? [true, false];      // 是否要求零轴上方金叉
+  const belowZeroOptions = macdParams?.belowZeroOptions ?? [false];      // 是否要求零轴下方金叉
+  const priorNegOptions = macdParams?.priorNegOptions ?? [true, false];      // 是否要求金叉前 MACD 曾为负
 
   for (const fast of fastPeriods) {
     for (const slow of slowPeriods) {
       if (fast >= slow) continue;
       for (const signal of signalPeriods) {
         for (const requireAboveZero of aboveZeroOptions) {
-          for (const requirePriorNegative of priorNegOptions) {
+          for (const requireBelowZero of belowZeroOptions) {
+            for (const requirePriorNegative of priorNegOptions) {
             const macd = calculateMACD(closes, slow, fast, signal);
             const dif = macd.MACD;
             const dea = macd.signal;
@@ -240,6 +252,7 @@ export function optimizeMACDStrategy(
 
                 // 零轴过滤
                 if (requireAboveZero && (dif[i] <= 0 || dea[i] <= 0)) continue;
+                if (requireBelowZero && (dif[i] >= 0 || dea[i] >= 0)) continue;
 
                 // 金叉前必须有负 MACD（确保从空头区域恢复）
                 let hadNegative = false;
@@ -340,6 +353,7 @@ export function optimizeMACDStrategy(
               allResults.push({
                 fast, slow, signal,
                 requireAboveZero,
+                requireBelowZero,
                 requirePriorNegative,
                 trades,
                 totalReturn,
@@ -683,6 +697,7 @@ export function batchBacktestAndScreen(
     strategyMode?: 'macd' | 'rsi' | 'both';
     buyThresholds?: number[];
     sellThresholds?: number[];
+    macdParams?: MACDStrategyParams;
   },
   screenParams: { strongStockDay:string, minStrategyScore: number; strongLookback: number }
 ): BatchBacktestAndScreenResult[] {
@@ -693,7 +708,7 @@ export function batchBacktestAndScreen(
 
     const strategyMode = backtestParams.strategyMode || 'both';
     const macdResults = strategyMode !== 'rsi'
-      ? optimizeMACDStrategy(klines, backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct)
+      ? optimizeMACDStrategy(klines, backtestParams.fixedStopLossPct, backtestParams.trailingStopLossPct, backtestParams.macdParams)
       : [];
     const rsiResults = strategyMode !== 'macd'
       ? optimizeRSIStrategy(

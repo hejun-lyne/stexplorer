@@ -12,6 +12,7 @@ import {
   checkRSIBuySignal,
   hasLongUpperShadow,
   type BatchBacktestAndScreenResult,
+  type MACDStrategyParams,
 } from './backtestCompute';
 import stock from '@/reducers/stock';
 
@@ -42,6 +43,7 @@ interface StockScreenCacheEntry {
     trailingStopLossPct: number;
     minStrategyScore: number;
     strategyMode: 'macd' | 'rsi' | 'both';
+    macdParams?: MACDStrategyParams;
   };
   result: BatchBacktestAndScreenResult;
 }
@@ -97,6 +99,7 @@ export interface MACDStrategyResult {
   slow: number;
   signal: number;
   requireAboveZero: boolean;
+  requireBelowZero: boolean;
   requirePriorNegative: boolean;
   trades?: MACDTrade[]; // [优化] 改为可选
   totalReturn: number;
@@ -238,6 +241,8 @@ export interface StrategyPendingOrder {
   canExecuteToday?: boolean;     // [新增] 当天是否可立即执行（用于 UI 区分保留/执行）
   watching?: boolean;            // [新增] 买入订单是否处于观察状态（暂不执行，次日继续确认）
   boardCode?: string;
+  boardName?: string;            // [新增] 所属板块名称（用于 UI 展示）
+  boardUpDown10Days?: string;    // [新增] 板块最近10个交易日涨跌天数比，如 "7/10"
   strategyType?: 'macd' | 'rsi';
   strategyParams?: MACDStrategyResult | RSIBacktestResult;
   score?: number;
@@ -246,6 +251,8 @@ export interface StrategyPendingOrder {
   strongType?: 'limit_up' | 'new_high_60';
   pullBackPct?: number;
   zsz?: number; // 总市值（亿元）
+  macdIndicator?: { dif: number; dea: number; hist: number }; // [新增] 当前 MACD 指标值
+  rsiIndicator?: number; // [新增] 当前 RSI 指标值
 }
 
 export interface StrategyTradeRecord {
@@ -425,6 +432,7 @@ export interface BacktestSnapshotParams {
   sellThresholds: number[];
   filterStrongType: 'limit_up' | 'new_high_60' | 'both';
   steepness: number;
+  macdParams?: MACDStrategyParams;
 }
 
 export interface BacktestSnapshot {
@@ -627,6 +635,7 @@ export class OptimizedStrategyBacktest {
   private FILTER_STRONG_TYPE: 'limit_up' | 'new_high_60' | 'both' = 'both'; // 强势股票筛选类型
   /** Sigmoid陡度系数（控制变化速度） */
   private STEEPNESS = 20;  // 默认10，推荐20，激进30
+  private MACD_PARAMS?: MACDStrategyParams; // MACD 策略参数网格
 
   constructor(
     tradeDays: string[],
@@ -660,6 +669,7 @@ export class OptimizedStrategyBacktest {
       sellThresholds?: number[];
       filterStrongType?: 'limit_up' | 'new_high_60' | 'both';
       steepness?: number;
+      macdParams?: MACDStrategyParams;
     }
   ) {
     this.tradeDays = tradeDays;
@@ -699,6 +709,7 @@ export class OptimizedStrategyBacktest {
     if (options?.buyThresholds !== undefined) this.RSI_BUY_THRESHOLDS = options.buyThresholds;
     if (options?.sellThresholds !== undefined) this.RSI_SELL_THRESHOLDS = options.sellThresholds;
     if (options?.filterStrongType !== undefined) this.FILTER_STRONG_TYPE = options.filterStrongType;
+    if (options?.macdParams !== undefined) this.MACD_PARAMS = options.macdParams;
     console.log(`[OptBacktest] 初始化完成 | 初始资金: ${initialCapital.toLocaleString()} | 交易日数: ${tradeDays.length} | Worker: ${workerExecutor ? '启用' : '禁用'} | 并发: ${this.WORKER_CONCURRENCY}`);
     console.log(`[OptBacktest] 动态参数:`, {
       STOP_LOSS_INIT_PCT: this.STOP_LOSS_INIT_PCT,
@@ -727,6 +738,7 @@ export class OptimizedStrategyBacktest {
       RSI_BUY_THRESHOLDS: this.RSI_BUY_THRESHOLDS,
       RSI_SELL_THRESHOLDS: this.RSI_SELL_THRESHOLDS,
       FILTER_STRONG_TYPE: this.FILTER_STRONG_TYPE,
+      MACD_PARAMS: this.MACD_PARAMS,
     });
   }
 
@@ -1269,6 +1281,34 @@ export class OptimizedStrategyBacktest {
     }
   }
 
+  /** [新增] 根据策略类型和参数计算当前 MACD/RSI 指标值 */
+  private computeIndicatorValue(
+    klines: Stock.KLineItem[],
+    strategyType?: 'macd' | 'rsi',
+    strategyParams?: MACDStrategyResult | RSIBacktestResult,
+    index?: number
+  ): { macd?: { dif: number; dea: number; hist: number }; rsi?: number } {
+    if (!strategyType || !strategyParams || klines.length === 0) return {};
+    const idx = index ?? klines.length - 1;
+    if (idx < 0 || idx >= klines.length) return {};
+    const closes = klines.map(k => k.sp);
+    if (strategyType === 'macd') {
+      const p = strategyParams as MACDStrategyResult;
+      const macd = calculateMACD(closes, p.slow, p.fast, p.signal);
+      return {
+        macd: {
+          dif: macd.MACD[idx],
+          dea: macd.signal[idx],
+          hist: macd.histogram[idx],
+        },
+      };
+    } else {
+      const p = strategyParams as RSIBacktestResult;
+      const rsi = calculateRSI(closes, p.rsiPeriod);
+      return { rsi: rsi[idx] };
+    }
+  }
+
     /** [修复] 安全的交易日差计算，支持 fallback 到 filterTradeDays */
   private async getTradeDaysDiffAsync(
     date1: string,
@@ -1424,7 +1464,14 @@ export class OptimizedStrategyBacktest {
     console.log(`[OptBacktest] [${date}] ${secid} 已从持仓移除`);
   }
 
-  private queueOrExecuteSell(secid: string, date: string, price: number, quantity: number, reason: string) {
+  private queueOrExecuteSell(
+    secid: string,
+    date: string,
+    price: number,
+    quantity: number,
+    reason: string,
+    indicatorValue?: { macd?: { dif: number; dea: number; hist: number }; rsi?: number }
+  ) {
     // [修复] 卖出订单统一进入待执行队列，经过用户确认后再执行
     this.pendingOrders.push({
       secid,
@@ -1432,6 +1479,8 @@ export class OptimizedStrategyBacktest {
       reason,
       signalDate: date,
       executePrice: this.SELL_AT_OPEN ? undefined : price,
+      macdIndicator: indicatorValue?.macd,
+      rsiIndicator: indicatorValue?.rsi,
     });
     console.log(`[OptBacktest] [${date}] ${secid} 卖出已排队: ${reason}（${this.SELL_AT_OPEN ? '次日开盘' : '当日收盘'}执行）`);
   }
@@ -1452,6 +1501,8 @@ export class OptimizedStrategyBacktest {
     zsz?: number;
     signalOpenPrice: number;
     signalEntityLow: number;
+    macdIndicator?: { dif: number; dea: number; hist: number };
+    rsiIndicator?: number;
   }>> {
     const candidates: Array<{
       secid: string;
@@ -1466,6 +1517,8 @@ export class OptimizedStrategyBacktest {
       zsz?: number;
       signalOpenPrice: number;
       signalEntityLow: number;
+      macdIndicator?: { dif: number; dea: number; hist: number };
+      rsiIndicator?: number;
     }> = [];
 
     // 预处理：移除已持仓、观察期满的股票
@@ -1614,6 +1667,8 @@ export class OptimizedStrategyBacktest {
 
       const currentPrice = klines[lastIndex].sp;
       const upRatioMA5 = this.dailyRiskPreference.get(today)?.upRatioMA5 ?? 0.5;
+      // [修复] 待执行订单列表统一显示当前（signalDate=today）的指标值，便于与 PriceTrend K线对照
+      const indicatorValue = this.computeIndicatorValue(klines, item.strategyType, item.strategyParams);
       candidates.push({
         secid,
         score: item.score,
@@ -1627,6 +1682,8 @@ export class OptimizedStrategyBacktest {
         zsz: item.zsz,
         signalOpenPrice: mDayKline.kp,
         signalEntityLow: Math.min(mDayKline.kp, mDayKline.sp),
+        macdIndicator: indicatorValue.macd,
+        rsiIndicator: indicatorValue.rsi,
       });
 
       const paramsStr = item.strategyType === 'macd'
@@ -1655,6 +1712,42 @@ export class OptimizedStrategyBacktest {
 
     // [修复] 提前计算当天市场风险偏好，确保 dailyRiskPreference 有值，供后续止损/回撤使用
     await this.getRiskPreference(today, dataProvider);
+
+    // [新增] 提前计算板块最近10个交易日涨跌天数比，供观察列表和候选股票共用
+    const todayIndex = this.tradeDays.indexOf(today);
+    const recent10Days = this.tradeDays.slice(Math.max(0, todayIndex - 9), todayIndex + 1);
+    const recentBoardsByDate: Record<string, Array<{ code: string; name: string; zf: number }>> = {};
+    if (recent10Days.length > 0) {
+      if ((dataProvider as any).getAllBoardsBatch) {
+        const batchResult = await (dataProvider as any).getAllBoardsBatch(recent10Days);
+        Object.assign(recentBoardsByDate, batchResult);
+      } else {
+        const dateResults = await this.runWithConcurrency(
+          recent10Days,
+          async (date) => ({ date, boards: await this.getAllBoardsCached(dataProvider, '', date) }),
+          3
+        );
+        for (const r of dateResults) {
+          if (r.status === 'fulfilled') {
+            recentBoardsByDate[r.value.date] = r.value.boards || [];
+          }
+        }
+      }
+    }
+    const boardUpDownRatioMap = new Map<string, { upDays: number; totalDays: number; ratio: number }>();
+    for (const date of recent10Days) {
+      const boards = recentBoardsByDate[date] || [];
+      for (const board of boards) {
+        const current = boardUpDownRatioMap.get(board.name) || { upDays: 0, totalDays: 0, ratio: 0 };
+        current.totalDays++;
+        if (board.zf > 0) current.upDays++;
+        boardUpDownRatioMap.set(board.name, current);
+      }
+    }
+    for (const stat of boardUpDownRatioMap.values()) {
+      stat.ratio = stat.totalDays > 0 ? stat.upDays / stat.totalDays : 0;
+    }
+    console.log(`[OptBacktest] [${today}] 板块最近10天涨跌天数比已计算: ${recent10Days.length}个交易日, ${boardUpDownRatioMap.size}个板块`);
 
     // ===== 阶段 2-0: 检查观察列表 =====
     const tWatch0 = performance.now();
@@ -1710,6 +1803,7 @@ export class OptimizedStrategyBacktest {
       const kLast = klines[klines.length - 1];
       // [调试] 打印持仓卖出使用的K线收盘价，用于核对价格是否匹配
       console.log(`[Debug][ sellCheck][${today}] ${secid} K线确认: date=${kLast.date} kp=${kLast.kp.toFixed(2)} sp=${kLast.sp.toFixed(2)} zg=${kLast.zg.toFixed(2)} zd=${kLast.zd.toFixed(2)} → 使用收盘价=${currentPrice.toFixed(2)}`);
+      const indicatorValue = this.computeIndicatorValue(klines, position.strategyType, position.strategyParams);
 
       // 0. 时间止损：持仓 ≥3 天且亏损，强制离场
       const daysHeld = this.getTradeDaysDiff(position.buyDate, today);
@@ -1747,7 +1841,7 @@ export class OptimizedStrategyBacktest {
       const inCostZone = Math.abs(currentPrice - position.buyPrice) <= buyEntityRange;
       if (daysHeld >= this.RANGE_BOUND_DAYS && inCostZone) {
         console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止损(横盘): 持仓${daysHeld}天, 仍在成本区±3%(${currentPrice.toFixed(2)} vs ${position.buyPrice.toFixed(2)})`);
-        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `时间止损-横盘(${daysHeld}天)`);
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `时间止损-横盘(${daysHeld}天)`, indicatorValue);
         continue;
       }
 
@@ -1761,7 +1855,7 @@ export class OptimizedStrategyBacktest {
       // 2. 固定止损（硬性风控，最先检查）
       if (currentPrice < position.buyPrice * dailyStopLossPct) {
         console.log(`[OptBacktest] [${today}] ${secid} 🔴 固定止损: 当前${currentPrice.toFixed(2)} < 买入价${position.buyPrice.toFixed(2)} (跌幅${((1 - dailyStopLossPct) * 100).toFixed(1)}%)`);
-        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `固定止损(跌幅${((1 - dailyStopLossPct) * 100).toFixed(1)}%)`);
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `固定止损(跌幅${((1 - dailyStopLossPct) * 100).toFixed(1)}%)`, indicatorValue);
         continue;
       }
 
@@ -1773,7 +1867,7 @@ export class OptimizedStrategyBacktest {
       console.log(`[OptBacktest] [${today}] ${secid} 移动止损更新: ${position.stopLossPrice.toFixed(2)} (回落${(dailyTrailingStopPct * 100).toFixed(1)}%)`);
       if (currentPrice < position.stopLossPrice) {
         console.log(`[OptBacktest] [${today}] ${secid} 🟡 移动止损: 当前${currentPrice.toFixed(2)} < 止损价${position.stopLossPrice.toFixed(2)}`);
-        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `移动止损(回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`);
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `移动止损(回落${((1 - dailyTrailingStopPct) * 100).toFixed(1)}%)`, indicatorValue);
         continue;
       }
       
@@ -1783,7 +1877,7 @@ export class OptimizedStrategyBacktest {
         const returnPct = (currentPrice - position.buyPrice) / position.buyPrice;
         if (returnPct < this.TIME_EXIT_MIN_RETURN) {
           console.log(`[OptBacktest] [${today}] ${secid} ⏱️ 时间止盈: 持仓${daysHeld}天, 收益率${(returnPct*100).toFixed(2)}% < ${(this.TIME_EXIT_MIN_RETURN*100).toFixed(0)}%，资金效率止盈`);
-          this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `时间止盈(持有${daysHeld}天收益<${(this.TIME_EXIT_MIN_RETURN*100).toFixed(0)}%)`);
+          this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, `时间止盈(持有${daysHeld}天收益<${(this.TIME_EXIT_MIN_RETURN*100).toFixed(0)}%)`, indicatorValue);
           continue;
         }
       }
@@ -1794,7 +1888,7 @@ export class OptimizedStrategyBacktest {
         // 4. 固定止盈（达到目标收益率）
         if (currentPrice >= position.takeProfitPrice) {
           console.log(`[OptBacktest] [${today}] ${secid} 🟢 固定止盈: 当前${currentPrice.toFixed(2)} >= 目标${position.takeProfitPrice.toFixed(2)}`);
-          this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '固定止盈');
+          this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, '固定止盈', indicatorValue);
           continue;
         }
         console.log(`[OptBacktest] [${today}] ${secid} 盈利${(profitPct*100).toFixed(1)}% > ${(this.PROFIT_IGNORE_SIGNAL_PCT*100).toFixed(0)}%，忽略策略信号`);
@@ -1814,7 +1908,7 @@ export class OptimizedStrategyBacktest {
         sellReason = 'RSI超买';
       }
       if (hasSellSignal) {
-        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, sellReason);
+        this.queueOrExecuteSell(secid, today, currentPrice, position.quantity, sellReason, indicatorValue);
         continue;
       }
 
@@ -2006,6 +2100,7 @@ export class OptimizedStrategyBacktest {
           strategyMode: this.strategyMode,
           buyThresholds: this.RSI_BUY_THRESHOLDS,
           sellThresholds: this.RSI_SELL_THRESHOLDS,
+          macdParams: this.MACD_PARAMS,
         };
         const screenParams = {
           strongStockDay: strongStockDay,
@@ -2084,6 +2179,7 @@ export class OptimizedStrategyBacktest {
                     trailingStopLossPct: backtestParams.trailingStopLossPct,
                     minStrategyScore: screenParams.minStrategyScore,
                     strategyMode: backtestParams.strategyMode,
+                    macdParams: backtestParams.macdParams,
                   },
                   result,
                 };
@@ -2199,8 +2295,11 @@ export class OptimizedStrategyBacktest {
       boardPass: boolean;
       boardRankPass: boolean;
       boardCode: string | null;
+      boardName: string | null;      // [新增] 实际匹配到的板块名称
       boardRank: number;
       boardZf: number;
+      boardUpDownRatio: number;      // [新增] 板块最近10天涨跌天数比
+      boardUpDown10Days: string;     // [新增] 板块最近10天涨跌天数比字符串，如 "7/10"
       stockRank: number;
       stockZf: number;
       nonLimitCount: number;
@@ -2212,11 +2311,14 @@ export class OptimizedStrategyBacktest {
 
       if (skipBoardRankCheck) {
         // 板块排名检查已跳过，所有板块都通过
+        const upDownStat = boardUpDownRatioMap.get(stock.bk);
+        const boardUpDown10Days = upDownStat ? `${upDownStat.upDays}/${upDownStat.totalDays}` : '-';
+        const boardUpDownRatio = upDownStat?.ratio ?? 0;
         if (skipStockRankCheck || stock.strongType === 'limit_up') {
-          preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode: null, boardRank: -1, boardZf: 0, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
+          preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode: null, boardName: stock.bk, boardRank: -1, boardZf: 0, boardUpDownRatio, boardUpDown10Days, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
         } else {
           // 仍需查 boardStocks（通过板块名称查找）
-          preComputed.set(stock.secid, { boardPass: true, boardRankPass: false, boardCode: null, boardRank: -1, stockRank: -1, boardZf: 0, stockZf: 0, nonLimitCount: 0 });
+          preComputed.set(stock.secid, { boardPass: true, boardRankPass: false, boardCode: null, boardName: stock.bk, boardRank: -1, stockRank: -1, boardZf: 0, boardUpDownRatio, boardUpDown10Days, stockZf: 0, nonLimitCount: 0 });
           boardStockRequests.push({ date, boardCode: null, boardName: stock.bk, secid: stock.secid, boardRank: -1, boardZf: 0 });
         }
         continue;
@@ -2226,6 +2328,7 @@ export class OptimizedStrategyBacktest {
       
       let boardPass = false;
       let boardCode: string | null = null;
+      let boardName: string | null = null;
       let boardRank = -1;
       let boardZf = 0;
       if (boards.length > 0) {
@@ -2239,20 +2342,25 @@ export class OptimizedStrategyBacktest {
 
           boardPass = absolutePass && (boardRank + 1) <= boards.length * this.BOARD_RANK_PCT;
           boardCode = boards[boardRank].code;
+          boardName = sortedBoards[boardRank].name;
         }
       }
 
+      const boardUpDownStat = boardName ? boardUpDownRatioMap.get(boardName) : undefined;
+      const boardUpDownRatio = boardUpDownStat?.ratio ?? 0;
+      const boardUpDown10Days = boardUpDownStat ? `${boardUpDownStat.upDays}/${boardUpDownStat.totalDays}` : '-';
+
       if (!boardPass) {
-        preComputed.set(stock.secid, { boardPass: false, boardRankPass: false, boardCode, boardRank, boardZf, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
+        preComputed.set(stock.secid, { boardPass: false, boardRankPass: false, boardCode, boardName, boardRank, boardZf, boardUpDownRatio, boardUpDown10Days, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
         continue;
       }
 
       if (stock.strongType === 'limit_up' || skipStockRankCheck) {
-        preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode, boardRank, boardZf, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
+        preComputed.set(stock.secid, { boardPass: true, boardRankPass: true, boardCode, boardName, boardRank, boardZf, boardUpDownRatio, boardUpDown10Days, stockRank: -1, stockZf: 0, nonLimitCount: 0 });
       } else {
         // 需要查 boardStocks，收集请求
         if (boardCode) {
-          boardStockRequests.push({ date, boardCode, boardName: stock.bk, secid: stock.secid, boardRank, boardZf, });
+          boardStockRequests.push({ date, boardCode, boardName: boardName || stock.bk, secid: stock.secid, boardRank, boardZf, });
         }
       }
     }
@@ -2375,6 +2483,7 @@ export class OptimizedStrategyBacktest {
         const pullBackStr = item.pullBackPct !== undefined ? `, 回调=${(item.pullBackPct * 100).toFixed(1)}%` : '';
         const upRatioMA5 = this.dailyRiskPreference.get(today)?.upRatioMA5 ?? 0.5;
         const signalKline = klines[klines.length - 1];
+        const indicatorValue = this.computeIndicatorValue(klines, screenResult.bestType!, screenResult.bestResult!);
         buyCandidates.push({
           secid: stock.secid,
           score: screenResult.score!,
@@ -2388,6 +2497,8 @@ export class OptimizedStrategyBacktest {
           zsz: stock.sz,
           signalOpenPrice: signalKline.kp,
           signalEntityLow: Math.min(signalKline.kp, signalKline.sp),
+          macdIndicator: indicatorValue.macd,
+          rsiIndicator: indicatorValue.rsi,
         });
         console.log(`[OptBacktest] [${today}] ${stock.secid} ✅ 通过筛选 | ${screenResult.reason}${pullBackStr}${computed.boardRank >= 0 ? ` | 板块排名=${computed.boardRank + 1}` : ''}${computed.stockRank >= 0 ? ` | 个股排名=${computed.stockRank + 1}` : ''}`);
       }
@@ -2447,6 +2558,11 @@ export class OptimizedStrategyBacktest {
         const computed = preComputed.get(candidate.secid);
         // [调试] 打印即将传入pendingOrders的排名信息
         console.log(`[Debug][ pendingOrder][${today}] ${candidate.secid} score=${candidate.score.toFixed(1)} boardRank=${computed?.boardRank !== undefined && computed.boardRank >= 0 ? computed.boardRank + 1 : '-'} stockRank=${computed?.stockRank !== undefined && computed.stockRank >= 0 ? computed.stockRank + 1 : '-'}`);
+        const boardName = computed?.boardName ?? candidate.boardCode;
+        const boardUpDownStat = boardName ? boardUpDownRatioMap.get(boardName) : undefined;
+        const boardUpDown10Days = boardUpDownStat
+          ? `${boardUpDownStat.upDays}/${boardUpDownStat.totalDays}`
+          : (computed?.boardUpDown10Days ?? '-');
         this.pendingOrders.push({
           secid: candidate.secid,
           type: 'buy',
@@ -2455,6 +2571,8 @@ export class OptimizedStrategyBacktest {
           signalOpenPrice: candidate.signalOpenPrice,
           signalEntityLow: candidate.signalEntityLow,
           boardCode: candidate.boardCode,
+          boardName,
+          boardUpDown10Days,
           strategyType: candidate.strategyType,
           strategyParams: candidate.strategyParams,
           score: candidate.score,
@@ -2463,6 +2581,8 @@ export class OptimizedStrategyBacktest {
           strongType: candidate.strongType,
           pullBackPct: candidate.pullBackPct,
           zsz: candidate.zsz,
+          macdIndicator: candidate.macdIndicator,
+          rsiIndicator: candidate.rsiIndicator,
         });
         boardHoldings.set(candidate.boardCode, boardCount + 1);
         console.log(`[OptBacktest] [${today}] ${candidate.secid} ✅ 生成买入订单 (次日${nextDay}执行) | 评分${candidate.score.toFixed(1)} | 板块${candidate.boardCode}`);
@@ -3196,6 +3316,7 @@ export class OptimizedStrategyBacktest {
       sellThresholds: this.RSI_SELL_THRESHOLDS,
       filterStrongType: this.FILTER_STRONG_TYPE,
       steepness: this.STEEPNESS,
+      macdParams: this.MACD_PARAMS,
     };
   }
 

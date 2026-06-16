@@ -1,6 +1,6 @@
 import React, { useCallback, useState, useEffect, useRef } from 'react';
 import { useDispatch } from 'react-redux';
-import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio, InputNumber, Input, Modal, Button, List, Popconfirm, Space, Switch } from 'antd';
+import { Row, Col, DatePicker, Table, Card, Statistic, Tag, Progress, Radio, InputNumber, Input, Modal, Button, List, Popconfirm, Space, Switch, Tooltip } from 'antd';
 import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
 import * as Services from '@/services';
@@ -570,6 +570,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [filterStrongType, setFilterStrongType] = useState<'limit_up' | 'new_high_60' | 'both'>('both');
     const [steepness, setSteepness] = useState(20);
 
+    // MACD 策略参数
+    const [macdFastPeriodsInput, setMacdFastPeriodsInput] = useState('8,12');
+    const [macdSlowPeriodsInput, setMacdSlowPeriodsInput] = useState('21,26');
+    const [macdSignalPeriodsInput, setMacdSignalPeriodsInput] = useState('9');
+    const [macdRequireAboveZero, setMacdRequireAboveZero] = useState(true);
+    const [macdRequireBelowZero, setMacdRequireBelowZero] = useState(false);
+    const [macdRequirePriorNegative, setMacdRequirePriorNegative] = useState(true);
+
     // 待执行订单 UI 交互状态
     const [pendingOrders, setPendingOrders] = useState<BacktestEngine.StrategyPendingOrder[]>([]);
     const [pendingOrderDecisions, setPendingOrderDecisions] = useState<Record<number, 'execute' | 'watch' | 'cancel'>>({});
@@ -582,6 +590,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
     const [resumeModalVisible, setResumeModalVisible] = useState(false);
 
     const parseThresholds = (s: string) => s.split(',').map(v => parseInt(v.trim(), 10)).filter(v => !isNaN(v));
+    const parseNumberList = (s: string) => s.split(',').map(v => parseInt(v.trim(), 10)).filter(v => !isNaN(v));
 
     const cancelledRef = useRef(false);
     const pausedRef = useRef(false);
@@ -646,6 +655,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               setSellThresholdsInput((params.sellThresholds ?? [65, 70, 75, 80, 85]).join(','));
               setFilterStrongType(params.filterStrongType ?? 'both');
               setSteepness(params.steepness ?? 20);
+
+              setMacdFastPeriodsInput(params.macdParams?.fastPeriods?.join(',') ?? '8,12');
+              setMacdSlowPeriodsInput(params.macdParams?.slowPeriods?.join(',') ?? '21,26');
+              setMacdSignalPeriodsInput(params.macdParams?.signalPeriods?.join(',') ?? '9');
+              setMacdRequireAboveZero(params.macdParams?.aboveZeroOptions?.includes(true) ?? true);
+              setMacdRequireBelowZero(params.macdParams?.belowZeroOptions?.includes(true) ?? false);
+              setMacdRequirePriorNegative(params.macdParams?.priorNegOptions?.includes(true) ?? true);
             }
           }
         } catch (e) {
@@ -786,6 +802,13 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         setSellThresholdsInput((p.sellThresholds ?? [65, 70, 75, 80, 85]).join(','));
         setFilterStrongType(p.filterStrongType ?? 'both');
         setSteepness(p.steepness ?? 20);
+
+        setMacdFastPeriodsInput(p.macdParams?.fastPeriods?.join(',') ?? '8,12');
+        setMacdSlowPeriodsInput(p.macdParams?.slowPeriods?.join(',') ?? '21,26');
+        setMacdSignalPeriodsInput(p.macdParams?.signalPeriods?.join(',') ?? '9');
+        setMacdRequireAboveZero(p.macdParams?.aboveZeroOptions?.includes(true) ?? true);
+        setMacdRequireBelowZero(p.macdParams?.belowZeroOptions?.includes(true) ?? false);
+        setMacdRequirePriorNegative(p.macdParams?.priorNegOptions?.includes(true) ?? true);
       }
 
       const baseOpts = getNetValueBaseOptions(darkMode, p?.initialCapital || 1000000);
@@ -974,6 +997,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         sellThresholds: parseThresholds(sellThresholdsInput),
         filterStrongType,
         steepness,
+        macdParams: {
+          fastPeriods: parseNumberList(macdFastPeriodsInput),
+          slowPeriods: parseNumberList(macdSlowPeriodsInput),
+          signalPeriods: parseNumberList(macdSignalPeriodsInput),
+          aboveZeroOptions: macdRequireAboveZero ? [true, false] : [false],
+          belowZeroOptions: macdRequireBelowZero ? [true, false] : [false],
+          priorNegOptions: macdRequirePriorNegative ? [true, false] : [false],
+        },
       };
 
       // [新增] 为优化策略创建/复用进行中的历史记录项，用于断点续跑
@@ -1069,6 +1100,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
             sellThresholds: parseThresholds(sellThresholdsInput),
             filterStrongType,
             steepness,
+            macdParams: {
+              fastPeriods: parseNumberList(macdFastPeriodsInput),
+              slowPeriods: parseNumberList(macdSlowPeriodsInput),
+              signalPeriods: parseNumberList(macdSignalPeriodsInput),
+              aboveZeroOptions: macdRequireAboveZero ? [true, false] : [false],
+              belowZeroOptions: macdRequireBelowZero ? [true, false] : [false],
+              priorNegOptions: macdRequirePriorNegative ? [true, false] : [false],
+            },
           });
           backtestResult = await strategy.run(
             dataProvider,
@@ -1140,6 +1179,14 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
               sellThresholds: parseThresholds(sellThresholdsInput),
               filterStrongType,
               steepness,
+              macdParams: {
+                fastPeriods: parseNumberList(macdFastPeriodsInput),
+                slowPeriods: parseNumberList(macdSlowPeriodsInput),
+                signalPeriods: parseNumberList(macdSignalPeriodsInput),
+                aboveZeroOptions: macdRequireAboveZero ? [true, false] : [false],
+                belowZeroOptions: macdRequireBelowZero ? [true, false] : [false],
+                priorNegOptions: macdRequirePriorNegative ? [true, false] : [false],
+              },
             },
           });
           console.log('[Backtest] 回测结果已缓存到磁盘');
@@ -1193,7 +1240,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
         pausedRef.current = false;
         console.log(`[UI] ====== 回测流程结束 ======`);
       }
-    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, pullbackPct, sellAtOpen, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, trailingStopStartPct, trailingStopTightenPct, buyThresholdsInput, sellThresholdsInput, filterStrongType, steepness, updateHistoryItem, saveToHistory]);
+    }, [dates, dataProvider, darkMode, strategyType, optimizedSubStrategy, stopLossInitPct, trailingStopPct, takeProfitPct, minStrategyScore, strongLookbackStart, strongLookbackEnd, initialCapital, maxPositions, positionRatio, boardRankPct, stockRankPct, structureBreakDays, rangeBoundDays, pullbackPct, sellAtOpen, timeExitMaxDays, timeExitMinReturn, profitIgnoreSignalPct, trailingStopStartPct, trailingStopTightenPct, buyThresholdsInput, sellThresholdsInput, filterStrongType, steepness, macdFastPeriodsInput, macdSlowPeriodsInput, macdSignalPeriodsInput, macdRequireAboveZero, macdRequireBelowZero, macdRequirePriorNegative, updateHistoryItem, saveToHistory]);
 
     const togglePause = useCallback(() => {
       const next = !paused;
@@ -1512,14 +1559,46 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>分数:</span>
                       <InputNumber size="small" min={0} max={500} step={1} value={minStrategyScore} onChange={(v) => setMinStrategyScore(v ?? 100)} disabled={running} style={{ width: 55 }} />
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>RSI买:</span>
-                      <Input size="small" value={buyThresholdsInput} onChange={(e) => setBuyThresholdsInput(e.target.value)} disabled={running} style={{ width: 80 }} />
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>RSI卖:</span>
-                      <Input size="small" value={sellThresholdsInput} onChange={(e) => setSellThresholdsInput(e.target.value)} disabled={running} style={{ width: 100 }} />
-                    </div>
+                    {(optimizedSubStrategy === 'rsi' || optimizedSubStrategy === 'both') && (
+                      <>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>RSI买:</span>
+                          <Input size="small" value={buyThresholdsInput} onChange={(e) => setBuyThresholdsInput(e.target.value)} disabled={running} style={{ width: 80 }} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>RSI卖:</span>
+                          <Input size="small" value={sellThresholdsInput} onChange={(e) => setSellThresholdsInput(e.target.value)} disabled={running} style={{ width: 100 }} />
+                        </div>
+                      </>
+                    )}
+                    {(optimizedSubStrategy === 'macd' || optimizedSubStrategy === 'both') && (
+                      <>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>MACD快:</span>
+                          <Input size="small" value={macdFastPeriodsInput} onChange={(e) => setMacdFastPeriodsInput(e.target.value)} disabled={running} style={{ width: 60 }} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>MACD慢:</span>
+                          <Input size="small" value={macdSlowPeriodsInput} onChange={(e) => setMacdSlowPeriodsInput(e.target.value)} disabled={running} style={{ width: 60 }} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>MACD信号:</span>
+                          <Input size="small" value={macdSignalPeriodsInput} onChange={(e) => setMacdSignalPeriodsInput(e.target.value)} disabled={running} style={{ width: 50 }} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>零轴上:</span>
+                          <Switch size="small" checked={macdRequireAboveZero} onChange={(v) => setMacdRequireAboveZero(v)} disabled={running} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>零轴下:</span>
+                          <Switch size="small" checked={macdRequireBelowZero} onChange={(v) => setMacdRequireBelowZero(v)} disabled={running} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>前负柱:</span>
+                          <Switch size="small" checked={macdRequirePriorNegative} onChange={(v) => setMacdRequirePriorNegative(v)} disabled={running} />
+                        </div>
+                      </>
+                    )}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                       <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>回看:</span>
                       <InputNumber size="small" min={2} max={30} step={1} value={strongLookbackStart} onChange={(v) => setStrongLookbackStart(v ?? 10)} disabled={running} style={{ width: 50 }} />
@@ -1632,7 +1711,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                           disabled={!pendingOrders.every((_, index) => pendingOrderDecisions[index] !== undefined)}
                           onClick={handleConfirmPendingOrders}
                         >
-                          确认 ({pendingOrders.filter((_, index) => pendingOrderDecisions[index] === 'execute').length}/{pendingOrders.length})
+                          确认 ({pendingOrders.filter((_, index) => pendingOrderDecisions[index] === 'execute').length}执行 / {pendingOrders.filter((_, index) => pendingOrderDecisions[index] === 'watch').length}观察 / {pendingOrders.length})
                         </Button>
                       </Space>
                     </div>
@@ -1678,11 +1757,61 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                       },
                       { title: '原因', dataIndex: 'reason', key: 'reason', minWidth: 200, ellipsis: true },
                       {
+                        title: '所属板块',
+                        dataIndex: 'boardName',
+                        key: 'boardName',
+                        width: 100,
+                        render: (v?: string) => v || '-',
+                        ellipsis: true,
+                      },
+                      {
+                        title: '板块10天涨跌比',
+                        dataIndex: 'boardUpDown10Days',
+                        key: 'boardUpDown10Days',
+                        width: 110,
+                        render: (v?: string) => {
+                          if (!v || v === '-') return '-';
+                          const [up, total] = v.split('/').map(n => parseInt(n, 10));
+                          const ratio = total > 0 ? up / total : 0;
+                          const color = ratio >= 0.6 ? '#cf1322' : ratio >= 0.4 ? '#faad14' : '#3f8600';
+                          return <span style={{ color }}>{v}</span>;
+                        },
+                      },
+                      {
                         title: '策略',
                         dataIndex: 'strategyType',
                         key: 'strategyType',
                         width: 80,
                         render: (v?: string) => v?.toUpperCase() || '-',
+                      },
+                      {
+                        title: '指标值',
+                        key: 'indicatorValue',
+                        width: 140,
+                        render: (_: any, record: any) => {
+                          const order = record as BacktestEngine.StrategyPendingOrder;
+                          const paramsStr = order.strategyType === 'macd' && order.strategyParams
+                            ? `MACD(${(order.strategyParams as BacktestEngine.MACDStrategyResult).fast},${(order.strategyParams as BacktestEngine.MACDStrategyResult).slow},${(order.strategyParams as BacktestEngine.MACDStrategyResult).signal})`
+                            : order.strategyType === 'rsi' && order.strategyParams
+                            ? `RSI(${(order.strategyParams as BacktestEngine.RSIBacktestResult).rsiPeriod})`
+                            : '';
+                          if (order.strategyType === 'macd' && order.macdIndicator) {
+                            const { dif, dea, hist } = order.macdIndicator;
+                            const content = (
+                              <span style={{ fontSize: 12 }}>
+                                DIF {dif.toFixed(2)}<br />
+                                DEA {dea.toFixed(2)}<br />
+                                HIST {hist.toFixed(2)}
+                              </span>
+                            );
+                            return paramsStr ? <Tooltip title={paramsStr}>{content}</Tooltip> : content;
+                          }
+                          if (order.strategyType === 'rsi' && order.rsiIndicator !== undefined) {
+                            const content = <span>RSI {order.rsiIndicator.toFixed(2)}</span>;
+                            return paramsStr ? <Tooltip title={paramsStr}>{content}</Tooltip> : content;
+                          }
+                          return '-';
+                        },
                       },
                       {
                         title: '评分',
@@ -1735,14 +1864,23 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                                 </Button>
                               )}
                               {!isSell && isWatching && (
-                                <Button
-                                  size="small"
-                                  danger={decision === 'cancel'}
-                                  type={decision === 'cancel' ? 'primary' : 'default'}
-                                  onClick={() => handlePendingOrderDecision(index, 'cancel')}
-                                >
-                                  取消观察
-                                </Button>
+                                <>
+                                  <Button
+                                    size="small"
+                                    type={decision === 'watch' ? 'primary' : 'default'}
+                                    onClick={() => handlePendingOrderDecision(index, 'watch')}
+                                  >
+                                    继续观察
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    danger={decision === 'cancel'}
+                                    type={decision === 'cancel' ? 'primary' : 'default'}
+                                    onClick={() => handlePendingOrderDecision(index, 'cancel')}
+                                  >
+                                    取消观察
+                                  </Button>
+                                </>
                               )}
                               {!isWatching && (
                                 <Button
@@ -1761,7 +1899,7 @@ const Backtest: React.FC<BacktestProps> = ({ onOpenStock, active }) => {
                     ]}
                     pagination={false}
                     size="small"
-                    scroll={{ x: 1200 }}
+                    scroll={{ x: 1400 }}
                   />
                 </Card>
               </div>
