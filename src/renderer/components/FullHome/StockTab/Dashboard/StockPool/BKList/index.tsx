@@ -21,10 +21,12 @@ export interface BKListProps {
   onBankuaisUpdate: (t: BKType, bks: Stock.BanKuaiItem[]) => void;
   onOpenBKStocks: (t: BKType, s: string) => void;
   onOpenBK: (s: string, name: string) => void;
+  /** 点击行业筛选结果中的行业名称，跳转到该行业的股票列表 */
+  onOpenIndustry: (industryCode: string, industryName: string) => void;
   active: boolean;
 }
 
-const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks, onOpenBK, active }) => {
+const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks, onOpenBK,onOpenIndustry, active }) => {
   const [pageSize, setPageSize] = useState(100);
   const [noMore, setNoMore] = useState(false);
   const [bankuais, setBankuais] = useState<Stock.BanKuaiItem[]>([]);
@@ -46,8 +48,12 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [showList, setShowList] = useState<Stock.BanKuaiItem[]>([]);
   const [dataSource, setDataSource] = useState<'dc' | 'ths'>('dc');
   const [industryFilterLoading, setIndustryFilterLoading] = useState(false);
-  const [filteredIndustries, setFilteredIndustries] = useState<any[]>([]);
+  const [industryAllData, setIndustryAllData] = useState<any[]>([]);
+  const [industryDisplayCount, setIndustryDisplayCount] = useState(0);
+  const [industryProgress, setIndustryProgress] = useState(0);
   const [displayMode, setDisplayMode] = useState<'boards' | 'industries'>('boards');
+  const isIndustryPausedRef = React.useRef(false);
+  const industryIndexRef = React.useRef(0);
   const PAGE_SIZE = 50;
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
@@ -88,7 +94,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
 
   useEffect(() => {
     if (displayMode === 'industries') {
-      let list = [...filteredIndustries];
+      // 只显示已计算的行业（分批显示效果）
+      let list = industryAllData.slice(0, industryDisplayCount);
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
         const key = keys[0];
@@ -141,7 +148,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       }
     }
     setShowList(list);
-  }, [bankuais, sortTypes, nameFilter, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, filteredIndustries]);
+  }, [bankuais, sortTypes, nameFilter, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, industryAllData, industryDisplayCount]);
 
   const totalPage = Math.max(1, Math.ceil(showList.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPage);
@@ -168,28 +175,76 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   }, [kLineApiSourceSetting, type, pageSize, dataSource]);
 
   const handleFilterIndustries = useCallback(async () => {
-    if (industryFilterLoading) return;
+    if (industryFilterLoading) {
+      // 暂停
+      isIndustryPausedRef.current = true;
+      return;
+    }
+
+    // 重置状态
+    if (industryIndexRef.current === 0 || industryIndexRef.current >= industryAllData.length) {
+      setIndustryAllData([]);
+      setIndustryDisplayCount(0);
+      industryIndexRef.current = 0;
+    }
+
+    isIndustryPausedRef.current = false;
     setIndustryFilterLoading(true);
+    setIndustryProgress(0);
+    setDisplayMode('industries');
+    setCurrentPage(1);
+
     try {
       const today = dayjs().format('YYYYMMDD');
+      console.log('[行业筛选] 开始获取所有行业数据...');
+
+      // 一次性获取所有行业数据（不过滤）
       const result = await Services.Tushare.FilterIndustriesFromTushare(today, {
         fund_flow_rank_pct: 0.3,
         require_ma_bull: true,
         min_return_5d: 1.0,
-      });
-      if (result.industries && result.industries.length > 0) {
-        setFilteredIndustries(result.industries);
-        setDisplayMode('industries');
-        setCurrentPage(1);
-      } else {
-        console.log('没有筛选出符合条件的行业');
+      }, true); // return_all = true
+
+      if (!result.industries || result.industries.length === 0) {
+        console.log('[行业筛选] 没有获取到行业数据');
+        setIndustryFilterLoading(false);
+        return;
+      }
+
+      const allData = result.industries;
+      console.log(`[行业筛选] 获取到 ${allData.length} 个行业，开始分批显示...`);
+      setIndustryAllData(allData);
+
+      // 分批显示动画：每 50ms 更新一批，模拟逐个计算效果
+      const batchSize = 3;
+      const total = allData.length;
+
+      for (let i = industryIndexRef.current; i < total; i += batchSize) {
+        if (isIndustryPausedRef.current) {
+          industryIndexRef.current = i;
+          break;
+        }
+
+        const end = Math.min(i + batchSize, total);
+        setIndustryDisplayCount(end);
+        industryIndexRef.current = end;
+        setIndustryProgress(Math.round((end / total) * 100));
+
+        // 让出主线程，更新 UI
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      if (!isIndustryPausedRef.current) {
+        industryIndexRef.current = 0;
+        setIndustryProgress(100);
+        console.log(`[行业筛选] 完成，共 ${allData.length} 个行业，通过过滤: ${allData.filter((d: any) => d.passed).length} 个`);
       }
     } catch (e) {
       console.error('行业筛选失败:', e);
     } finally {
       setIndustryFilterLoading(false);
     }
-  }, [industryFilterLoading]);
+  }, [industryFilterLoading, industryAllData.length]);
 
   const onCalcTechIndicators = useCallback(async () => {
     if (techFilterLoading) {
@@ -296,19 +351,29 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             <Button
               size="small"
               onClick={handleFilterIndustries}
-              loading={industryFilterLoading}
+              loading={industryFilterLoading && industryProgress === 0}
               style={{ marginLeft: 4 }}
             >
               行业筛选
             </Button>
           ) : (
-            <Button
-              size="small"
-              onClick={() => setDisplayMode('boards')}
-              style={{ marginLeft: 4 }}
-            >
-              返回板块
-            </Button>
+            <>
+              <Button
+                size="small"
+                onClick={handleFilterIndustries}
+                loading={industryFilterLoading}
+                style={{ marginLeft: 4 }}
+              >
+                {industryFilterLoading ? `分析中 ${industryProgress}%` : '重新筛选'}
+              </Button>
+              <Button
+                size="small"
+                onClick={() => setDisplayMode('boards')}
+                style={{ marginLeft: 4 }}
+              >
+                返回板块
+              </Button>
+            </>
           )}
           <Button
             size="small"
@@ -377,7 +442,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         </Row>
       ) : (
         <Row className={styles.header}>
-          <Col span={5}>行业名称</Col>
+          <Col span={4}>行业名称</Col>
+          <Col span={2}>状态</Col>
           <Col span={3}>
             趋势得分
             <Button size="small" type="text" icon={sortTypes.trend_score == 1 ? <CaretUpOutlined /> : sortTypes.trend_score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('trend_score')} />
@@ -390,8 +456,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             20日涨幅
             <Button size="small" type="text" icon={sortTypes.ret_20d == 1 ? <CaretUpOutlined /> : sortTypes.ret_20d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('ret_20d')} />
           </Col>
-          <Col span={4}>
-            资金净流入(亿)
+          <Col span={3}>
+            资金净流入
             <Button size="small" type="text" icon={sortTypes.fund_flow == 1 ? <CaretUpOutlined /> : sortTypes.fund_flow == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('fund_flow')} />
           </Col>
           <Col span={3}>均线多头</Col>
@@ -431,33 +497,54 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             </Row>
           ))
         ) : (
-          pageData.map((b: any, index: number) => (
-            <Row key={`${b.industry_code}-${index}`} className={styles.row}>
-              <Col span={5}>
-                <Tooltip title={b.industry_code}>
-                  <span>{b.industry_name}</span>
-                </Tooltip>
-              </Col>
-              <Col span={3} className={b.trend_score >= 60 ? 'text-up' : b.trend_score >= 40 ? '' : 'text-down'}>
-                {b.trend_score?.toFixed?.(1) ?? b.trend_score}
-              </Col>
-              <Col span={3} className={Utils.GetValueColor(b.ret_5d).textClass}>
-                {b.ret_5d?.toFixed?.(2) ?? b.ret_5d}%
-              </Col>
-              <Col span={3} className={Utils.GetValueColor(b.ret_20d).textClass}>
-                {b.ret_20d?.toFixed?.(2) ?? b.ret_20d}%
-              </Col>
-              <Col span={4} className={Utils.GetValueColor(b.fund_flow).textClass}>
-                {formatMoneyFlow(b.fund_flow * 1e8)}
-              </Col>
-              <Col span={3}>
-                {b.ma_bull ? <span className="text-up">✓ 多头排列</span> : <span className="text-down">✗ 非多头</span>}
-              </Col>
-              <Col span={3}>
-                {b.composite_score?.toFixed?.(1) ?? b.composite_score}
-              </Col>
-            </Row>
-          ))
+          pageData.map((b: any, index: number) => {
+            const isCalculated = b.calculated !== false;
+            const isPassed = b.passed === true;
+            return (
+              <Row
+                key={`${b.industry_code}-${index}`}
+                className={styles.row}
+                style={{
+                  backgroundColor: isPassed ? 'rgba(82, 196, 26, 0.08)' : undefined,
+                  opacity: isCalculated ? 1 : 0.5,
+                }}
+              >
+                <Col span={5}>
+                  <Tooltip title={b.industry_code}>
+                    <span style={{ cursor: 'pointer' }} onClick={() => onOpenIndustry(b.industry_code, b.industry_name)}>
+                      {b.industry_name}
+                      {isPassed && <span style={{ color: '#52c41a', marginLeft: 4 }}>✓</span>}
+                      {!isCalculated && <span style={{ color: '#999', marginLeft: 4 }}>(计算中...)</span>}
+                    </span>
+                  </Tooltip>
+                </Col>
+                <Col span={3} className={!isCalculated ? '' : b.trend_score >= 60 ? 'text-up' : b.trend_score >= 40 ? '' : 'text-down'}>
+                  {isCalculated ? (b.trend_score?.toFixed?.(1) ?? b.trend_score) : '--'}
+                </Col>
+                <Col span={3} className={!isCalculated ? '' : Utils.GetValueColor(b.ret_5d).textClass}>
+                  {isCalculated ? `${b.ret_5d?.toFixed?.(2) ?? b.ret_5d}%` : '--'}
+                </Col>
+                <Col span={3} className={!isCalculated ? '' : Utils.GetValueColor(b.ret_20d).textClass}>
+                  {isCalculated ? `${b.ret_20d?.toFixed?.(2) ?? b.ret_20d}%` : '--'}
+                </Col>
+                <Col span={4} className={!isCalculated ? '' : Utils.GetValueColor(b.fund_flow).textClass}>
+                  {isCalculated ? formatMoneyFlow(b.fund_flow * 1e8) : '--'}
+                </Col>
+                <Col span={3}>
+                  {!isCalculated ? (
+                    <span style={{ color: '#999' }}>--</span>
+                  ) : b.ma_bull ? (
+                    <span className="text-up">✓ 多头排列</span>
+                  ) : (
+                    <span className="text-down">✗ 非多头</span>
+                  )}
+                </Col>
+                <Col span={3}>
+                  {isCalculated ? (b.composite_score?.toFixed?.(1) ?? b.composite_score) : '--'}
+                </Col>
+              </Row>
+            );
+          })
         )}
         {/* ...分页按钮... */}
         </div>

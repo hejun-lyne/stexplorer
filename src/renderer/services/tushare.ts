@@ -1182,12 +1182,14 @@ export interface BuySignalConfig {
  */
 export async function FilterIndustriesFromTushare(
   tradeDate: string,
-  config?: IndustryFilterConfig
+  config?: IndustryFilterConfig,
+  return_all?: boolean
 ): Promise<any> {
   try {
     const result = await callTushare('filter_industries', {
       trade_date: tradeDate.replace(/-/g, ''),
       ...config,
+      return_all: return_all || false,
     });
     if (result.error) {
       console.error('行业筛选失败:', result.error);

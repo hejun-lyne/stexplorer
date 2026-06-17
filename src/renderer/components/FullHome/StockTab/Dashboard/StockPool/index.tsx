@@ -33,6 +33,13 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
       setActiveKey('stlist');
     });
   }, []);
+  const openIndustry = useCallback((code: string, name: string) => {
+    batch(() => {
+      setBKType(BKType.Industry);
+      setBKSecid(code);
+      setActiveKey('stlist');
+    });
+  }, []);
   const [industries, setIndustries] = useState<Stock.BanKuaiItem[]>([]);
   const [gainians, setGainians] = useState<Stock.BanKuaiItem[]>([]);
   const [bktype, setBKType] = useState(BKType.Industry);
@@ -148,6 +155,7 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
             onBankuaisUpdate={updateBKs}
             onOpenBKStocks={openBK}
             onOpenBK={onOpenStock}
+            onOpenIndustry={openIndustry}
             active={activeKey === 'gainians'}
           />
         </Tabs.TabPane>
@@ -157,6 +165,7 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
             type={BKType.Industry}
             onOpenBKStocks={openBK}
             onOpenBK={onOpenStock}
+            onOpenIndustry={openIndustry}
             active={activeKey === 'industries'}
           />
         </Tabs.TabPane>

@@ -2478,9 +2478,11 @@ class TushareAPI:
     @staticmethod
     def filter_industries(trade_date: str, fund_flow_days: int = 5,
                           fund_flow_rank_pct: float = 0.3, min_return_5d: float = 2.0,
-                          min_rs: float = 1.1, require_ma_bull: bool = True) -> Dict[str, Any]:
+                          min_rs: float = 1.1, require_ma_bull: bool = True,
+                          return_all: bool = False) -> Dict[str, Any]:
         """步骤1: 筛选值得投资的二级行业
 
+        当 return_all=True 时返回所有行业（不过滤），并标记 passed 字段
         返回可 JSON 序列化的行业列表（不含内部 DataFrame 对象）
         """
         try:
@@ -2492,14 +2494,14 @@ class TushareAPI:
                 min_rs=min_rs,
                 require_ma_bull=require_ma_bull,
             )
-            df = selector.filter_industries(trade_date, config)
+            df = selector.filter_industries(trade_date, config, return_all=return_all)
             if df.empty:
                 return {"industries": [], "count": 0, "trade_date": trade_date}
 
             # 去掉不可序列化的 kline DataFrame 列
             result_df = df.drop(columns=['kline'], errors='ignore')
             records = df_to_records(result_df)
-            return {"industries": records, "count": len(records), "trade_date": trade_date}
+            return {"industries": records, "count": len(records), "trade_date": trade_date, "return_all": return_all}
         except Exception as e:
             return {"error": str(e)}
 
@@ -3736,14 +3738,15 @@ class StockSelector:
             "rs": round(rs, 2)
         }
 
-    def filter_industries(self, trade_date: str, config: IndustryFilterConfig = None) -> pd.DataFrame:
+    def filter_industries(self, trade_date: str, config: IndustryFilterConfig = None, return_all: bool = False) -> pd.DataFrame:
         """
         筛选值得投资的二级行业
+        当 return_all=True 时返回所有行业（不过滤），并增加 passed 字段标记是否通过条件
         """
         if config is None:
             config = IndustryFilterConfig()
 
-        print(f"[DEBUG filter_industries] 开始筛选，trade_date={trade_date}, config={config}")
+        print(f"[DEBUG filter_industries] 开始筛选，trade_date={trade_date}, return_all={return_all}, config={config}")
 
         industries = self.get_l2_industries()
         if industries is None or industries.empty:
@@ -3761,7 +3764,6 @@ class StockSelector:
         results = []
         total = len(industries)
         kline_fail_count = 0
-        trend_fail_count = 0
 
         for idx, (_, row) in enumerate(industries.iterrows()):
             code = row['index_code']
@@ -3774,17 +3776,22 @@ class StockSelector:
             kline = self.get_industry_kline(code, start_date, trade_date)
             if kline is None or len(kline) < 20:
                 kline_fail_count += 1
-                if kline is None:
-                    print(f"[DEBUG] {name}({code}): K线返回 None")
-                else:
-                    print(f"[DEBUG] {name}({code}): K线数据不足，仅 {len(kline)} 条（需>=20）")
+                # 返回占位数据，确保列表完整
+                results.append({
+                    'industry_code': code,
+                    'industry_name': name,
+                    'trend_score': 0,
+                    'ret_5d': 0,
+                    'ret_20d': 0,
+                    'ma_bull': False,
+                    'fund_flow': 0,
+                    'kline': None,
+                    'calculated': False,
+                })
                 continue
 
             # 计算趋势得分
             trend = self.calc_industry_trend_score(kline)
-            if trend['total'] == 0:
-                trend_fail_count += 1
-                print(f"[DEBUG] {name}({code}): 趋势得分=0，K线长度={len(kline)}")
 
             # 计算资金流入
             fund_flow = self.calc_industry_fund_flow(code, trade_date, config.fund_flow_days)
@@ -3797,62 +3804,37 @@ class StockSelector:
                 'ret_20d': trend['ret_20d'],
                 'ma_bull': trend['ma_bull'],
                 'fund_flow': round(fund_flow / 1e8, 2),  # 转为亿元
-                'kline': kline  # 保留K线供后续使用
+                'kline': kline if not return_all else None,  # return_all 时不保留 kline 减少序列化开销
+                'calculated': True,
             })
 
-        print(f"[DEBUG filter_industries] K线获取成功: {len(results)}/{total}, 失败: {kline_fail_count}, 趋势得分=0: {trend_fail_count}")
+        print(f"[DEBUG filter_industries] K线获取成功: {len([r for r in results if r['calculated']])}/{total}, 失败: {kline_fail_count}")
 
         df = pd.DataFrame(results)
-        if df.empty:
-            print("[DEBUG filter_industries] 所有行业K线获取失败，返回空")
-            return df
 
-        print("[DEBUG filter_industries] 原始数据前5行:")
-        print(df[['industry_name','trend_score','ret_5d','ma_bull','fund_flow']].head().to_string())
+        # 资金流入排名（只对计算成功的排名）
+        df['fund_flow_rank'] = df[df['calculated']]['fund_flow'].rank(ascending=False, pct=True)
+        df['fund_flow_rank'] = df['fund_flow_rank'].fillna(1.0)  # 未计算的排到最后
 
-        # 资金流入排名
-        df['fund_flow_rank'] = df['fund_flow'].rank(ascending=False, pct=True)
-        print(f"[DEBUG filter_industries] fund_flow 统计: min={df['fund_flow'].min():.2f}, max={df['fund_flow'].max():.2f}, mean={df['fund_flow'].mean():.2f}")
-        print(f"[DEBUG filter_industries] fund_flow_rank 统计: min={df['fund_flow_rank'].min():.4f}, max={df['fund_flow_rank'].max():.4f}")
-
-        # 分别检查每个过滤条件
+        # 计算是否通过过滤条件
         cond1 = df['trend_score'] >= 40
         cond2 = df['ret_5d'] >= config.min_return_5d
         cond3 = df['fund_flow_rank'] <= config.fund_flow_rank_pct
         cond4 = df['ma_bull'] if config.require_ma_bull else pd.Series([True] * len(df))
-        print(f"[DEBUG filter_industries] 过滤条件通过数: trend_score>=40:{cond1.sum()}, ret_5d>={config.min_return_5d}:{cond2.sum()}, fund_flow_rank<={config.fund_flow_rank_pct}:{cond3.sum()}, ma_bull:{cond4.sum()}")
+        df['passed'] = cond1 & cond2 & cond3 & cond4
 
-        # 综合过滤条件
-        filtered = df[
-            cond1 & cond2 & cond3 & cond4
-        ].copy()
+        # 综合得分（对所有行业计算，未计算的为0）
+        df['composite_score'] = (
+            df['trend_score'] * 0.6 +
+            (1 - df['fund_flow_rank']) * 40
+        ).fillna(0)
 
-        print(f"[DEBUG filter_industries] 过滤后: {len(filtered)}/{len(df)} 个行业通过")
-        if len(filtered) > 0:
-            print("[DEBUG filter_industries] 通过的行业:")
-            print(filtered[['industry_name','trend_score','ret_5d','ma_bull','fund_flow','fund_flow_rank']].to_string())
-        else:
-            # 打印未通过的原因分类
-            print("[DEBUG filter_industries] 未通过原因分析:")
-            for _, row in df.iterrows():
-                reasons = []
-                if row['trend_score'] < 40:
-                    reasons.append(f"trend_score={row['trend_score']:.1f}<40")
-                if row['ret_5d'] < config.min_return_5d:
-                    reasons.append(f"ret_5d={row['ret_5d']:.2f}<{config.min_return_5d}")
-                if row['fund_flow_rank'] > config.fund_flow_rank_pct:
-                    reasons.append(f"fund_flow_rank={row['fund_flow_rank']:.4f}>{config.fund_flow_rank_pct}")
-                if config.require_ma_bull and not row['ma_bull']:
-                    reasons.append("ma_bull=False")
-                if reasons:
-                    print(f"  - {row['industry_name']}: {', '.join(reasons)}")
+        if return_all:
+            # 不过滤，返回所有，按 composite_score 降序
+            return df.sort_values('composite_score', ascending=False).reset_index(drop=True)
 
-        # 综合排序: 趋势得分*0.6 + 资金排名*0.4
-        filtered['composite_score'] = (
-            filtered['trend_score'] * 0.6 + 
-            (1 - filtered['fund_flow_rank']) * 40  # 转为0-40分
-        )
-
+        # 过滤模式：只返回通过的
+        filtered = df[df['passed']].copy()
         return filtered.sort_values('composite_score', ascending=False).reset_index(drop=True)
 
     # ==================== 2. 个股龙头识别 ====================
