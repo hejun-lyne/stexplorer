@@ -1993,6 +1993,138 @@ class TushareAPI:
         return result
 
     @staticmethod
+    def get_industry_stocks(secid: str, date: Optional[str] = None) -> Dict[str, Any]:
+        """获取申万二级行业成分股（支持 801010.SI 或 90.801010 格式）
+
+        通过 index_member 接口获取申万行业指数成分股，并通过 daily + daily_basic 补全行情数据。
+        返回格式与 get_board_stocks 兼容：{ total, stocks: [{ code, name, secid, zx, zdf, ... }] }
+        """
+        try:
+            # 统一提取申万行业代码
+            code = convert_secid_to_pure_code(secid)
+            if '.' in code:
+                code = code.split('.')[0]
+            # 确保是 801 开头的申万二级行业代码
+            if not code.startswith('801') or len(code) != 6:
+                return {"error": f"Invalid SW industry code: {secid}"}
+
+            ts_code = f"{code}.SI"
+            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+
+            pro = get_pro()
+
+            # 1. 获取成分股
+            df = safe_api_call(pro.index_member, index_code=ts_code)
+            if isinstance(df, dict) and df.get("error"):
+                return df
+            if df is None or df.empty:
+                return {"total": 0, "stocks": [], "source": "sw_index_member"}
+
+            # 过滤仍在成分股中的（out_date 为空表示当前仍在）
+            df = df[df['out_date'].isna() | (df['out_date'] == '')]
+            if df.empty:
+                return {"total": 0, "stocks": [], "source": "sw_index_member"}
+
+            # 2. 获取最近交易日
+            trade_date = target_date
+            try:
+                cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=10)).strftime('%Y%m%d'), end_date=target_date, is_open='1')
+                if cal_df is not None and not cal_df.empty:
+                    trade_date = str(cal_df['cal_date'].iloc[0])
+            except Exception:
+                pass
+
+            # 3. 批量获取全市场当日行情
+            market_data: Dict[str, Dict[str, Any]] = {}
+            try:
+                daily_df = pro.daily(trade_date=trade_date)
+                if daily_df is not None and not daily_df.empty:
+                    for _, row in daily_df.iterrows():
+                        tc = str(row.get("ts_code", ""))
+                        market_data[tc] = {
+                            "zx": _to_float(row.get("close", 0)),
+                            "zdf": _to_float(row.get("pct_chg", 0)),
+                            "zdd": _to_float(row.get("change", 0)),
+                            "zg": _to_float(row.get("high", 0)),
+                            "zd": _to_float(row.get("low", 0)),
+                            "jk": _to_float(row.get("open", 0)),
+                            "zs": _to_float(row.get("pre_close", 0)),
+                            "cjl": _to_int(row.get("vol", 0)),
+                            "cje": round(_to_float(row.get("amount", 0)) * 1000, 2),
+                        }
+            except Exception as e:
+                print(f"[daily 批量查询失败] {e}")
+
+            # 4. 批量获取全市场当日基础指标
+            try:
+                basic_df = pro.daily_basic(trade_date=trade_date)
+                if basic_df is not None and not basic_df.empty:
+                    for _, row in basic_df.iterrows():
+                        tc = str(row.get("ts_code", ""))
+                        if tc in market_data:
+                            market_data[tc].update({
+                                "hsl": _to_float(row.get("turnover_rate", 0)),
+                                "syl": _to_float(row.get("pe_ttm", row.get("pe", 0))),
+                                "sjl": _to_float(row.get("pb", 0)),
+                                "sz": round(_to_float(row.get("total_mv", 0)) / 10000, 2),
+                                "lt": round(_to_float(row.get("circ_mv", 0)) / 10000, 2),
+                            })
+            except Exception as e:
+                print(f"[daily_basic 批量查询失败] {e}")
+
+            # 5. 组装结果
+            stocks = []
+            for _, row in df.iterrows():
+                con_code = str(row.get("con_code", ""))
+                stock_code = con_code.split(".")[0] if "." in con_code else con_code
+                if not stock_code or not stock_code.isdigit():
+                    continue
+                market = 1 if stock_code.startswith("6") else 0
+                secid_out = f"{market}.{stock_code}"
+                member_ts = f"{stock_code}.{'SH' if stock_code.startswith('6') else 'SZ'}"
+                md = market_data.get(member_ts, {})
+                zx = md.get("zx", 0)
+                zs = md.get("zs", 0)
+                zf = round((md.get("zg", 0) - md.get("zd", 0)) / zs * 100, 2) if zs > 0 else 0
+                stocks.append({
+                    "code": stock_code,
+                    "name": str(row.get("con_name", "")),
+                    "secid": secid_out,
+                    "zx": zx,
+                    "zdf": md.get("zdf", 0),
+                    "zdd": md.get("zdd", 0),
+                    "cjl": md.get("cjl", 0),
+                    "cje": md.get("cje", 0),
+                    "zf": zf,
+                    "zg": md.get("zg", 0),
+                    "zd": md.get("zd", 0),
+                    "jk": md.get("jk", 0),
+                    "zs": zs,
+                    "lb": 0,
+                    "hsl": md.get("hsl", 0),
+                    "syl": md.get("syl", 0),
+                    "sjl": md.get("sjl", 0),
+                    "sz": md.get("sz", 0),
+                    "lt": md.get("lt", 0),
+                    "main_in": 0,
+                    "main_in_5d": 0,
+                    "cm5": 0,
+                    "cd60": 0,
+                    "cy1": 0,
+                    "cs": 0,
+                })
+
+            return {
+                "total": len(stocks),
+                "stocks": stocks,
+                "date": target_date,
+                "source": "sw_index_member",
+                "industry_code": code,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
     def get_board_stocks_batch(requests: List[Dict[str, Any]]) -> Dict[str, Any]:
         """批量获取板块成分股，按 date+boardCode 去重内部查询"""
         seen = set()

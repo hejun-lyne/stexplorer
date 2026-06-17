@@ -1189,7 +1189,7 @@ export async function FilterIndustriesFromTushare(
     const result = await callTushare('filter_industries', {
       trade_date: tradeDate.replace(/-/g, ''),
       ...config,
-      return_all: return_all || false,
+      return_all,
     });
     if (result.error) {
       console.error('行业筛选失败:', result.error);
@@ -1342,5 +1342,33 @@ export async function SelectStocksFromTushare(
   } catch (error) {
     logError(error, 'SelectStocksFromTushare', '选股失败');
     return { results: [], count: 0 };
+  }
+}
+
+
+// ==================== 申万行业成分股 ====================
+
+/**
+ * 获取申万二级行业成分股（支持 801010.SI 格式）
+ * @param secid 申万行业代码，如 "801010.SI" 或 "90.801010"
+ * @param date 查询日期(YYYYMMDD)，不传则默认最近交易日
+ * @returns 兼容 GetBankuaiStocksFromTushare 的返回格式
+ */
+export async function GetIndustryStocksFromTushare(secid: string, date?: string): Promise<any> {
+  try {
+    const params: Record<string, any> = { secid };
+    if (date) params.date = date;
+
+    const result = await callTushare('get_industry_stocks', params);
+
+    if (result.error) {
+      console.error('获取申万行业成分股失败:', result.error);
+      return { total: 0, stocks: [] };
+    }
+
+    return result;
+  } catch (error) {
+    logError(error, 'GetIndustryStocksFromTushare', '获取申万行业成分股失败');
+    return { total: 0, stocks: [] };
   }
 }

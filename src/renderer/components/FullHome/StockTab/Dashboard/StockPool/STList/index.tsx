@@ -9,6 +9,7 @@ import { useState } from 'react';
 import { Stock } from '@/types/stock';
 import { useRequest, useThrottleFn } from 'ahooks';
 import { useCallback } from 'react';
+import { GetIndustryStocksFromTushare } from '@/services/tushare';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
 import classNames from 'classnames';
@@ -63,10 +64,32 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       }
     },
   });
+
+  const { run: runGetIndustryStocks } = useRequest(GetIndustryStocksFromTushare, {
+    throwOnError: true,
+    manual: true,
+    onSuccess: (data) => {
+      setStocks(data.stocks as Stock.DetailItem[]);
+      if (ftypes.length > 0) {
+        setFiltering(true);
+        runFilterStocks(
+          data.stocks.map((s: any) => s.secid),
+          ftypes,
+          fdays
+        );
+      }
+    },
+  });
   const { run: mayGetStocks } = useThrottleFn(
     (source: number, secid: string, ps: number) => {
       if (secid.length > 0) {
-        runGetStocks(source, secid, ps);
+        if (isSWIndustryCode(secid)) {
+          // 申万二级行业代码，使用 Tushare index_member 接口
+          runGetIndustryStocks(secid);
+        } else {
+          // 东财/同花顺板块代码，走原有逻辑
+          runGetStocks(source, secid, ps);
+        }
       }
     },
     {
@@ -85,19 +108,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
 
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
-      if (s === secid) {
-        return;
-      }
-      // 刷新数据
+      if (!s) return;
       setCurrentPage(1);
-      // mayGetStocks(s, pageSize);
       onChangeBK(t, s);
+      // 立即触发数据加载
+      setTimeout(() => {
+        mayGetStocks(kLineApiSourceSetting, s, 200);
+      }, 0);
     },
-    [secid]
+    [secid, kLineApiSourceSetting, mayGetStocks]
   );
 
   useEffect(() => {
-    mayGetStocks(kLineApiSourceSetting, secid, 200);
+    if (secid) {
+      mayGetStocks(kLineApiSourceSetting, secid, 200);
+    }
   }, [secid, kLineApiSourceSetting]);
 
   const updateFtypes = useCallback(
@@ -118,6 +143,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const filterStocks = ftypes.length ? stocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : stocks;
 
   // 格式化资金流向金额（元 -> 亿/万）
+  /** 判断 secid 是否为申万二级行业代码 */
+  const isSWIndustryCode = useCallback((s: string) => {
+    const code = s.split('.').pop() || s;
+    return code.startsWith('801') && code.length === 6;
+  }, []);
+
   const formatMoneyFlow = (val: number) => {
     const v = Number(val) || 0;
     if (Math.abs(v) >= 1e8) {
