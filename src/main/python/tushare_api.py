@@ -3632,15 +3632,26 @@ class StockSelector:
         return df
 
     def get_industry_kline(self, index_code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """获取行业指数K线"""
+        """获取申万行业指数K线 (sw_daily 接口，ID 327)
+
+        sw_daily 返回字段: ts_code, trade_date, open, close, high, low, change, pct_change, vol, amount
+        与 index_daily 字段基本一致，但 pct_chg 字段名为 pct_change
+        """
         cache_key = f"industry_kline_{index_code}_{start_date}_{end_date}"
         cached = read_cache(cache_key, max_age_hours=168)
         if cached is not None and isinstance(cached, pd.DataFrame):
             return cached
 
         try:
-            df = self.pro.sw_industry_daily(ts_code=index_code, start_date=start_date, end_date=end_date)
+            # 使用正确的接口名 sw_daily（申万行业指数日行情）
+            df = safe_api_call(self.pro.sw_daily, ts_code=index_code, start_date=start_date, end_date=end_date)
+            if isinstance(df, dict) and df.get("error"):
+                print(f"[WARN] sw_daily 接口错误 {index_code}: {df.get('error')}")
+                return None
             if df is not None and not df.empty:
+                # 统一字段名：sw_daily 用 pct_change，统一为 pct_chg 以兼容后续计算
+                if 'pct_change' in df.columns and 'pct_chg' not in df.columns:
+                    df = df.rename(columns={'pct_change': 'pct_chg'})
                 df = df.sort_values('trade_date').reset_index(drop=True)
                 write_cache(cache_key, df)
                 return df
@@ -3684,6 +3695,7 @@ class StockSelector:
     def calc_industry_trend_score(self, kline: pd.DataFrame) -> Dict:
         """计算行业趋势强度得分"""
         if kline is None or len(kline) < 60:
+            print(f"[DEBUG calc_industry_trend_score] K线不足: {len(kline) if kline else 0} 条（需>=60）")
             return {"total": 0, "ret_5d": 0, "ret_20d": 0, "ma_bull": False, "rs": 0}
 
         df = kline.copy()
@@ -3714,6 +3726,8 @@ class StockSelector:
         score += 25 if ma_bull else 0              # 均线多头25分
         score += 25 if ret_5d > 0 and ret_20d > 0 else 0  # 双正25分
 
+        print(f"[DEBUG calc_industry_trend_score] close={latest['close']:.2f}, ma5={latest['ma5']:.2f}, ma10={latest['ma10']:.2f}, ma20={latest['ma20']:.2f}, ma60={latest['ma60']:.2f}, ma_bull={ma_bull}, ret_5d={ret_5d:.2f}, ret_20d={ret_20d:.2f}, score={score}")
+
         return {
             "total": score,
             "ret_5d": round(ret_5d, 2),
@@ -3729,18 +3743,25 @@ class StockSelector:
         if config is None:
             config = IndustryFilterConfig()
 
+        print(f"[DEBUG filter_industries] 开始筛选，trade_date={trade_date}, config={config}")
+
         industries = self.get_l2_industries()
         if industries is None or industries.empty:
             print("[ERROR] 无法获取行业列表")
             return pd.DataFrame()
 
+        print(f"[DEBUG filter_industries] 获取到 {len(industries)} 个二级行业")
+
         # 计算K线起始日期
         end_dt = datetime.strptime(trade_date, "%Y%m%d")
         start_dt = end_dt - timedelta(days=120)
         start_date = start_dt.strftime("%Y%m%d")
+        print(f"[DEBUG filter_industries] K线查询范围: {start_date} ~ {trade_date}")
 
         results = []
         total = len(industries)
+        kline_fail_count = 0
+        trend_fail_count = 0
 
         for idx, (_, row) in enumerate(industries.iterrows()):
             code = row['index_code']
@@ -3752,10 +3773,18 @@ class StockSelector:
             # 获取行业K线
             kline = self.get_industry_kline(code, start_date, trade_date)
             if kline is None or len(kline) < 20:
+                kline_fail_count += 1
+                if kline is None:
+                    print(f"[DEBUG] {name}({code}): K线返回 None")
+                else:
+                    print(f"[DEBUG] {name}({code}): K线数据不足，仅 {len(kline)} 条（需>=20）")
                 continue
 
             # 计算趋势得分
             trend = self.calc_industry_trend_score(kline)
+            if trend['total'] == 0:
+                trend_fail_count += 1
+                print(f"[DEBUG] {name}({code}): 趋势得分=0，K线长度={len(kline)}")
 
             # 计算资金流入
             fund_flow = self.calc_industry_fund_flow(code, trade_date, config.fund_flow_days)
@@ -3771,20 +3800,52 @@ class StockSelector:
                 'kline': kline  # 保留K线供后续使用
             })
 
+        print(f"[DEBUG filter_industries] K线获取成功: {len(results)}/{total}, 失败: {kline_fail_count}, 趋势得分=0: {trend_fail_count}")
+
         df = pd.DataFrame(results)
         if df.empty:
+            print("[DEBUG filter_industries] 所有行业K线获取失败，返回空")
             return df
+
+        print("[DEBUG filter_industries] 原始数据前5行:")
+        print(df[['industry_name','trend_score','ret_5d','ma_bull','fund_flow']].head().to_string())
 
         # 资金流入排名
         df['fund_flow_rank'] = df['fund_flow'].rank(ascending=False, pct=True)
+        print(f"[DEBUG filter_industries] fund_flow 统计: min={df['fund_flow'].min():.2f}, max={df['fund_flow'].max():.2f}, mean={df['fund_flow'].mean():.2f}")
+        print(f"[DEBUG filter_industries] fund_flow_rank 统计: min={df['fund_flow_rank'].min():.4f}, max={df['fund_flow_rank'].max():.4f}")
+
+        # 分别检查每个过滤条件
+        cond1 = df['trend_score'] >= 40
+        cond2 = df['ret_5d'] >= config.min_return_5d
+        cond3 = df['fund_flow_rank'] <= config.fund_flow_rank_pct
+        cond4 = df['ma_bull'] if config.require_ma_bull else pd.Series([True] * len(df))
+        print(f"[DEBUG filter_industries] 过滤条件通过数: trend_score>=40:{cond1.sum()}, ret_5d>={config.min_return_5d}:{cond2.sum()}, fund_flow_rank<={config.fund_flow_rank_pct}:{cond3.sum()}, ma_bull:{cond4.sum()}")
 
         # 综合过滤条件
         filtered = df[
-            (df['trend_score'] >= 40) &                    # 趋势得分>=40
-            (df['ret_5d'] >= config.min_return_5d) &       # 5日涨幅达标
-            (df['fund_flow_rank'] <= config.fund_flow_rank_pct) &  # 资金流入前30%
-            (df['ma_bull'] if config.require_ma_bull else True)    # 均线多头(可选)
+            cond1 & cond2 & cond3 & cond4
         ].copy()
+
+        print(f"[DEBUG filter_industries] 过滤后: {len(filtered)}/{len(df)} 个行业通过")
+        if len(filtered) > 0:
+            print("[DEBUG filter_industries] 通过的行业:")
+            print(filtered[['industry_name','trend_score','ret_5d','ma_bull','fund_flow','fund_flow_rank']].to_string())
+        else:
+            # 打印未通过的原因分类
+            print("[DEBUG filter_industries] 未通过原因分析:")
+            for _, row in df.iterrows():
+                reasons = []
+                if row['trend_score'] < 40:
+                    reasons.append(f"trend_score={row['trend_score']:.1f}<40")
+                if row['ret_5d'] < config.min_return_5d:
+                    reasons.append(f"ret_5d={row['ret_5d']:.2f}<{config.min_return_5d}")
+                if row['fund_flow_rank'] > config.fund_flow_rank_pct:
+                    reasons.append(f"fund_flow_rank={row['fund_flow_rank']:.4f}>{config.fund_flow_rank_pct}")
+                if config.require_ma_bull and not row['ma_bull']:
+                    reasons.append("ma_bull=False")
+                if reasons:
+                    print(f"  - {row['industry_name']}: {', '.join(reasons)}")
 
         # 综合排序: 趋势得分*0.6 + 资金排名*0.4
         filtered['composite_score'] = (
