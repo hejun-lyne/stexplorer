@@ -14,6 +14,7 @@ import { useCallback } from 'react';
 import { useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
+import dayjs from 'dayjs';
 
 export interface BKListProps {
   type: BKType;
@@ -44,6 +45,9 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [currentPage, setCurrentPage] = useState(1);
   const [showList, setShowList] = useState<Stock.BanKuaiItem[]>([]);
   const [dataSource, setDataSource] = useState<'dc' | 'ths'>('dc');
+  const [industryFilterLoading, setIndustryFilterLoading] = useState(false);
+  const [filteredIndustries, setFilteredIndustries] = useState<any[]>([]);
+  const [displayMode, setDisplayMode] = useState<'boards' | 'industries'>('boards');
   const PAGE_SIZE = 50;
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
@@ -83,6 +87,25 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   }, []);
 
   useEffect(() => {
+    if (displayMode === 'industries') {
+      let list = [...filteredIndustries];
+      const keys = Object.keys(sortTypes);
+      if (keys.length === 1) {
+        const key = keys[0];
+        const t = sortTypes[key];
+        if (t !== 0) {
+          list = list.sort((a: any, b: any) => {
+            const left = Number(a[key]) || 0;
+            const right = Number(b[key]) || 0;
+            if (left === right) return 0;
+            return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+          });
+        }
+      }
+      setShowList(list as any);
+      return;
+    }
+
     let list = bankuais.filter((b) => {
       if (nameFilter && !b.name.includes(nameFilter)) return false;
       if (!filterMA20 && !filterMA40 && !filterMA60 && !filterRSI) return true;
@@ -118,7 +141,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       }
     }
     setShowList(list);
-  }, [bankuais, sortTypes, nameFilter, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults]);
+  }, [bankuais, sortTypes, nameFilter, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, filteredIndustries]);
 
   const totalPage = Math.max(1, Math.ceil(showList.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPage);
@@ -135,6 +158,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     setCurrentPage(1);
     currentIndexRef.current = 0;
     setTechProgress(0);
+    setDisplayMode('boards');
     runGetBankuais(kLineApiSourceSetting, type, pageSize, dataSource);
   }, [kLineApiSourceSetting, type, dataSource]);
   const loadMore = useCallback(() => {
@@ -142,6 +166,30 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     setPageSize(ps);
     mayGetBankuais(kLineApiSourceSetting, type, ps, dataSource);
   }, [kLineApiSourceSetting, type, pageSize, dataSource]);
+
+  const handleFilterIndustries = useCallback(async () => {
+    if (industryFilterLoading) return;
+    setIndustryFilterLoading(true);
+    try {
+      const today = dayjs().format('YYYYMMDD');
+      const result = await Services.Tushare.FilterIndustriesFromTushare(today, {
+        fund_flow_rank_pct: 0.3,
+        require_ma_bull: true,
+        min_return_5d: 1.0,
+      });
+      if (result.industries && result.industries.length > 0) {
+        setFilteredIndustries(result.industries);
+        setDisplayMode('industries');
+        setCurrentPage(1);
+      } else {
+        console.log('没有筛选出符合条件的行业');
+      }
+    } catch (e) {
+      console.error('行业筛选失败:', e);
+    } finally {
+      setIndustryFilterLoading(false);
+    }
+  }, [industryFilterLoading]);
 
   const onCalcTechIndicators = useCallback(async () => {
     if (techFilterLoading) {
@@ -244,6 +292,24 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           >
             刷新
           </Button>
+          {displayMode === 'boards' ? (
+            <Button
+              size="small"
+              onClick={handleFilterIndustries}
+              loading={industryFilterLoading}
+              style={{ marginLeft: 4 }}
+            >
+              行业筛选
+            </Button>
+          ) : (
+            <Button
+              size="small"
+              onClick={() => setDisplayMode('boards')}
+              style={{ marginLeft: 4 }}
+            >
+              返回板块
+            </Button>
+          )}
           <Button
             size="small"
             onClick={onCalcTechIndicators}
@@ -273,69 +339,126 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           )}
         </div>
       </div>
-      <Row className={styles.header}>
-        <Col span={4}>名字</Col>
-        <Col span={2}>
-          涨跌幅
-          <Button size="small" type="text" icon={sortTypes.zdf == 1 ? <CaretUpOutlined /> : sortTypes.zdf == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('zdf')} />
-        </Col>
-        <Col span={2}>
-          换手率
-          <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
-        </Col>
-        <Col span={2}>
-          上涨家数
-          <Button size="small" type="text" icon={sortTypes.szs == 1 ? <CaretUpOutlined /> : sortTypes.szs == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szs')} />
-        </Col>
-        <Col span={2}>
-          下跌家数
-          <Button size="small" type="text" icon={sortTypes.xds == 1 ? <CaretUpOutlined /> : sortTypes.xds == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('xds')} />
-        </Col>
-        <Col span={2}>
-          上涨比例
-          <Button size="small" type="text" icon={sortTypes.szbl == 1 ? <CaretUpOutlined /> : sortTypes.szbl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szbl')} />
-        </Col>
-        <Col span={3}>
-          今日主力净流入
-          <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
-        </Col>
-        <Col span={3}>
-          5日主力净流入
-          <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
-        </Col>
-        <Col span={1}><Checkbox checked={filterMA20} onChange={(e) => setFilterMA20(e.target.checked)} style={{ color: '#fff' }}>MA20</Checkbox></Col>
-        <Col span={1}><Checkbox checked={filterMA40} onChange={(e) => setFilterMA40(e.target.checked)} style={{ color: '#fff' }}>MA40</Checkbox></Col>
-        <Col span={1}><Checkbox checked={filterMA60} onChange={(e) => setFilterMA60(e.target.checked)} style={{ color: '#fff' }}>MA60</Checkbox></Col>
-        <Col span={1}><Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>RSI6</Checkbox></Col>
-      </Row>
+      {displayMode === 'boards' ? (
+        <Row className={styles.header}>
+          <Col span={4}>名字</Col>
+          <Col span={2}>
+            涨跌幅
+            <Button size="small" type="text" icon={sortTypes.zdf == 1 ? <CaretUpOutlined /> : sortTypes.zdf == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('zdf')} />
+          </Col>
+          <Col span={2}>
+            换手率
+            <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
+          </Col>
+          <Col span={2}>
+            上涨家数
+            <Button size="small" type="text" icon={sortTypes.szs == 1 ? <CaretUpOutlined /> : sortTypes.szs == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szs')} />
+          </Col>
+          <Col span={2}>
+            下跌家数
+            <Button size="small" type="text" icon={sortTypes.xds == 1 ? <CaretUpOutlined /> : sortTypes.xds == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('xds')} />
+          </Col>
+          <Col span={2}>
+            上涨比例
+            <Button size="small" type="text" icon={sortTypes.szbl == 1 ? <CaretUpOutlined /> : sortTypes.szbl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('szbl')} />
+          </Col>
+          <Col span={3}>
+            今日主力净流入
+            <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
+          </Col>
+          <Col span={3}>
+            5日主力净流入
+            <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
+          </Col>
+          <Col span={1}><Checkbox checked={filterMA20} onChange={(e) => setFilterMA20(e.target.checked)} style={{ color: '#fff' }}>MA20</Checkbox></Col>
+          <Col span={1}><Checkbox checked={filterMA40} onChange={(e) => setFilterMA40(e.target.checked)} style={{ color: '#fff' }}>MA40</Checkbox></Col>
+          <Col span={1}><Checkbox checked={filterMA60} onChange={(e) => setFilterMA60(e.target.checked)} style={{ color: '#fff' }}>MA60</Checkbox></Col>
+          <Col span={1}><Checkbox checked={filterRSI} onChange={(e) => setFilterRSI(e.target.checked)} style={{ color: '#fff' }}>RSI6</Checkbox></Col>
+        </Row>
+      ) : (
+        <Row className={styles.header}>
+          <Col span={5}>行业名称</Col>
+          <Col span={3}>
+            趋势得分
+            <Button size="small" type="text" icon={sortTypes.trend_score == 1 ? <CaretUpOutlined /> : sortTypes.trend_score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('trend_score')} />
+          </Col>
+          <Col span={3}>
+            5日涨幅
+            <Button size="small" type="text" icon={sortTypes.ret_5d == 1 ? <CaretUpOutlined /> : sortTypes.ret_5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('ret_5d')} />
+          </Col>
+          <Col span={3}>
+            20日涨幅
+            <Button size="small" type="text" icon={sortTypes.ret_20d == 1 ? <CaretUpOutlined /> : sortTypes.ret_20d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('ret_20d')} />
+          </Col>
+          <Col span={4}>
+            资金净流入(亿)
+            <Button size="small" type="text" icon={sortTypes.fund_flow == 1 ? <CaretUpOutlined /> : sortTypes.fund_flow == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('fund_flow')} />
+          </Col>
+          <Col span={3}>均线多头</Col>
+          <Col span={3}>
+            综合得分
+            <Button size="small" type="text" icon={sortTypes.composite_score == 1 ? <CaretUpOutlined /> : sortTypes.composite_score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('composite_score')} />
+          </Col>
+        </Row>
+      )}
       <div className={styles.table}>
         <div className={styles.table}>
-        {pageData.map((b, index) => (
-          <Row key={`${b.code}-${index}`} className={styles.row}>
-            <Col span={4} style={{ cursor: 'pointer' }} onClick={() => onOpenBKStocks(type, b.secid)}>
-              {b.name}
-            </Col>
-            <Col span={2} style={{ cursor: 'pointer' }} className={Utils.GetValueColor(b.zdf).textClass} onClick={() => onOpenBK(b.secid, b.name)}>
-              {!isNaN(b.zdf) ? b.zdf.toFixed(2) + '%' : '--'}
-            </Col>
-            <Col span={2}>{isNaN(b.hsl) ? '--' : parseFloat(b.hsl).toFixed(2) + '%'}</Col>
-            <Col span={2} className="text-up">{b.szs}</Col>
-            <Col span={2} className="text-down">{b.xds}</Col>
-            <Col span={2} className={Utils.GetValueColor(b.szs - b.xds).textClass}>
-              {((b.szs / (b.szs + b.xds)) * 100).toFixed(2) + '%'}
-            </Col>
-            <Col span={3} className={Utils.GetValueColor(b.mainIn).textClass}>
-              {formatMoneyFlow(b.mainIn)}
-            </Col>
-            <Col span={3} className={Utils.GetValueColor(b.mainIn5d).textClass}>
-              {formatMoneyFlow(b.mainIn5d)}
-            </Col>
-            <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma20 ? '✓' : '✗') : ''}</Col>
-            <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma40 ? '✓' : '✗') : ''}</Col>
-            <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma60 ? '✓' : '✗') : ''}</Col>
-            <Col span={1}>{techPending[b.secid] ? '分析中' : rsiResults[b.secid] ? (rsiResults[b.secid].isOversold ? '✓' : '✗') : ''}</Col>
-          </Row>
-        ))}
+        {displayMode === 'boards' ? (
+          pageData.map((b, index) => (
+            <Row key={`${b.code}-${index}`} className={styles.row}>
+              <Col span={4} style={{ cursor: 'pointer' }} onClick={() => onOpenBKStocks(type, b.secid)}>
+                {b.name}
+              </Col>
+              <Col span={2} style={{ cursor: 'pointer' }} className={Utils.GetValueColor(b.zdf).textClass} onClick={() => onOpenBK(b.secid, b.name)}>
+                {!isNaN(b.zdf) ? b.zdf.toFixed(2) + '%' : '--'}
+              </Col>
+              <Col span={2}>{isNaN(b.hsl) ? '--' : parseFloat(b.hsl).toFixed(2) + '%'}</Col>
+              <Col span={2} className="text-up">{b.szs}</Col>
+              <Col span={2} className="text-down">{b.xds}</Col>
+              <Col span={2} className={Utils.GetValueColor(b.szs - b.xds).textClass}>
+                {((b.szs / (b.szs + b.xds)) * 100).toFixed(2) + '%'}
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(b.mainIn).textClass}>
+                {formatMoneyFlow(b.mainIn)}
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(b.mainIn5d).textClass}>
+                {formatMoneyFlow(b.mainIn5d)}
+              </Col>
+              <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma20 ? '✓' : '✗') : ''}</Col>
+              <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma40 ? '✓' : '✗') : ''}</Col>
+              <Col span={1}>{techPending[b.secid] ? '分析中' : maResults[b.secid] ? (maResults[b.secid].ma60 ? '✓' : '✗') : ''}</Col>
+              <Col span={1}>{techPending[b.secid] ? '分析中' : rsiResults[b.secid] ? (rsiResults[b.secid].isOversold ? '✓' : '✗') : ''}</Col>
+            </Row>
+          ))
+        ) : (
+          pageData.map((b: any, index: number) => (
+            <Row key={`${b.industry_code}-${index}`} className={styles.row}>
+              <Col span={5}>
+                <Tooltip title={b.industry_code}>
+                  <span>{b.industry_name}</span>
+                </Tooltip>
+              </Col>
+              <Col span={3} className={b.trend_score >= 60 ? 'text-up' : b.trend_score >= 40 ? '' : 'text-down'}>
+                {b.trend_score?.toFixed?.(1) ?? b.trend_score}
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(b.ret_5d).textClass}>
+                {b.ret_5d?.toFixed?.(2) ?? b.ret_5d}%
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(b.ret_20d).textClass}>
+                {b.ret_20d?.toFixed?.(2) ?? b.ret_20d}%
+              </Col>
+              <Col span={4} className={Utils.GetValueColor(b.fund_flow).textClass}>
+                {formatMoneyFlow(b.fund_flow * 1e8)}
+              </Col>
+              <Col span={3}>
+                {b.ma_bull ? <span className="text-up">✓ 多头排列</span> : <span className="text-down">✗ 非多头</span>}
+              </Col>
+              <Col span={3}>
+                {b.composite_score?.toFixed?.(1) ?? b.composite_score}
+              </Col>
+            </Row>
+          ))
+        )}
         {/* ...分页按钮... */}
         </div>
       </div>

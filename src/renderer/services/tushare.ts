@@ -1124,3 +1124,221 @@ export async function FromTushare(secid: string): Promise<any> {
     return null;
   }
 }
+
+// ==================== 选股模块配置类型 ====================
+
+export interface IndustryFilterConfig {
+  /** 资金流入计算天数，默认 5 */
+  fund_flow_days?: number;
+  /** 资金流入排名百分比(前30%)，默认 0.3 */
+  fund_flow_rank_pct?: number;
+  /** 最小5日涨幅(%)，默认 2.0 */
+  min_return_5d?: number;
+  /** 最小相对强弱，默认 1.1 */
+  min_rs?: number;
+  /** 是否要求均线多头排列，默认 true */
+  require_ma_bull?: boolean;
+}
+
+export interface StockFilterConfig {
+  /** 行业内选取龙头数量，默认 5 */
+  leader_top_n?: number;
+  /** 最小流通市值(亿)，默认 20 */
+  min_circ_mv?: number;
+  /** 最大流通市值(亿)，默认 800 */
+  max_circ_mv?: number;
+  /** 最小日均成交额(万)，默认 5000 */
+  min_avg_amount?: number;
+  /** 最小扣非净利润增速(%)，默认 -30 */
+  min_profit_growth?: number;
+  /** 距近期高点最大回撤(%)，默认 15 */
+  max_decline_from_high?: number;
+  /** 是否要求股价在年线上方，默认 false */
+  require_above_ma250?: boolean;
+}
+
+export interface BuySignalConfig {
+  /** 策略类型: breakout(突破)/callback(回调)/both，默认 breakout */
+  strategy?: string;
+  /** 突破时量比要求，默认 1.5 */
+  breakout_volume_ratio?: number;
+  /** 回调至哪条均线，默认 ma10 */
+  callback_to_ma?: string;
+  /** 最大回调深度(%)，默认 8 */
+  max_callback_depth?: number;
+}
+
+// ==================== 选股模块 - 步骤拆分接口 ====================
+
+/**
+ * 步骤1: 筛选值得投资的二级行业
+ *
+ * 基于趋势得分、资金流入、均线多头排列综合筛选，返回符合条件的行业列表。
+ * 可独立调用，用于观察当前哪些行业处于强势状态。
+ *
+ * @param tradeDate 交易日期(YYYY-MM-DD 或 YYYYMMDD)
+ * @param config 行业筛选配置
+ * @returns { industries: [...], count: N, trade_date: "..." }
+ */
+export async function FilterIndustriesFromTushare(
+  tradeDate: string,
+  config?: IndustryFilterConfig
+): Promise<any> {
+  try {
+    const result = await callTushare('filter_industries', {
+      trade_date: tradeDate.replace(/-/g, ''),
+      ...config,
+    });
+    if (result.error) {
+      console.error('行业筛选失败:', result.error);
+      return { industries: [], count: 0 };
+    }
+    return result;
+  } catch (error) {
+    logError(error, 'FilterIndustriesFromTushare', '行业筛选失败');
+    return { industries: [], count: 0 };
+  }
+}
+
+/**
+ * 步骤2: 识别某行业的龙头股票
+ *
+ * 对指定行业的所有成分股计算龙头得分（涨幅、资金流入、涨停次数、行业相关性），
+ * 按得分降序返回前 N 只。可独立调用，用于观察某行业内的强势股。
+ *
+ * @param industryCode 行业指数代码，如 "801010.SI"（申万二级）
+ * @param tradeDate 交易日期
+ * @param topN 返回前 N 只龙头，默认 10
+ * @returns { leaders: [...], count: N, industry_code: "..." }
+ */
+export async function GetIndustryLeadersFromTushare(
+  industryCode: string,
+  tradeDate: string,
+  topN?: number
+): Promise<any> {
+  try {
+    const result = await callTushare('get_industry_leaders', {
+      industry_code: industryCode,
+      trade_date: tradeDate.replace(/-/g, ''),
+      top_n: topN || 10,
+    });
+    if (result.error) {
+      console.error('行业龙头识别失败:', result.error);
+      return { leaders: [], count: 0 };
+    }
+    return result;
+  } catch (error) {
+    logError(error, 'GetIndustryLeadersFromTushare', '行业龙头识别失败');
+    return { leaders: [], count: 0 };
+  }
+}
+
+/**
+ * 步骤3: 对股票列表进行排雷过滤
+ *
+ * 对传入的股票列表逐一检查风险指标：流通市值、日均成交额、业绩增速、
+ * 距高点回撤、年线位置。返回每只股票是否通过及未通过原因。
+ * 可独立调用，用于对自选股或观察列表进行风险排查。
+ *
+ * @param tradeDate 交易日期
+ * @param stocks ts_code 数组，如 ["000001.SZ", "600000.SH"]
+ * @param config 个股筛选配置
+ * @returns { results: [{ts_code, passed, reason}], count, passed_count }
+ */
+export async function RiskFilterStocksFromTushare(
+  tradeDate: string,
+  stocks: string[],
+  config?: StockFilterConfig
+): Promise<any> {
+  try {
+    const result = await callTushare('risk_filter_stocks', {
+      trade_date: tradeDate.replace(/-/g, ''),
+      stocks,
+      ...config,
+    });
+    if (result.error) {
+      console.error('排雷过滤失败:', result.error);
+      return { results: [], count: 0, passed_count: 0 };
+    }
+    return result;
+  } catch (error) {
+    logError(error, 'RiskFilterStocksFromTushare', '排雷过滤失败');
+    return { results: [], count: 0, passed_count: 0 };
+  }
+}
+
+/**
+ * 步骤4: 对股票列表检查买入信号
+ *
+ * 对传入的股票列表检查突破信号（放量突破近期高点）或回调信号（回调至均线附近）。
+ * 返回每只股票是否有信号、信号类型及信号详情。
+ * 可独立调用，用于对候选股票进行择时判断。
+ *
+ * @param tradeDate 交易日期
+ * @param stocks ts_code 数组
+ * @param config 买入信号配置
+ * @returns { results: [{ts_code, has_signal, signal_type, signal_detail}], count, signal_count }
+ */
+export async function CheckBuySignalsFromTushare(
+  tradeDate: string,
+  stocks: string[],
+  config?: BuySignalConfig
+): Promise<any> {
+  try {
+    const result = await callTushare('check_buy_signals', {
+      trade_date: tradeDate.replace(/-/g, ''),
+      stocks,
+      ...config,
+    });
+    if (result.error) {
+      console.error('买入信号检查失败:', result.error);
+      return { results: [], count: 0, signal_count: 0 };
+    }
+    return result;
+  } catch (error) {
+    logError(error, 'CheckBuySignalsFromTushare', '买入信号检查失败');
+    return { results: [], count: 0, signal_count: 0 };
+  }
+}
+
+/**
+ * 完整选股流程: 行业筛选 -> 龙头识别 -> 排雷过滤 -> 择时信号
+ *
+ * 一键执行全部步骤，返回带 final_score 的最终候选列表。
+ * 适合每日收盘后自动执行或手动一键选股。
+ *
+ * @param tradeDate 交易日期
+ * @param industryConfig 行业筛选配置
+ * @param stockConfig 个股筛选配置
+ * @param buyConfig 买入信号配置
+ * @param topIndustries 选取前 N 个行业，默认 5
+ * @param topStocksPerIndustry 每个行业选取前 N 只，默认 3
+ * @returns { results: [...], count: N, trade_date: "..." }
+ */
+export async function SelectStocksFromTushare(
+  tradeDate: string,
+  industryConfig?: IndustryFilterConfig,
+  stockConfig?: StockFilterConfig,
+  buyConfig?: BuySignalConfig,
+  topIndustries?: number,
+  topStocksPerIndustry?: number
+): Promise<any> {
+  try {
+    const result = await callTushare('select_stocks', {
+      trade_date: tradeDate.replace(/-/g, ''),
+      industry_config: industryConfig || {},
+      stock_config: stockConfig || {},
+      buy_config: buyConfig || {},
+      top_industries: topIndustries || 5,
+      top_stocks_per_industry: topStocksPerIndustry || 3,
+    });
+    if (result.error) {
+      console.error('选股失败:', result.error);
+      return { results: [], count: 0 };
+    }
+    return result;
+  } catch (error) {
+    logError(error, 'SelectStocksFromTushare', '选股失败');
+    return { results: [], count: 0 };
+  }
+}

@@ -19,6 +19,7 @@ export interface BKStockMonitorProps {
   area?: { start: string; end: string } | null;
 }
 
+
 const BKStockMonitor: React.FC<BKStockMonitorProps> = React.memo(
   ({ secids, active, markdate, ktype, mtype, moveTop, remove, openStock, range, area }) => {
     const [shownList, setShowList] = useState<string[]>([]);
