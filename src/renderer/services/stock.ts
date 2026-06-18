@@ -1772,7 +1772,8 @@ export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, 
   if (source === Enums.FundApiType.Akshare) {
     result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
   } else if (source === Enums.FundApiType.Tushare) {
-    result = await TushareAPI.GetBankuaiStocksFromTushare(secid);
+
+    result = await TushareAPI.GetBankuaiStocksFromTushare(secid, dayjs().subtract(1, 'day').format('YYYYMMDD'));
   } else {
     result = await GetBankuaiStocksFromEastmoney(secid, count);
   }
