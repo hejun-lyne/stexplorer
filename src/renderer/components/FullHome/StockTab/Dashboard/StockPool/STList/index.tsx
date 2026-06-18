@@ -9,13 +9,19 @@ import { useState } from 'react';
 import { Stock } from '@/types/stock';
 import { useRequest, useThrottleFn } from 'ahooks';
 import { useCallback } from 'react';
-import { GetIndustryStocksFromTushare } from '@/services/tushare';
+import {
+  GetIndustryStocksFromTushare,
+  GetIndustryLeadersFromTushare,
+  RiskFilterStocksFromTushare,
+  CheckBuySignalsFromTushare,
+} from '@/services/tushare';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
 import classNames from 'classnames';
 import { batch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
+import dayjs from 'dayjs';
 
 export interface STListProps {
   industries: Stock.BanKuaiItem[];
@@ -37,6 +43,33 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [nameFilter, setNameFilter] = useState('');
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
   const [showList, setShowList] = useState<Stock.DetailItem[]>([]);
+
+  // 选股流程状态
+  const [displayMode, setDisplayMode] = useState<'stocks' | 'leaders' | 'risk' | 'signals'>('stocks');
+
+  // 龙头股识别
+  const [leaderLoading, setLeaderLoading] = useState(false);
+  const [leaderData, setLeaderData] = useState<any[]>([]);
+  const [leaderDisplayCount, setLeaderDisplayCount] = useState(0);
+  const [leaderProgress, setLeaderProgress] = useState(0);
+  const isLeaderPausedRef = React.useRef(false);
+  const leaderIndexRef = React.useRef(0);
+
+  // 排雷过滤
+  const [riskLoading, setRiskLoading] = useState(false);
+  const [riskData, setRiskData] = useState<any[]>([]);
+  const [riskDisplayCount, setRiskDisplayCount] = useState(0);
+  const [riskProgress, setRiskProgress] = useState(0);
+  const isRiskPausedRef = React.useRef(false);
+  const riskIndexRef = React.useRef(0);
+
+  // 择时信号
+  const [signalLoading, setSignalLoading] = useState(false);
+  const [signalData, setSignalData] = useState<any[]>([]);
+  const [signalDisplayCount, setSignalDisplayCount] = useState(0);
+  const [signalProgress, setSignalProgress] = useState(0);
+  const isSignalPausedRef = React.useRef(false);
+  const signalIndexRef = React.useRef(0);
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
@@ -106,12 +139,229 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setCurrentPage(page);
   }, []);
 
+  // ========== 龙头股识别 ==========
+  const handleFilterLeaders = useCallback(async () => {
+    if (leaderLoading) {
+      isLeaderPausedRef.current = true;
+      return;
+    }
+    if (!secid) {
+      console.log('[龙头股] 请先选择一个板块/行业');
+      return;
+    }
+
+    if (leaderIndexRef.current === 0 || leaderIndexRef.current >= leaderData.length) {
+      setLeaderData([]);
+      setLeaderDisplayCount(0);
+      leaderIndexRef.current = 0;
+    }
+
+    isLeaderPausedRef.current = false;
+    setLeaderLoading(true);
+    setLeaderProgress(0);
+    setDisplayMode('leaders');
+    setCurrentPage(1);
+
+    try {
+      const today = dayjs().format('YYYYMMDD');
+      // 如果是申万行业代码，直接传入；否则需要查找映射（简化处理：先尝试直接传入）
+      const industryCode = isSWIndustryCode(secid) ? secid.split('.').pop() || secid : secid;
+      console.log(`[龙头股] 开始识别 ${industryCode} 的龙头...`);
+
+      const result = await GetIndustryLeadersFromTushare(industryCode, today, 20);
+      if (!result.leaders || result.leaders.length === 0) {
+        console.log('[龙头股] 没有识别到龙头股票');
+        setLeaderLoading(false);
+        return;
+      }
+
+      const allData = result.leaders;
+      console.log(`[龙头股] 获取到 ${allData.length} 只候选龙头，开始显示...`);
+      setLeaderData(allData);
+
+      const batchSize = 2;
+      const total = allData.length;
+      for (let i = leaderIndexRef.current; i < total; i += batchSize) {
+        if (isLeaderPausedRef.current) {
+          leaderIndexRef.current = i;
+          break;
+        }
+        const end = Math.min(i + batchSize, total);
+        setLeaderDisplayCount(end);
+        leaderIndexRef.current = end;
+        setLeaderProgress(Math.round((end / total) * 100));
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      if (!isLeaderPausedRef.current) {
+        leaderIndexRef.current = 0;
+        setLeaderProgress(100);
+        console.log(`[龙头股] 完成，共 ${allData.length} 只候选龙头`);
+      }
+    } catch (e) {
+      console.error('龙头股识别失败:', e);
+    } finally {
+      setLeaderLoading(false);
+    }
+  }, [leaderLoading, leaderData.length, secid]);
+
+  // ========== 排雷过滤 ==========
+  const handleRiskFilter = useCallback(async () => {
+    if (riskLoading) {
+      isRiskPausedRef.current = true;
+      return;
+    }
+    // 获取当前显示的股票列表的 ts_code
+    const currentStocks = displayMode === 'leaders'
+      ? leaderData.slice(0, leaderDisplayCount).map((d: any) => d.ts_code)
+      : stocks.map((s) => {
+          const code = s.secid.split('.').pop() || s.secid;
+          return code.startsWith('6') ? `${code}.SH` : `${code}.SZ`;
+        });
+
+    if (currentStocks.length === 0) {
+      console.log('[排雷] 没有可排雷的股票');
+      return;
+    }
+
+    if (riskIndexRef.current === 0 || riskIndexRef.current >= riskData.length) {
+      setRiskData([]);
+      setRiskDisplayCount(0);
+      riskIndexRef.current = 0;
+    }
+
+    isRiskPausedRef.current = false;
+    setRiskLoading(true);
+    setRiskProgress(0);
+    setDisplayMode('risk');
+    setCurrentPage(1);
+
+    try {
+      const today = dayjs().format('YYYYMMDD');
+      console.log(`[排雷] 开始对 ${currentStocks.length} 只股票排雷...`);
+
+      const result = await RiskFilterStocksFromTushare(today, currentStocks, {
+        min_circ_mv: 30,
+        max_circ_mv: 600,
+        max_decline_from_high: 12,
+      });
+      if (!result.results || result.results.length === 0) {
+        console.log('[排雷] 排雷结果为空');
+        setRiskLoading(false);
+        return;
+      }
+
+      const allData = result.results;
+      setRiskData(allData);
+
+      const batchSize = 3;
+      const total = allData.length;
+      for (let i = riskIndexRef.current; i < total; i += batchSize) {
+        if (isRiskPausedRef.current) {
+          riskIndexRef.current = i;
+          break;
+        }
+        const end = Math.min(i + batchSize, total);
+        setRiskDisplayCount(end);
+        riskIndexRef.current = end;
+        setRiskProgress(Math.round((end / total) * 100));
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      if (!isRiskPausedRef.current) {
+        riskIndexRef.current = 0;
+        setRiskProgress(100);
+        console.log(`[排雷] 完成，通过: ${allData.filter((d: any) => d.passed).length}/${allData.length}`);
+      }
+    } catch (e) {
+      console.error('排雷过滤失败:', e);
+    } finally {
+      setRiskLoading(false);
+    }
+  }, [riskLoading, riskData.length, displayMode, leaderData, leaderDisplayCount, stocks]);
+
+  // ========== 择时信号 ==========
+  const handleCheckSignals = useCallback(async () => {
+    if (signalLoading) {
+      isSignalPausedRef.current = true;
+      return;
+    }
+    // 获取当前已通过排雷的股票，或当前显示的股票
+    const currentStocks = displayMode === 'risk'
+      ? riskData.filter((d: any) => d.passed).map((d: any) => d.ts_code)
+      : displayMode === 'leaders'
+        ? leaderData.slice(0, leaderDisplayCount).map((d: any) => d.ts_code)
+        : stocks.map((s) => {
+            const code = s.secid.split('.').pop() || s.secid;
+            return code.startsWith('6') ? `${code}.SH` : `${code}.SZ`;
+          });
+
+    if (currentStocks.length === 0) {
+      console.log('[择时] 没有可检查的股票');
+      return;
+    }
+
+    if (signalIndexRef.current === 0 || signalIndexRef.current >= signalData.length) {
+      setSignalData([]);
+      setSignalDisplayCount(0);
+      signalIndexRef.current = 0;
+    }
+
+    isSignalPausedRef.current = false;
+    setSignalLoading(true);
+    setSignalProgress(0);
+    setDisplayMode('signals');
+    setCurrentPage(1);
+
+    try {
+      const today = dayjs().format('YYYYMMDD');
+      console.log(`[择时] 开始对 ${currentStocks.length} 只股票检查信号...`);
+
+      const result = await CheckBuySignalsFromTushare(today, currentStocks, {
+        strategy: 'both',
+        breakout_volume_ratio: 1.5,
+      });
+      if (!result.results || result.results.length === 0) {
+        console.log('[择时] 信号检查结果为空');
+        setSignalLoading(false);
+        return;
+      }
+
+      const allData = result.results;
+      setSignalData(allData);
+
+      const batchSize = 3;
+      const total = allData.length;
+      for (let i = signalIndexRef.current; i < total; i += batchSize) {
+        if (isSignalPausedRef.current) {
+          signalIndexRef.current = i;
+          break;
+        }
+        const end = Math.min(i + batchSize, total);
+        setSignalDisplayCount(end);
+        signalIndexRef.current = end;
+        setSignalProgress(Math.round((end / total) * 100));
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      if (!isSignalPausedRef.current) {
+        signalIndexRef.current = 0;
+        setSignalProgress(100);
+        console.log(`[择时] 完成，有信号: ${allData.filter((d: any) => d.has_signal).length}/${allData.length}`);
+      }
+    } catch (e) {
+      console.error('择时信号检查失败:', e);
+    } finally {
+      setSignalLoading(false);
+    }
+  }, [signalLoading, signalData.length, displayMode, riskData, leaderData, leaderDisplayCount, stocks]);
+
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
       if (!s) return;
       setCurrentPage(1);
+      setDisplayMode('stocks');
       onChangeBK(t, s);
-      // 立即触发数据加载
       setTimeout(() => {
         mayGetStocks(kLineApiSourceSetting, s, 200);
       }, 0);
@@ -184,6 +434,54 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   }, [sortTypes]);
 
   useLayoutEffect(() => {
+    if (displayMode === 'leaders') {
+      let list = leaderData.slice(0, leaderDisplayCount);
+      const keys = Object.keys(sortTypes);
+      if (keys.length === 1) {
+        list = list.sort((a: any, b: any) => {
+          const left = Number(a[keys[0]]) || 0;
+          const right = Number(b[keys[0]]) || 0;
+          const t = sortTypes[keys[0]];
+          if (left === right) return 0;
+          return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+        });
+      }
+      setShowList(list as any);
+      return;
+    }
+
+    if (displayMode === 'risk') {
+      let list = riskData.slice(0, riskDisplayCount);
+      const keys = Object.keys(sortTypes);
+      if (keys.length === 1) {
+        list = list.sort((a: any, b: any) => {
+          const left = Number(a[keys[0]]) || 0;
+          const right = Number(b[keys[0]]) || 0;
+          const t = sortTypes[keys[0]];
+          if (left === right) return 0;
+          return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+        });
+      }
+      setShowList(list as any);
+      return;
+    }
+
+    if (displayMode === 'signals') {
+      let list = signalData.slice(0, signalDisplayCount);
+      const keys = Object.keys(sortTypes);
+      if (keys.length === 1) {
+        list = list.sort((a: any, b: any) => {
+          const left = Number(a[keys[0]]) || 0;
+          const right = Number(b[keys[0]]) || 0;
+          const t = sortTypes[keys[0]];
+          if (left === right) return 0;
+          return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+        });
+      }
+      setShowList(list as any);
+      return;
+    }
+
     let list = filterStocks.filter((s) => {
       if (nameFilter && !s.name.includes(nameFilter)) return false;
       return true;
@@ -194,7 +492,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
     setShowList(list);
     setCurrentPage(1);
-  }, [filterStocks, sortTypes, nameFilter, sortItems]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount]);
   return (
     <>
       <div className={classNames(styles.header, styles.actbar)}>
@@ -246,58 +544,264 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           />
           &nbsp;
           {filtering && <span>筛选中...</span>}
+          <Button
+            size="small"
+            onClick={handleFilterLeaders}
+            loading={leaderLoading && leaderProgress === 0}
+            style={{ marginLeft: 4 }}
+          >
+            龙头识别
+          </Button>
+          <Button
+            size="small"
+            onClick={handleRiskFilter}
+            loading={riskLoading && riskProgress === 0}
+            style={{ marginLeft: 4 }}
+          >
+            排雷
+          </Button>
+          <Button
+            size="small"
+            onClick={handleCheckSignals}
+            loading={signalLoading && signalProgress === 0}
+            style={{ marginLeft: 4 }}
+          >
+            择时
+          </Button>
+          {displayMode !== 'stocks' && (
+            <Button
+              size="small"
+              onClick={() => setDisplayMode('stocks')}
+              style={{ marginLeft: 4 }}
+            >
+              返回股票
+            </Button>
+          )}
         </div>
       </div>
-      <Row className={styles.header}>
-        <Col span={3}>名字</Col>
-        <Col span={3}>最新价</Col>
-        <Col span={3}>涨跌额</Col>
-        <Col span={3}>
-          涨跌幅
-          <Button size="small" type="text" icon={sortTypes.zdf == 1 ? <CaretUpOutlined /> : sortTypes.zdf == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('zdf')} />
-        </Col>
-        <Col span={3}>
-          流通市值
-          <Button size="small" type="text" icon={sortTypes.lt == 1 ? <CaretUpOutlined /> : sortTypes.lt == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('lt')} />
-        </Col>
-        <Col span={3}>
-          换手率
-          <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
-        </Col>
-        <Col span={3}>
-          当日主力净流入
-          <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
-        </Col>
-        <Col span={3}>
-          5日主力净流入
-          <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
-        </Col>
-      </Row>
+      {displayMode === 'stocks' ? (
+        <Row className={styles.header}>
+          <Col span={3}>名字</Col>
+          <Col span={3}>最新价</Col>
+          <Col span={3}>涨跌额</Col>
+          <Col span={3}>
+            涨跌幅
+            <Button size="small" type="text" icon={sortTypes.zdf == 1 ? <CaretUpOutlined /> : sortTypes.zdf == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('zdf')} />
+          </Col>
+          <Col span={3}>
+            流通市值
+            <Button size="small" type="text" icon={sortTypes.lt == 1 ? <CaretUpOutlined /> : sortTypes.lt == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('lt')} />
+          </Col>
+          <Col span={3}>
+            换手率
+            <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
+          </Col>
+          <Col span={3}>
+            当日主力净流入
+            <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
+          </Col>
+          <Col span={3}>
+            5日主力净流入
+            <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
+          </Col>
+        </Row>
+      ) : displayMode === 'leaders' ? (
+        <Row className={styles.header}>
+          <Col span={4}>股票代码</Col>
+          <Col span={3}>
+            龙头得分
+            <Button size="small" type="text" icon={sortTypes.leader_score == 1 ? <CaretUpOutlined /> : sortTypes.leader_score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('leader_score')} />
+          </Col>
+          <Col span={3}>
+            5日涨幅
+            <Button size="small" type="text" icon={sortTypes.ret_5d == 1 ? <CaretUpOutlined /> : sortTypes.ret_5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('ret_5d')} />
+          </Col>
+          <Col span={3}>
+            20日涨幅
+            <Button size="small" type="text" icon={sortTypes.ret_20d == 1 ? <CaretUpOutlined /> : sortTypes.ret_20d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('ret_20d')} />
+          </Col>
+          <Col span={3}>
+            资金流入(百万)
+            <Button size="small" type="text" icon={sortTypes.net_inflow == 1 ? <CaretUpOutlined /> : sortTypes.net_inflow == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('net_inflow')} />
+          </Col>
+          <Col span={2}>涨停次数</Col>
+          <Col span={3}>
+            换手率
+            <Button size="small" type="text" icon={sortTypes.turnover == 1 ? <CaretUpOutlined /> : sortTypes.turnover == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('turnover')} />
+          </Col>
+          <Col span={3}>
+            行业相关性
+            <Button size="small" type="text" icon={sortTypes.industry_corr == 1 ? <CaretUpOutlined /> : sortTypes.industry_corr == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('industry_corr')} />
+          </Col>
+        </Row>
+      ) : displayMode === 'risk' ? (
+        <Row className={styles.header}>
+          <Col span={5}>股票代码</Col>
+          <Col span={3}>状态</Col>
+          <Col span={4}>未通过原因</Col>
+          <Col span={4}>
+            流通市值
+            <Button size="small" type="text" icon={sortTypes.circ_mv == 1 ? <CaretUpOutlined /> : sortTypes.circ_mv == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('circ_mv')} />
+          </Col>
+          <Col span={4}>
+            日均成交额
+            <Button size="small" type="text" icon={sortTypes.avg_amount == 1 ? <CaretUpOutlined /> : sortTypes.avg_amount == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('avg_amount')} />
+          </Col>
+          <Col span={4}>
+            距高点回撤
+            <Button size="small" type="text" icon={sortTypes.decline_from_high == 1 ? <CaretUpOutlined /> : sortTypes.decline_from_high == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('decline_from_high')} />
+          </Col>
+        </Row>
+      ) : (
+        <Row className={styles.header}>
+          <Col span={5}>股票代码</Col>
+          <Col span={3}>状态</Col>
+          <Col span={4}>信号类型</Col>
+          <Col span={4}>信号强度</Col>
+          <Col span={4}>
+            量比
+            <Button size="small" type="text" icon={sortTypes.volume_ratio == 1 ? <CaretUpOutlined /> : sortTypes.volume_ratio == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('volume_ratio')} />
+          </Col>
+          <Col span={4}>
+            回调深度
+            <Button size="small" type="text" icon={sortTypes.callback_depth == 1 ? <CaretUpOutlined /> : sortTypes.callback_depth == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('callback_depth')} />
+          </Col>
+        </Row>
+      )}
       <div className={classNames(styles.table, styles.moreheader)}>
-        {showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
-          <Row key={s.code} className={styles.row}>
-            <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
-              {s.name}
-            </Col>
-            <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
-              {s.zx.toFixed(2)}
-            </Col>
-            <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
-              {(s.zdd).toFixed(2)}
-            </Col>
-            <Col span={3} className={Utils.GetValueColor(s.zdf).textClass}>
-              {s.zdf.toFixed(2) + '%'}
-            </Col>
-            <Col span={3}>{(s.lt).toFixed(2) + '亿'}</Col>
-            <Col span={3}>{(s.hsl).toFixed(2) + '%'}</Col>
-            <Col span={3} className={Utils.GetValueColor((s as any).main_in).textClass}>
-              {formatMoneyFlow((s as any).main_in)}
-            </Col>
-            <Col span={3} className={Utils.GetValueColor((s as any).main_in_5d).textClass}>
-              {formatMoneyFlow((s as any).main_in_5d)}
-            </Col>
-          </Row>
-        ))}
+        {displayMode === 'stocks' ? (
+          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
+            <Row key={s.code} className={styles.row}>
+              <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
+                {s.name}
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
+                {s.zx.toFixed(2)}
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
+                {(s.zdd).toFixed(2)}
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(s.zdf).textClass}>
+                {s.zdf.toFixed(2) + '%'}
+              </Col>
+              <Col span={3}>{(s.lt).toFixed(2) + '亿'}</Col>
+              <Col span={3}>{(s.hsl).toFixed(2) + '%'}</Col>
+              <Col span={3} className={Utils.GetValueColor((s as any).main_in).textClass}>
+                {formatMoneyFlow((s as any).main_in)}
+              </Col>
+              <Col span={3} className={Utils.GetValueColor((s as any).main_in_5d).textClass}>
+                {formatMoneyFlow((s as any).main_in_5d)}
+              </Col>
+            </Row>
+          ))
+        ) : displayMode === 'leaders' ? (
+          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => (
+            <Row key={s.ts_code} className={styles.row}>
+              <Col span={4}>
+                <span>{s.ts_code}</span>
+              </Col>
+              <Col span={3} className={s.leader_score >= 70 ? 'text-up' : s.leader_score >= 50 ? '' : 'text-down'}>
+                {s.leader_score?.toFixed?.(1) ?? s.leader_score}
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(s.ret_5d).textClass}>
+                {s.ret_5d?.toFixed?.(2) ?? s.ret_5d}%
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(s.ret_20d).textClass}>
+                {s.ret_20d?.toFixed?.(2) ?? s.ret_20d}%
+              </Col>
+              <Col span={3} className={Utils.GetValueColor(s.net_inflow).textClass}>
+                {s.net_inflow?.toFixed?.(2) ?? s.net_inflow}M
+              </Col>
+              <Col span={2}>
+                {s.limit_count}
+              </Col>
+              <Col span={3}>
+                {s.turnover?.toFixed?.(2) ?? s.turnover}%
+              </Col>
+              <Col span={3}>
+                {s.industry_corr?.toFixed?.(2) ?? s.industry_corr}
+              </Col>
+            </Row>
+          ))
+        ) : displayMode === 'risk' ? (
+          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+            const isPassed = s.passed === true;
+            return (
+              <Row
+                key={s.ts_code}
+                className={styles.row}
+                style={{
+                  backgroundColor: isPassed ? 'rgba(82, 196, 26, 0.08)' : 'rgba(255, 77, 79, 0.08)',
+                }}
+              >
+                <Col span={5}>
+                  <span>{s.ts_code}</span>
+                </Col>
+                <Col span={3}>
+                  {isPassed ? (
+                    <span className="text-up">✓ 通过</span>
+                  ) : (
+                    <span className="text-down">✗ 未通过</span>
+                  )}
+                </Col>
+                <Col span={4} style={{ color: isPassed ? '#52c41a' : '#ff4d4f', fontSize: 12 }}>
+                  {s.reason}
+                </Col>
+                <Col span={4}>
+                  {s.circ_mv?.toFixed?.(2) ?? s.circ_mv}亿
+                </Col>
+                <Col span={4}>
+                  {s.avg_amount?.toFixed?.(0) ?? s.avg_amount}万
+                </Col>
+                <Col span={4} className={Utils.GetValueColor(-(s.decline_from_high || 0)).textClass}>
+                  {s.decline_from_high?.toFixed?.(2) ?? s.decline_from_high}%
+                </Col>
+              </Row>
+            );
+          })
+        ) : (
+          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+            const hasSignal = s.has_signal === true;
+            return (
+              <Row
+                key={s.ts_code}
+                className={styles.row}
+                style={{
+                  backgroundColor: hasSignal ? 'rgba(82, 196, 26, 0.08)' : undefined,
+                }}
+              >
+                <Col span={5}>
+                  <span>{s.ts_code}</span>
+                </Col>
+                <Col span={3}>
+                  {hasSignal ? (
+                    <span className="text-up">✓ 有信号</span>
+                  ) : (
+                    <span>○ 无信号</span>
+                  )}
+                </Col>
+                <Col span={4}>
+                  {s.signal_type === 'breakout' ? (
+                    <span className="text-up">突破</span>
+                  ) : s.signal_type === 'callback' ? (
+                    <span style={{ color: '#faad14' }}>回调</span>
+                  ) : (
+                    <span style={{ color: '#999' }}>--</span>
+                  )}
+                </Col>
+                <Col span={4}>
+                  {s.signal_detail?.strength || '--'}
+                </Col>
+                <Col span={4}>
+                  {s.signal_detail?.volume_ratio?.toFixed?.(2) ?? s.signal_detail?.volume_ratio ?? '--'}
+                </Col>
+                <Col span={4}>
+                  {s.signal_detail?.callback_depth?.toFixed?.(2) ?? s.signal_detail?.callback_depth ?? '--'}%
+                </Col>
+              </Row>
+            );
+          })
+        )}
         <Pagination
           current={currentPage}
           pageSize={pageSize}

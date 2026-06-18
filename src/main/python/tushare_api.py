@@ -3794,7 +3794,14 @@ class StockSelector:
         return None
 
     def calc_industry_fund_flow(self, industry_code: str, trade_date: str, days: int = 5) -> float:
-        """计算行业N日资金净流入(通过成分股汇总)"""
+        """计算行业N日资金净流入(通过成分股汇总)
+
+        修复点：
+        1. 使用 trade_cal 获取真实交易日，避免传入非交易日导致返回空
+        2. 对 con_code 格式做容错（纯代码自动补 .SH/.SZ）
+        3. 对 moneyflow 返回字段做容错（net_mf_amount 不存在时手动计算）
+        4. 增加调试日志，方便排查
+        """
         cache_key = f"industry_fund_flow_{industry_code}_{trade_date}_{days}"
         cached = read_cache(cache_key, max_age_hours=24)
         if cached is not None and isinstance(cached, (int, float)):
@@ -3803,28 +3810,78 @@ class StockSelector:
         # 获取成分股
         members = self.pro.index_member(index_code=industry_code)
         if members is None or members.empty:
+            print(f"[DEBUG fund_flow] {industry_code}: 无成分股")
             return 0.0
 
-        # 计算日期范围
-        end_dt = datetime.strptime(trade_date, "%Y%m%d")
-        start_dt = end_dt - timedelta(days=days * 2)  # 多取一些，过滤非交易日
-        start_date = start_dt.strftime("%Y%m%d")
+        # 使用 trade_cal 获取真实交易日范围
+        pro = get_pro()
+        try:
+            end_dt = datetime.strptime(trade_date, "%Y%m%d")
+            cal_start = (end_dt - timedelta(days=30)).strftime("%Y%m%d")
+            cal_df = pro.trade_cal(exchange='SSE', start_date=cal_start, end_date=trade_date, is_open='1')
+            if cal_df is not None and not cal_df.empty:
+                trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())
+                if len(trade_dates) >= days:
+                    start_date = trade_dates[-min(days*2, len(trade_dates))]
+                    end_date = trade_dates[-1]
+                else:
+                    start_date = trade_dates[0] if trade_dates else (end_dt - timedelta(days=days*2)).strftime("%Y%m%d")
+                    end_date = trade_dates[-1] if trade_dates else trade_date
+            else:
+                start_date = (end_dt - timedelta(days=days*2)).strftime("%Y%m%d")
+                end_date = trade_date
+        except Exception as e:
+            print(f"[WARN fund_flow] trade_cal 失败: {e}")
+            start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=days*2)).strftime("%Y%m%d")
+            end_date = trade_date
 
         total_inflow = 0.0
         stock_codes = members['con_code'].tolist()
+        success_count = 0
+        fail_count = 0
 
-        for code in stock_codes[:50]:  # 限制数量，避免请求过多
+        for code in stock_codes[:50]:
+            # 确保 code 是 ts_code 格式（含 .SH/.SZ 后缀）
+            ts_code = code
+            if '.' not in code:
+                ts_code = f"{code}.{'SH' if code.startswith('6') else 'SZ'}"
+
             try:
-                df = self.pro.moneyflow(ts_code=code, start_date=start_date, end_date=trade_date)
-                if df is not None and not df.empty:
-                    # 取最近N个交易日
-                    df = df.sort_values('trade_date', ascending=False).head(days)
-                    total_inflow += df['net_mf_amount'].sum()
-            except Exception:
+                df = self.pro.moneyflow(ts_code=ts_code, start_date=start_date, end_date=end_date)
+                if df is None or df.empty:
+                    fail_count += 1
+                    continue
+
+                # 取最近N个交易日
+                df = df.sort_values('trade_date', ascending=False).head(days)
+
+                # 字段名容错：优先 net_mf_amount，其次 net_amount，最后手动计算
+                net_inflow = 0.0
+                if 'net_mf_amount' in df.columns:
+                    net_inflow = df['net_mf_amount'].sum()
+                elif 'net_amount' in df.columns:
+                    net_inflow = df['net_amount'].sum()
+                else:
+                    # 手动计算：大单+特大单净流入 = (buy_elg - sell_elg) + (buy_lg - sell_lg)
+                    buy_elg = df['buy_elg_amount'].sum() if 'buy_elg_amount' in df.columns else 0
+                    sell_elg = df['sell_elg_amount'].sum() if 'sell_elg_amount' in df.columns else 0
+                    buy_lg = df['buy_lg_amount'].sum() if 'buy_lg_amount' in df.columns else 0
+                    sell_lg = df['sell_lg_amount'].sum() if 'sell_lg_amount' in df.columns else 0
+                    net_inflow = (buy_elg - sell_elg) + (buy_lg - sell_lg)
+
+                total_inflow += float(net_inflow)
+                success_count += 1
+
+            except Exception as e:
+                fail_count += 1
+                if fail_count <= 3:  # 只打印前3个错误，避免日志刷屏
+                    print(f"[WARN fund_flow] moneyflow 失败 {ts_code}: {e}")
                 continue
 
-        write_cache(cache_key, total_inflow)
-        return total_inflow
+        result = float(total_inflow)
+        print(f"[DEBUG fund_flow] {industry_code}: {result/1e8:.4f}亿, 成功:{success_count}, 失败:{fail_count}, 日期:{start_date}~{end_date}")
+        write_cache(cache_key, result)
+        return result
 
     def calc_industry_trend_score(self, kline: pd.DataFrame) -> Dict:
         """计算行业趋势强度得分"""
