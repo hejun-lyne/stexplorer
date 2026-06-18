@@ -1483,6 +1483,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const [trendData, setTrendData] = useState({
       trends: stock ? stock.trends : [],
     });
+    // 使用 ref 保存最新的 trendData，避免 useThrottleFn 闭包过期问题
+    const trendDataRef = useRef(trendData);
+    trendDataRef.current = trendData;
     const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
     const [currentActivePeriod, setCurrentActivePeriod] = useState<Stock.PeriodMarkItem | null | undefined>(null);
     const [chartOptions, setChartOptions] = useState<any>({});
@@ -1572,19 +1575,28 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           updateTrendData(trends);
         }
 
-        // 同步更新日线K线（如果最后一根是今日合成的）
+        // 同步更新日线K线：无论日K线中是否已有今日数据，都用最新分时数据更新
         const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
-        const dayKlines = klineData.klines[dayIndex];
-        if (dayKlines && dayKlines.length > 0) {
+        const currentDayKlines = klineDataRef.current.klines[dayIndex];
+        if (currentDayKlines && currentDayKlines.length > 0) {
           const today = new Date();
           const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-          const lastDayK = dayKlines[dayKlines.length - 1];
+          const lastDayK = currentDayKlines[currentDayKlines.length - 1];
           if (lastDayK.date === todayStr) {
-            const zsValue = dayKlines.length > 1 ? dayKlines[dayKlines.length - 2].sp : (trends[0]?.last || 0);
+            // 日K线已有今日数据，用最新分时更新它
+            const zsValue = currentDayKlines.length > 1 ? currentDayKlines[currentDayKlines.length - 2].sp : (trends[0]?.last || 0);
             const dailyK = buildDailyKFromTrends(trends, secid, zsValue);
-            if (dailyK && dailyK.sp !== lastDayK.sp && dailyK.kp !== lastDayK.kp) {
-              const newDayKlines = [...dayKlines];
+            if (dailyK) {
+              const newDayKlines = [...currentDayKlines];
               newDayKlines[newDayKlines.length - 1] = dailyK;
+              handeKline({ ks: newDayKlines, kt: KLineType.Day });
+            }
+          } else {
+            // 日K线缺少今日数据（先加载了K线，后加载分时），附加合成今日K线
+            const zsValue = lastDayK?.sp || (trends[0]?.last || 0);
+            const dailyK = buildDailyKFromTrends(trends, secid, zsValue);
+            if (dailyK) {
+              const newDayKlines = [...currentDayKlines, dailyK];
               handeKline({ ks: newDayKlines, kt: KLineType.Day });
             }
           }
@@ -1691,6 +1703,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       dgwy: DefaultKTypes.map((_) => [[], [], []]),
       choumas: DefaultKTypes.map((_) => [] as Stock.ChouMaItem[]),
     });
+    // 使用 ref 保存最新的 klineData，避免 useThrottleFn 闭包过期问题
+    const klineDataRef = useRef(klineData);
+    klineDataRef.current = klineData;
     // [新增] 根据回测日期计算应该展示到哪一个交易日（前一个交易日）
     const dayKlines = klineData.klines[DefaultKTypes.indexOf(KLineType.Day)];
     const displayToDate = useMemo(() => calcDisplayToDate(trainMode, toDate, backtestDate, dayKlines), [trainMode, toDate, backtestDate, dayKlines]);
@@ -1729,14 +1744,15 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         //   }
         // }
         // 如果是日线且分时数据存在，检查是否需要从分时数据合成当日K线
-        if (kt == KLineType.Day && trendData.trends.length > 0) {
+        const latestTrends = trendDataRef.current.trends;
+        if (kt == KLineType.Day && latestTrends.length > 0) {
           const today = new Date();
           const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
           const lastDate = ks[ks.length - 1]?.date;
           if (lastDate !== todayStr) {
-            const zsValue = ks[ks.length - 1]?.sp || trendData.trends[0].last || 0;
-            const dailyK = buildDailyKFromTrends(trendData.trends, secid, zsValue);
-            if (dailyK && dailyK.sp !== ks[ks.length - 1].sp && dailyK.kp !== ks[ks.length - 1].kp) {
+            const zsValue = ks[ks.length - 1]?.sp || latestTrends[0].last || 0;
+            const dailyK = buildDailyKFromTrends(latestTrends, secid, zsValue);
+            if (dailyK) {
               ks = [...ks, dailyK];
             }
           }

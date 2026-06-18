@@ -416,22 +416,29 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
     const arr = [...items];
     arr.sort((a, b) => {
-      const left = (a as any)[key];
-      const right = (b as any)[key];
+      const left = Number((a as any)[key]) || 0;
+      const right = Number((b as any)[key]) || 0;
+      if (left === right) return 0;
       if (t == 1) {
-        return left - right;
+        return left > right ? 1 : -1;
       } else {
-        return right - left;
+        return left < right ? 1 : -1;
       }
     });
     return arr;
   }, []);
 
   const updateSortType = useCallback((key: string) => {
-    let type = sortTypes[key] || 0;
-    type = type == 0 ? 1 : type == 1 ? 2 : 0;
-    setSortTypes({ [key]: type });
-  }, [sortTypes]);
+    setSortTypes((prev) => {
+      const currentType = prev[key] || 0;
+      const nextType = currentType === 0 ? 1 : currentType === 1 ? 2 : 0;
+      // 只保留当前点击列的排序状态，其他列重置
+      if (nextType === 0) {
+        return {};
+      }
+      return { [key]: nextType };
+    });
+  }, []);
 
   useLayoutEffect(() => {
     if (displayMode === 'leaders') {
