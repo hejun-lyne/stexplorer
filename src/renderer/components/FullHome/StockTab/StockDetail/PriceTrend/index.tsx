@@ -1,4 +1,5 @@
 import React, { useCallback, useRef, useState, useEffect, useLayoutEffect, useMemo } from 'react';
+import dayjs from 'dayjs';
 import { StoreState } from '@/reducers/types';
 import { useInterval, useRequest, useSize, useThrottleFn } from 'ahooks';
 import ChartCard from '@/components/Card/ChartCard';
@@ -1479,7 +1480,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const increaseColor = variableColors['--increase-color'];
     const reduceColor = variableColors['--reduce-color'];
     const [trendDates, setTrendDates] = useState<string[]>([]);
-    const [currentTrendDate, setCurrentTrendDate] = useState('选择日期');
+    const [currentTrendDate, setCurrentTrendDate] = useState(dayjs().format('YYYY-MM-DD'));
     const [trendData, setTrendData] = useState({
       trends: stock ? stock.trends : [],
     });
@@ -1561,7 +1562,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         batch(() => {
           setTrendData(newTrendData);
           if (trendDates.length == 0 && trends.length > 0) {
-            let td = new Date().toLocaleDateString().substring(0, 10);
+            let td = dayjs().format('YYYY-MM-DD');
             if (trends[0].datetime.length >= 10) {
               td = trends[0].datetime.substring(0, 10);
             } 
@@ -1982,18 +1983,17 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     // );
     const stype = Helpers.Stock.GetStockType(secid);
     const isUSStock = stype === StockMarketType.US || stype === StockMarketType.USZindex;
-    const klineCallback = () => {
-      if (typeIndex !== 0 && !requestKLines[typeIndex]) {
-        const newRequestKLines = [...requestKLines];
-        newRequestKLines[typeIndex] = true;
-        setRequestKLines(newRequestKLines);
-        runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[typeIndex], klineData.count[typeIndex]);
+    // 交易时段自动刷新分时数据（K线不需要刷新，由分时数据合成）
+    const trendRefreshCallback = useCallback(() => {
+      if (!requestTrends) {
+        setRequestTrends(true);
+        runGetTrends(kLineApiSourceSetting, secid);
       }
-    };
+    }, [requestTrends, kLineApiSourceSetting, secid, runGetTrends]);
     
     // 两个 Hook 都调用，但根据股票类型只启用其中一个
-    useWorkDayTimeToDo(isUSStock ? () => {} : klineCallback, isUSStock ? null : CONST.DEFAULT.STOCK_TREND_DELAY);
-    useUSWorkDayTimeToDo(isUSStock ? klineCallback : () => {}, isUSStock ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
+    useWorkDayTimeToDo(isUSStock ? () => {} : trendRefreshCallback, isUSStock ? null : CONST.DEFAULT.STOCK_TREND_DELAY);
+    useUSWorkDayTimeToDo(isUSStock ? trendRefreshCallback : () => {}, isUSStock ? CONST.DEFAULT.STOCK_TREND_DELAY : null);
 
     const [lineEnabled, setLineEnabled] = useState(false);
     const changeLineEnabled = useCallback(

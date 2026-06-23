@@ -1976,7 +1976,7 @@ export async function FilterKline(secid: string, types: Enums.KFilterType[], day
       return null;
     }
   }
-  const { ks } = await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, klimit);
+  const { ks } = await Services.Stock.GetKFromDataSource(Enums.FundApiType.Tushare, secid, Enums.KLineType.Day, klimit);
   if (!ks.length) {
     return null;
   }
