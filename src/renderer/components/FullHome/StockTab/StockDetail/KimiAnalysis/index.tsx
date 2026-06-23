@@ -100,14 +100,14 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
       id: Date.now().toString(),
       role: 'user',
       content: userContent,
-      analysisType: isOption ? (typeOrText as AnalysisType) : undefined,
+      analysisType: isOption ? (typeOrText as AnalysisType) : 'custom',
     };
 
     const assistantMsg: Message = {
       id: (Date.now() + 1).toString(),
       role: 'assistant',
       content: '',
-      analysisType: isOption ? (typeOrText as AnalysisType) : undefined,
+      analysisType: isOption ? (typeOrText as AnalysisType) : 'custom',
     };
 
     setMessages((prev) => [...prev, userMsg, assistantMsg]);

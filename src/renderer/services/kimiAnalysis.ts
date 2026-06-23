@@ -17,7 +17,7 @@ export interface Message {
   analysisType?: AnalysisType;
 }
 
-export type AnalysisType = 'tech' | 'event' | 'fundamental';
+export type AnalysisType = 'tech' | 'event' | 'fundamental' | 'custom';
 export type DataPrecision = 'fast' | 'deep';
 
 export interface AnalysisOption {
