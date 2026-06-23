@@ -15,6 +15,7 @@ export interface Message {
   role: 'user' | 'assistant';
   content: string;
   analysisType?: AnalysisType;
+  timestamp: number;
 }
 
 export type AnalysisType = 'tech' | 'event' | 'fundamental';

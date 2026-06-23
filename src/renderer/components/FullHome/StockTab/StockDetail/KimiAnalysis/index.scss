@@ -148,9 +148,25 @@
   word-break: break-word;
 }
 
+.bubbleHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
 .typeTag {
-  margin-bottom: 6px;
   display: inline-block;
+}
+
+.timestamp {
+  font-size: 11px;
+  color: #999;
+  margin-left: auto;
+}
+
+.userMessage .timestamp {
+  color: rgba(255, 255, 255, 0.7);
 }
 
 .markdown {

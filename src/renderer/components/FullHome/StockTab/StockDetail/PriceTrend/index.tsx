@@ -1575,7 +1575,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           updateTrendData(trends);
         }
 
-        // 同步更新日线K线：无论日K线中是否已有今日数据，都用最新分时数据更新
+        // 同步更新日线K线：如果日K线中已有该交易日的有效K线（kp/sp/zg/zd均存在），
+        // 则不需要从分时再生成，直接复用原始K线
         const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
         const currentDayKlines = klineDataRef.current.klines[dayIndex];
         if (currentDayKlines && currentDayKlines.length > 0) {
@@ -1583,7 +1584,12 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
           const lastDayK = currentDayKlines[currentDayKlines.length - 1];
           if (lastDayK.date === todayStr) {
-            // 日K线已有今日数据，用最新分时更新它
+            // 检查原本K线是否已有有效数据（kp/sp/zg/zd都存在）
+            if (lastDayK.kp && lastDayK.sp && lastDayK.zg && lastDayK.zd) {
+              // 已有完整K线数据，不需要从分时重新生成
+              return;
+            }
+            // 日K线有今日日期但没有完整数据，用最新分时更新它
             const zsValue = currentDayKlines.length > 1 ? currentDayKlines[currentDayKlines.length - 2].sp : (trends[0]?.last || 0);
             const dailyK = buildDailyKFromTrends(trends, secid, zsValue);
             if (dailyK) {
@@ -1744,18 +1750,28 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         //   }
         // }
         // 如果是日线且分时数据存在，检查是否需要从分时数据合成当日K线
+        // 如果原始K线已经包含对应交易日的完整K线（kp/sp/zg/zd都存在），则不需要合成
         const latestTrends = trendDataRef.current.trends;
         if (kt == KLineType.Day && latestTrends.length > 0) {
           const today = new Date();
           const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-          const lastDate = ks[ks.length - 1]?.date;
-          if (lastDate !== todayStr) {
-            const zsValue = ks[ks.length - 1]?.sp || latestTrends[0].last || 0;
+          const lastK = ks[ks.length - 1];
+          if (lastK?.date !== todayStr) {
+            // K线中不包含今日数据，需要从分时合成
+            const zsValue = lastK?.sp || latestTrends[0].last || 0;
             const dailyK = buildDailyKFromTrends(latestTrends, secid, zsValue);
             if (dailyK) {
               ks = [...ks, dailyK];
             }
+          } else if (!lastK.kp || !lastK.sp || !lastK.zg || !lastK.zd) {
+            // K线有今日日期但数据不完整，用分时数据补充
+            const zsValue = ks.length > 1 ? ks[ks.length - 2].sp : (latestTrends[0]?.last || 0);
+            const dailyK = buildDailyKFromTrends(latestTrends, secid, zsValue);
+            if (dailyK) {
+              ks[ks.length - 1] = dailyK;
+            }
           }
+          // 如果已有完整的今日K线数据，不做任何处理
         }
         // 更新k线描述信息
         Helpers.Tech.DescribeKlines(ks);

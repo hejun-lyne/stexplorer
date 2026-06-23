@@ -10,10 +10,28 @@ import { KLineType, StockMarketType } from '@/utils/enums';
 import { Stock } from '@/types/stock';
 import * as Helpers from '../helpers';
 
-const { execPyScript } = window.contextModules.electron;
+const { execPyScript, getLocalStoragePath } = window.contextModules.electron;
 
 // Python 脚本路径
 const AKSHARE_SCRIPT = 'akshare_api.py';
+
+// 缓存本地存储路径，避免每次 IPC 调用
+let cachedStoragePath: string | null = null;
+
+async function getStoragePath(): Promise<string> {
+  if (cachedStoragePath !== null) return cachedStoragePath;
+  try {
+    const result = await getLocalStoragePath();
+    if (result?.success && result.path) {
+      cachedStoragePath = result.path;
+      return cachedStoragePath;
+    }
+  } catch (e) {
+    console.error('[Tushare] 获取存储路径失败:', e);
+  }
+  cachedStoragePath = '';
+  return '';
+}
 
 // 日志辅助函数
 function logError(error: any, method: string, extraInfo?: string) {
@@ -34,7 +52,12 @@ function logError(error: any, method: string, extraInfo?: string) {
  */
 async function callAkshare(method: string, params: Record<string, any> = {}): Promise<any> {
   try {
-    const result = await execPyScript(AKSHARE_SCRIPT, [method, '--params', JSON.stringify(params)]);
+    const args = [method, '--params', JSON.stringify(params)];
+    const storagePath = await getStoragePath();
+    if (storagePath) {
+      args.push('--storage-path', storagePath);
+    }
+    const result = await execPyScript(AKSHARE_SCRIPT, args);
     // Python 脚本会输出 JSON 字符串
     if (Array.isArray(result) && result.length > 0) {
       const output = result[result.length - 1]; // 取最后一行输出
@@ -279,21 +302,102 @@ export async function GetKFromAkshare(secid: string, code: number, limit?: numbe
   }
 }
 // ==================== 分时走势 (腾讯财经数据源) ====================
+
+const STOCK_TREND_TABLE = 'stock_trend';
+
+const TRADE_CALENDAR_TUSHARE_TABLE = 'trade_calendar_tushare';
+
 /**
- * 获取分时走势数据 - 使用腾讯财经数据源
+ * 获取今天往前的最后一个交易日（包含今天），格式 YYYY-MM-DD
+ * 优先使用 tushare 已缓存的全年交易日历，避免重复请求 akshare
+ */
+async function getLastTradeDate(): Promise<string> {
+  const today = dayjs().format('YYYYMMDD');
+  const todayFormatted = dayjs().format('YYYY-MM-DD');
+  const year = today.substring(0, 4);
+
+  try {
+    let dates: string[] = [];
+
+    // 1. 优先从 tushare 交易日历缓存读取（已有全年数据）
+    try {
+      const tushareCached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TUSHARE_TABLE, year);
+      if (tushareCached?.success && tushareCached.data?.data?.dates) {
+        dates = tushareCached.data.data.dates;
+      }
+    } catch (e) { /* ignore */ }
+
+    // 2. 再尝试 akshare 自己的交易日历缓存
+    if (dates.length === 0) {
+      try {
+        const akshareCached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
+        if (akshareCached?.success && akshareCached.data?.data?.dates) {
+          dates = akshareCached.data.data.dates;
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    // 3. 缓存都不可用，直接按周一到周五兜底
+    if (dates.length === 0) {
+      const weekday = dayjs(todayFormatted).day();
+      if (weekday === 0 || weekday === 6) {
+        // 周末，找最近的周五
+        const daysToFriday = weekday === 0 ? 2 : 1;
+        return dayjs(todayFormatted).subtract(daysToFriday, 'day').format('YYYY-MM-DD');
+      }
+      return todayFormatted;
+    }
+
+    // 4. 在交易日列表中找到 <= 今天的最大日期
+    const sorted = [...dates].sort();
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      if (sorted[i] <= todayFormatted) {
+        return sorted[i];
+      }
+    }
+  } catch (e) {
+    console.error('[akshare] 获取最后交易日失败:', e);
+  }
+  return todayFormatted;
+}
+
+/**
+ * 获取分时走势数据 - 使用腾讯财经数据源，带本地缓存
  * 
  * 数据源: 腾讯财经 (stock_zh_a_tick_tx_js)
  * 数据类型: 当日分笔成交数据
  * 备用: 如腾讯接口失败，自动切换到 163 数据源
+ * 
+ * 缓存策略: key = code + 最后交易日，若缓存写入时间 >= 交易日15:00则直接返回
  */
 export async function GetTrendFromAkshare(secid: string): Promise<{ secid: string, trends: Stock.TrendItem[] }> {
   try {
+    const code = secid.split('.').pop() || secid;
+    const tradeDate = await getLastTradeDate();
+    const cacheKey = `${code}_${tradeDate}`;
+
+    // 1. 尝试读取缓存
+    try {
+      const cached = await window.contextModules.electron.sqliteRead(STOCK_TREND_TABLE, cacheKey);
+      if (cached?.success && cached.data?.data) {
+        const { trends: cachedTrends, cachedAt } = cached.data.data;
+        const cutoff = dayjs(`${tradeDate} 15:00:00`);
+        const cachedTime = dayjs(cachedAt);
+        if (cachedTime.isValid() && cachedTime.isAfter(cutoff) && cachedTrends?.length > 0) {
+          return { secid, trends: cachedTrends };
+        }
+      }
+    } catch (e) {
+      // 缓存读取异常，忽略
+    }
+
+    // 2. 缓存未命中，调用 Python 获取分时数据
     const result = await callAkshare('get_stock_trend', { secid });
     if (result.error) {
       console.error('获取分时数据失败:', result.error);
       return { secid, trends: [] };
     }
-    
+
     const trends = result
       .map((item: any) => ({
         datetime: item.datetime,
@@ -304,7 +408,22 @@ export async function GetTrendFromAkshare(secid: string): Promise<{ secid: strin
         up: item.up !== undefined ? item.up : (item.current >= item.last ? 1 : -1),
       }))
       .filter((t: any) => t.current > 0);
-    
+
+    // 3. 写入缓存（附带 cachedAt 时间戳）
+    try {
+      await window.contextModules.electron.sqliteWrite(
+        STOCK_TREND_TABLE,
+        {
+          trends,
+          cachedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+        },
+        dayjs().format('YYYY-MM-DD HH:mm:ss'),
+        cacheKey
+      );
+    } catch (e) {
+      console.error('[akshare] 写入分时数据缓存失败:', e);
+    }
+
     return { secid, trends };
   } catch (error) {
     logError(error, 'GetTrendFromAkshare', '获取分时走势失败');

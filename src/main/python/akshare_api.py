@@ -8,6 +8,7 @@ Akshare API 封装模块
 """
 
 import sys
+import os
 import json
 import argparse
 import random
@@ -27,6 +28,93 @@ try:
 except ImportError:
     requests = None
 
+# ============ 本地缓存机制 ============
+
+_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".stexplorer", "akshare_cache")
+
+
+def _log(msg: str):
+    """输出日志到 stderr 和日志文件，避免污染 stdout 中的 JSON 输出"""
+    line = f"{datetime.now().isoformat()} {msg}"
+    sys.stderr.write(f"{line}\n")
+    sys.stderr.flush()
+    # 同时写日志文件，方便排查
+    try:
+        log_dir = os.path.join(os.path.expanduser("~"), ".stexplorer")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "akshare_debug.log"), "a", encoding="utf-8") as lf:
+            lf.write(f"{line}\n")
+    except Exception:
+        pass
+
+
+# 模块加载时记录，验证代码是否被加载
+_log("akshare_api.py 模块已加载")
+
+
+def set_cache_dir(storage_path: str):
+    """设置缓存根目录，使用应用本地存储路径下的 akshare_cache 子目录"""
+    global _CACHE_DIR
+    if storage_path:
+        _CACHE_DIR = os.path.join(storage_path, "akshare_cache")
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    _log(f"缓存目录设置为: {_CACHE_DIR}")
+
+def _cache_key(func_name: str, **kwargs) -> str:
+    """生成缓存 key"""
+    param_str = "_".join(f"{k}={v}" for k, v in sorted(kwargs.items()) if v is not None)
+    return f"{func_name}_{param_str}" if param_str else func_name
+
+
+def _cache_path(cache_key: str) -> str:
+    """获取缓存文件路径"""
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    return os.path.join(_CACHE_DIR, f"{cache_key}.json")
+
+
+def read_cache(cache_key: str, max_age_hours: int = 168) -> Optional[Any]:
+    """读取缓存，max_age_hours 默认 7 天"""
+    path = _cache_path(cache_key)
+    if not os.path.exists(path):
+        return None
+    try:
+        mtime = os.path.getmtime(path)
+        age_hours = (datetime.now().timestamp() - mtime) / 3600
+        if age_hours > max_age_hours:
+            _log(f"[read_cache] 缓存过期: {cache_key}, age={age_hours:.1f}h > max={max_age_hours}h")
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _log(f"[read_cache] 缓存命中: {cache_key}")
+        # 自动还原 DataFrame
+        if isinstance(data, dict) and data.get("__type__") == "dataframe":
+            records = data.get("records", [])
+            if records:
+                return pd.DataFrame(records)
+            return pd.DataFrame()
+        return data
+    except Exception as e:
+        _log(f"[read_cache] 读取失败: {cache_key}, 错误: {e}")
+        return None
+
+
+def write_cache(cache_key: str, data: Any):
+    """写入缓存"""
+    try:
+        path = _cache_path(cache_key)
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            # 自动序列化 DataFrame
+            if isinstance(data, pd.DataFrame):
+                json.dump(
+                    {"__type__": "dataframe", "records": df_to_records(data)},
+                    f, ensure_ascii=False, cls=DateTimeEncoder
+                )
+            else:
+                json.dump(data, f, ensure_ascii=False, cls=DateTimeEncoder)
+        _log(f"[write_cache] 写入成功: {cache_key} -> {path}")
+    except Exception as e:
+        _log(f"[write_cache] 写入失败: {cache_key}, 错误: {e}")
 
 def convert_secid_to_tx_symbol(secid: str) -> str:
     """
@@ -313,19 +401,19 @@ class AkshareAPI:
             return stocks
         except Exception as e:
             return {"error": str(e)}
-    
     @staticmethod
     def get_stock_realtime(secid: str) -> Dict[str, Any]:
         """获取股票实时行情"""
         try:
             code = convert_secid_to_pure_code(secid)
+            
             df = ak.stock_zh_a_spot_em()
             stock_row = df[df["代码"] == code]
             if stock_row.empty:
                 return {"error": "Stock not found"}
             
             row = stock_row.iloc[0]
-            return {
+            result = {
                 "code": code,
                 "name": row.get("名称", ""),
                 "zx": float(row.get("最新价", 0) or 0),
@@ -344,7 +432,11 @@ class AkshareAPI:
                 "lt": float(row.get("流通市值", 0) or 0),
                 "zsz": float(row.get("总市值", 0) or 0),
             }
+            
+            return result
         except Exception as e:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
             return {"error": str(e)}
     
     @staticmethod
@@ -998,6 +1090,7 @@ def main():
     parser = argparse.ArgumentParser(description="Akshare API CLI")
     parser.add_argument("method", help="方法名")
     parser.add_argument("--params", "-p", help="JSON格式的参数", default="{}")
+    parser.add_argument("--storage-path", "-s", help="本地存储根目录路径（用于缓存）", default=None)
     
     args = parser.parse_args()
     
@@ -1008,6 +1101,10 @@ def main():
         print(json.dumps({"error": "Invalid JSON params"}, ensure_ascii=False))
         sys.exit(1)
     
+    # 设置缓存目录
+    if args.storage_path:
+        set_cache_dir(args.storage_path)
+
     # 调用对应方法
     api = AkshareAPI()
     method = getattr(api, args.method, None)

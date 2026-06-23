@@ -192,6 +192,8 @@ function getFilePath(table: string, id?: number | string | object): string {
       return path.join(dataDir, 'kline_cache', `${table}_${id}.json`);
     } else if(table.indexOf('board_stocks_cache') >= 0) {
       return path.join(dataDir, 'board_stocks_cache', `${table}.json`);
+    } else if(table.indexOf('stock_trend') >= 0) {
+      return path.join(dataDir, 'stock_trend', `${table}_${id}.json`);
     }
     return path.join(dataDir, `${table}_${id}.json`);
   }

@@ -95,19 +95,22 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
       return;
     }
 
+    const now = Date.now();
     const userContent = isOption ? KimiAnalysisService.typeNames[typeOrText as AnalysisType] : (typeOrText as string);
     const userMsg: Message = {
-      id: Date.now().toString(),
+      id: now.toString(),
       role: 'user',
       content: userContent,
       analysisType: isOption ? (typeOrText as AnalysisType) : undefined,
+      timestamp: now,
     };
 
     const assistantMsg: Message = {
-      id: (Date.now() + 1).toString(),
+      id: (now + 1).toString(),
       role: 'assistant',
       content: '',
       analysisType: isOption ? (typeOrText as AnalysisType) : undefined,
+      timestamp: now,
     };
 
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -218,6 +221,15 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     sendMessage(type, true);
   }, [loading, sendMessage]);
 
+  const formatTime = (timestamp: number) => {
+    const d = new Date(timestamp);
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    return `${month}-${day} ${hours}:${minutes}`;
+  };
+
   const renderMarkdown = (text: string) => {
     return { __html: KimiAnalysisService.parseMarkdown(text) };
   };
@@ -266,11 +278,14 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
                   {msg.role === 'user' ? <UserOutlined /> : <RobotOutlined />}
                 </div>
                 <div className={styles.bubble}>
-                  {msg.analysisType && msg.role === 'user' && (
-                    <Tag color={analysisOptions.find((o) => o.type === msg.analysisType)?.color} className={styles.typeTag}>
-                      {KimiAnalysisService.typeNames[msg.analysisType]}
-                    </Tag>
-                  )}
+                  <div className={styles.bubbleHeader}>
+                    {msg.analysisType && msg.role === 'user' && (
+                      <Tag color={analysisOptions.find((o) => o.type === msg.analysisType)?.color} className={styles.typeTag}>
+                        {KimiAnalysisService.typeNames[msg.analysisType]}
+                      </Tag>
+                    )}
+                    <span className={styles.timestamp}>{formatTime(msg.timestamp)}</span>
+                  </div>
                   <div
                     className={styles.markdown}
                     dangerouslySetInnerHTML={renderMarkdown(msg.content)}
