@@ -752,10 +752,15 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
       const expectedLatestDate = await getExpectedLatestDate();
 
       if (lastDate >= expectedLatestDate) {
-        if (limit && limit > 0 && ks.length > limit) {
-          return { ks: ks.slice(-limit), kt: code };
+        // 检查缓存数据长度是否满足 limit 要求
+        if (limit && limit > 0 && ks.length < limit) {
+          // 缓存数据量不足，需要重新请求
+        } else {
+          if (limit && limit > 0 && ks.length > limit) {
+            return { ks: ks.slice(-limit), kt: code };
+          }
+          return { ks, kt: code };
         }
-        return { ks, kt: code };
       }
     }
   } catch (e) {

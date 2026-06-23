@@ -734,6 +734,9 @@ class TushareAPI:
             last_date = _parse_date_str(last_date_str)
             if not last_date:
                 return False
+            # 检查缓存数据总长度是否满足 limit 要求（避免缓存数据量太少的情况）
+            if limit > 0 and len(cached_data) < limit:
+                return False
             # 检查截止日期是否满足
             if not end_date_std:
                 # 未指定 end_date：检查是否包含最新交易日

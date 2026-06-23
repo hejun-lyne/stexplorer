@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect } from 'react';
+import React, { useEffect } from 'react';
 import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
@@ -23,6 +23,15 @@ import { StoreState } from '@/reducers/types';
 import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 
+const kFilterOptions = [
+  { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
+  { label: KFilterTypeNames[KFilterType.FLYX], value: KFilterType.FLYX },
+  { label: KFilterTypeNames[KFilterType.XYJC], value: KFilterType.XYJC },
+  { label: KFilterTypeNames[KFilterType.TPHP], value: KFilterType.TPHP },
+  { label: KFilterTypeNames[KFilterType.FQFB], value: KFilterType.FQFB },
+  { label: KFilterTypeNames[KFilterType.FYZS], value: KFilterType.FYZS },
+];
+
 export interface STListProps {
   industries: Stock.BanKuaiItem[];
   gainians: Stock.BanKuaiItem[];
@@ -42,7 +51,6 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [filterSecids, setFilterSecids] = useState<string[]>([]);
   const [nameFilter, setNameFilter] = useState('');
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
-  const [showList, setShowList] = useState<Stock.DetailItem[]>([]);
 
   // 选股流程状态
   const [displayMode, setDisplayMode] = useState<'stocks' | 'leaders' | 'risk' | 'signals'>('stocks');
@@ -388,9 +396,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         );
       }
     },
-    [stocks]
+    [stocks, fdays, runFilterStocks]
   );
-  const filterStocks = ftypes.length ? stocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : stocks;
+  const filterStocks = React.useMemo(
+    () => (ftypes.length ? stocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : stocks),
+    [ftypes, stocks, filterSecids]
+  );
 
   // 格式化资金流向金额（元 -> 亿/万）
   /** 判断 secid 是否为申万二级行业代码 */
@@ -440,12 +451,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     });
   }, []);
 
-  useLayoutEffect(() => {
+  // 使用 useMemo 在 render 阶段计算 showList，避免 useLayoutEffect 中 setState 导致的无限循环
+  const showList = React.useMemo(() => {
     if (displayMode === 'leaders') {
-      let list = leaderData.slice(0, leaderDisplayCount);
+      let list = [...leaderData.slice(0, leaderDisplayCount)];
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
-        list = list.sort((a: any, b: any) => {
+        list.sort((a: any, b: any) => {
           const left = Number(a[keys[0]]) || 0;
           const right = Number(b[keys[0]]) || 0;
           const t = sortTypes[keys[0]];
@@ -453,15 +465,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
         });
       }
-      setShowList(list as any);
-      return;
+      return list as any;
     }
 
     if (displayMode === 'risk') {
-      let list = riskData.slice(0, riskDisplayCount);
+      let list = [...riskData.slice(0, riskDisplayCount)];
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
-        list = list.sort((a: any, b: any) => {
+        list.sort((a: any, b: any) => {
           const left = Number(a[keys[0]]) || 0;
           const right = Number(b[keys[0]]) || 0;
           const t = sortTypes[keys[0]];
@@ -469,15 +480,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
         });
       }
-      setShowList(list as any);
-      return;
+      return list as any;
     }
 
     if (displayMode === 'signals') {
-      let list = signalData.slice(0, signalDisplayCount);
+      let list = [...signalData.slice(0, signalDisplayCount)];
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
-        list = list.sort((a: any, b: any) => {
+        list.sort((a: any, b: any) => {
           const left = Number(a[keys[0]]) || 0;
           const right = Number(b[keys[0]]) || 0;
           const t = sortTypes[keys[0]];
@@ -485,8 +495,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
         });
       }
-      setShowList(list as any);
-      return;
+      return list as any;
     }
 
     let list = filterStocks.filter((s) => {
@@ -497,8 +506,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     if (keys.length === 1) {
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
-    setShowList(list);
-    setCurrentPage(1);
+    return list;
   }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount]);
   return (
     <>
@@ -538,15 +546,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           <InputNumber step={1} onChange={setFdays} min={1} defaultValue={8} style={{ width: 60 }} />
           <span>天</span>&nbsp;
           <Checkbox.Group
-            options={[
-              { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
-              { label: KFilterTypeNames[KFilterType.FLYX], value: KFilterType.FLYX },
-              { label: KFilterTypeNames[KFilterType.XYJC], value: KFilterType.XYJC },
-              { label: KFilterTypeNames[KFilterType.TPHP], value: KFilterType.TPHP },
-              { label: KFilterTypeNames[KFilterType.FQFB], value: KFilterType.FQFB },
-              { label: KFilterTypeNames[KFilterType.FYZS], value: KFilterType.FYZS },
-            ]}
-            defaultValue={[]}
+            options={kFilterOptions}
+            value={ftypes}
             onChange={updateFtypes}
           />
           &nbsp;
@@ -605,11 +606,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           </Col>
           <Col span={3}>
             当日主力净流入
-            <Button size="small" type="text" icon={sortTypes.mainIn == 1 ? <CaretUpOutlined /> : sortTypes.mainIn == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn')} />
+            <Button size="small" type="text" icon={sortTypes.main_in == 1 ? <CaretUpOutlined /> : sortTypes.main_in == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('main_in')} />
           </Col>
           <Col span={3}>
             5日主力净流入
-            <Button size="small" type="text" icon={sortTypes.mainIn5d == 1 ? <CaretUpOutlined /> : sortTypes.mainIn5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('mainIn5d')} />
+            <Button size="small" type="text" icon={sortTypes.main_in_5d == 1 ? <CaretUpOutlined /> : sortTypes.main_in_5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('main_in_5d')} />
           </Col>
         </Row>
       ) : displayMode === 'leaders' ? (
