@@ -1585,12 +1585,13 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
           const lastDayK = currentDayKlines[currentDayKlines.length - 1];
           if (lastDayK.date === todayStr) {
-            // 检查原本K线是否已有有效数据（kp/sp/zg/zd都存在）
-            if (lastDayK.kp && lastDayK.sp && lastDayK.zg && lastDayK.zd) {
-              // 已有完整K线数据，不需要从分时重新生成
+            // 检查原本K线是否来自真实数据（非分时合成）：hsl > 0 表示是API返回的真实K线
+            // 分时合成的日K线 hsl 始终为 0，需要持续用最新分时更新
+            if (lastDayK.kp && lastDayK.sp && lastDayK.zg && lastDayK.zd && lastDayK.hsl > 0) {
+              // 已有来自API的完整K线数据，不需要从分时重新生成
               return;
             }
-            // 日K线有今日日期但没有完整数据，用最新分时更新它
+            // 日K线有今日日期但来自分时合成或数据不完整，用最新分时更新它
             const zsValue = currentDayKlines.length > 1 ? currentDayKlines[currentDayKlines.length - 2].sp : (trends[0]?.last || 0);
             const dailyK = buildDailyKFromTrends(trends, secid, zsValue);
             if (dailyK) {
@@ -1764,15 +1765,15 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             if (dailyK) {
               ks = [...ks, dailyK];
             }
-          } else if (!lastK.kp || !lastK.sp || !lastK.zg || !lastK.zd) {
-            // K线有今日日期但数据不完整，用分时数据补充
+          } else if (!lastK.kp || !lastK.sp || !lastK.zg || !lastK.zd || lastK.hsl === 0) {
+            // K线有今日日期但数据不完整或是分时合成的（hsl=0），用分时数据补充/更新
             const zsValue = ks.length > 1 ? ks[ks.length - 2].sp : (latestTrends[0]?.last || 0);
             const dailyK = buildDailyKFromTrends(latestTrends, secid, zsValue);
             if (dailyK) {
               ks[ks.length - 1] = dailyK;
             }
           }
-          // 如果已有完整的今日K线数据，不做任何处理
+          // 如果已有完整的今日K线数据（来自API，hsl>0），不做任何处理
         }
         // 更新k线描述信息
         Helpers.Tech.DescribeKlines(ks);
