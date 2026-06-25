@@ -34,6 +34,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   const klinesRef = useRef(klines);
   const stockRef = useRef(stock);
   const sessionIdRef = useRef<string>('');
+  const currentStockCodeRef = useRef<string>('');
   const kimiApiKey = useSelector((state: StoreState) => state.setting.systemSetting.kimiApiKeySetting);
 
   trendsRef.current = trends;
@@ -68,13 +69,16 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
   }, [stock.name]);
 
   useEffect(() => {
-    if (active && stock?.code) {
+    // 只在 stock code 真正变化时才重新加载缓存
+    // 不再因 active=false 清空消息，避免流式响应进行中丢失内容
+    if (stock?.code && stock.code !== currentStockCodeRef.current) {
+      currentStockCodeRef.current = stock.code;
       setMessages([]);
+      setLoading(false);
+      setError('');
       loadCache(stock.code);
-    } else {
-      setMessages([]);
     }
-  }, [active, stock?.code, loadCache]);
+  }, [stock?.code, loadCache]);
 
   useEffect(() => {
     if (stock?.code && messages.length > 0) {
