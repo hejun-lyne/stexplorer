@@ -646,7 +646,7 @@ async function init() {
   });
 
   // ===== Kimi AI 分析 IPC 处理程序（支持流式响应）=====
-  ipcMain.handle('kimi-analyze-stock', async (event, { apiKey, prompt }: { apiKey: string; prompt: string }) => {
+  ipcMain.handle('kimi-analyze-stock', async (event, { apiKey, prompt, sessionId }: { apiKey: string; prompt: string; sessionId?: string }) => {
     try {
       const trimmedKey = (apiKey || '').trim();
       if (!trimmedKey) {
@@ -721,7 +721,7 @@ async function init() {
               const delta = data.choices?.[0]?.delta;
               if (delta?.content) {
                 fullContent += delta.content;
-                event.sender.send('kimi-analysis-chunk', { content: fullContent, sessionId: data.session_id });
+                event.sender.send('kimi-analysis-chunk', { content: fullContent, sessionId });
               }
             } catch {
               // 忽略解析失败的行
@@ -827,7 +827,8 @@ async function init() {
           // 过载时通知用户
           if (isOverloaded) {
             event.sender.send('kimi-analysis-chunk', { 
-              content: `⏳ 服务繁忙，正在自动重试（第 ${firstAttempts} 次）...` 
+              content: `⏳ 服务繁忙，正在自动重试（第 ${firstAttempts} 次）...`,
+              sessionId,
             });
           }
 
@@ -897,7 +898,8 @@ async function init() {
                     const msg = parseKimiError(error);
                     console.warn(`[Kimi] 第二步流式第 ${retryCount} 次重试，原因: ${msg}`);
                     event.sender.send('kimi-analysis-chunk', { 
-                      content: `⏳ 服务繁忙，正在自动重试（第 ${retryCount} 次）...` 
+                      content: `⏳ 服务繁忙，正在自动重试（第 ${retryCount} 次）...`,
+                      sessionId,
                     });
                   },
                 ],
@@ -930,7 +932,7 @@ async function init() {
                   const delta = data.choices?.[0]?.delta;
                   if (delta?.content) {
                     fullContent += delta.content;
-                    event.sender.send('kimi-analysis-chunk', { content: fullContent, sessionId: data.session_id });
+                    event.sender.send('kimi-analysis-chunk', { content: fullContent, sessionId });
                   }
                 } catch {
                   // 忽略
@@ -979,7 +981,7 @@ async function init() {
         // 如果流式因过载失败，降级为非流式
         if (result.error?.startsWith('OVERLOADED:')) {
           console.warn('[Kimi] 流式过载，降级为非流式请求');
-          event.sender.send('kimi-analysis-chunk', { content: '⏳ 服务繁忙，切换至稳定模式，请稍候...' });
+          event.sender.send('kimi-analysis-chunk', { content: '⏳ 服务繁忙，切换至稳定模式，请稍候...', sessionId });
           
           try {
             const fallbackResponse = await got.post('https://api.moonshot.cn/v1/chat/completions', {
