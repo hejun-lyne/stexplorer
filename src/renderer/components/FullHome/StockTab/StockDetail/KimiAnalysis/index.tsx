@@ -227,7 +227,7 @@ const KimiAnalysis: React.FC<KimiAnalysisProps> = ({ stock, trends, klines, acti
     const day = String(d.getDate()).padStart(2, '0');
     const hours = String(d.getHours()).padStart(2, '0');
     const minutes = String(d.getMinutes()).padStart(2, '0');
-    return `${month}-${day} ${hours}:${minutes}`;
+    return `${d.getFullYear()}-${month}-${day} ${hours}:${minutes}`;
   };
 
   const renderMarkdown = (text: string) => {

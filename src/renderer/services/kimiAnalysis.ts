@@ -41,7 +41,7 @@ export const typeNames: Record<AnalysisType, string> = {
 
 export const SYSTEM_PROMPT = `你是股票分析师，客观专业，风险提示充分，中文回答，格式清晰。数据格式说明：【】内为数据类别，| 分隔不同字段，表格有明确的列标题。`;
 
-export const MAX_HISTORY_ROUNDS = 1;
+export const MAX_HISTORY_ROUNDS = 0;
 
 export const TOOLS = [
   {
