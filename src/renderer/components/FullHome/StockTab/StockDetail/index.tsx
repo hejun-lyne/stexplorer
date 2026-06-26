@@ -244,7 +244,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
                     <BacktestAnalysis secid={secid} klines={klines || undefined} />
                   </Tabs.TabPane>
                   <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易记录</span>} key={'holdings'}>
-                    <Holdings secid={secid} />
+                    <Holdings secid={secid} onOpenStock={onOpenStock} />
                   </Tabs.TabPane>
                   <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>股吧评论</span>} key={'guba'}>
                     <Guba secid={secid} active={active} openUrl={onOpenUrl} />

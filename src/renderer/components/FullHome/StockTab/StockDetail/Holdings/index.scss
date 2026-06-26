@@ -104,3 +104,13 @@
   text-align: center;
   margin-top: 2px;
 }
+
+// ===== 可点击股票名 =====
+.stockName {
+  color: var(--primary-color);
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}

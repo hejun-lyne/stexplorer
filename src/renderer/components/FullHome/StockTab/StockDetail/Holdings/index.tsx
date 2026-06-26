@@ -12,6 +12,7 @@ import moment from 'moment';
 
 export interface HoldingsProps {
   secid: string;
+  onOpenStock?: (secid: string, name: string) => void;
 }
 
 const FUNDS_STORAGE_KEY = 'kimi_sim_funds';
@@ -31,7 +32,7 @@ const saveFunds = (v: number) => {
   } catch { /* ignore */ }
 };
 
-const Holdings: React.FC<HoldingsProps> = React.memo(({ secid }) => {
+const Holdings: React.FC<HoldingsProps> = React.memo(({ secid, onOpenStock }) => {
   const dispatch = useDispatch();
   const nowHolds = useSelector((state: StoreState) => state.stock.nowHolds);
   const allTradings = useSelector((state: StoreState) => state.stock.tradings);
@@ -312,7 +313,11 @@ const Holdings: React.FC<HoldingsProps> = React.memo(({ secid }) => {
                   backgroundColor: isCurrent ? 'var(--card-background-color)' : undefined,
                 }}
               >
-                <span className={styles.b} style={{ fontWeight: isCurrent ? 'bold' : 'normal' }}>
+                <span
+                  className={classnames(styles.b, styles.stockName)}
+                  style={{ fontWeight: isCurrent ? 'bold' : 'normal' }}
+                  onClick={() => onOpenStock?.(h.secid, name)}
+                >
                   {name}
                 </span>
                 <span className={styles.b}>{hPrice.toFixed(2)}</span>
@@ -503,7 +508,11 @@ const Holdings: React.FC<HoldingsProps> = React.memo(({ secid }) => {
             }}
           >
             <span className={styles.b} style={{ fontSize: 12 }}>{item.time}</span>
-            <span className={styles.b} style={{ fontWeight: isCurrent ? 'bold' : 'normal', fontSize: 12 }}>
+            <span
+              className={classnames(styles.b, styles.stockName)}
+              style={{ fontWeight: isCurrent ? 'bold' : 'normal', fontSize: 12 }}
+              onClick={() => onOpenStock?.(item.secid, tradeStockName)}
+            >
               {tradeStockName}
             </span>
             <span className={styles.b}>
