@@ -618,8 +618,7 @@ export function appendTrade(trade: Stock.DoTradeItem): ThunkAction {
         stock: { tradings },
       } = getState();
       trade.id = tradings.length ? Math.max(...tradings.map((t) => t.id)) + 1 : 1;
-      tradings.push(trade);
-      dispatch(setStockTradingAction(tradings));
+      dispatch(setStockTradingAction([...tradings, trade]));
     } catch (error) {
       console.log('增加交易操作出错', error);
     }
@@ -695,7 +694,7 @@ export function setStockConfigAction(stockConfig: Stock.SettingItem[]): ThunkAct
 export function setStockTradingAction(tradings: Stock.DoTradeItem[], lastModified?: string): ThunkAction {
   return (dispatch, getState) => {
     try {
-      const sortedTradings = tradings.sort((a, b) => b.id - a.id);
+      const sortedTradings = [...tradings].sort((a, b) => b.id - a.id);
       // 更新持有信息
       const holds: Record<string, Stock.NowHoldItem> = {};
       for (let i = sortedTradings.length - 1; i >= 0; i--) {

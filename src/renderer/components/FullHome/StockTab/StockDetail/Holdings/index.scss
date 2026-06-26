@@ -37,3 +37,70 @@
     color: var(--main-text-color);
   }
 }
+
+// ===== 紧凑顶栏（资金 + 统计） =====
+.topBar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background-color: var(--card-background-color);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.topBarItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
+.topBarDivider {
+  width: 1px;
+  height: 18px;
+  background-color: var(--border-color);
+  margin: 0 2px;
+}
+
+.topBarLabel {
+  color: var(--hint-color);
+  font-size: 11px;
+}
+
+.topBarValue {
+  font-weight: bold;
+  color: var(--main-text-color);
+  cursor: default;
+}
+
+.fundsEditInline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.topBarBtns {
+  display: flex;
+  gap: 2px;
+  margin-left: 2px;
+}
+
+.fundsHint {
+  font-size: 12px;
+  color: var(--hint-color);
+  line-height: 24px;
+}
+
+// ===== 比例模式 =====
+.ratioInfo {
+  font-size: 12px;
+  color: var(--hint-color);
+  text-align: center;
+  margin-top: 2px;
+}
