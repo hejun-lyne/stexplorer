@@ -561,7 +561,7 @@ class TushareAPI:
 
     @staticmethod
     def get_stock_realtime(secid: str) -> Dict[str, Any]:
-        """获取实时行情（腾讯财经接口，免费稳定，字段丰富）
+        """获取实时行情（交易时段走腾讯财经，非交易时段回退 tushare daily+daily_basic）
 
         腾讯 qt.gtimg.cn 接口返回字段（~分隔）：
           1-名称, 2-代码, 3-最新价, 4-昨收, 5-今开, 6-成交量(手),
@@ -572,13 +572,24 @@ class TushareAPI:
 
         返回字段补全：zx, zs, zdf, zdd, cjl, cje, zg, zd, jk, lb, hsl, syl, sjl, lt, zsz, zt, dt
         """
-        try:
-            # 板块代码仍走 Tushare dc_index（腾讯无 BKxxxx 体系）
-            if is_board_code(secid):
-                return TushareAPI._get_board_realtime(secid)
+        # 板块代码仍走 Tushare dc_index（腾讯无 BKxxxx 体系）
+        if is_board_code(secid):
+            return TushareAPI._get_board_realtime(secid)
 
+        # 1. 优先尝试腾讯财经接口（交易时段数据实时）
+        tx_result = TushareAPI._get_realtime_from_tencent(secid)
+        if tx_result and "error" not in tx_result:
+            return tx_result
+
+        # 2. 腾讯接口失败（非交易时段常见），回退到 tushare daily + daily_basic
+        return TushareAPI._get_realtime_from_tushare_daily(secid)
+
+    @staticmethod
+    def _get_realtime_from_tencent(secid: str) -> Optional[Dict[str, Any]]:
+        """从腾讯财经获取实时行情（仅交易时段有效）"""
+        try:
             if requests is None:
-                return {"error": "requests 未安装，无法获取实时行情"}
+                return None
 
             symbol = convert_secid_to_tx_symbol(secid)
             url = f"http://qt.gtimg.cn/q={symbol}"
@@ -588,7 +599,7 @@ class TushareAPI:
 
             # 解析 v_sz000001="..."; 格式
             if "v_" not in text or '"' not in text:
-                return {"error": "Invalid response from tencent"}
+                return None
 
             start = text.find('"') + 1
             end = text.rfind('"')
@@ -601,6 +612,10 @@ class TushareAPI:
             name = _get(1, "")
             code = _get(2, "")
             price = _to_float(_get(3, 0))
+            # 非交易时段，腾讯返回的 price 通常为 0 或等于昨收（不可靠）
+            if price == 0:
+                return None
+
             pre_close = _to_float(_get(4, 0))
             open_price = _to_float(_get(5, 0))
             # 成交量：手 → 股（与旧版 Tushare get_realtime_quotes 单位保持一致）
@@ -648,6 +663,224 @@ class TushareAPI:
                 "time": time_str,
                 "source": "tencent",
             }
+        except Exception as e:
+            print(f"[腾讯实时行情失败] {secid}: {e}")
+            return None
+
+    @staticmethod
+    def _get_realtime_from_tushare_daily(secid: str) -> Dict[str, Any]:
+        """从 tushare daily + daily_basic 获取最近交易日盘后数据（非交易时段回退方案）"""
+        try:
+            code = convert_secid_to_pure_code(secid)
+            mk = "1" if (("." in secid and secid.split(".")[0] == "1") or code.startswith("6")) else "0"
+            ts_code = f"{code}.{'SH' if mk == '1' else 'SZ'}"
+
+            # 获取最近一个交易日
+            latest_date = _get_expected_last_trade_date("daily")
+            trade_date = latest_date.replace("-", "")
+
+            pro = get_pro()
+
+            # 获取日线行情（daily 接口）
+            daily_df = safe_api_call(pro.daily, ts_code=ts_code, trade_date=trade_date)
+            if isinstance(daily_df, dict) and daily_df.get("error"):
+                return daily_df
+            if daily_df is None or daily_df.empty:
+                return {"error": f"No daily data for {ts_code} on {latest_date}"}
+
+            row = daily_df.iloc[0]
+            close = _to_float(row.get("close", 0))
+            pre_close = _to_float(row.get("pre_close", 0))
+            zdd = close - pre_close if pre_close > 0 else 0
+            zdf = (zdd / pre_close * 100) if pre_close > 0 else 0
+
+            result = {
+                "code": code,
+                "name": "",
+                "zx": close,
+                "zs": pre_close,
+                "zdf": round(zdf, 2),
+                "zdd": round(zdd, 2),
+                "cjl": _to_int(row.get("vol", 0)),
+                "cje": round(_to_float(row.get("amount", 0)) * 1000, 2),  # daily amount 单位千元→万
+                "zg": _to_float(row.get("high", 0)),
+                "zd": _to_float(row.get("low", 0)),
+                "jk": _to_float(row.get("open", 0)),
+                "lb": 0,           # 量比非交易时段无意义
+                "hsl": 0,
+                "syl": 0,
+                "sjl": 0,
+                "lt": 0,           # 流通市值（亿）
+                "zsz": 0,          # 总市值（亿）
+                "zf": _to_float(row.get("high", 0)) - _to_float(row.get("low", 0)) if pre_close > 0 else 0,
+                "zt": 0,
+                "dt": 0,
+                "time": latest_date,
+                "source": "tushare_daily",
+            }
+
+            # 补充 daily_basic 数据（换手率、市盈率、市净率、市值）
+            try:
+                basic_df = safe_api_call(pro.daily_basic, ts_code=ts_code, trade_date=trade_date)
+                if basic_df is not None and not (isinstance(basic_df, dict) and basic_df.get("error")) and not basic_df.empty:
+                    basic_row = basic_df.iloc[0]
+                    result["hsl"] = _to_float(basic_row.get("turnover_rate", 0))
+                    result["syl"] = _to_float(basic_row.get("pe_ttm", basic_row.get("pe", 0)))
+                    result["sjl"] = _to_float(basic_row.get("pb", 0))
+                    # daily_basic 的 total_mv/circ_mv 单位是"万元"，转为"亿"
+                    result["zsz"] = round(_to_float(basic_row.get("total_mv", 0)) / 10000, 2)
+                    result["lt"] = round(_to_float(basic_row.get("circ_mv", 0)) / 10000, 2)
+            except Exception as e:
+                print(f"[daily_basic 补充失败] {secid}: {e}")
+
+            # 补充股票名称（从 stock_basic 映射）
+            try:
+                name_map, _ = _get_stock_basic_maps()
+                result["name"] = name_map.get(ts_code, "")
+            except Exception:
+                pass
+
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def get_stocks_realtime_batch(secids: List[str]) -> Dict[str, Any]:
+        """批量获取实时行情（交易时段走腾讯财经，非交易时段用 daily+daily_basic 全量一次获取）
+
+        返回格式: {"data": {"secid": {...}, ...}, "errors": [...]}
+        """
+        result_data: Dict[str, Any] = {}
+        failed_secids: List[str] = []
+        errors: List[str] = []
+
+        # 1. 先逐个尝试腾讯财经接口（交易时段有效）
+        for secid in secids:
+            if is_board_code(secid):
+                board_result = TushareAPI._get_board_realtime(secid)
+                if board_result and "error" not in board_result:
+                    result_data[secid] = board_result
+                else:
+                    failed_secids.append(secid)
+            else:
+                tx_result = TushareAPI._get_realtime_from_tencent(secid)
+                if tx_result and "error" not in tx_result:
+                    result_data[secid] = tx_result
+                else:
+                    failed_secids.append(secid)
+
+        # 2. 对腾讯失败的 secid，用 tushare daily+daily_basic 一次性批量获取
+        if failed_secids:
+            try:
+                batch_results = TushareAPI._get_realtime_from_tushare_daily_batch(failed_secids)
+                if isinstance(batch_results, dict) and batch_results.get("error"):
+                    errors.append(f"daily batch failed: {batch_results['error']}")
+                    for secid in failed_secids:
+                        result_data[secid] = {"error": "no data"}
+                else:
+                    for secid in failed_secids:
+                        if secid in batch_results:
+                            result_data[secid] = batch_results[secid]
+                        else:
+                            result_data[secid] = {"error": "no data"}
+            except Exception as e:
+                errors.append(f"daily batch exception: {str(e)}")
+                for secid in failed_secids:
+                    result_data[secid] = {"error": str(e)}
+
+        return {"data": result_data, "errors": errors}
+
+    @staticmethod
+    def _get_realtime_from_tushare_daily_batch(secids: List[str]) -> Dict[str, Any]:
+        """一次请求 daily + daily_basic 全量数据，从中匹配需要的 secid"""
+        try:
+            pro = get_pro()
+            latest_date = _get_expected_last_trade_date("daily")
+            trade_date = latest_date.replace("-", "")
+
+            # 1. 一次性获取全市场 daily 数据
+            daily_df = safe_api_call(pro.daily, trade_date=trade_date)
+            if isinstance(daily_df, dict) and daily_df.get("error"):
+                return daily_df
+            if daily_df is None or daily_df.empty:
+                return {"error": f"No daily data on {latest_date}"}
+
+            # 构建 ts_code -> row 的索引
+            daily_map = {}
+            for _, row in daily_df.iterrows():
+                ts_code = str(row.get("ts_code", ""))
+                daily_map[ts_code] = row
+
+            # 2. 一次性获取全市场 daily_basic 数据（补充换手率/PE/PB/市值）
+            basic_map = {}
+            try:
+                basic_df = safe_api_call(pro.daily_basic, trade_date=trade_date)
+                if basic_df is not None and not (isinstance(basic_df, dict) and basic_df.get("error")) and not basic_df.empty:
+                    for _, row in basic_df.iterrows():
+                        ts_code = str(row.get("ts_code", ""))
+                        basic_map[ts_code] = row
+            except Exception as e:
+                print(f"[daily_basic batch] 获取失败: {e}")
+
+            # 3. 获取股票名称映射
+            try:
+                name_map, _ = _get_stock_basic_maps()
+            except Exception:
+                name_map = {}
+
+            # 4. 为每个 secid 组装结果
+            results: Dict[str, Any] = {}
+            for secid in secids:
+                code = convert_secid_to_pure_code(secid)
+                ts_code = convert_secid_to_ts_code(secid)
+
+                row = daily_map.get(ts_code)
+                if row is None:
+                    results[secid] = {"error": f"no daily data for {ts_code}"}
+                    continue
+
+                close = _to_float(row.get("close", 0))
+                pre_close = _to_float(row.get("pre_close", 0))
+                zdd = close - pre_close if pre_close > 0 else 0
+                zdf = (zdd / pre_close * 100) if pre_close > 0 else 0
+
+                result = {
+                    "code": code,
+                    "name": name_map.get(ts_code, ""),
+                    "zx": close,
+                    "zs": pre_close,
+                    "zdf": round(zdf, 2),
+                    "zdd": round(zdd, 2),
+                    "cjl": _to_int(row.get("vol", 0)),
+                    "cje": round(_to_float(row.get("amount", 0)) * 1000, 2),  # 千元→万
+                    "zg": _to_float(row.get("high", 0)),
+                    "zd": _to_float(row.get("low", 0)),
+                    "jk": _to_float(row.get("open", 0)),
+                    "lb": 0,
+                    "hsl": 0,
+                    "syl": 0,
+                    "sjl": 0,
+                    "lt": 0,
+                    "zsz": 0,
+                    "zf": _to_float(row.get("high", 0)) - _to_float(row.get("low", 0)) if pre_close > 0 else 0,
+                    "zt": 0,
+                    "dt": 0,
+                    "time": latest_date,
+                    "source": "tushare_daily_batch",
+                }
+
+                # 补充 daily_basic 数据
+                basic_row = basic_map.get(ts_code)
+                if basic_row is not None:
+                    result["hsl"] = _to_float(basic_row.get("turnover_rate", 0))
+                    result["syl"] = _to_float(basic_row.get("pe_ttm", basic_row.get("pe", 0)))
+                    result["sjl"] = _to_float(basic_row.get("pb", 0))
+                    result["zsz"] = round(_to_float(basic_row.get("total_mv", 0)) / 10000, 2)
+                    result["lt"] = round(_to_float(basic_row.get("circ_mv", 0)) / 10000, 2)
+
+                results[secid] = result
+
+            return results
         except Exception as e:
             return {"error": str(e)}
 
@@ -5781,47 +6014,3 @@ def register_limit_up_methods():
 register_limit_up_methods()
 
 
-# ============ CLI 入口 ============
-
-def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="涨停股票评分系统")
-    parser.add_argument("action", choices=["score", "batch"], help="评分模式: score-单只, batch-批量")
-    parser.add_argument("--secid", "-s", help="股票ID，如 0.000001")
-    parser.add_argument("--date", "-d", help="交易日期，如 2025-06-27")
-    parser.add_argument("--token", "-t", help="Tushare Token", default=None)
-    parser.add_argument("--top-n", "-n", type=int, default=50, help="批量模式返回前N名")
-    parser.add_argument("--storage-path", help="缓存目录", default=None)
-
-    args = parser.parse_args()
-
-    # 初始化
-    if args.token:
-        init_pro(args.token)
-    else:
-        init_pro()
-
-    if _pro_api is None:
-        print(json.dumps({"error": "Tushare Pro Token 未设置"}, ensure_ascii=False))
-        sys.exit(1)
-
-    if args.storage_path:
-        from tushare_api import set_cache_dir
-        set_cache_dir(args.storage_path)
-
-    scorer = LimitUpScorer()
-    date = args.date or datetime.now().strftime('%Y-%m-%d')
-
-    if args.action == "score":
-        if not args.secid:
-            print(json.dumps({"error": "请提供 --secid 参数"}, ensure_ascii=False))
-            sys.exit(1)
-        result = scorer.score_limit_up_stock(args.secid, date)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        result = scorer.batch_score_limit_up(date, top_n=args.top_n)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
-if __name__ == "__main__":
-    main()

@@ -250,6 +250,50 @@ export async function GetDetailFromTushare(secid: string): Promise<Stock.DetailI
   }
 }
 
+/**
+ * 批量获取股票详情（非交易时段用一次 tushare daily+daily_basic 全量请求，避免逐个调用）
+ */
+export async function GetDetailsFromTushareBatch(secids: string[]): Promise<(Stock.DetailItem | null)[]> {
+  try {
+    const result = await callTushare('get_stocks_realtime_batch', { secids });
+    if (result.error) {
+      console.error('批量获取详情失败:', result.error);
+      return secids.map(() => null);
+    }
+
+    const data = result.data || {};
+    return secids.map((secid) => {
+      const item = data[secid];
+      if (!item || item.error) return null;
+
+      return {
+        secid,
+        code: item.code,
+        name: item.name,
+        zx: item.zx,
+        zs: item.zs,
+        zdf: item.zdf,
+        zdd: item.zdd,
+        cjl: item.cjl,
+        cje: item.cje,
+        zg: item.zg,
+        zd: item.zd,
+        jk: item.jk,
+        lb: item.lb,
+        hsl: item.hsl,
+        lt: item.lt,
+        bk: '',
+        time: item.time || dayjs().format('MM-DD HH:mm'),
+        b1: 0, b1p: 0, b2: 0, b2p: 0, b3: 0, b3p: 0, b4: 0, b4p: 0, b5: 0, b5p: 0,
+        s1: 0, s1p: 0, s2: 0, s2p: 0, s3: 0, s3p: 0, s4: 0, s4p: 0, s5: 0, s5p: 0,
+      } as Stock.DetailItem;
+    });
+  } catch (error) {
+    logError(error, 'GetDetailsFromTushareBatch', '批量获取股票详情失败');
+    return secids.map(() => null);
+  }
+}
+
 // ==================== K 线数据 ====================
 /**
  * 获取K线数据 - 使用 Tushare 数据源

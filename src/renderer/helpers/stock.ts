@@ -52,7 +52,11 @@ export async function GetStockDetails(sourceOrSecids: Enums.FundApiType | string
     ids = secids || [];
   }
   if (!ids.length) return [];
-  const usePythonSource = source === Enums.FundApiType.Akshare || source === Enums.FundApiType.Tushare;
+  // Tushare 走批量接口（一次 Python 调用完成全市场数据获取）
+  if (source === Enums.FundApiType.Tushare) {
+    return TushareAPI.GetDetailsFromTushareBatch(ids);
+  }
+  const usePythonSource = source === Enums.FundApiType.Akshare;
   return Adapter.ChokeGroupAdapter(
     ids.map((secid) => () => Services.Stock.GetDetailFromDataSource(usePythonSource ? source : Enums.FundApiType.Eastmoney, secid)),
     10
