@@ -4797,11 +4797,19 @@ def main():
         print(json.dumps({"error": f"Method {args.method} not found"}, ensure_ascii=False))
         sys.exit(1)
 
+    # 将所有调试 print 重定向到 stderr，避免污染 stdout 的 JSON 输出
+    _real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+
     try:
         result = method(**params)
-        print(json.dumps(result, ensure_ascii=False, cls=DateTimeEncoder))
     except Exception as e:
-        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        result = {"error": str(e)}
+    finally:
+        sys.stdout = _real_stdout
+
+    # 只在恢复后的真实 stdout 输出最终 JSON
+    print(json.dumps(result, ensure_ascii=False, cls=DateTimeEncoder))
 
 
 
