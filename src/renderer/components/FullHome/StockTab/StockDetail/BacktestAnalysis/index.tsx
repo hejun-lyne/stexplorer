@@ -915,38 +915,91 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
                       bordered={false}
                       pagination={false}
                       rowKey="field"
-                      dataSource={Object.entries(detail!).map(([field, value]) => {
-                        let displayValue: string;
-                        if (typeof value === 'number') {
-                          // 百分比类字段保留2-4位小数
-                          const fieldLower = field.toLowerCase();
-                          if (fieldLower.includes('pct') || fieldLower.includes('ratio') || fieldLower.includes('rate') || fieldLower.includes('decline') || fieldLower.includes('deviation') || fieldLower.includes('slope')) {
-                            displayValue = (value * 100).toFixed(2) + '%';
-                          } else if (fieldLower.includes('score') || fieldLower === 'weighted') {
-                            displayValue = value.toFixed(2);
-                          } else if (Number.isInteger(value) || fieldLower.includes('count') || fieldLower.includes('num') || fieldLower.includes('times') || fieldLower.includes('days')) {
-                            displayValue = String(value);
+                      dataSource={(() => {
+                        // 格式化单个值（可能返回字符串，或嵌套对象/数组展平后的行数组）
+                        const formatValue = (field: string, value: any): string | { field: string; value: string }[] => {
+                          if (typeof value === 'number') {
+                            const fieldLower = field.toLowerCase();
+                            if (fieldLower.includes('pct') || fieldLower.includes('ratio') || fieldLower.includes('rate') || fieldLower.includes('decline') || fieldLower.includes('deviation') || fieldLower.includes('slope')) {
+                              return (value * 100).toFixed(2) + '%';
+                            } else if (fieldLower.includes('score') || fieldLower === 'weighted') {
+                              return value.toFixed(2);
+                            } else if (Number.isInteger(value) || fieldLower.includes('count') || fieldLower.includes('num') || fieldLower.includes('times') || fieldLower.includes('days')) {
+                              return String(value);
+                            } else {
+                              return value.toFixed(2);
+                            }
+                          } else if (typeof value === 'boolean') {
+                            return value ? '是' : '否';
+                          } else if (value === null || value === undefined) {
+                            return '-';
+                          } else if (Array.isArray(value)) {
+                            // 数组 -> 展平为独立行，如 concepts[0].xxx
+                            const flattened: { field: string; value: string }[] = [];
+                            value.forEach((item: any, idx: number) => {
+                              if (typeof item === 'object' && item !== null) {
+                                Object.entries(item).forEach(([subField, subValue]) => {
+                                  const v = formatValue(subField, subValue);
+                                  flattened.push({
+                                    field: `${field}[${idx}].${subField}`,
+                                    value: Array.isArray(v) ? JSON.stringify(subValue) : v,
+                                  });
+                                });
+                              } else {
+                                const v = formatValue('', item);
+                                flattened.push({
+                                  field: `${field}[${idx}]`,
+                                  value: Array.isArray(v) ? JSON.stringify(item) : v,
+                                });
+                              }
+                            });
+                            return flattened;
+                          } else if (typeof value === 'object') {
+                            // 嵌套对象 -> 展平为独立行，如 sub_scores.xxx
+                            const flattened: { field: string; value: string }[] = [];
+                            Object.entries(value).forEach(([subField, subValue]) => {
+                              const v = formatValue(subField, subValue);
+                              flattened.push({
+                                field: `${field}.${subField}`,
+                                value: Array.isArray(v) ? JSON.stringify(subValue) : v,
+                              });
+                            });
+                            return flattened;
                           } else {
-                            displayValue = value.toFixed(2);
+                            return String(value);
                           }
-                        } else if (typeof value === 'boolean') {
-                          displayValue = value ? '是' : '否';
-                        } else if (value === null || value === undefined) {
-                          displayValue = '-';
-                        } else {
-                          displayValue = String(value);
-                        }
-                        return { field, value: displayValue };
-                      })}
+                        };
+
+                        // 展平所有顶层字段，嵌套对象/数组展开为独立行
+                        const rows: { field: string; value: string }[] = [];
+                        Object.entries(detail!).forEach(([field, value]) => {
+                          const result = formatValue(field, value);
+                          if (Array.isArray(result)) {
+                            rows.push(...result);
+                          } else {
+                            rows.push({ field, value: result });
+                          }
+                        });
+                        return rows;
+                      })()}
                       columns={[
                         {
                           title: '字段',
                           dataIndex: 'field',
                           key: 'field',
-                          width: 160,
-                          render: (v: string) => (
-                            <span style={{ fontSize: 11, color: 'var(--sec-text-color)' }}>{v}</span>
-                          ),
+                          width: 200,
+                          render: (v: string) => {
+                            const isNested = v.includes('.') || v.includes('[');
+                            return (
+                              <span style={{
+                                fontSize: 11,
+                                color: isNested ? 'var(--sec-text-color)' : 'var(--main-text-color)',
+                                paddingLeft: isNested ? 12 : 0,
+                              }}>
+                                {isNested ? '└ ' : ''}{v}
+                              </span>
+                            );
+                          },
                         },
                         {
                           title: '值',
