@@ -66,10 +66,15 @@ async function callTushare(method: string, params: Record<string, any> = {}): Pr
       args.push('--storage-path', storagePath);
     }
     const result = await execPyScript(TUSHARE_SCRIPT, args);
-    // Python 脚本会输出 JSON 字符串
+    // Python 脚本输出 JSON 字符串，每行可能包含 JSON 或 debug 信息
+    // 从最后一行往前找第一个可解析的 JSON 行
     if (Array.isArray(result) && result.length > 0) {
-      const output = result[result.length - 1]; // 取最后一行输出
-      return JSON.parse(output);
+      for (let i = result.length - 1; i >= 0; i--) {
+        const line = (result[i] as string).trim();
+        if (line.startsWith('{') || line.startsWith('[')) {
+          return JSON.parse(line);
+        }
+      }
     }
     return result;
   } catch (error) {

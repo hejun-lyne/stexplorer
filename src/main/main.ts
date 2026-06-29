@@ -24,7 +24,7 @@ import path from 'path';
 import { exec } from 'child_process';
 import { Worker } from 'worker_threads';
 import { resolve } from 'path';
-import { PythonShell } from 'python-shell';
+// PythonShell 已替换为 child_process.spawn，避免 mode:'text' 的 eval 行为
 // import ElectronStore from 'electron-store';
 import * as ts from 'typescript';
 import { PromiseWorker } from './promiseWorker';
@@ -1303,36 +1303,46 @@ async function init() {
       console.log(`Script full path: ${scriptFullPath}`);
       console.log(`Script exists: ${fs.existsSync(scriptFullPath)}`);
       
-      const options = {
-        mode: 'text',
-        pythonPath: pythonPath,
-        pythonOptions: ['-u'],
-        scriptPath: scriptPath,
-        args: config.params,
-        stderrParser: (line: string) => line,
-      };
-      
-      const pyshell = new PythonShell(config.fileName, options);
-      const stderrLines: string[] = [];
-      pyshell.stderr.on('data', (line: string) => {
-        stderrLines.push(line);
+      // 使用 child_process.spawn 替代 PythonShell，避免 mode:'text' 的 eval 行为
+      const { spawn } = require('child_process');
+      const child = spawn(pythonPath, ['-u', scriptFullPath, ...config.params], {
+        cwd: scriptPath,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
       });
-      pyshell.end((err, results) => {
-        if (err) {
-          console.error('Python script error:', err);
-          if (stderrLines.length > 0) {
-            console.error('Python stderr output:', stderrLines.join(''));
+      
+      const stdoutLines: string[] = [];
+      const stderrLines: string[] = [];
+      
+      child.stdout.on('data', (data: Buffer) => {
+        stdoutLines.push(data.toString());
+      });
+      
+      child.stderr.on('data', (data: Buffer) => {
+        stderrLines.push(data.toString());
+      });
+      
+      child.on('close', (code: number | null) => {
+        if (code !== 0) {
+          const stderr = stderrLines.join('');
+          console.error('Python script error: exit code', code);
+          if (stderr) {
+            console.error('Python stderr output:', stderr);
           }
-          // 尝试获取更详细的错误信息
-          if ((err as any).traceback) {
-            console.error('Python traceback:', (err as any).traceback);
-          }
-          reject(err);
+          reject(new Error(`process exited with code ${code}${stderr ? ': ' + stderr : ''}`));
           return;
         }
         console.log(`${config.fileName} finished.`);
-        console.log('results', results);
-        resolve(results);
+        // 将所有 stdout 行合并，按换行分割成数组
+        const allOutput = stdoutLines.join('');
+        const lines = allOutput.split('\n').filter((l: string) => l.trim());
+        console.log('stdout lines count:', lines.length);
+        console.log('results', lines);
+        resolve(lines);
+      });
+      
+      child.on('error', (err: Error) => {
+        console.error('Failed to start Python process:', err);
+        reject(err);
       });
     });
   });
