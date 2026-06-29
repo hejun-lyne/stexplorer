@@ -38,11 +38,23 @@ export async function GetFutureDetail(secid: string) {
   return detail;
 }
 
-export async function GetStockDetails(source:Enums.FundApiType, secids: string[]) {
-  // const setting = Helpers.Setting.GetSystemSetting();
+export async function GetStockDetails(sourceOrSecids: Enums.FundApiType | string[], secids?: string[]) {
+  // 兼容两种调用方式：GetStockDetails(secids) 和 GetStockDetails(source, secids)
+  let source: Enums.FundApiType;
+  let ids: string[];
+  if (Array.isArray(sourceOrSecids)) {
+    ids = sourceOrSecids;
+    // 自动从系统设置中获取数据源
+    const state = store.getState();
+    source = state.setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney;
+  } else {
+    source = sourceOrSecids;
+    ids = secids || [];
+  }
+  if (!ids.length) return [];
   const usePythonSource = source === Enums.FundApiType.Akshare || source === Enums.FundApiType.Tushare;
   return Adapter.ChokeGroupAdapter(
-    secids.map((secid) => () => Services.Stock.GetDetailFromDataSource(usePythonSource ? source : Enums.FundApiType.Eastmoney, secid)),
+    ids.map((secid) => () => Services.Stock.GetDetailFromDataSource(usePythonSource ? source : Enums.FundApiType.Eastmoney, secid)),
     10
   );
 }
@@ -784,8 +796,10 @@ function UpdateTradings(secids: string[], stocksMapping: Record<string, Stock.Al
       return;
     }
     tradingsMapping[secid].forEach((trade: Stock.DoTradeItem) => {
-      const current = stocksMapping[secid].detail.zx;
-      const klines = stocksMapping[secid].klines[Enums.KLineType.Day];
+      const stockData = stocksMapping[secid];
+      if (!stockData?.detail?.zx) return;
+      const current = stockData.detail.zx;
+      const klines = stockData.klines[Enums.KLineType.Day];
       const dealDay = trade.time.substring(0, 10);
       const dIndex = klines.map((k) => k.date).indexOf(dealDay);
       if (dIndex == -1) {

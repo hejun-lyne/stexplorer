@@ -230,7 +230,7 @@ const StockTab: React.FC<StockTabProps> = React.memo(
             {kview ? (
               <Tabs.TabPane key="kview" tab="全盘">
                 <STMonitor
-                  details={stockTabs.map((tab) => stocksMapping[tab.tid].detail)}
+                  details={stockTabs.map((tab) => stocksMapping[tab.tid]?.detail).filter(Boolean)}
                   active={true}
                   noMore={true}
                   onLoadMore={() => { }}

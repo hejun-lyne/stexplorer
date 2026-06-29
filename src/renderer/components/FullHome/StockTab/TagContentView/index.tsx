@@ -2,6 +2,7 @@ import React from 'react';
 import { useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { StockMarketType } from '@/utils/enums';
+import { Stock } from '@/types/stock';
 import STMonitor from '../Dashboard/StockPool/STMonitor';
 
 export interface TagContentViewProps {
@@ -13,9 +14,12 @@ export interface TagContentViewProps {
 const TagContentView: React.FC<TagContentViewProps> = React.memo(({ name, type, openStock }) => {
     const configs = useSelector((storeState: StoreState) => storeState.stock.stockConfigs.filter((c) => c.tags?.includes(name)));
     const stocksMapping = useSelector((storeState: StoreState) => storeState.stock.stocksMapping);
+    const details = configs
+        .map((config) => stocksMapping[config.secid]?.detail)
+        .filter(Boolean) as Stock.DetailItem[];
     return (
         <STMonitor
-            details={configs.map((config) => stocksMapping[config.secid].detail)}
+            details={details}
             active={true}
             noMore={true}
             onLoadMore={() => { }}

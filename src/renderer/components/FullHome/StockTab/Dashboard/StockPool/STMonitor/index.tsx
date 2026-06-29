@@ -22,7 +22,7 @@ export interface STMonitorProps {
 const STMonitor: React.FC<STMonitorProps> = ({ details, active, markdate, noMore, onLoadMore, onOpenStock, stopStock }) => {
   const [monitors, setMonitors] = useState([] as string[]);
   const addAll = useCallback(() => {
-    setMonitors(details.map((d) => d.secid));
+    setMonitors((details || []).map((d) => d.secid));
   }, [details]);
   const removeAll = useCallback(() => {
     setMonitors([]);

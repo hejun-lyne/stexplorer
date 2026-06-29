@@ -14,7 +14,9 @@ export const ConCurrencyAllAdapter: <T>(requests: Collector<T>[], delay?: number
   delay = 0
 ) => {
   await Utils.Sleep(delay);
-  return Promise.all(requests.map((_) => (typeof _ === 'function' ? _() : _)));
+  // 使用 allSettled 确保单个请求失败不会导致整个批次失败
+  const results = await Promise.allSettled(requests.map((_) => (typeof _ === 'function' ? _() : _)));
+  return results.map((r) => (r.status === 'fulfilled' ? r.value : null));
 };
 
 /**
@@ -30,10 +32,15 @@ export const ChokeAllAdapter: <T>(requests: Collector<T>[], delay?: number) => P
   return requests
     .reduce(
       (last, next, index) =>
-        last.then(next).then((res) => {
-          result.push(res);
-          return Utils.Sleep(delay);
-        }),
+        last
+          .then(next)
+          .then((res) => {
+            result.push(res);
+          })
+          .catch(() => {
+            result.push(null);
+          })
+          .then(() => Utils.Sleep(delay)),
       Promise.resolve()
     )
     .then(() => result);

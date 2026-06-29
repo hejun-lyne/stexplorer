@@ -39,7 +39,7 @@ const ZZList: React.FC<ZZListProps> = ({ onOpenStock, active }) => {
           Tech.DescribeKlines(ks);
           Tech.DetermineKlines(ks);
           const lastK = ks[ks.length - 1];
-          if (stocksMapping[lastK.secid].detail) {
+          if (stocksMapping[lastK.secid]?.detail) {
             const st = { ...stocksMapping[lastK.secid].detail } as unknown as Stock.CLItem;
             const config = stockConfigs.find((_) => _.secid == st.secid);
             st.hybk = config?.hybk;
@@ -138,7 +138,8 @@ const ZZList: React.FC<ZZListProps> = ({ onOpenStock, active }) => {
   useLayoutEffect(() => {
     if (showList.length > 0) {
       showList.forEach((item) => {
-        const detail = stocksMapping[item.secid].detail;
+        const detail = stocksMapping[item.secid]?.detail;
+        if (!detail) return;
         item.zx = detail.zx;
         item.zdf = detail.zdf;
         item.lt = detail.lt;
