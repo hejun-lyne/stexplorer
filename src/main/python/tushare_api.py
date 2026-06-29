@@ -117,11 +117,19 @@ def convert_secid_to_pure_code(secid: str) -> str:
 
 
 def is_board_code(secid: str) -> bool:
-    """判断是否为板块代码"""
+    """判断是否为板块代码（东财板块/概念指数，需走 dc_daily 接口）"""
     if secid.startswith("90."):
         return True
     code = convert_secid_to_pure_code(secid)
-    return code.startswith("BK") or code.startswith("88")
+    # BKxxxx 和 88xxxx 板块代码
+    if code.startswith("BK") or code.startswith("88"):
+        return True
+    # 东财概念指数：market == 2 且非传统指数代码（如 2.931068 消费龙头）
+    if "." in secid:
+        mk = secid.split(".")[0]
+        if mk == "2":
+            return True
+    return False
 
 
 def is_index_code(secid: str) -> bool:
