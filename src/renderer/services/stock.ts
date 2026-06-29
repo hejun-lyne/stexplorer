@@ -167,7 +167,6 @@ export async function SearchFromEastmoney(keyword: string) {
 }
 
 export async function GetTrendFromEastmoney(secid: string, zs?: number) {
-  // 如果设置了 Python 数据源，使用对应接口获取分时数据
   if (usePythonDataSource()) {
     const source = getCurrentDataSource();
     if (source === Enums.FundApiType.Tushare) {
@@ -768,8 +767,14 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
   }
 
   // 2. 缓存未命中或已过期，请求新数据
+  // 港股（含港股指数）通过 akshare 后端调用东财接口
+  const stockType = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
+  const isHK = stockType === Enums.StockMarketType.HK;
+
   let result: { ks: Stock.KLineItem[], kt: number } | undefined;
-  if (source == Enums.FundApiType.Eastmoney) {
+  if (isHK) {
+    result = await AkshareAPI.GetKFromAkshare(secid, code, limit);
+  } else if (source == Enums.FundApiType.Eastmoney) {
     result = await GetKFromEastmoney(secid, code, limit);
   } else if (source == Enums.FundApiType.ZiZai) {
     result = await GetKFromZizai(secid, code);
@@ -4451,6 +4456,11 @@ export async function SearchFromDataSource(source: Enums.FundApiType, keyword: s
 }
 
 export async function GetDetailFromDataSource(source: Enums.FundApiType, secid: string) {
+  // 港股（含港股指数）通过 akshare 后端获取
+  const stockType = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
+  if (stockType === Enums.StockMarketType.HK) {
+    return AkshareAPI.GetDetailFromAkshare(secid);
+  }
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetDetailFromAkshare(secid);
   }
@@ -4462,6 +4472,11 @@ export async function GetDetailFromDataSource(source: Enums.FundApiType, secid: 
 }
 
 export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: string) {
+  // 港股（含港股指数）通过 akshare 后端获取
+  const stockType = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
+  if (stockType === Enums.StockMarketType.HK) {
+    return AkshareAPI.GetTrendFromAkshare(secid);
+  }
   if (source === Enums.FundApiType.Eastmoney) {
     return GetTrendFromEastmoney(secid);
   }

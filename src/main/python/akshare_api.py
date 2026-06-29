@@ -153,6 +153,19 @@ def is_board_code(secid: str) -> bool:
     return code.startswith("BK") or code.startswith("88") or code.startswith("3")
 
 
+def is_hk_code(secid: str) -> bool:
+    """判断是否为港股代码（含港股指数）
+    
+    港股 secid 格式：MktNum.Code，其中 MktNum 为 3 位数字且以 1 开头
+    如：116.00700（港股个股）、124.HSTECH（恒生科技指数）
+    """
+    if "." in secid:
+        mk = secid.split(".")[0]
+        if len(mk) == 3 and mk.startswith("1") and mk.isdigit():
+            return True
+    return False
+
+
 def _get_ths_cookie() -> str:
     """获取同花顺 cookie v_code"""
     try:
@@ -407,6 +420,10 @@ class AkshareAPI:
         try:
             code = convert_secid_to_pure_code(secid)
             
+            # 港股（含港股指数）A 股实时行情接口不支持，走东方财富接口
+            if is_hk_code(secid):
+                return AkshareAPI._get_hk_realtime_from_eastmoney(secid)
+            
             df = ak.stock_zh_a_spot_em()
             stock_row = df[df["代码"] == code]
             if stock_row.empty:
@@ -440,6 +457,52 @@ class AkshareAPI:
             return {"error": str(e)}
     
     @staticmethod
+    def _get_hk_realtime_from_eastmoney(secid: str) -> Dict[str, Any]:
+        """从东方财富获取港股实时行情"""
+        if requests is None:
+            return {"error": "requests 库未安装"}
+        try:
+            import random as _random
+            rnd = _random.randint(1, 99)
+            url = f"https://{rnd}.push2.eastmoney.com/api/qt/stock/get"
+            params = {
+                "secid": secid,
+                "fields": "f43,f44,f45,f46,f47,f48,f50,f51,f52,f55,f57,f58,f60,f116,f117,f162,f167,f168,f169,f170,f171",
+                "_": str(int(datetime.now().timestamp() * 1000)),
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://quote.eastmoney.com/",
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+            if not data:
+                return {"error": "No data"}
+            code = convert_secid_to_pure_code(secid)
+            return {
+                "code": code,
+                "name": data.get("f58", ""),
+                "zx": float(data.get("f43", 0) or 0) / 1000 if data.get("f43") else 0,
+                "zs": float(data.get("f60", 0) or 0) / 1000 if data.get("f60") else 0,
+                "zdf": float(data.get("f170", 0) or 0) / 100 if data.get("f170") else 0,
+                "zdd": float(data.get("f169", 0) or 0) / 1000 if data.get("f169") else 0,
+                "cjl": int(data.get("f47", 0) or 0),
+                "cje": float(data.get("f48", 0) or 0),
+                "zg": float(data.get("f44", 0) or 0) / 1000 if data.get("f44") else 0,
+                "zd": float(data.get("f45", 0) or 0) / 1000 if data.get("f45") else 0,
+                "jk": float(data.get("f46", 0) or 0) / 1000 if data.get("f46") else 0,
+                "lb": 0,
+                "hsl": float(data.get("f168", 0) or 0) / 100 if data.get("f168") else 0,
+                "syl": float(data.get("f162", 0) or 0) / 100 if data.get("f162") else 0,
+                "sjl": float(data.get("f167", 0) or 0) / 100 if data.get("f167") else 0,
+                "lt": float(data.get("f117", 0) or 0),
+                "zsz": float(data.get("f116", 0) or 0),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    @staticmethod
     def get_kline_data(secid: str, period: str = "daily", adjust: str = "qfq") -> List[Dict[str, Any]]:
         """
         获取K线数据 - 使用腾讯财经数据源
@@ -450,6 +513,10 @@ class AkshareAPI:
         try:
             # 板块代码使用 Eastmoney 数据源（akshare 个股接口不支持板块）
             if is_board_code(secid):
+                return _get_board_kline_from_eastmoney(secid, period)
+            
+            # 港股（含港股指数）腾讯接口不支持，走东方财富 K 线接口
+            if is_hk_code(secid):
                 return _get_board_kline_from_eastmoney(secid, period)
             
             # 转换为腾讯 symbol 格式
@@ -548,8 +615,17 @@ class AkshareAPI:
         获取分时走势数据 - 使用腾讯财经数据源
         
         腾讯接口返回分笔成交数据，需按分钟聚合成与东财一致的分钟数据
+        对于 market==2 的指数/板块代码，使用东方财富分时接口（腾讯个股接口不支持）
         """
         try:
+            # 指数/板块代码（market==2），腾讯个股分时接口不支持，直接用东方财富
+            if "." in secid and secid.split(".")[0] == "2":
+                return AkshareAPI._get_trend_from_eastmoney(secid)
+            
+            # 港股（含港股指数）腾讯个股分时接口不支持，直接用东方财富
+            if is_hk_code(secid):
+                return AkshareAPI._get_trend_from_eastmoney(secid)
+
             symbol = convert_secid_to_tx_symbol(secid)
             df = ak.stock_zh_a_tick_tx_js(symbol=symbol)
             
@@ -619,10 +695,60 @@ class AkshareAPI:
             return trends
         except Exception as e:
             try:
+                # market==2 指数走东方财富接口
+                if "." in secid and secid.split(".")[0] == "2":
+                    return AkshareAPI._get_trend_from_eastmoney(secid)
                 return AkshareAPI._get_trend_from_163(secid)
             except:
                 return {"error": str(e)}
     
+    @staticmethod
+    def _get_trend_from_eastmoney(secid: str) -> List[Dict[str, Any]]:
+        """从东方财富获取指数/板块分时数据（腾讯个股接口不支持 market==2 的指数代码）"""
+        if requests is None:
+            return {"error": "requests 未安装"}
+        try:
+            url = "http://push2his.eastmoney.com/api/qt/stock/trends2/get"
+            params = {
+                "secid": secid,
+                "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                "ndays": 1,
+                "iscr": 0,
+                "iscca": 0,
+                "_": int(datetime.now().timestamp() * 1000),
+            }
+            resp = requests.get(url, params=params, timeout=10)
+            resp.encoding = "utf-8"
+            data = resp.json()
+            if not data.get("data") or not data["data"].get("trends"):
+                return {"error": "No trend data available"}
+            
+            trends = []
+            for item in data["data"]["trends"]:
+                parts = item.split(",")
+                if len(parts) < 8:
+                    continue
+                datetime_str = parts[0]
+                last = float(parts[1] or 0)
+                current = float(parts[2] or 0)
+                vol = int(parts[5] or 0)
+                average = float(parts[7] or 0)
+                if current <= 0:
+                    continue
+                up = 1 if current >= last else -1
+                trends.append({
+                    "datetime": datetime_str,
+                    "current": current,
+                    "last": last,
+                    "vol": vol,
+                    "average": average,
+                    "up": up,
+                })
+            return trends
+        except Exception as e:
+            return {"error": str(e)}
+
     @staticmethod
     def _get_trend_from_163(secid: str) -> List[Dict[str, Any]]:
         """备用：从 163 获取分时数据，按分钟聚合"""

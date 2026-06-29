@@ -1594,6 +1594,14 @@ export function GetStockType(secid: string) {
   } else if (secid.startsWith('105')) {
     return Enums.StockMarketType.US;
   }
+  // 港股：东财 secid 中 MktNum 为 3 位数字且以 1 开头（如 116.00700、124.HSTECH）
+  const dotIndex = secid.indexOf('.');
+  if (dotIndex > 0) {
+    const mk = secid.substring(0, dotIndex);
+    if (/^1\d{2}$/.test(mk)) {
+      return Enums.StockMarketType.HK;
+    }
+  }
   return Enums.StockMarketType.Zindex;
 }
 
