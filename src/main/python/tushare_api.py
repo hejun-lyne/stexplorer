@@ -4786,9 +4786,6 @@ def main():
         print(json.dumps({"error": str(e)}, ensure_ascii=False))
 
 
-if __name__ == "__main__":
-    main()
-
 
 # ============ 涨停股票评分系统 (LimitUpScorer) ============
 #!/usr/bin/env python3
@@ -6011,6 +6008,13 @@ def register_limit_up_methods():
 
 
 # 注册涨停评分方法到 TushareAPI
+# 必须在 if __name__ == "__main__" 之前调用，否则 CLI 模式下 main() 找不到方法
 register_limit_up_methods()
+
+# ============ CLI 入口 ============
+# 注意：register_limit_up_methods() 必须在 main() 之前执行，因此 CLI 入口放在文件末尾
+
+if __name__ == "__main__":
+    main()
 
 
