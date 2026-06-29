@@ -1309,11 +1309,24 @@ async function init() {
         pythonOptions: ['-u'],
         scriptPath: scriptPath,
         args: config.params,
+        stderrParser: (line: string) => line,
       };
       
-      PythonShell.run(config.fileName, options, (err, results) => {
+      const pyshell = new PythonShell(config.fileName, options);
+      const stderrLines: string[] = [];
+      pyshell.stderr.on('data', (line: string) => {
+        stderrLines.push(line);
+      });
+      pyshell.end((err, results) => {
         if (err) {
           console.error('Python script error:', err);
+          if (stderrLines.length > 0) {
+            console.error('Python stderr output:', stderrLines.join(''));
+          }
+          // 尝试获取更详细的错误信息
+          if ((err as any).traceback) {
+            console.error('Python traceback:', (err as any).traceback);
+          }
           reject(err);
           return;
         }

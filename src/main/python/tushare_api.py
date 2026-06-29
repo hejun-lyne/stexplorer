@@ -49,14 +49,26 @@ def init_pro(token: Optional[str] = None):
     """初始化 tushare pro api"""
     global _pro_api
     if token:
-        ts.set_token(token)
-        _pro_api = ts.pro_api(token)
-        return _pro_api
+        try:
+            ts.set_token(token)
+            _pro_api = ts.pro_api(token)
+            return _pro_api
+        except Exception as e:
+            sys.stderr.write(f"[DEBUG] init_pro failed: {e}\n")
+            import traceback
+            sys.stderr.write(traceback.format_exc())
+            return None
     env_token = os.environ.get('TUSHARE_TOKEN', '')
     if env_token:
-        ts.set_token(env_token)
-        _pro_api = ts.pro_api(env_token)
-        return _pro_api
+        try:
+            ts.set_token(env_token)
+            _pro_api = ts.pro_api(env_token)
+            return _pro_api
+        except Exception as e:
+            sys.stderr.write(f"[DEBUG] init_pro(env) failed: {e}\n")
+            import traceback
+            sys.stderr.write(traceback.format_exc())
+            return None
     return None
 
 
@@ -4744,6 +4756,10 @@ class DateTimeEncoder(json.JSONEncoder):
 # ============ CLI 入口 ============
 
 def main():
+    # 当脚本作为 __main__ 运行时，直接通过 tushare_api 模块引用所有全局状态，
+    # 避免 __main__ 和 tushare_api 两个命名空间不一致的问题。
+    import tushare_api as _mod
+
     parser = argparse.ArgumentParser(description="Tushare Pro API CLI")
     parser.add_argument("method", help="方法名")
     parser.add_argument("--params", "-p", help="JSON格式的参数", default="{}")
@@ -4754,7 +4770,7 @@ def main():
 
     try:
         params = json.loads(args.params)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
         print(json.dumps({"error": "Invalid JSON params"}, ensure_ascii=False))
         sys.exit(1)
 
@@ -4764,11 +4780,13 @@ def main():
 
     # 初始化
     if args.token:
-        init_pro(args.token)
+        _mod.init_pro(args.token)
     else:
-        init_pro()
+        _mod.init_pro()
 
-    if _pro_api is None:
+    if _mod._pro_api is None:
+        print(json.dumps({"error": "Tushare Pro Token 未设置，请在设置中配置 token"}, ensure_ascii=False))
+        sys.exit(1)
         print(json.dumps({"error": "Tushare Pro Token 未设置，请在设置中配置 token"}, ensure_ascii=False))
         sys.exit(1)
 
