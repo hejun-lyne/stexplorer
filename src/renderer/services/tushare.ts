@@ -1095,6 +1095,63 @@ export async function GetUpRatioFromTushare(dates: string[]): Promise<Record<str
     return {};
   }
 }
+// ==================== 涨停股票评分 (LimitUpScorer) ====================
+
+/**
+ * LimitUpScorer 评分结果维度详情
+ */
+export interface LimitUpDimensionDetail {
+  score: number;
+  weight: number;
+  weighted: number;
+  detail: Record<string, any>;
+}
+
+/**
+ * LimitUpScorer 单只股票评分结果
+ */
+export interface LimitUpScoreResult {
+  secid: string;
+  ts_code: string;
+  trade_date: string;
+  name: string;
+  total_score: number;
+  grade: string;
+  recommendation: string;
+  penalty: number;
+  dimension_scores: {
+    topic_heat?: LimitUpDimensionDetail;
+    ma60_break?: LimitUpDimensionDetail;
+    trend_stage?: LimitUpDimensionDetail;
+    relative_strength?: LimitUpDimensionDetail;
+    stock_character?: LimitUpDimensionDetail;
+  };
+  weights: Record<string, number>;
+}
+
+/**
+ * 调用 LimitUpScorer 对单只涨停股票进行评分
+ * @param secid 股票ID，如 "0.000001"
+ * @param tradeDate 交易日期 (YYYY-MM-DD)
+ * @returns 评分结果
+ */
+export async function ScoreLimitUpStock(secid: string, tradeDate: string): Promise<LimitUpScoreResult | null> {
+  try {
+    const result = await callTushare('score_limit_up_stock', {
+      secid,
+      trade_date: tradeDate.replace(/-/g, ''),
+    });
+    if (result.error) {
+      console.error('涨停评分失败:', result.error);
+      return null;
+    }
+    return result as LimitUpScoreResult;
+  } catch (error) {
+    logError(error, 'ScoreLimitUpStock', '涨停评分失败');
+    return null;
+  }
+}
+
 // ==================== 综合查询 ====================
 
 export async function FromTushare(secid: string): Promise<any> {

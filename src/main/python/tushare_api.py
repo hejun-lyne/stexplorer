@@ -5777,6 +5777,10 @@ def register_limit_up_methods():
     TushareAPI.batch_score_limit_up = batch_score_limit_up
 
 
+# 注册涨停评分方法到 TushareAPI
+register_limit_up_methods()
+
+
 # ============ CLI 入口 ============
 
 def main():

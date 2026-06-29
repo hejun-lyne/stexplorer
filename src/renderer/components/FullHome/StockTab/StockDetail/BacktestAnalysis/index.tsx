@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Button, Table, Tag, Row, Col, Alert, Checkbox, Spin } from 'antd';
+import { Button, Table, Tag, Row, Col, Alert, Checkbox, Spin, Progress } from 'antd';
 import { useDispatch } from 'react-redux';
 import { setStockTradePointsAction } from '@/actions/stock';
 import { useRequest } from 'ahooks';
@@ -7,6 +7,8 @@ import { calculateMA, calculateMACD, calculateRSI } from '@/helpers/tech';
 import { InputNumber } from 'antd';
 import { Stock } from '@/types/stock';
 import styles from './index.scss';
+import dayjs from 'dayjs';
+import { ScoreLimitUpStock, LimitUpScoreResult } from '@/services/tushare';
 
 // 引入 electron worker 执行器（与 PriceTrend 保持一致）
 const { makeWorkerExec } = window.contextModules.electron;
@@ -80,6 +82,10 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
   const [macdResults, setMacdResults] = useState<MACDStrategyResult[]>([]);
   const [rsiResults, setRsiResults] = useState<RSIBacktestResult[]>([]);
 
+  // LimitUpScorer 评分状态
+  const [limitUpScore, setLimitUpScore] = useState<LimitUpScoreResult | null>(null);
+  const [limitUpScoreMsg, setLimitUpScoreMsg] = useState('');
+
   // klines 变化时清空旧结果（内容指纹判断，避免引用变化误触发）
   const prevSecidRef = useRef(secid);
   const prevKlinesKeyRef = useRef('');
@@ -100,6 +106,8 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
       setShowMAPoints(false);
       setShowMACDPoints(false);
       setShowRSIPoints(false);
+      setLimitUpScore(null);
+      setLimitUpScoreMsg('');
     }
   }, [secid, klines]);
 
@@ -432,6 +440,58 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
     }
   }, [topRSIResult, klines, secid, dispatch, showRSIPoints]);
 
+  // ==================== LimitUpScorer 涨停评分 ====================
+
+  /**
+   * 判断某条 KLine 是否涨停
+   * 创业板(30)、科创(68)、北交(8/9开头)：涨跌幅 >= 19.9%
+   * 其他：涨跌幅 >= 9.9%
+   */
+  const isLimitUp = useCallback((item: Stock.KLineItem): boolean => {
+    const code = secid.split('.').pop() || '';
+    if (code.startsWith('30') || code.startsWith('68') || code.startsWith('8') || code.startsWith('9')) {
+      return item.zdf >= 19.9;
+    }
+    return item.zdf >= 9.9;
+  }, [secid]);
+
+  // 找到最近一个涨停的交易日
+  const lastLimitUpDate = (() => {
+    if (!klines || klines.length === 0) return '';
+    for (let i = klines.length - 1; i >= 0; i--) {
+      if (isLimitUp(klines[i])) {
+        return dayjs(klines[i].date).format('YYYY-MM-DD');
+      }
+    }
+    return '';
+  })();
+
+  const { run: runLimitUpScore, loading: limitUpScoreLoading } = useRequest(
+    async () => {
+      if (!lastLimitUpDate) {
+        throw new Error('未找到近期涨停的交易日');
+      }
+      return ScoreLimitUpStock(secid, lastLimitUpDate);
+    },
+    {
+      manual: true,
+      onBefore: () => {
+        setLimitUpScoreMsg('正在调用 LimitUpScorer 评分...');
+      },
+      onSuccess: (data) => {
+        if (data) {
+          setLimitUpScore(data);
+          setLimitUpScoreMsg(`评分完成：${data.name} 总分 ${data.total_score.toFixed(1)} 等级 ${data.grade}`);
+        } else {
+          setLimitUpScoreMsg('评分失败，请检查 Tushare Token 和网络连接');
+        }
+      },
+      onError: (error: any) => {
+        setLimitUpScoreMsg('评分失败：' + (error?.message || String(error)));
+      },
+    }
+  );
+
   const maColumns = [
     { title: '参数', dataIndex: 'param', key: 'param' },
     { title: '值', dataIndex: 'value', key: 'value' },
@@ -696,6 +756,215 @@ const BacktestAnalysis: React.FC<BacktestAnalysisProps> = React.memo(({ secid, k
           />
         </div>
       )}
+
+      {/* ==================== LimitUpScorer 涨停评分 ==================== */}
+      <div className={styles.section}>
+        <div className={styles.title}>
+          <Tag color="volcano">涨停评分 (LimitUpScorer)</Tag>
+          {lastLimitUpDate && (
+            <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--sec-text-color)' }}>
+              基于涨停日 {lastLimitUpDate} 数据
+            </span>
+          )}
+        </div>
+        <Row gutter={16} align="middle" style={{ marginBottom: 8 }}>
+          <Col>
+            <Button
+              size="small"
+              type="primary"
+              danger
+              onClick={() => runLimitUpScore()}
+              loading={limitUpScoreLoading}
+              disabled={limitUpScoreLoading || !lastLimitUpDate}
+            >
+              {limitUpScoreLoading ? '评分中...' : '执行涨停评分'}
+            </Button>
+          </Col>
+          <Col>
+            <span style={{ fontSize: 11, color: 'var(--sec-text-color)' }}>
+              调用 LimitUpScorer 对当前股票进行多维度综合评分
+            </span>
+          </Col>
+        </Row>
+
+        {/* 评分状态提示 */}
+        {limitUpScoreMsg && (
+          <Alert
+            message={limitUpScoreMsg}
+            type={limitUpScore ? 'success' : 'info'}
+            size="small"
+            banner
+            style={{ padding: '4px 8px', marginBottom: 8 }}
+          />
+        )}
+
+        {/* 评分结果展示 */}
+        <Spin spinning={limitUpScoreLoading} tip="评分计算中..." size="small">
+          {limitUpScore && (
+            <div className={styles.resultCard}>
+              {/* 总分和等级 */}
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 24, fontWeight: 'bold', color: 'var(--main-text-color)' }}>
+                    {limitUpScore.total_score.toFixed(1)}
+                    <span style={{ fontSize: 14, marginLeft: 8 }}>
+                      {limitUpScore.grade} 级
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 13, color: 'var(--sec-text-color)', marginTop: 2 }}>
+                    {limitUpScore.recommendation}
+                    {limitUpScore.penalty < 1.0 && (
+                      <Tag color="warning" style={{ marginLeft: 8 }}>
+                        惩罚系数 {limitUpScore.penalty.toFixed(2)}
+                      </Tag>
+                    )}
+                  </div>
+                </div>
+                <Progress
+                  type="circle"
+                  size="small"
+                  percent={Math.min(limitUpScore.total_score, 100)}
+                  strokeColor={{
+                    '0%': '#f5222d',
+                    '40%': '#fa8c16',
+                    '55%': '#faad14',
+                    '70%': '#52c41a',
+                    '85%': '#13c2c2',
+                  }}
+                  format={() => `${limitUpScore.grade}`}
+                />
+              </div>
+
+              {/* 各维度得分 */}
+              <div className={styles.title} style={{ marginBottom: 4 }}>评分维度</div>
+              <Table
+                size="small"
+                bordered={false}
+                pagination={false}
+                rowKey="dim"
+                dataSource={[
+                  {
+                    dim: '题材热点热度',
+                    key: 'topic_heat',
+                    weight: limitUpScore.weights?.weight_topic_heat || 0.20,
+                    ...limitUpScore.dimension_scores?.topic_heat,
+                  },
+                  {
+                    dim: '60日均线突破质量',
+                    key: 'ma60_break',
+                    weight: limitUpScore.weights?.weight_ma60_break || 0.20,
+                    ...limitUpScore.dimension_scores?.ma60_break,
+                  },
+                  {
+                    dim: '趋势阶段',
+                    key: 'trend_stage',
+                    weight: limitUpScore.weights?.weight_trend_stage || 0.25,
+                    ...limitUpScore.dimension_scores?.trend_stage,
+                  },
+                  {
+                    dim: '同题材相对强度',
+                    key: 'relative_strength',
+                    weight: limitUpScore.weights?.weight_relative_strength || 0.20,
+                    ...limitUpScore.dimension_scores?.relative_strength,
+                  },
+                  {
+                    dim: '股性评价',
+                    key: 'stock_character',
+                    weight: limitUpScore.weights?.weight_stock_character || 0.15,
+                    ...limitUpScore.dimension_scores?.stock_character,
+                  },
+                ].filter(d => d.score !== undefined)}
+                columns={[
+                  { title: '维度', dataIndex: 'dim', key: 'dim', width: 140 },
+                  { title: '得分', dataIndex: 'score', key: 'score', width: 70, render: (v: number) => v?.toFixed(1) },
+                  { title: '权重', dataIndex: 'weight', key: 'weight', width: 60, render: (v: number) => `${((v || 0) * 100).toFixed(0)}%` },
+                  { title: '加权', dataIndex: 'weighted', key: 'weighted', width: 70, render: (v: number) => v?.toFixed(1) },
+                ]}
+              />
+
+              {/* 原始评分维度数据明细 */}
+              <div className={styles.title} style={{ marginBottom: 4, marginTop: 12 }}>
+                原始维度数据明细
+              </div>
+              {(() => {
+                const dims = limitUpScore.dimension_scores;
+                if (!dims) return null;
+
+                const rawDims = [
+                  { label: '题材热点热度', dimKey: 'topic_heat', detail: dims.topic_heat?.detail },
+                  { label: '60日均线突破质量', dimKey: 'ma60_break', detail: dims.ma60_break?.detail },
+                  { label: '趋势阶段', dimKey: 'trend_stage', detail: dims.trend_stage?.detail },
+                  { label: '同题材相对强度', dimKey: 'relative_strength', detail: dims.relative_strength?.detail },
+                  { label: '股性评价', dimKey: 'stock_character', detail: dims.stock_character?.detail },
+                ];
+                const allDimensions = rawDims.filter((d): d is { label: string; dimKey: string; detail: Record<string, any> } =>
+                  !!d.detail && Object.keys(d.detail).length > 0
+                );
+
+                if (allDimensions.length === 0) {
+                  return <span style={{ fontSize: 12, color: 'var(--sec-text-color)' }}>暂无原始数据</span>;
+                }
+
+                return allDimensions.map(({ label, dimKey, detail }) => (
+                  <div key={dimKey} style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--main-text-color)', marginBottom: 4 }}>
+                      {label}
+                    </div>
+                    <Table
+                      size="small"
+                      bordered={false}
+                      pagination={false}
+                      rowKey="field"
+                      dataSource={Object.entries(detail!).map(([field, value]) => {
+                        let displayValue: string;
+                        if (typeof value === 'number') {
+                          // 百分比类字段保留2-4位小数
+                          const fieldLower = field.toLowerCase();
+                          if (fieldLower.includes('pct') || fieldLower.includes('ratio') || fieldLower.includes('rate') || fieldLower.includes('decline') || fieldLower.includes('deviation') || fieldLower.includes('slope')) {
+                            displayValue = (value * 100).toFixed(2) + '%';
+                          } else if (fieldLower.includes('score') || fieldLower === 'weighted') {
+                            displayValue = value.toFixed(2);
+                          } else if (Number.isInteger(value) || fieldLower.includes('count') || fieldLower.includes('num') || fieldLower.includes('times') || fieldLower.includes('days')) {
+                            displayValue = String(value);
+                          } else {
+                            displayValue = value.toFixed(2);
+                          }
+                        } else if (typeof value === 'boolean') {
+                          displayValue = value ? '是' : '否';
+                        } else if (value === null || value === undefined) {
+                          displayValue = '-';
+                        } else {
+                          displayValue = String(value);
+                        }
+                        return { field, value: displayValue };
+                      })}
+                      columns={[
+                        {
+                          title: '字段',
+                          dataIndex: 'field',
+                          key: 'field',
+                          width: 160,
+                          render: (v: string) => (
+                            <span style={{ fontSize: 11, color: 'var(--sec-text-color)' }}>{v}</span>
+                          ),
+                        },
+                        {
+                          title: '值',
+                          dataIndex: 'value',
+                          key: 'value',
+                          render: (v: string) => (
+                            <span style={{ fontSize: 11, fontWeight: 500 }}>{v}</span>
+                          ),
+                        },
+                      ]}
+                    />
+                  </div>
+                ));
+              })()}
+            </div>
+          )}
+        </Spin>
+      </div>
 
       {/* 策略对比 */}
       {topMAResult && topMACDResult && topRSIResult && (
