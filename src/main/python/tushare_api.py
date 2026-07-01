@@ -1280,7 +1280,11 @@ class TushareAPI:
 
     @staticmethod
     def _get_board_kline(secid: str, period: str = "daily") -> List[Dict[str, Any]]:
-        """获取东财板块K线（dc_daily，6000积分）"""
+        """获取东财板块K线（dc_daily，6000积分）
+
+        缓存策略：参照 get_kline_data，缓存 key 与 trade_date 无关，
+        通过比较缓存最新日期与预期最新交易日来判断缓存是否过期。
+        """
         try:
             code = convert_secid_to_pure_code(secid)
             pro = get_pro()
@@ -1298,15 +1302,42 @@ class TushareAPI:
             # dc_daily 需要 BKxxxx.DC 格式
             ts_code = f"{code}.DC" if not code.endswith(".DC") else code
 
-            # 先尝试带 start_date/end_date 查询
-            df = cached_api_call(f"dc_daily_{ts_code}_{start_date}_{trade_date}", 24, pro.dc_daily,
-                                  ts_code=ts_code, start_date=start_date, end_date=trade_date)
+            # 缓存 key 与 trade_date 无关，参照 get_kline_data 的缓存策略
+            cache_key = f"board_kline_{ts_code}_{period}"
+            # 获取预期最新交易日
+            expected_last_str = _get_expected_last_trade_date(period)
+            expected_last = _parse_date_str(expected_last_str)
+
+            # 检查缓存是否有效
+            cached_df = read_cache(cache_key, max_age_hours=168 * 4)  # 最长缓存 4 周
+            cache_valid = False
+            if cached_df is not None and isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+                cache_max_date_str = str(cached_df['trade_date'].max())
+                cache_max_date = _parse_date_str(cache_max_date_str)
+                if cache_max_date is not None and expected_last is not None:
+                    if cache_max_date >= expected_last:
+                        cache_valid = True
+                        print(f"[板块K线缓存命中] {ts_code} 缓存最新={cache_max_date_str} >= 需求={expected_last_str}")
+                    else:
+                        print(f"[板块K线缓存过期] {ts_code} 缓存最新={cache_max_date_str} < 需求={expected_last_str}，重新拉取")
+
+            if cache_valid:
+                df = cached_df
+            else:
+                # 缓存无效，重新拉取。直接用 today 作为 end_date（不用 trade_date），
+                # 因为 dc_daily 接口本身支持未来日期查询，会返回截至最新数据
+                df = safe_api_call(pro.dc_daily, ts_code=ts_code, start_date=start_date, end_date=today)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    write_cache(cache_key, df)
+
             debug_info = {
                 "ts_code": ts_code,
                 "start_date": start_date,
-                "end_date": trade_date,
+                "end_date": today,
                 "query_type": "range",
                 "df_type": type(df).__name__,
+                "expected_last": expected_last_str,
+                "cache_hit": cache_valid,
             }
             if isinstance(df, pd.DataFrame):
                 debug_info["df_shape"] = df.shape
@@ -1330,6 +1361,7 @@ class TushareAPI:
                             debug_info["query_type"] = "daily_concat"
                             debug_info["concat_dates"] = recent_dates
                             debug_info["df_shape"] = df.shape
+                            write_cache(cache_key, df)
                 except Exception as e:
                     debug_info["daily_query_error"] = str(e)
 
