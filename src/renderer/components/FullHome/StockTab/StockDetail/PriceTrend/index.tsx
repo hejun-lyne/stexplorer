@@ -1056,7 +1056,7 @@ function alignChouma(ks: { zg: number; zd: number }[], cm: Stock.ChouMaItem, ran
     avgCost: cm.avgCost,
   };
 }
-function setupTrendChart(darkMode: boolean, trends: Stock.TrendItem[], zs: number) {
+function setupTrendChart(darkMode: boolean, trends: Stock.TrendItem[], zs: number, stockMarkLines?: number[]) {
   const options = baseTChartOptions(darkMode);
   options.grid = getGridOption(false);
   options.visualMap = getVisualMap();
@@ -1070,7 +1070,26 @@ function setupTrendChart(darkMode: boolean, trends: Stock.TrendItem[], zs: numbe
   options.yAxis = getyAxis(darkMode, [yMin, yMax]);
   // const macds = Tech.calculateMACD(trends.map((_) => _.current), 89, 25, 13); // macd(trends.map((_) => _.current));
   const { color } = Utils.GetValueColor(Number(trends[trends.length - 1]?.current) - zs);
-  const markLines = getMarkLineData(darkMode, Number(trends[trends.length - 1]?.current), undefined);
+  const currentPrice = Number(trends[trends.length - 1]?.current);
+  const markLines = getMarkLineData(darkMode, zs, undefined);
+  // 添加 stockMarkLines（日K线上的用户自定义markline），只显示在分时图价格范围内的
+  if (stockMarkLines && stockMarkLines.length > 0) {
+    stockMarkLines.forEach((m) => {
+      if (m >= yMin && m <= yMax) {
+        markLines.push({
+          name: m < currentPrice ? '支撑' : '压力',
+          yAxis: m,
+          label: {
+            color: Utils.getVariablesColor(CONST.VARIABLES)['--hint-color'],
+          },
+          lineStyle: {
+            color: Utils.getVariablesColor(CONST.VARIABLES)['--hint-color'],
+            type: 'dashed',
+          },
+        });
+      }
+    });
+  }
   options.series = [
     getTrendSeries(trends, color, markLines),
     getVolSeries(trends.map(({ vol, up }, i) => [i, vol, up])),
@@ -1081,7 +1100,7 @@ function setupTrendChart(darkMode: boolean, trends: Stock.TrendItem[], zs: numbe
   }
   return options;
 }
-function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[], zs: number) {
+function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[], zs: number, stockMarkLines?: number[]) {
   opts.darkMode = darkMode;
   opts.tooltip.formatter = tChartTipFormatter(zs);
   const dates = trends.map(({ datetime }) => datetime.length >= 10 ? datetime.split(' ')[1] : datetime);
@@ -1099,6 +1118,27 @@ function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[
   if (opts.series.length > 2) {
     opts.series[2].data = trends.map(({ average }) => average); // 平均价格
   }
+  // 更新 markLine：保留昨收和 GSpot，替换 stockMarkLines
+  const currentPrice = Number(trends[trends.length - 1]?.current);
+  const baseMarkLines = getMarkLineData(darkMode, zs, undefined);
+  if (stockMarkLines && stockMarkLines.length > 0) {
+    stockMarkLines.forEach((m) => {
+      if (m >= yMin && m <= yMax) {
+        baseMarkLines.push({
+          name: m < currentPrice ? '支撑' : '压力',
+          yAxis: m,
+          label: {
+            color: Utils.getVariablesColor(CONST.VARIABLES)['--hint-color'],
+          },
+          lineStyle: {
+            color: Utils.getVariablesColor(CONST.VARIABLES)['--hint-color'],
+            type: 'dashed',
+          },
+        });
+      }
+    });
+  }
+  opts.series[0].markLine.data = baseMarkLines;
   // macd
   // const macds = Tech.calculateMACD(trends.map((_) => _.current), 89, 25, 13); //macd(trends.map((_) => _.current));
   // opts.series[3].data = macds.histogram;
@@ -1628,9 +1668,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           if (prevK) tzs = prevK.sp;
         }
         if (chartOptions[0]) {
-          updateTrendChart(chartOptions[0], darkMode, data.trends, tzs);
+          updateTrendChart(chartOptions[0], darkMode, data.trends, tzs, config?.markLines);
         } else {
-          chartOptions[0] = setupTrendChart(darkMode, data.trends || [], tzs);
+          chartOptions[0] = setupTrendChart(darkMode, data.trends || [], tzs, config?.markLines);
         }
         setChartOptions({
           ...chartOptions,
@@ -2379,6 +2419,32 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           if (chartOptions[0]) {
             const opts = chartOptions[0];
             opts.darkMode = darkMode;
+            // 更新分时图上的 stockMarkLines
+            if (opts.series[0].markLine) {
+              const trendData = opts.series[0].data as number[];
+              const yMin = opts.yAxis[0].min ?? (trendData.length > 0 ? Math.min(...trendData) * 0.999 : 0);
+              const yMax = opts.yAxis[0].max ?? (trendData.length > 0 ? Math.max(...trendData) * 1.001 : 0);
+              const currentPrice = trendData.length > 0 ? trendData[trendData.length - 1] : 0;
+              const baseMarkLines = getMarkLineData(darkMode, zs, undefined);
+              if (config?.markLines && config.markLines.length > 0) {
+                config.markLines.forEach((m) => {
+                  if (m >= yMin && m <= yMax) {
+                    baseMarkLines.push({
+                      name: m < currentPrice ? '支撑' : '压力',
+                      yAxis: m,
+                      label: {
+                        color: Utils.getVariablesColor(CONST.VARIABLES)['--hint-color'],
+                      },
+                      lineStyle: {
+                        color: Utils.getVariablesColor(CONST.VARIABLES)['--hint-color'],
+                        type: 'dashed',
+                      },
+                    });
+                  }
+                });
+              }
+              opts.series[0].markLine.data = baseMarkLines;
+            }
             chartInstance?.setOption(opts, true);
           }
         } else {
