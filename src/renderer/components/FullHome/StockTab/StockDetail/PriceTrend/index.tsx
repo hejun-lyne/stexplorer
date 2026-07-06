@@ -1616,8 +1616,15 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           updateTrendData(trends);
         }
 
-        // 同步更新日线K线：非交易日不使用分时来填充K线数据
-        if (Utils.JudgeWorkDayTime(new Date().getTime())) {
+        // 同步更新日线K线：交易日（含收盘后）用分时数据填充/更新当日K线
+        const now = new Date();
+        const nowHour = now.getHours();
+        const nowDay = now.getDay();
+        const nowMinute = now.getMinutes();
+        const isWorkDay = nowDay >= 1 && nowDay <= 5;
+        const isTradingTime = Utils.JudgeWorkDayTime(now.getTime());
+        const isAfterMarketCloseToday = isWorkDay && !isTradingTime && (nowHour > 15 || (nowHour === 15 && nowMinute > 0));
+        if (isTradingTime || isAfterMarketCloseToday) {
           const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
           const currentDayKlines = klineDataRef.current.klines[dayIndex];
           if (currentDayKlines && currentDayKlines.length > 0) {
@@ -1793,25 +1800,50 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         //   }
         // }
         // 非交易日不使用分时来填充K线数据
-        if (Utils.JudgeWorkDayTime(new Date().getTime())) {
+        const now = new Date();
+        const nowHour = now.getHours();
+        const nowDay = now.getDay();
+        const nowMinute = now.getMinutes();
+        const isWorkDay = nowDay >= 1 && nowDay <= 5;
+        const isTradingTime = Utils.JudgeWorkDayTime(now.getTime());
+        // 收盘后（15:00之后）到当天结束，仍为工作日
+        const isAfterMarketCloseToday = isWorkDay && !isTradingTime && (nowHour > 15 || (nowHour === 15 && nowMinute > 0));
+        if (isTradingTime || isAfterMarketCloseToday) {
           const latestTrends = trendDataRef.current.trends;
-          if (kt == KLineType.Day && latestTrends.length > 0) {
+          if (kt == KLineType.Day) {
             const today = new Date();
             const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
             const lastK = ks[ks.length - 1];
             if (lastK?.date !== todayStr) {
-              // K线中不包含今日数据，需要从分时合成
-              const zsValue = lastK?.sp || latestTrends[0].last || 0;
-              const dailyK = buildDailyKFromTrends(latestTrends, secid, zsValue);
-              if (dailyK) {
-                ks = [...ks, dailyK];
+              // K线中不包含今日数据
+              if (latestTrends.length > 0) {
+                // 已有分时数据，直接从分时合成
+                const zsValue = lastK?.sp || latestTrends[0].last || 0;
+                const dailyK = buildDailyKFromTrends(latestTrends, secid, zsValue);
+                if (dailyK) {
+                  ks = [...ks, dailyK];
+                }
+              } else if (isAfterMarketCloseToday) {
+                // 收盘后无分时数据，自动触发分时请求，请求成功后再合成今日K线
+                if (!requestTrends) {
+                  setRequestTrends(true);
+                  runGetTrends(kLineApiSourceSetting, secid);
+                }
               }
             } else if (!lastK.kp || !lastK.sp || !lastK.zg || !lastK.zd || lastK.hsl === 0) {
               // K线有今日日期但数据不完整或是分时合成的（hsl=0），用分时数据补充/更新
-              const zsValue = ks.length > 1 ? ks[ks.length - 2].sp : (latestTrends[0]?.last || 0);
-              const dailyK = buildDailyKFromTrends(latestTrends, secid, zsValue);
-              if (dailyK) {
-                ks[ks.length - 1] = dailyK;
+              if (latestTrends.length > 0) {
+                const zsValue = ks.length > 1 ? ks[ks.length - 2].sp : (latestTrends[0]?.last || 0);
+                const dailyK = buildDailyKFromTrends(latestTrends, secid, zsValue);
+                if (dailyK) {
+                  ks[ks.length - 1] = dailyK;
+                }
+              } else if (isAfterMarketCloseToday) {
+                // 收盘后无分时数据，自动触发分时请求
+                if (!requestTrends) {
+                  setRequestTrends(true);
+                  runGetTrends(kLineApiSourceSetting, secid);
+                }
               }
             }
             // 如果已有完整的今日K线数据（来自API，hsl>0），不做任何处理
