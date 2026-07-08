@@ -3401,16 +3401,17 @@ class TushareAPI:
 
                 # 计算各周期的累计值（1日/3日/5日/10日）
                 def sum_period(data_list, n):
-                    """取最近 n 天的累计"""
+                    """取最近 n 天的累计，返回 (主力, 散户, 中户)"""
                     subset = data_list[-n:] if len(data_list) >= n else data_list
                     main_sum = sum(d.get("main_in", 0) for d in subset)
                     retail_sum = sum(d.get("small_in", 0) for d in subset)
-                    return main_sum, retail_sum
+                    medium_sum = sum(d.get("medium_in", 0) for d in subset)
+                    return main_sum, retail_sum, medium_sum
 
-                main_1d, retail_1d = sum_period(daily_data, 1)
-                main_3d, retail_3d = sum_period(daily_data, 3)
-                main_5d, retail_5d = sum_period(daily_data, 5)
-                main_10d, retail_10d = sum_period(daily_data, 10)
+                main_1d, retail_1d, medium_1d = sum_period(daily_data, 1)
+                main_3d, retail_3d, medium_3d = sum_period(daily_data, 3)
+                main_5d, retail_5d, medium_5d = sum_period(daily_data, 5)
+                main_10d, retail_10d, medium_10d = sum_period(daily_data, 10)
 
                 # 最新一日的详细分档数据
                 latest = daily_data[-1]
@@ -3427,6 +3428,11 @@ class TushareAPI:
                     "retail_3d": round(retail_3d, 2),
                     "retail_5d": round(retail_5d, 2),
                     "retail_10d": round(retail_10d, 2),
+                    # 各周期中户净流入
+                    "medium_1d": round(medium_1d, 2),
+                    "medium_3d": round(medium_3d, 2),
+                    "medium_5d": round(medium_5d, 2),
+                    "medium_10d": round(medium_10d, 2),
                     # 最新一日的分档数据
                     "main_in": latest.get("main_in", 0),
                     "small_in": latest.get("small_in", 0),
@@ -3438,6 +3444,7 @@ class TushareAPI:
                     "detail_dates": [d.get("trade_date", "") for d in daily_data],
                     "detail_main": [round(d.get("main_in", 0), 2) for d in daily_data],
                     "detail_retail": [round(d.get("small_in", 0), 2) for d in daily_data],
+                    "detail_medium": [round(d.get("medium_in", 0), 2) for d in daily_data],
                 }
 
             # 无 days 参数：保持向后兼容，只返回当日数据

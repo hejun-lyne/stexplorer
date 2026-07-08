@@ -124,21 +124,25 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
                 {/* 主力资金流向汇总 */}
                 <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
                   <Col span={6}>周期</Col>
-                  <Col span={9}>主力净流入</Col>
-                  <Col span={9}>散户净流入</Col>
+                  <Col span={6}>主力</Col>
+                  <Col span={6}>中户</Col>
+                  <Col span={6}>散户</Col>
                 </Row>
                 {[
-                  { label: '今日', main: moneyFlow.main_1d, retail: moneyFlow.retail_1d },
-                  { label: '3日', main: moneyFlow.main_3d, retail: moneyFlow.retail_3d },
-                  { label: '5日', main: moneyFlow.main_5d, retail: moneyFlow.retail_5d },
-                  { label: '10日', main: moneyFlow.main_10d, retail: moneyFlow.retail_10d },
+                  { label: '今日', main: moneyFlow.main_1d, medium: moneyFlow.medium_1d, retail: moneyFlow.retail_1d },
+                  { label: '3日', main: moneyFlow.main_3d, medium: moneyFlow.medium_3d, retail: moneyFlow.retail_3d },
+                  { label: '5日', main: moneyFlow.main_5d, medium: moneyFlow.medium_5d, retail: moneyFlow.retail_5d },
+                  { label: '10日', main: moneyFlow.main_10d, medium: moneyFlow.medium_10d, retail: moneyFlow.retail_10d },
                 ].map((item) => (
                   <Row key={item.label} style={{ marginBottom: 6 }}>
                     <Col span={6}>{item.label}</Col>
-                    <Col span={9} className={Utils.GetValueColor(item.main).textClass}>
+                    <Col span={6} className={Utils.GetValueColor(item.main).textClass}>
                       {formatMoneyFlow(item.main)}
                     </Col>
-                    <Col span={9} className={Utils.GetValueColor(item.retail).textClass}>
+                    <Col span={6} className={Utils.GetValueColor(item.medium).textClass}>
+                      {formatMoneyFlow(item.medium)}
+                    </Col>
+                    <Col span={6} className={Utils.GetValueColor(item.retail).textClass}>
                       {formatMoneyFlow(item.retail)}
                     </Col>
                   </Row>
@@ -190,19 +194,23 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
                       <Col span={24}>近10日逐日资金流向</Col>
                     </Row>
                     <Row className={styles.rowheader} style={{ marginBottom: 4 }}>
-                      <Col span={8}>日期</Col>
-                      <Col span={8}>主力</Col>
-                      <Col span={8}>散户</Col>
+                      <Col span={6}>日期</Col>
+                      <Col span={6}>主力</Col>
+                      <Col span={6}>中户</Col>
+                      <Col span={6}>散户</Col>
                     </Row>
                     {[...moneyFlow.detail_dates].reverse().map((date: string, i: number) => {
                       const origIndex = moneyFlow.detail_dates.length - 1 - i;
                       return (
                         <Row key={date} style={{ marginBottom: 3, fontSize: 12 }}>
-                          <Col span={8}>{date.substring(5)}</Col>
-                          <Col span={8} className={Utils.GetValueColor(moneyFlow.detail_main[origIndex]).textClass}>
+                          <Col span={6}>{date.substring(5)}</Col>
+                          <Col span={6} className={Utils.GetValueColor(moneyFlow.detail_main[origIndex]).textClass}>
                             {formatMoneyFlow(moneyFlow.detail_main[origIndex])}
                           </Col>
-                          <Col span={8} className={Utils.GetValueColor(moneyFlow.detail_retail[origIndex]).textClass}>
+                          <Col span={6} className={Utils.GetValueColor(moneyFlow.detail_medium[origIndex]).textClass}>
+                            {formatMoneyFlow(moneyFlow.detail_medium[origIndex])}
+                          </Col>
+                          <Col span={6} className={Utils.GetValueColor(moneyFlow.detail_retail[origIndex]).textClass}>
                             {formatMoneyFlow(moneyFlow.detail_retail[origIndex])}
                           </Col>
                         </Row>

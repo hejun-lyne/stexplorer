@@ -970,6 +970,10 @@ export async function GetMoneyFlowFromTushare(secid: string, days?: number): Pro
         retail_3d: result.retail_3d,
         retail_5d: result.retail_5d,
         retail_10d: result.retail_10d,
+        medium_1d: result.medium_1d,
+        medium_3d: result.medium_3d,
+        medium_5d: result.medium_5d,
+        medium_10d: result.medium_10d,
         main_in: result.main_in,
         small_in: result.small_in,
         medium_in: result.medium_in,
@@ -979,6 +983,7 @@ export async function GetMoneyFlowFromTushare(secid: string, days?: number): Pro
         detail_dates: result.detail_dates,
         detail_main: result.detail_main,
         detail_retail: result.detail_retail,
+        detail_medium: result.detail_medium,
       };
     }
     
