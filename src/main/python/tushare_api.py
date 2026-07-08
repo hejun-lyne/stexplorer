@@ -1294,7 +1294,8 @@ class TushareAPI:
             try:
                 cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=30)).strftime('%Y%m%d'), end_date=today, is_open='1')
                 if cal_df is not None and not cal_df.empty:
-                    trade_date = str(cal_df['cal_date'].iloc[-1])
+                    # trade_cal 默认返回降序，iloc[0] 才是最近交易日
+                    trade_date = str(cal_df['cal_date'].iloc[0])
             except Exception:
                 pass
             start_date = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
@@ -1351,7 +1352,8 @@ class TushareAPI:
                 try:
                     cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=10)).strftime('%Y%m%d'), end_date=today, is_open='1')
                     if cal_df is not None and not cal_df.empty:
-                        recent_dates = cal_df['cal_date'].astype(str).tolist()[-5:]
+                        # trade_cal 默认返回降序，sorted 升序后取 [-5:] 才是最近5天
+                        recent_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
                         for td in recent_dates:
                             day_df = safe_api_call(pro.dc_daily, ts_code=ts_code, trade_date=td)
                             if isinstance(day_df, pd.DataFrame) and not day_df.empty:
@@ -3281,7 +3283,63 @@ class TushareAPI:
     # ------------------ 资金流向 ------------------
 
     @staticmethod
-    def get_money_flow(code: str) -> Dict[str, Any]:
+    def _calc_money_flow_from_row(row, is_board: bool = False) -> Dict[str, Any]:
+        """从数据行计算资金流向，所有金额统一返回为元
+        is_board: 板块数据金额单位已经是元；个股数据金额单位为万元需 *10000
+        """
+        multiplier = 1 if is_board else 10000
+        buy_sm = _to_float(row.get("buy_sm_amount", 0)) * multiplier
+        sell_sm = _to_float(row.get("sell_sm_amount", 0)) * multiplier
+        buy_md = _to_float(row.get("buy_md_amount", 0)) * multiplier
+        sell_md = _to_float(row.get("sell_md_amount", 0)) * multiplier
+        buy_lg = _to_float(row.get("buy_lg_amount", 0)) * multiplier
+        sell_lg = _to_float(row.get("sell_lg_amount", 0)) * multiplier
+        buy_elg = _to_float(row.get("buy_elg_amount", 0)) * multiplier
+        sell_elg = _to_float(row.get("sell_elg_amount", 0)) * multiplier
+        small_in = buy_sm - sell_sm
+        medium_in = buy_md - sell_md
+        big_in = buy_lg - sell_lg
+        super_big_in = buy_elg - sell_elg
+        # 主力净流入 = 大单 + 超大单（用分档数据计算，避免接口 net_mf_amount/net_amount 不一致）
+        main_in = big_in + super_big_in
+        # 主力净流入占比 = 主力净流入 / 总成交额（总买入 + 总卖出）
+        total_trade = buy_sm + sell_sm + buy_md + sell_md + buy_lg + sell_lg + buy_elg + sell_elg
+        main_rate = round(main_in / total_trade * 100, 2) if total_trade > 0 else 0
+        return {
+            "main_in": round(main_in, 2),
+            "small_in": round(small_in, 2),
+            "medium_in": round(medium_in, 2),
+            "big_in": round(big_in, 2),
+            "super_big_in": round(super_big_in, 2),
+            "main_rate": main_rate,
+        }
+
+    @staticmethod
+    def _get_money_flow_single_day(pro, code: str, trade_date: str) -> Dict[str, Any]:
+        """获取单日资金流向数据，所有金额统一返回为元"""
+        if code.startswith("BK") or code.startswith("90."):
+            # 板块资金流向：东财 moneyflow_ind_dc，金额单位已经是元
+            ts_code = f"{code}.DC" if not code.endswith(".DC") else code
+            df = safe_api_call(pro.moneyflow_ind_dc, ts_code=ts_code, trade_date=trade_date)
+            if isinstance(df, dict) and df.get("error"):
+                return None
+            if df is None or df.empty:
+                return None
+            row = df.iloc[0]
+            return TushareAPI._calc_money_flow_from_row(row, is_board=True)
+        else:
+            # 个股资金流向：Tushare 标准 moneyflow，金额单位是万元，需 *10000 转为元
+            ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
+            df = safe_api_call(pro.moneyflow, ts_code=ts_code, start_date=trade_date, end_date=trade_date)
+            if isinstance(df, dict) and df.get("error"):
+                return None
+            if df is None or df.empty:
+                return None
+            row = df.iloc[0]
+            return TushareAPI._calc_money_flow_from_row(row, is_board=False)
+
+    @staticmethod
+    def get_money_flow(code: str, days: Optional[int] = None) -> Dict[str, Any]:
         """获取资金流向：个股用 moneyflow，板块用 moneyflow_ind_dc（东财，6000积分）
 
         moneyflow_ind_dc 返回字段：
@@ -3289,56 +3347,106 @@ class TushareAPI:
         buy_lg_amount/sell_lg_amount(大单买/卖), buy_elg_amount/sell_elg_amount(特大单买/卖),
         net_amount(净流入), net_amount_rate(净流入占比)
         净流入 = 买入金额 - 卖出金额
+
+        当 days 参数指定时，返回最近 N 个交易日的资金流向数据，按主力/散户分类汇总：
+        - 主力 = 大单 + 超大单
+        - 散户 = 小单
+        返回字段包含：
+        - main_1d / main_3d / main_5d / main_10d: 各周期的主力净流入
+        - retail_1d / retail_3d / retail_5d / retail_10d: 各周期的散户净流入
+        - detail_dates: 每日明细的日期列表
+        - detail_main: 每日主力净流入列表
+        - detail_retail: 每日散户净流入列表
         """
         try:
             pro = get_pro()
             today = datetime.now().strftime('%Y%m%d')
-            # 判断是否为板块代码
-            if code.startswith("BK") or code.startswith("90."):
-                # 板块资金流向：东财 moneyflow_ind_dc
-                ts_code = f"{code}.DC" if not code.endswith(".DC") else code
-                df = safe_api_call(pro.moneyflow_ind_dc, ts_code=ts_code, trade_date=today)
+
+            # 判断板块/个股
+            is_board = code.startswith("BK") or code.startswith("90.")
+            source = "dc" if is_board else "tushare"
+
+            if days:
+                # 直接用 moneyflow 接口按日期范围查询，比 get_trade_dates() 更简单可靠
+                start_date = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')
+
+                if is_board:
+                    ts_code = f"{code}.DC" if not code.endswith(".DC") else code
+                    df = safe_api_call(pro.moneyflow_ind_dc, ts_code=ts_code, start_date=start_date, end_date=today)
+                else:
+                    ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
+                    df = safe_api_call(pro.moneyflow, ts_code=ts_code, start_date=start_date, end_date=today)
+
                 if isinstance(df, dict) and df.get("error"):
                     return df
                 if df is None or df.empty:
                     return {"error": "No data"}
-                row = df.iloc[0]
-                # 计算各档位净流入 = 买入 - 卖出
-                small_in = _to_float(row.get("buy_sm_amount", 0)) - _to_float(row.get("sell_sm_amount", 0))
-                medium_in = _to_float(row.get("buy_md_amount", 0)) - _to_float(row.get("sell_md_amount", 0))
-                big_in = _to_float(row.get("buy_lg_amount", 0)) - _to_float(row.get("sell_lg_amount", 0))
-                super_big_in = _to_float(row.get("buy_elg_amount", 0)) - _to_float(row.get("sell_elg_amount", 0))
+
+                # 按日期排序，取最近 days 条
+                df = df.sort_values('trade_date', ascending=True).reset_index(drop=True)
+                if len(df) > days:
+                    df = df.iloc[-days:]
+
+                # 计算每日数据
+                daily_data = []
+                for _, row in df.iterrows():
+                    date_val = row.get('trade_date', '')
+                    date_str = _standardize_date(date_val)
+                    day_data = TushareAPI._calc_money_flow_from_row(row, is_board=is_board)
+                    day_data["trade_date"] = date_str
+                    daily_data.append(day_data)
+
+                if not daily_data:
+                    return {"error": "No data for any trading day"}
+
+                # 计算各周期的累计值（1日/3日/5日/10日）
+                def sum_period(data_list, n):
+                    """取最近 n 天的累计"""
+                    subset = data_list[-n:] if len(data_list) >= n else data_list
+                    main_sum = sum(d.get("main_in", 0) for d in subset)
+                    retail_sum = sum(d.get("small_in", 0) for d in subset)
+                    return main_sum, retail_sum
+
+                main_1d, retail_1d = sum_period(daily_data, 1)
+                main_3d, retail_3d = sum_period(daily_data, 3)
+                main_5d, retail_5d = sum_period(daily_data, 5)
+                main_10d, retail_10d = sum_period(daily_data, 10)
+
+                # 最新一日的详细分档数据
+                latest = daily_data[-1]
+
                 return {
-                    "main_in": _to_float(row.get("net_amount", 0)),
-                    "small_in": round(small_in, 2),
-                    "medium_in": round(medium_in, 2),
-                    "big_in": round(big_in, 2),
-                    "super_big_in": round(super_big_in, 2),
-                    "main_rate": _to_float(row.get("net_amount_rate", 0)),
-                    "source": "dc",
+                    "source": source,
+                    # 各周期主力净流入
+                    "main_1d": round(main_1d, 2),
+                    "main_3d": round(main_3d, 2),
+                    "main_5d": round(main_5d, 2),
+                    "main_10d": round(main_10d, 2),
+                    # 各周期散户净流入
+                    "retail_1d": round(retail_1d, 2),
+                    "retail_3d": round(retail_3d, 2),
+                    "retail_5d": round(retail_5d, 2),
+                    "retail_10d": round(retail_10d, 2),
+                    # 最新一日的分档数据
+                    "main_in": latest.get("main_in", 0),
+                    "small_in": latest.get("small_in", 0),
+                    "medium_in": latest.get("medium_in", 0),
+                    "big_in": latest.get("big_in", 0),
+                    "super_big_in": latest.get("super_big_in", 0),
+                    "main_rate": latest.get("main_rate", 0),
+                    # 每日明细
+                    "detail_dates": [d.get("trade_date", "") for d in daily_data],
+                    "detail_main": [round(d.get("main_in", 0), 2) for d in daily_data],
+                    "detail_retail": [round(d.get("small_in", 0), 2) for d in daily_data],
                 }
-            else:
-                # 个股资金流向：Tushare 标准 moneyflow
-                ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
-                df = safe_api_call(pro.moneyflow, ts_code=ts_code, start_date=today, end_date=today)
-                if isinstance(df, dict) and df.get("error"):
-                    return df
-                if df is None or df.empty:
-                    return {"error": "No data"}
-                row = df.iloc[0]
-                # moneyflow 返回 buy/sell 金额，需手动计算各档位净流入
-                small_in = _to_float(row.get("buy_sm_amount", 0)) - _to_float(row.get("sell_sm_amount", 0))
-                medium_in = _to_float(row.get("buy_md_amount", 0)) - _to_float(row.get("sell_md_amount", 0))
-                big_in = _to_float(row.get("buy_lg_amount", 0)) - _to_float(row.get("sell_lg_amount", 0))
-                super_big_in = _to_float(row.get("buy_elg_amount", 0)) - _to_float(row.get("sell_elg_amount", 0))
-                return {
-                    "main_in": _to_float(row.get("net_mf_amount", 0)),
-                    "small_in": round(small_in, 2),
-                    "medium_in": round(medium_in, 2),
-                    "big_in": round(big_in, 2),
-                    "super_big_in": round(super_big_in, 2),
-                    "source": "tushare",
-                }
+
+            # 无 days 参数：保持向后兼容，只返回当日数据
+            day_data = TushareAPI._get_money_flow_single_day(pro, code, today)
+            if day_data is None:
+                return {"error": "No data"}
+            day_data["source"] = source
+            return day_data
+
         except Exception as e:
             return {"error": str(e)}
 

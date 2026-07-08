@@ -944,16 +944,45 @@ export async function GetResearchesFromTushare(secid: string, page: number = 1):
 
 // ==================== 资金流向 ====================
 
-export async function GetMoneyFlowFromTushare(secid: string): Promise<any> {
+export async function GetMoneyFlowFromTushare(secid: string, days?: number): Promise<any> {
   try {
     const code = secid.split('.').pop() || secid;
-    const result = await callTushare('get_money_flow', { code });
+    const params: Record<string, any> = { code };
+    if (days) {
+      params.days = days;
+    }
+    const result = await callTushare('get_money_flow', params);
     
     if (result.error) {
       console.error('获取资金流向失败:', result.error);
       return null;
     }
     
+    // 多日模式返回完整数据
+    if (days) {
+      return {
+        source: result.source,
+        main_1d: result.main_1d,
+        main_3d: result.main_3d,
+        main_5d: result.main_5d,
+        main_10d: result.main_10d,
+        retail_1d: result.retail_1d,
+        retail_3d: result.retail_3d,
+        retail_5d: result.retail_5d,
+        retail_10d: result.retail_10d,
+        main_in: result.main_in,
+        small_in: result.small_in,
+        medium_in: result.medium_in,
+        big_in: result.big_in,
+        super_big_in: result.super_big_in,
+        main_rate: result.main_rate,
+        detail_dates: result.detail_dates,
+        detail_main: result.detail_main,
+        detail_retail: result.detail_retail,
+      };
+    }
+    
+    // 单日模式（向后兼容）
     return {
       main: result.main_in,
       small: result.small_in,

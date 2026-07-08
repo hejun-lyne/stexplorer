@@ -3,13 +3,25 @@ import styles from '../index.scss';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import { useRequest } from 'ahooks';
-import { Col, Collapse, Row, Tabs } from 'antd';
+import { Col, Collapse, Row, Tabs, Spin } from 'antd';
 import DeptTradeBack from './DeptTradeBack';
 import { batch } from 'react-redux';
 
 export interface CoreTradeProps {
   code: string;
 }
+
+/** 格式化资金流向金额（元 -> 亿/万） */
+const formatMoneyFlow = (val: number) => {
+  const v = Number(val) || 0;
+  if (Math.abs(v) >= 1e8) {
+    return (v / 1e8).toFixed(2) + '亿';
+  }
+  if (Math.abs(v) >= 1e4) {
+    return (v / 1e4).toFixed(2) + '万';
+  }
+  return v.toFixed(0) + '元';
+};
 
 const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
   const [lhbangs, setLHBangs] = useState<any[]>();
@@ -65,6 +77,16 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     },
     cacheKey: `GetStockZhiYaSum/${code}`,
   });
+
+  // 资金流向数据
+  const [moneyFlow, setMoneyFlow] = useState<any>(null);
+  const { run: runGetMoneyFlow, loading: moneyFlowLoading } = useRequest(Services.Tushare.GetMoneyFlowFromTushare, {
+    throwOnError: true,
+    manual: true,
+    onSuccess: setMoneyFlow,
+    cacheKey: `GetMoneyFlowFromTushare/${code}`,
+  });
+
   useEffect(() => {
     runGetLongHuBang(code);
     runGetBlockTrade(code);
@@ -72,6 +94,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     runGetExchangeChange(code);
     runGetZhiyaSum(code);
     runGetZhiyaDetail(code);
+    runGetMoneyFlow(code, 10);
   }, [code]);
 
   const [deptCodes, setDeptCodes] = useState([]);
@@ -91,7 +114,117 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
   return (
     <div className={styles.coretrade}>
       <DeptTradeBack codes={deptCodes} visible={modelVisible} close={() => setModelVisible(false)} />
-      <Tabs tabPosition="left" defaultActiveKey={'lhb'} style={{ height: '100%' }}>
+      <Tabs tabPosition="left" defaultActiveKey={'moneyflow'} style={{ height: '100%' }}>
+        <Tabs.TabPane tab={<span>资金流向</span>} key={'moneyflow'}>
+          <div className={styles.cardcontent}>
+            {moneyFlowLoading ? (
+              <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
+            ) : moneyFlow ? (
+              <div className={styles.gdzj}>
+                {/* 主力资金流向汇总 */}
+                <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
+                  <Col span={6}>周期</Col>
+                  <Col span={9}>主力净流入</Col>
+                  <Col span={9}>散户净流入</Col>
+                </Row>
+                {[
+                  { label: '今日', main: moneyFlow.main_1d, retail: moneyFlow.retail_1d },
+                  { label: '3日', main: moneyFlow.main_3d, retail: moneyFlow.retail_3d },
+                  { label: '5日', main: moneyFlow.main_5d, retail: moneyFlow.retail_5d },
+                  { label: '10日', main: moneyFlow.main_10d, retail: moneyFlow.retail_10d },
+                ].map((item) => (
+                  <Row key={item.label} style={{ marginBottom: 6 }}>
+                    <Col span={6}>{item.label}</Col>
+                    <Col span={9} className={Utils.GetValueColor(item.main).textClass}>
+                      {formatMoneyFlow(item.main)}
+                    </Col>
+                    <Col span={9} className={Utils.GetValueColor(item.retail).textClass}>
+                      {formatMoneyFlow(item.retail)}
+                    </Col>
+                  </Row>
+                ))}
+
+                {/* 最新一日详细分档 */}
+                <div style={{ marginTop: 16 }}>
+                  <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
+                    <Col span={24}>最新交易日资金分档明细</Col>
+                  </Row>
+                  <Row style={{ marginBottom: 4 }}>
+                    <Col span={8}>小单(散户)</Col>
+                    <Col span={16} className={Utils.GetValueColor(moneyFlow.small_in).textClass}>
+                      {formatMoneyFlow(moneyFlow.small_in)}
+                    </Col>
+                  </Row>
+                  <Row style={{ marginBottom: 4 }}>
+                    <Col span={8}>中单</Col>
+                    <Col span={16} className={Utils.GetValueColor(moneyFlow.medium_in).textClass}>
+                      {formatMoneyFlow(moneyFlow.medium_in)}
+                    </Col>
+                  </Row>
+                  <Row style={{ marginBottom: 4 }}>
+                    <Col span={8}>大单</Col>
+                    <Col span={16} className={Utils.GetValueColor(moneyFlow.big_in).textClass}>
+                      {formatMoneyFlow(moneyFlow.big_in)}
+                    </Col>
+                  </Row>
+                  <Row style={{ marginBottom: 4 }}>
+                    <Col span={8}>超大单</Col>
+                    <Col span={16} className={Utils.GetValueColor(moneyFlow.super_big_in).textClass}>
+                      {formatMoneyFlow(moneyFlow.super_big_in)}
+                    </Col>
+                  </Row>
+                  {moneyFlow.main_rate !== undefined && moneyFlow.main_rate !== null && (
+                    <Row style={{ marginBottom: 4 }}>
+                      <Col span={8}>主力净流入占比</Col>
+                      <Col span={16} className={Utils.GetValueColor(moneyFlow.main_rate).textClass}>
+                        {moneyFlow.main_rate.toFixed(2)}%
+                      </Col>
+                    </Row>
+                  )}
+                </div>
+
+                {/* 每日主力/散户走势 */}
+                {moneyFlow.detail_dates && moneyFlow.detail_dates.length > 0 && (
+                  <div style={{ marginTop: 16 }}>
+                    <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
+                      <Col span={24}>近10日逐日资金流向</Col>
+                    </Row>
+                    <Row className={styles.rowheader} style={{ marginBottom: 4 }}>
+                      <Col span={8}>日期</Col>
+                      <Col span={8}>主力</Col>
+                      <Col span={8}>散户</Col>
+                    </Row>
+                    {[...moneyFlow.detail_dates].reverse().map((date: string, i: number) => {
+                      const origIndex = moneyFlow.detail_dates.length - 1 - i;
+                      return (
+                        <Row key={date} style={{ marginBottom: 3, fontSize: 12 }}>
+                          <Col span={8}>{date.substring(5)}</Col>
+                          <Col span={8} className={Utils.GetValueColor(moneyFlow.detail_main[origIndex]).textClass}>
+                            {formatMoneyFlow(moneyFlow.detail_main[origIndex])}
+                          </Col>
+                          <Col span={8} className={Utils.GetValueColor(moneyFlow.detail_retail[origIndex]).textClass}>
+                            {formatMoneyFlow(moneyFlow.detail_retail[origIndex])}
+                          </Col>
+                        </Row>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* 数据来源 */}
+                {moneyFlow.source && (
+                  <div style={{ marginTop: 12, fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
+                    数据来源：{moneyFlow.source === 'dc' ? '东方财富' : 'Tushare'}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', padding: 40, color: 'var(--secondary-text-color)' }}>
+                暂无资金流向数据
+              </div>
+            )}
+          </div>
+        </Tabs.TabPane>
         <Tabs.TabPane tab={<span>龙虎榜</span>} key={'lhb'}>
           <div className={styles.cardcontent}>
             <Collapse expandIconPosition="right">
