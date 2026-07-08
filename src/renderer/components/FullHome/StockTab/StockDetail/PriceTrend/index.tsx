@@ -48,6 +48,7 @@ import {
   VerticalLeftOutlined,
   ZoomInOutlined,
   ZoomOutOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons';
 
 export interface PriceTrendProps {
@@ -2677,6 +2678,26 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const chartWrapperRef = useRef<HTMLDivElement>(null);
     const { CheckableTag } = Tag;
 
+    const exportDayKlineAsJson = useCallback(() => {
+      const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
+      const dayKlines = klineData.klines[dayIndex];
+      if (!dayKlines || dayKlines.length === 0) {
+        return;
+      }
+      const latest30 = dayKlines.slice(-30);
+      const jsonStr = JSON.stringify(latest30, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const stockName = stock?.name || secid;
+      link.download = `${stockName}_日K线_${dayjs().format('YYYYMMDD_HHmmss')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }, [klineData, secid, stock]);
+
     const titleBar = (
       <>
         {DefaultKTypes.map((t, i) => (
@@ -2821,6 +2842,15 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                       </Select.Option>
                     ))}
                   </Select>
+                  &nbsp;
+                  <Button
+                    size="small"
+                    icon={<DownloadOutlined />}
+                    onClick={exportDayKlineAsJson}
+                    title="导出日K线数据为JSON"
+                  >
+                    导出日K
+                  </Button>
                   &nbsp;
                   <span
                     className={Utils.GetValueColor(klineData.klines[typeIndex][klineData.klines[typeIndex].length - 1].sp - zs).textClass}

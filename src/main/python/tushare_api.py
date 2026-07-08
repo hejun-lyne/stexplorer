@@ -3352,8 +3352,8 @@ class TushareAPI:
         - 主力 = 大单 + 超大单
         - 散户 = 小单
         返回字段包含：
-        - main_1d / main_3d / main_5d / main_10d: 各周期的主力净流入
-        - retail_1d / retail_3d / retail_5d / retail_10d: 各周期的散户净流入
+        - main_1d / main_3d / main_5d / main_10d / main_30d: 各周期的主力净流入
+        - retail_1d / retail_3d / retail_5d / retail_10d / retail_30d: 各周期的散户净流入
         - detail_dates: 每日明细的日期列表
         - detail_main: 每日主力净流入列表
         - detail_retail: 每日散户净流入列表
@@ -3368,7 +3368,7 @@ class TushareAPI:
 
             if days:
                 # 直接用 moneyflow 接口按日期范围查询，比 get_trade_dates() 更简单可靠
-                start_date = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')
+                start_date = (datetime.now() - timedelta(days=days + 45)).strftime('%Y%m%d')
 
                 if is_board:
                     ts_code = f"{code}.DC" if not code.endswith(".DC") else code
@@ -3399,7 +3399,7 @@ class TushareAPI:
                 if not daily_data:
                     return {"error": "No data for any trading day"}
 
-                # 计算各周期的累计值（1日/3日/5日/10日）
+                # 计算各周期的累计值（1日/3日/5日/10日/30日）
                 def sum_period(data_list, n):
                     """取最近 n 天的累计，返回 (主力, 散户, 中户)"""
                     subset = data_list[-n:] if len(data_list) >= n else data_list
@@ -3412,6 +3412,7 @@ class TushareAPI:
                 main_3d, retail_3d, medium_3d = sum_period(daily_data, 3)
                 main_5d, retail_5d, medium_5d = sum_period(daily_data, 5)
                 main_10d, retail_10d, medium_10d = sum_period(daily_data, 10)
+                main_30d, retail_30d, medium_30d = sum_period(daily_data, 30)
 
                 # 最新一日的详细分档数据
                 latest = daily_data[-1]
@@ -3423,16 +3424,19 @@ class TushareAPI:
                     "main_3d": round(main_3d, 2),
                     "main_5d": round(main_5d, 2),
                     "main_10d": round(main_10d, 2),
+                    "main_30d": round(main_30d, 2),
                     # 各周期散户净流入
                     "retail_1d": round(retail_1d, 2),
                     "retail_3d": round(retail_3d, 2),
                     "retail_5d": round(retail_5d, 2),
                     "retail_10d": round(retail_10d, 2),
+                    "retail_30d": round(retail_30d, 2),
                     # 各周期中户净流入
                     "medium_1d": round(medium_1d, 2),
                     "medium_3d": round(medium_3d, 2),
                     "medium_5d": round(medium_5d, 2),
                     "medium_10d": round(medium_10d, 2),
+                    "medium_30d": round(medium_30d, 2),
                     # 最新一日的分档数据
                     "main_in": latest.get("main_in", 0),
                     "small_in": latest.get("small_in", 0),

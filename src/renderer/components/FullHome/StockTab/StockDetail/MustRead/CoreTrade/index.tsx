@@ -3,7 +3,7 @@ import styles from '../index.scss';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import { useRequest } from 'ahooks';
-import { Col, Collapse, Row, Tabs, Spin } from 'antd';
+import { Col, Collapse, Row, Tabs, Spin, Button } from 'antd';
 import DeptTradeBack from './DeptTradeBack';
 import { batch } from 'react-redux';
 
@@ -94,7 +94,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     runGetExchangeChange(code);
     runGetZhiyaSum(code);
     runGetZhiyaDetail(code);
-    runGetMoneyFlow(code, 10);
+    runGetMoneyFlow(code, 30);
   }, [code]);
 
   const [deptCodes, setDeptCodes] = useState([]);
@@ -111,6 +111,73 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     runGetZhiyaDetail(code, p);
     setZhiyaPage(p);
   }, [code, zhiyaPage]);
+
+  const handleExportMoneyFlow = useCallback(async () => {
+    if (!moneyFlow || !moneyFlow.detail_dates || moneyFlow.detail_dates.length === 0) {
+      const { dialog } = window.contextModules.electron;
+      await dialog.showMessageBox({
+        title: '提示',
+        type: 'info',
+        message: '暂无资金流向数据可导出',
+      });
+      return;
+    }
+    try {
+      const { dialog, ipcRenderer } = window.contextModules.electron;
+      const defaultPath = `moneyflow_${code}_${moneyFlow.detail_dates[moneyFlow.detail_dates.length - 1]}.json`;
+      const { filePath, canceled } = await dialog.showSaveDialog({
+        title: '导出资金流向数据',
+        defaultPath,
+        filters: [{ name: 'JSON Files', extensions: ['json'] }],
+      });
+      if (canceled || !filePath) return;
+
+      // 构建导出数据：逐日资金流向明细
+      const exportData = {
+        code,
+        exportTime: new Date().toISOString(),
+        source: moneyFlow.source === 'dc' ? '东方财富' : 'Tushare',
+        summary: {
+          main_1d: moneyFlow.main_1d,
+          main_3d: moneyFlow.main_3d,
+          main_5d: moneyFlow.main_5d,
+          main_30d: moneyFlow.main_30d,
+          retail_1d: moneyFlow.retail_1d,
+          retail_3d: moneyFlow.retail_3d,
+          retail_5d: moneyFlow.retail_5d,
+          retail_30d: moneyFlow.retail_30d,
+          medium_1d: moneyFlow.medium_1d,
+          medium_3d: moneyFlow.medium_3d,
+          medium_5d: moneyFlow.medium_5d,
+          medium_30d: moneyFlow.medium_30d,
+        },
+        dailyDetails: moneyFlow.detail_dates.map((date: string, i: number) => ({
+          date,
+          main: moneyFlow.detail_main[i],
+          retail: moneyFlow.detail_retail[i],
+          medium: moneyFlow.detail_medium[i],
+        })),
+      };
+
+      const content = JSON.stringify(exportData, null, 2);
+      await ipcRenderer.invoke('save-string-silently', { filePath, content });
+
+      await dialog.showMessageBox({
+        title: '导出成功',
+        type: 'info',
+        message: `资金流向数据已保存到 ${filePath}`,
+      });
+    } catch (error) {
+      console.error('导出资金流向失败:', error);
+      const { dialog } = window.contextModules.electron;
+      await dialog.showMessageBox({
+        title: '导出失败',
+        type: 'error',
+        message: '导出资金流向数据时出现错误',
+      });
+    }
+  }, [code, moneyFlow]);
+
   return (
     <div className={styles.coretrade}>
       <DeptTradeBack codes={deptCodes} visible={modelVisible} close={() => setModelVisible(false)} />
@@ -132,7 +199,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
                   { label: '今日', main: moneyFlow.main_1d, medium: moneyFlow.medium_1d, retail: moneyFlow.retail_1d },
                   { label: '3日', main: moneyFlow.main_3d, medium: moneyFlow.medium_3d, retail: moneyFlow.retail_3d },
                   { label: '5日', main: moneyFlow.main_5d, medium: moneyFlow.medium_5d, retail: moneyFlow.retail_5d },
-                  { label: '10日', main: moneyFlow.main_10d, medium: moneyFlow.medium_10d, retail: moneyFlow.retail_10d },
+                  { label: '30日', main: moneyFlow.main_30d, medium: moneyFlow.medium_30d, retail: moneyFlow.retail_30d },
                 ].map((item) => (
                   <Row key={item.label} style={{ marginBottom: 6 }}>
                     <Col span={6}>{item.label}</Col>
@@ -190,8 +257,11 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
                 {/* 每日主力/散户走势 */}
                 {moneyFlow.detail_dates && moneyFlow.detail_dates.length > 0 && (
                   <div style={{ marginTop: 16 }}>
-                    <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
-                      <Col span={24}>近10日逐日资金流向</Col>
+                    <Row className={styles.rowheader} style={{ marginBottom: 8 }} align="middle">
+                      <Col flex="auto">近30日逐日资金流向</Col>
+                      <Col>
+                        <Button size="small" onClick={handleExportMoneyFlow}>导出JSON</Button>
+                      </Col>
                     </Row>
                     <Row className={styles.rowheader} style={{ marginBottom: 4 }}>
                       <Col span={6}>日期</Col>
