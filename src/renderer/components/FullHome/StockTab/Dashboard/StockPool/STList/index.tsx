@@ -14,6 +14,7 @@ import {
   GetIndustryLeadersFromTushare,
   RiskFilterStocksFromTushare,
   CheckBuySignalsFromTushare,
+  MainInFilterStocksFromTushare,
 } from '@/services/tushare';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
@@ -53,7 +54,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
 
   // 选股流程状态
-  const [displayMode, setDisplayMode] = useState<'stocks' | 'leaders' | 'risk' | 'signals'>('stocks');
+  const [displayMode, setDisplayMode] = useState<'stocks' | 'leaders' | 'risk' | 'signals' | 'mainIn'>('stocks');
 
   // 龙头股识别
   const [leaderLoading, setLeaderLoading] = useState(false);
@@ -78,6 +79,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [signalProgress, setSignalProgress] = useState(0);
   const isSignalPausedRef = React.useRef(false);
   const signalIndexRef = React.useRef(0);
+
+  // 主力建仓过滤
+  const [mainInLoading, setMainInLoading] = useState(false);
+  const [mainInData, setMainInData] = useState<any[]>([]);
+  const [mainInDisplayCount, setMainInDisplayCount] = useState(0);
+  const [mainInProgress, setMainInProgress] = useState(0);
+  const isMainInPausedRef = React.useRef(false);
+  const mainInIndexRef = React.useRef(0);
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
@@ -364,6 +373,82 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
   }, [signalLoading, signalData.length, displayMode, riskData, leaderData, leaderDisplayCount, stocks]);
 
+  // ========== 主力建仓过滤 ==========
+  const handleMainInFilter = useCallback(async () => {
+    if (mainInLoading) {
+      isMainInPausedRef.current = true;
+      return;
+    }
+    // 获取当前显示的股票列表
+    const currentStocks = displayMode === 'signals'
+      ? signalData.filter((d: any) => d.has_signal).map((d: any) => d.ts_code)
+      : displayMode === 'risk'
+        ? riskData.filter((d: any) => d.passed).map((d: any) => d.ts_code)
+        : displayMode === 'leaders'
+          ? leaderData.slice(0, leaderDisplayCount).map((d: any) => d.ts_code)
+          : stocks.map((s) => {
+              const code = s.secid.split('.').pop() || s.secid;
+              return code.startsWith('6') ? `${code}.SH` : `${code}.SZ`;
+            });
+
+    if (currentStocks.length === 0) {
+      console.log('[主力建仓] 没有可分析的股票');
+      return;
+    }
+
+    if (mainInIndexRef.current === 0 || mainInIndexRef.current >= mainInData.length) {
+      setMainInData([]);
+      setMainInDisplayCount(0);
+      mainInIndexRef.current = 0;
+    }
+
+    isMainInPausedRef.current = false;
+    setMainInLoading(true);
+    setMainInProgress(0);
+    setDisplayMode('mainIn');
+    setCurrentPage(1);
+
+    try {
+      const today = dayjs().format('YYYYMMDD');
+      console.log(`[主力建仓] 开始分析 ${currentStocks.length} 只股票...`);
+
+      const result = await MainInFilterStocksFromTushare(today, currentStocks);
+      if (!result.results || result.results.length === 0) {
+        console.log('[主力建仓] 分析结果为空');
+        setMainInLoading(false);
+        return;
+      }
+
+      const allData = result.results;
+      setMainInData(allData);
+
+      const batchSize = 3;
+      const total = allData.length;
+      for (let i = mainInIndexRef.current; i < total; i += batchSize) {
+        if (isMainInPausedRef.current) {
+          mainInIndexRef.current = i;
+          break;
+        }
+        const end = Math.min(i + batchSize, total);
+        setMainInDisplayCount(end);
+        mainInIndexRef.current = end;
+        setMainInProgress(Math.round((end / total) * 100));
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      if (!isMainInPausedRef.current) {
+        mainInIndexRef.current = 0;
+        setMainInProgress(100);
+        const buyCount = allData.filter((d: any) => d.buy_signal).length;
+        console.log(`[主力建仓] 完成，有买入信号: ${buyCount}/${allData.length}`);
+      }
+    } catch (e) {
+      console.error('主力建仓分析失败:', e);
+    } finally {
+      setMainInLoading(false);
+    }
+  }, [mainInLoading, mainInData.length, displayMode, signalData, riskData, leaderData, leaderDisplayCount, stocks]);
+
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
       if (!s) return;
@@ -498,6 +583,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       return list as any;
     }
 
+    if (displayMode === 'mainIn') {
+      let list = [...mainInData.slice(0, mainInDisplayCount)];
+      const keys = Object.keys(sortTypes);
+      if (keys.length === 1) {
+        list.sort((a: any, b: any) => {
+          const left = Number(a[keys[0]]) || 0;
+          const right = Number(b[keys[0]]) || 0;
+          const t = sortTypes[keys[0]];
+          if (left === right) return 0;
+          return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+        });
+      }
+      return list as any;
+    }
+
     let list = filterStocks.filter((s) => {
       if (nameFilter && !s.name.includes(nameFilter)) return false;
       return true;
@@ -507,7 +607,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount]);
   return (
     <>
       <div className={classNames(styles.header, styles.actbar)}>
@@ -575,6 +675,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             style={{ marginLeft: 4 }}
           >
             择时
+          </Button>
+          <Button
+            size="small"
+            onClick={handleMainInFilter}
+            loading={mainInLoading && mainInProgress === 0}
+            style={{ marginLeft: 4 }}
+          >
+            主力建仓
           </Button>
           {displayMode !== 'stocks' && (
             <Button
@@ -660,7 +768,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             <Button size="small" type="text" icon={sortTypes.decline_from_high == 1 ? <CaretUpOutlined /> : sortTypes.decline_from_high == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('decline_from_high')} />
           </Col>
         </Row>
-      ) : (
+      ) : displayMode === 'signals' ? (
         <Row className={styles.header}>
           <Col span={5}>股票代码</Col>
           <Col span={3}>状态</Col>
@@ -674,6 +782,30 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             回调深度
             <Button size="small" type="text" icon={sortTypes.callback_depth == 1 ? <CaretUpOutlined /> : sortTypes.callback_depth == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('callback_depth')} />
           </Col>
+        </Row>
+      ) : (
+        <Row className={styles.header}>
+          <Col span={3}>股票代码</Col>
+          <Col span={2}>
+            评分
+            <Button size="small" type="text" icon={sortTypes.score == 1 ? <CaretUpOutlined /> : sortTypes.score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('score')} />
+          </Col>
+          <Col span={2}>评级</Col>
+          <Col span={2}>基础过滤</Col>
+          <Col span={3}>
+            主力30日
+            <Button size="small" type="text" icon={sortTypes.main_30d == 1 ? <CaretUpOutlined /> : sortTypes.main_30d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('main_30d')} />
+          </Col>
+          <Col span={3}>
+            散户30日
+            <Button size="small" type="text" icon={sortTypes.retail_30d == 1 ? <CaretUpOutlined /> : sortTypes.retail_30d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('retail_30d')} />
+          </Col>
+          <Col span={3}>
+            启动信号
+            <Button size="small" type="text" icon={sortTypes.max_5d_return == 1 ? <CaretUpOutlined /> : sortTypes.max_5d_return == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('max_5d_return')} />
+          </Col>
+          <Col span={3}>买入信号</Col>
+          <Col span={3}>卖出信号</Col>
         </Row>
       )}
       <div className={classNames(styles.table, styles.moreheader)}>
@@ -767,7 +899,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
               </Row>
             );
           })
-        ) : (
+        ) : displayMode === 'signals' ? (
           showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             const hasSignal = s.has_signal === true;
             return (
@@ -805,6 +937,70 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 </Col>
                 <Col span={4}>
                   {s.signal_detail?.callback_depth?.toFixed?.(2) ?? s.signal_detail?.callback_depth ?? '--'}%
+                </Col>
+              </Row>
+            );
+          })
+        ) : (
+          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+            const hasBuySignal = s.buy_signal !== null;
+            const hasSellSignal = s.sell_signal !== null;
+            const bgColor = hasSellSignal
+              ? 'rgba(255, 77, 79, 0.08)'
+              : hasBuySignal
+                ? 'rgba(82, 196, 26, 0.08)'
+                : undefined;
+            return (
+              <Row
+                key={s.ts_code}
+                className={styles.row}
+                style={{ backgroundColor: bgColor }}
+              >
+                <Col span={3}>
+                  <span>{s.ts_code}</span>
+                </Col>
+                <Col span={2} className={Utils.GetValueColor(s.score - 50).textClass}>
+                  {s.score}
+                </Col>
+                <Col span={2}>
+                  <span style={{
+                    color: s.grade === 'A' ? '#52c41a' : s.grade === 'B' ? '#1890ff' : s.grade === 'C' ? '#faad14' : '#ff4d4f',
+                    fontWeight: 'bold',
+                  }}>
+                    {s.grade}
+                  </span>
+                </Col>
+                <Col span={2}>
+                  {s.basic_passed ? (
+                    <span className="text-up">✓</span>
+                  ) : (
+                    <span className="text-down" title={s.basic_reason}>✗</span>
+                  )}
+                </Col>
+                <Col span={3} className={Utils.GetValueColor(s.main_30d).textClass}>
+                  {formatMoneyFlow(s.main_30d)}
+                </Col>
+                <Col span={3} className={Utils.GetValueColor(-s.retail_30d).textClass}>
+                  {formatMoneyFlow(s.retail_30d)}
+                </Col>
+                <Col span={3} className={Utils.GetValueColor(s.max_5d_return).textClass}>
+                  {s.max_5d_return?.toFixed?.(1) ?? s.max_5d_return}%
+                </Col>
+                <Col span={3}>
+                  {s.buy_signal === 'A' ? (
+                    <span className="text-up" style={{ fontWeight: 'bold' }}>最强A</span>
+                  ) : s.buy_signal === 'B' ? (
+                    <span style={{ color: '#1890ff' }}>稳健B</span>
+                  ) : (
+                    <span style={{ color: '#999' }}>--</span>
+                  )}
+                </Col>
+                <Col span={3}>
+                  {hasSellSignal ? (
+                    <span className="text-down" title={s.sell_reason}>回避</span>
+                  ) : (
+                    <span style={{ color: '#999' }}>--</span>
+                  )}
                 </Col>
               </Row>
             );

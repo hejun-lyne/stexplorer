@@ -1324,98 +1324,403 @@ export interface BuySignalConfig {
  * @param config 个股筛选配置
  * @returns { results: [{ts_code, passed, reason}], count, passed_count }
  */
+/**
+ * ts_code 转 secid（如 "000001.SZ" -> "0.000001", "600000.SH" -> "1.600000"）
+ */
+function tsCodeToSecid(tsCode: string): string {
+  const parts = tsCode.split('.');
+  const code = parts[0];
+  const market = code.startsWith('6') ? '1' : '0';
+  return `${market}.${code}`;
+}
+
+/**
+ * 主力建仓单只股票分析结果
+ */
+interface MainInStockResult {
+  ts_code: string;
+  name: string;
+  score: number;
+  grade: string;
+  /** 基础过滤是否通过 */
+  basic_passed: boolean;
+  basic_reason: string;
+  /** 建仓条件组通过情况 */
+  condition_a: boolean; // 主力持续流入
+  condition_b: boolean; // 散户持续流出
+  condition_c: boolean; // 筹码向主力集中
+  condition_d: boolean; // 价格位置合理
+  condition_e: boolean; // 启动信号
+  condition_f: boolean; // 洗盘特征
+  condition_g: boolean; // 量价配合
+  condition_h: boolean; // 散户行为验证
+  /** 评分维度 */
+  dim_main_depth: number;        // 主力建仓深度得分
+  dim_retail_panic: number;      // 散户割肉力度得分
+  dim_breakout_power: number;    // 启动爆发力得分
+  dim_wash_quality: number;      // 洗盘质量得分
+  dim_position_safety: number;   // 位置安全垫得分
+  /** 指标数据 */
+  main_30d: number;        // 主力30日累计(元)
+  retail_30d: number;      // 散户30日累计(元)
+  circ_mv: number;         // 流通市值(元)
+  current_price: number;   // 当前价
+  max_5d_return: number;   // 近5日最大涨幅
+  decline_main_in_days: number;  // 近10日下跌且主力流入日数
+  cost_deviation: number;  // 成本偏离
+  avg_price_30d: number;   // 近30日加权均价
+  high_30d: number;        // 近30日最高价
+  low_30d: number;         // 近30日最低价
+  avg_amount_30d: number;  // 近30日日均成交额(元)
+  max_decline_30d: number; // 近30日最大回撤
+  /** 买卖信号 */
+  buy_signal: string | null;   // 'A' | 'B' | null
+  sell_signal: string | null;  // 'SELL' | null
+  sell_reason: string;
+}
+
 export async function MainInFilterStocksFromTushare(
-  tradeDate: string,
+  _tradeDate: string,
   stocks: string[],
   config?: StockFilterConfig
-): Promise<any> {
-  // # 基础过滤
-  // 流通市值 > 20亿          # 排除流动性极差的微盘股
-  // 近30日日均成交额 > 5000万  # 确保有资金参与
-  // 近30日最大回撤 < 30%      # 排除连续一字跌停的暴雷股
+): Promise<{ results: MainInStockResult[]; count: number; passed_count: number }> {
+  const minCircMv = (config?.min_circ_mv ?? 20) * 1e8;   // 流通市值下限，默认20亿 -> 元
+  const minAvgAmount = (config?.min_avg_amount ?? 5000) * 1e4; // 日均成交额下限，默认5000万 -> 元
+  const maxDecline = (config?.max_decline_from_high ?? 30) / 100; // 最大回撤
 
-  // # 识别主力建仓
-  // # 条件组A：主力持续流入
-  // 主力5日累计 > 0 且 主力30日累计 > 1亿
+  const results: MainInStockResult[] = [];
 
-  // # 条件组B：散户持续流出  
-  // 散户5日累计 < 0 且 散户30日累计 < -5000万
+  for (const tsCode of stocks) {
+    const secid = tsCodeToSecid(tsCode);
 
-  // # 条件组C：筹码向主力集中
-  // (主力30日累计 + 中户30日累计) > 0 且 散户30日累计 < 0
+    try {
+      // 并行获取资金流向(30日)、K线(30日)、实时详情
+      const [moneyFlow, kResult, detail] = await Promise.all([
+        GetMoneyFlowFromTushare(secid, 30),
+        GetKFromTushare(secid, KLineType.Day, 30),
+        GetDetailFromTushare(secid),
+      ]);
 
-  // # 条件组D：价格位置合理
-  // 当前价 < 近30日最高价 × 0.95   # 不在历史高位
-  // 当前价 > 近30日最低价 × 1.05   # 不在历史最低（排除持续下跌无底的）
+      const klines = kResult.ks || [];
+      const name = detail?.name || tsCode;
 
-  // 高级档（精准定位）："主升浪前"特征
-  // # 条件组E：启动信号
-  // 近5日内存在单日涨幅 > 5% 且 主力当日净流入 > 3000万
+      // 数据不足则跳过
+      if (!moneyFlow || moneyFlow.error) {
+        results.push(makeEmptyResult(tsCode, name, `资金流向数据缺失`));
+        continue;
+      }
+      if (klines.length < 10) {
+        results.push(makeEmptyResult(tsCode, name, `K线数据不足(${klines.length}条)`));
+        continue;
+      }
 
-  // # 条件组F：洗盘特征
-  // 近5日内存在单日跌幅 > 3% 但 主力当日净流入 > 0（下跌中主力吸筹）
+      // ============ 提取指标数据 ============
+      const circMv = detail?.lt ?? 0; // 流通市值(元)
+      const currentPrice = detail?.zx ?? (klines[klines.length - 1]?.sp ?? 0);
 
-  // # 条件组G：量价配合
-  // 近5日上涨日平均换手率 > 近5日下跌日平均换手率 × 1.2
+      // 资金流向
+      const main30d = moneyFlow.main_30d || 0;
+      const retail30d = moneyFlow.retail_30d || 0;
+      const main5d = moneyFlow.main_5d || 0;
+      const retail5d = moneyFlow.retail_5d || 0;
+      const medium30d = moneyFlow.medium_30d || 0;
+      const detailMain: number[] = moneyFlow.detail_main || [];
+      const detailRetail: number[] = moneyFlow.detail_retail || [];
 
-  // # 条件组H：散户行为验证
-  // 近5日散户净流出日数 >= 3天
+      // K线价格数据
+      const prices = klines.map(k => k.sp);
+      const high30d = Math.max(...klines.map(k => k.zg));
+      const low30d = Math.min(...klines.map(k => k.zd));
+      const cje30d = klines.map(k => k.cje || 0);
+      const avgAmount30d = cje30d.reduce((a, b) => a + b, 0) / Math.max(cje30d.length, 1);
+      const maxDecline30d = computeMaxDecline(prices);
+      const avgPrice30d = computeWeightedAvgPrice(klines);
 
-  // # 评分模型（0-100分）
-  // def score_stock(data):
-  //   score = 0
-    
-  //   # 1. 主力建仓深度 (30分)
-  //   主力30日占比 = data['主力30日累计'] / data['流通市值']
-  //   if 主力30日占比 > 0.05: score += 30
-  //   elif 主力30日占比 > 0.03: score += 20
-  //   elif 主力30日占比 > 0.01: score += 10
-    
-  //   # 2. 散户割肉力度 (25分)
-  //   散户30日占比 = abs(data['散户30日累计']) / data['流通市值']
-  //   if 散户30日占比 > 0.05: score += 25
-  //   elif 散户30日占比 > 0.03: score += 15
-  //   elif 散户30日占比 > 0.01: score += 5
-    
-  //   # 3. 启动爆发力 (20分)
-  //   近5日最大涨幅 = data['近5日最大涨幅']
-  //   if 近5日最大涨幅 > 0.10: score += 20
-  //   elif 近5日最大涨幅 > 0.07: score += 15
-  //   elif 近5日最大涨幅 > 0.05: score += 10
-    
-  //   # 4. 洗盘质量 (15分)
-  //   下跌吸筹次数 = data['近10日下跌且主力流入日数']
-  //   if 下跌吸筹次数 >= 3: score += 15
-  //   elif 下跌吸筹次数 >= 2: score += 10
-  //   elif 下跌吸筹次数 >= 1: score += 5
-    
-  //   # 5. 位置安全垫 (10分)
-  //   成本偏离 = (data['当前价'] - data['近30日加权均价']) / data['近30日加权均价']
-  //   if -0.05 < 成本偏离 < 0.05: score += 10
-  //   elif -0.10 < 成本偏离 < 0.10: score += 5
-    
-  //   return score
+      // 近5日数据（取最后5条）
+      const recent5 = klines.slice(-5);
+      const recent10 = klines.slice(-10);
 
-  // 评分解读：
-  // ≥80分：类似002558，主力深度建仓+散户割肉，即将或正在主升浪
-  // 60-79分：类似603327，主力在吸筹但力度不够，或位置偏高
-  // 40-59分：类似002940，主力做T为主，方向不明
-  // <40分：类似300005，主力出货，散户接盘
+      // 近5日最大涨幅
+      const max5dReturn = Math.max(...recent5.map(k => k.zdf || 0));
 
-  // #买入信号（满足以下任意组合）
-  // 组合A（最强）：
-  // 评分 ≥ 80分
-  // 近3日内出现"下跌但主力净流入"（洗盘信号）
-  // 当前价 ≤ 近30日加权均价 × 1.02
-  // 组合B（稳健）：
-  // 评分 ≥ 60分
-  // 主力5日累计 > 0 且 散户5日累计 < 0
-  // 近5日出现单日涨幅 > 7%（确认有资金点火）
-  // 卖出/回避信号
-  // 评分 < 40分
-  // 连续3日主力净流出且累计 > 5000万
-  // 散户30日累计转正（从割肉变追涨）
-  // 股价突破近30日最高价但主力当日净流出（拉高出货）
+      // 近10日下跌且主力流入日数
+      let declineMainInDays = 0;
+      for (let i = 0; i < recent10.length; i++) {
+        const k = recent10[i];
+        const zdf = k.zdf || 0;
+        // 对应 detailMain 的索引（从30日数据的末尾往前对齐）
+        const detailIdx = detailMain.length - recent10.length + i;
+        const mainIn = (detailIdx >= 0 && detailIdx < detailMain.length) ? detailMain[detailIdx] : 0;
+        if (zdf < 0 && mainIn > 0) {
+          declineMainInDays++;
+        }
+      }
+
+      // 成本偏离
+      const costDeviation = avgPrice30d > 0 ? (currentPrice - avgPrice30d) / avgPrice30d : 0;
+
+      // ============ 基础过滤 ============
+      const basicFailReasons: string[] = [];
+      if (circMv > 0 && circMv < minCircMv) {
+        basicFailReasons.push(`流通市值${(circMv / 1e8).toFixed(1)}亿 < ${(minCircMv / 1e8).toFixed(0)}亿`);
+      }
+      if (avgAmount30d > 0 && avgAmount30d < minAvgAmount) {
+        basicFailReasons.push(`日均成交额${(avgAmount30d / 1e4).toFixed(0)}万 < ${(minAvgAmount / 1e4).toFixed(0)}万`);
+      }
+      if (maxDecline30d > maxDecline) {
+        basicFailReasons.push(`近30日最大回撤${(maxDecline30d * 100).toFixed(1)}% > ${(maxDecline * 100).toFixed(0)}%`);
+      }
+      const basicPassed = basicFailReasons.length === 0;
+
+      // ============ 条件组检查 ============
+      // A: 主力持续流入
+      const condA = main5d > 0 && main30d > 1e8;
+
+      // B: 散户持续流出
+      const condB = retail5d < 0 && retail30d < -5e7;
+
+      // C: 筹码向主力集中
+      const condC = (main30d + medium30d) > 0 && retail30d < 0;
+
+      // D: 价格位置合理
+      const condD = currentPrice < high30d * 0.95 && currentPrice > low30d * 1.05;
+
+      // E: 启动信号（近5日内存在单日涨幅 > 5% 且 主力当日净流入 > 3000万）
+      let condE = false;
+      for (let i = 0; i < recent5.length; i++) {
+        const zdf = recent5[i].zdf || 0;
+        const detailIdx = detailMain.length - recent5.length + i;
+        const mainIn = (detailIdx >= 0 && detailIdx < detailMain.length) ? detailMain[detailIdx] : 0;
+        if (zdf > 5 && mainIn > 3e7) {
+          condE = true;
+          break;
+        }
+      }
+
+      // F: 洗盘特征（近5日内存在单日跌幅 > 3% 但主力当日净流入 > 0）
+      let condF = false;
+      for (let i = 0; i < recent5.length; i++) {
+        const zdf = recent5[i].zdf || 0;
+        const detailIdx = detailMain.length - recent5.length + i;
+        const mainIn = (detailIdx >= 0 && detailIdx < detailMain.length) ? detailMain[detailIdx] : 0;
+        if (zdf < -3 && mainIn > 0) {
+          condF = true;
+          break;
+        }
+      }
+
+      // G: 量价配合（上涨日平均换手率 > 下跌日平均换手率 × 1.2）
+      const upHsls: number[] = [];
+      const downHsls: number[] = [];
+      for (const k of recent5) {
+        if ((k.zdf || 0) > 0) {
+          upHsls.push(k.hsl || 0);
+        } else if ((k.zdf || 0) < 0) {
+          downHsls.push(k.hsl || 0);
+        }
+      }
+      const avgUpHsl = upHsls.length > 0 ? upHsls.reduce((a, b) => a + b, 0) / upHsls.length : 0;
+      const avgDownHsl = downHsls.length > 0 ? downHsls.reduce((a, b) => a + b, 0) / downHsls.length : 0;
+      const condG = avgUpHsl > 0 && avgDownHsl > 0 && avgUpHsl > avgDownHsl * 1.2;
+
+      // H: 散户行为验证（近5日散户净流出日数 >= 3天）
+      let retailOutflowDays = 0;
+      for (let i = 0; i < recent5.length; i++) {
+        const detailIdx = detailRetail.length - recent5.length + i;
+        const retailIn = (detailIdx >= 0 && detailIdx < detailRetail.length) ? detailRetail[detailIdx] : 0;
+        if (retailIn < 0) retailOutflowDays++;
+      }
+      const condH = retailOutflowDays >= 3;
+
+      // ============ 评分模型 ============
+      // 1. 主力建仓深度 (30分)
+      const main30dRatio = circMv > 0 ? main30d / circMv : 0;
+      let dimMainDepth = 0;
+      if (main30dRatio > 0.05) dimMainDepth = 30;
+      else if (main30dRatio > 0.03) dimMainDepth = 20;
+      else if (main30dRatio > 0.01) dimMainDepth = 10;
+
+      // 2. 散户割肉力度 (25分)
+      const retail30dRatio = circMv > 0 ? Math.abs(retail30d) / circMv : 0;
+      let dimRetailPanic = 0;
+      if (retail30dRatio > 0.05) dimRetailPanic = 25;
+      else if (retail30dRatio > 0.03) dimRetailPanic = 15;
+      else if (retail30dRatio > 0.01) dimRetailPanic = 5;
+
+      // 3. 启动爆发力 (20分)
+      let dimBreakout = 0;
+      if (max5dReturn > 10) dimBreakout = 20;
+      else if (max5dReturn > 7) dimBreakout = 15;
+      else if (max5dReturn > 5) dimBreakout = 10;
+
+      // 4. 洗盘质量 (15分)
+      let dimWash = 0;
+      if (declineMainInDays >= 3) dimWash = 15;
+      else if (declineMainInDays >= 2) dimWash = 10;
+      else if (declineMainInDays >= 1) dimWash = 5;
+
+      // 5. 位置安全垫 (10分)
+      let dimPosition = 0;
+      if (costDeviation > -0.05 && costDeviation < 0.05) dimPosition = 10;
+      else if (costDeviation > -0.10 && costDeviation < 0.10) dimPosition = 5;
+
+      const score = dimMainDepth + dimRetailPanic + dimBreakout + dimWash + dimPosition;
+
+      // 评级
+      let grade: string;
+      if (score >= 80) grade = 'A';
+      else if (score >= 60) grade = 'B';
+      else if (score >= 40) grade = 'C';
+      else grade = 'D';
+
+      // ============ 买卖信号判断 ============
+      let buySignal: string | null = null;
+      let sellSignal: string | null = null;
+      let sellReason = '';
+
+      // 买入组合A（最强）
+      const washLast3 = checkWashLast3Days(recent5, detailMain);
+      const priceOkA = avgPrice30d > 0 && currentPrice <= avgPrice30d * 1.02;
+      if (score >= 80 && washLast3 && priceOkA) {
+        buySignal = 'A';
+      }
+      // 买入组合B（稳健）
+      if (!buySignal) {
+        const has7pctUp = recent5.some(k => (k.zdf || 0) > 7);
+        if (score >= 60 && main5d > 0 && retail5d < 0 && has7pctUp) {
+          buySignal = 'B';
+        }
+      }
+
+      // 卖出/回避信号
+      if (score < 40) {
+        sellSignal = 'SELL';
+        sellReason = `评分${score}分 < 40分，主力出货/散户接盘`;
+      }
+      if (!sellSignal && detailMain.length >= 3) {
+        const last3Main = detailMain.slice(-3);
+        const allOutflow = last3Main.every(v => v < 0);
+        const totalOutflow = Math.abs(last3Main.reduce((a, b) => a + b, 0));
+        if (allOutflow && totalOutflow > 5e7) {
+          sellSignal = 'SELL';
+          sellReason = `连续3日主力净流出，累计${(totalOutflow / 1e4).toFixed(0)}万`;
+        }
+      }
+      if (!sellSignal && retail30d > 0) {
+        sellSignal = 'SELL';
+        sellReason = '散户30日累计转正（从割肉变追涨）';
+      }
+      if (!sellSignal && currentPrice >= high30d && detailMain.length > 0 && detailMain[detailMain.length - 1] < 0) {
+        sellSignal = 'SELL';
+        sellReason = '股价突破近30日最高价但主力当日净流出（拉高出货）';
+      }
+
+      results.push({
+        ts_code: tsCode,
+        name,
+        score,
+        grade,
+        basic_passed: basicPassed,
+        basic_reason: basicPassed ? '通过' : basicFailReasons.join('; '),
+        condition_a: condA,
+        condition_b: condB,
+        condition_c: condC,
+        condition_d: condD,
+        condition_e: condE,
+        condition_f: condF,
+        condition_g: condG,
+        condition_h: condH,
+        dim_main_depth: dimMainDepth,
+        dim_retail_panic: dimRetailPanic,
+        dim_breakout_power: dimBreakout,
+        dim_wash_quality: dimWash,
+        dim_position_safety: dimPosition,
+        main_30d: main30d,
+        retail_30d: retail30d,
+        circ_mv: circMv,
+        current_price: currentPrice,
+        max_5d_return: max5dReturn,
+        decline_main_in_days: declineMainInDays,
+        cost_deviation: costDeviation,
+        avg_price_30d: avgPrice30d,
+        high_30d: high30d,
+        low_30d: low30d,
+        avg_amount_30d: avgAmount30d,
+        max_decline_30d: maxDecline30d,
+        buy_signal: buySignal,
+        sell_signal: sellSignal,
+        sell_reason: sellReason,
+      });
+    } catch (error) {
+      logError(error, 'MainInFilterStocksFromTushare', `处理 ${tsCode} 失败`);
+      results.push(makeEmptyResult(tsCode, tsCode, `处理异常: ${error}`));
+    }
+  }
+
+  // 按评分降序排列
+  results.sort((a, b) => b.score - a.score);
+  const passedCount = results.filter(r => r.basic_passed && r.buy_signal !== null).length;
+
+  return { results, count: results.length, passed_count: passedCount };
+}
+
+function makeEmptyResult(tsCode: string, name: string, reason: string): MainInStockResult {
+  return {
+    ts_code: tsCode,
+    name,
+    score: 0,
+    grade: 'D',
+    basic_passed: false,
+    basic_reason: reason,
+    condition_a: false, condition_b: false, condition_c: false, condition_d: false,
+    condition_e: false, condition_f: false, condition_g: false, condition_h: false,
+    dim_main_depth: 0, dim_retail_panic: 0, dim_breakout_power: 0,
+    dim_wash_quality: 0, dim_position_safety: 0,
+    main_30d: 0, retail_30d: 0, circ_mv: 0, current_price: 0,
+    max_5d_return: 0, decline_main_in_days: 0, cost_deviation: 0,
+    avg_price_30d: 0, high_30d: 0, low_30d: 0,
+    avg_amount_30d: 0, max_decline_30d: 0,
+    buy_signal: null, sell_signal: null, sell_reason: '',
+  };
+}
+
+/** 计算近30日最大回撤 */
+function computeMaxDecline(prices: number[]): number {
+  if (prices.length < 2) return 0;
+  let maxDrawdown = 0;
+  let peak = prices[0];
+  for (const p of prices) {
+    if (p > peak) peak = p;
+    const dd = (peak - p) / peak;
+    if (dd > maxDrawdown) maxDrawdown = dd;
+  }
+  return maxDrawdown;
+}
+
+/** 计算近30日加权均价（成交量加权） */
+function computeWeightedAvgPrice(klines: Stock.KLineItem[]): number {
+  if (klines.length === 0) return 0;
+  let totalValue = 0;
+  let totalVol = 0;
+  for (const k of klines) {
+    const vol = k.cjl || 0;
+    const price = k.sp;
+    totalValue += price * vol;
+    totalVol += vol;
+  }
+  return totalVol > 0 ? totalValue / totalVol : 0;
+}
+
+/** 检查近3日内是否有"下跌但主力净流入"的洗盘信号 */
+function checkWashLast3Days(recent5: Stock.KLineItem[], detailMain: number[]): boolean {
+  const last3 = recent5.slice(-3);
+  for (let i = 0; i < last3.length; i++) {
+    const zdf = last3[i].zdf || 0;
+    const detailIdx = detailMain.length - recent5.length + (recent5.length - 3) + i;
+    const mainIn = (detailIdx >= 0 && detailIdx < detailMain.length) ? detailMain[detailIdx] : 0;
+    if (zdf < 0 && mainIn > 0) return true;
+  }
+  return false;
 }
 
 // ==================== 选股模块 - 步骤拆分接口 ====================

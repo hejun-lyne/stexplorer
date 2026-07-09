@@ -199,6 +199,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
                   { label: '今日', main: moneyFlow.main_1d, medium: moneyFlow.medium_1d, retail: moneyFlow.retail_1d },
                   { label: '3日', main: moneyFlow.main_3d, medium: moneyFlow.medium_3d, retail: moneyFlow.retail_3d },
                   { label: '5日', main: moneyFlow.main_5d, medium: moneyFlow.medium_5d, retail: moneyFlow.retail_5d },
+                  { label: '10日', main: moneyFlow.main_10d, medium: moneyFlow.medium_10d, retail: moneyFlow.retail_10d },
                   { label: '30日', main: moneyFlow.main_30d, medium: moneyFlow.medium_30d, retail: moneyFlow.retail_30d },
                 ].map((item) => (
                   <Row key={item.label} style={{ marginBottom: 6 }}>
