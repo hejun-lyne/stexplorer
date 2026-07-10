@@ -785,7 +785,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         </Row>
       ) : (
         <Row className={styles.header}>
-          <Col span={3}>股票代码</Col>
+          <Col span={3}>股票名称</Col>
           <Col span={2}>
             评分
             <Button size="small" type="text" icon={sortTypes.score == 1 ? <CaretUpOutlined /> : sortTypes.score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('score')} />
@@ -956,8 +956,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 className={styles.row}
                 style={{ backgroundColor: bgColor }}
               >
-                <Col span={3}>
-                  <span>{s.ts_code}</span>
+                <Col span={3} style={{ cursor: 'pointer' }} onClick={() => {
+                  const code = s.ts_code.split('.').shift() || s.ts_code;
+                  const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
+                  onOpenStock(secid, s.name || s.ts_code);
+                }}>
+                  <span style={{ color: '#1890ff' }}>{s.name || s.ts_code}</span>
                 </Col>
                 <Col span={2} className={Utils.GetValueColor(s.score - 50).textClass}>
                   {s.score}

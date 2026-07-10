@@ -3284,7 +3284,7 @@ class TushareAPI:
 
     @staticmethod
     def _calc_money_flow_from_row(row, is_board: bool = False) -> Dict[str, Any]:
-        """从数据行计算资金流向，所有金额统一返回为元
+        """从数据行计算资金流向（用于 moneyflow / moneyflow_ind_dc 接口），所有金额统一返回为元
         is_board: 板块数据金额单位已经是元；个股数据金额单位为万元需 *10000
         """
         multiplier = 1 if is_board else 10000
@@ -3315,6 +3315,44 @@ class TushareAPI:
         }
 
     @staticmethod
+    def _calc_money_flow_from_row_dc(row) -> Dict[str, Any]:
+        """从 moneyflow_dc（东财个股）数据行计算资金流向，所有金额统一返回为元
+
+        moneyflow_dc 返回的字段已经是净额（万元），不需要买入-卖出计算：
+        - buy_sm_amount: 小单净额（散户）
+        - buy_md_amount: 中单净额（中户）
+        - buy_lg_amount: 大单净额
+        - buy_elg_amount: 超大单净额
+        - net_amount: 主力净额 = buy_lg_amount + buy_elg_amount
+        - net_amount_rate: 主力净流入占比
+        """
+        multiplier = 10000  # moneyflow_dc 金额单位为万元
+        small_in = _to_float(row.get("buy_sm_amount", 0)) * multiplier
+        medium_in = _to_float(row.get("buy_md_amount", 0)) * multiplier
+        big_in = _to_float(row.get("buy_lg_amount", 0)) * multiplier
+        super_big_in = _to_float(row.get("buy_elg_amount", 0)) * multiplier
+        # 主力净流入 = 大单净额 + 超大单净额
+        main_in = big_in + super_big_in
+        # 主力净流入占比：优先使用接口返回的 net_amount_rate
+        main_rate = _to_float(row.get("net_amount_rate", 0))
+        # 如果 net_amount_rate 为 0 但主力不为 0，用反推计算
+        if main_rate == 0 and main_in != 0:
+            net_amount = _to_float(row.get("net_amount", 0)) * multiplier
+            if net_amount != 0:
+                net_amount_rate = _to_float(row.get("net_amount_rate", 0))
+                if net_amount_rate != 0:
+                    total_trade = abs(net_amount / net_amount_rate * 100)
+                    main_rate = round(main_in / total_trade * 100, 2) if total_trade > 0 else 0
+        return {
+            "main_in": round(main_in, 2),
+            "small_in": round(small_in, 2),
+            "medium_in": round(medium_in, 2),
+            "big_in": round(big_in, 2),
+            "super_big_in": round(super_big_in, 2),
+            "main_rate": main_rate,
+        }
+
+    @staticmethod
     def _get_money_flow_single_day(pro, code: str, trade_date: str) -> Dict[str, Any]:
         """获取单日资金流向数据，所有金额统一返回为元"""
         if code.startswith("BK") or code.startswith("90."):
@@ -3328,25 +3366,26 @@ class TushareAPI:
             row = df.iloc[0]
             return TushareAPI._calc_money_flow_from_row(row, is_board=True)
         else:
-            # 个股资金流向：Tushare 标准 moneyflow，金额单位是万元，需 *10000 转为元
+            # 个股资金流向：东财 moneyflow_dc，字段为净额（万元），数据与东方财富APP一致
             ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
-            df = safe_api_call(pro.moneyflow, ts_code=ts_code, start_date=trade_date, end_date=trade_date)
+            df = safe_api_call(pro.moneyflow_dc, ts_code=ts_code, start_date=trade_date, end_date=trade_date)
             if isinstance(df, dict) and df.get("error"):
                 return None
             if df is None or df.empty:
                 return None
             row = df.iloc[0]
-            return TushareAPI._calc_money_flow_from_row(row, is_board=False)
+            return TushareAPI._calc_money_flow_from_row_dc(row)
 
     @staticmethod
     def get_money_flow(code: str, days: Optional[int] = None) -> Dict[str, Any]:
-        """获取资金流向：个股用 moneyflow，板块用 moneyflow_ind_dc（东财，6000积分）
+        """获取资金流向：
+        - 个股用 moneyflow_dc（东财个股），字段为净额（万元），数据与东方财富APP一致
+        - 板块用 moneyflow_ind_dc（东财板块），字段为买入/卖出金额（元）
 
-        moneyflow_ind_dc 返回字段：
-        buy_sm_amount/sell_sm_amount(小单买/卖), buy_md_amount/sell_md_amount(中单买/卖),
-        buy_lg_amount/sell_lg_amount(大单买/卖), buy_elg_amount/sell_elg_amount(特大单买/卖),
-        net_amount(净流入), net_amount_rate(净流入占比)
-        净流入 = 买入金额 - 卖出金额
+        moneyflow_dc 返回字段（净额）：
+        buy_sm_amount(小单净额), buy_md_amount(中单净额),
+        buy_lg_amount(大单净额), buy_elg_amount(超大单净额),
+        net_amount(主力净额), net_amount_rate(主力净流入占比)
 
         当 days 参数指定时，返回最近 N 个交易日的资金流向数据，按主力/散户分类汇总：
         - 主力 = 大单 + 超大单
@@ -3364,10 +3403,10 @@ class TushareAPI:
 
             # 判断板块/个股
             is_board = code.startswith("BK") or code.startswith("90.")
-            source = "dc" if is_board else "tushare"
+            # 个股也用东财数据源（moneyflow_dc），与东方财富APP一致
+            source = "dc"
 
             if days:
-                # 直接用 moneyflow 接口按日期范围查询，比 get_trade_dates() 更简单可靠
                 start_date = (datetime.now() - timedelta(days=days + 45)).strftime('%Y%m%d')
 
                 if is_board:
@@ -3375,7 +3414,7 @@ class TushareAPI:
                     df = safe_api_call(pro.moneyflow_ind_dc, ts_code=ts_code, start_date=start_date, end_date=today)
                 else:
                     ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
-                    df = safe_api_call(pro.moneyflow, ts_code=ts_code, start_date=start_date, end_date=today)
+                    df = safe_api_call(pro.moneyflow_dc, ts_code=ts_code, start_date=start_date, end_date=today)
 
                 if isinstance(df, dict) and df.get("error"):
                     return df
@@ -3387,12 +3426,15 @@ class TushareAPI:
                 if len(df) > days:
                     df = df.iloc[-days:]
 
-                # 计算每日数据
+                # 计算每日数据：个股用 _calc_money_flow_from_row_dc，板块用 _calc_money_flow_from_row
                 daily_data = []
                 for _, row in df.iterrows():
                     date_val = row.get('trade_date', '')
                     date_str = _standardize_date(date_val)
-                    day_data = TushareAPI._calc_money_flow_from_row(row, is_board=is_board)
+                    if is_board:
+                        day_data = TushareAPI._calc_money_flow_from_row(row, is_board=True)
+                    else:
+                        day_data = TushareAPI._calc_money_flow_from_row_dc(row)
                     day_data["trade_date"] = date_str
                     daily_data.append(day_data)
 
@@ -3461,6 +3503,341 @@ class TushareAPI:
         except Exception as e:
             return {"error": str(e)}
 
+    @staticmethod
+    def main_in_filter(trade_date: str, stocks: List[str],
+                       min_circ_mv: float = 20,
+                       min_avg_amount: float = 5000,
+                       max_decline: float = 30) -> Dict[str, Any]:
+        """主力建仓信号识别（批量分析）
+        
+        对传入的股票列表逐一检查：识别资金流向与价格走势的背离，
+        找出主力在偷偷收集筹码、散户在恐慌割肉的标的。
+        
+        Args:
+            trade_date: 交易日期（YYYYMMDD）
+            stocks: ts_code 数组，如 ["000001.SZ", "600000.SH"]
+            min_circ_mv: 流通市值下限（亿），默认20
+            min_avg_amount: 日均成交额下限（万），默认5000
+            max_decline: 最大回撤（%），默认30
+        
+        Returns:
+            {"results": [...], "count": N, "passed_count": N}
+        """
+        min_circ_mv_yuan = min_circ_mv * 1e8   # 亿 -> 元
+        min_avg_amount_yuan = min_avg_amount * 1e4  # 万 -> 元
+        max_decline_ratio = max_decline / 100.0
+
+        results = []
+
+        for ts_code in stocks:
+            code = ts_code.split('.')[0]
+            market = '1' if code.startswith('6') else '0'
+            secid = f"{market}.{code}"
+
+            try:
+                # 并行获取资金流向(30日)、K线(30日)、实时详情
+                try:
+                    money_flow = TushareAPI.get_money_flow(code, days=30)
+                except Exception:
+                    money_flow = {"error": "获取资金流向异常"}
+
+                try:
+                    klines = TushareAPI.get_kline_data(secid, period="daily", limit=30)
+                except Exception:
+                    klines = []
+
+                try:
+                    detail = TushareAPI.get_stock_realtime(secid)
+                except Exception:
+                    detail = {"error": "获取详情异常"}
+
+                name = detail.get("name", ts_code) if isinstance(detail, dict) else ts_code
+
+                # 数据不足则跳过
+                if isinstance(money_flow, dict) and money_flow.get("error"):
+                    results.append(TushareAPI._make_main_in_empty(ts_code, name, f"资金流向数据缺失"))
+                    continue
+                if not isinstance(klines, list) or len(klines) < 10:
+                    results.append(TushareAPI._make_main_in_empty(ts_code, name, f"K线数据不足({len(klines) if isinstance(klines, list) else 0}条)"))
+                    continue
+
+                # ============ 提取指标数据 ============
+                # 流通市值(元)：detail 中 lt 单位为"亿"
+                lt_yi = _to_float(detail.get("lt", 0)) if isinstance(detail, dict) else 0
+                circ_mv = lt_yi * 1e8
+                # 当前价
+                current_price = _to_float(detail.get("zx", 0)) if isinstance(detail, dict) else 0
+                if current_price == 0 and klines:
+                    current_price = _to_float(klines[-1].get("sp", 0))
+
+                # 资金流向
+                main_30d = _to_float(money_flow.get("main_30d", 0)) if isinstance(money_flow, dict) else 0
+                retail_30d = _to_float(money_flow.get("retail_30d", 0)) if isinstance(money_flow, dict) else 0
+                main_5d = _to_float(money_flow.get("main_5d", 0)) if isinstance(money_flow, dict) else 0
+                retail_5d = _to_float(money_flow.get("retail_5d", 0)) if isinstance(money_flow, dict) else 0
+                medium_30d = _to_float(money_flow.get("medium_30d", 0)) if isinstance(money_flow, dict) else 0
+                detail_main = money_flow.get("detail_main", []) if isinstance(money_flow, dict) else []
+                detail_retail = money_flow.get("detail_retail", []) if isinstance(money_flow, dict) else []
+
+                # K线价格数据
+                prices = [_to_float(k.get("sp", 0)) for k in klines]
+                high_30d = max(_to_float(k.get("zg", 0)) for k in klines)
+                low_30d = min(_to_float(k.get("zd", 0)) for k in klines)
+                cje_30d = [_to_float(k.get("cje", 0)) for k in klines]
+                avg_amount_30d = sum(cje_30d) / max(len(cje_30d), 1)
+                max_decline_30d = TushareAPI._compute_max_decline(prices)
+                avg_price_30d = TushareAPI._compute_weighted_avg_price(klines)
+
+                # 近5日、近10日数据
+                recent5 = klines[-5:] if len(klines) >= 5 else klines
+                recent10 = klines[-10:] if len(klines) >= 10 else klines
+
+                # 近5日最大涨幅
+                max_5d_return = max(_to_float(k.get("zdf", 0)) for k in recent5)
+
+                # 近10日下跌且主力流入日数
+                decline_main_in_days = 0
+                for i, k in enumerate(recent10):
+                    zdf = _to_float(k.get("zdf", 0))
+                    detail_idx = len(detail_main) - len(recent10) + i
+                    main_in_val = detail_main[detail_idx] if 0 <= detail_idx < len(detail_main) else 0
+                    if zdf < 0 and main_in_val > 0:
+                        decline_main_in_days += 1
+
+                # 成本偏离
+                cost_deviation = (current_price - avg_price_30d) / avg_price_30d if avg_price_30d > 0 else 0
+
+                # ============ 基础过滤 ============
+                basic_fail_reasons = []
+                if circ_mv > 0 and circ_mv < min_circ_mv_yuan:
+                    basic_fail_reasons.append(f"流通市值{circ_mv / 1e8:.1f}亿 < {min_circ_mv:.0f}亿")
+                if avg_amount_30d > 0 and avg_amount_30d < min_avg_amount_yuan:
+                    basic_fail_reasons.append(f"日均成交额{avg_amount_30d / 1e4:.0f}万 < {min_avg_amount:.0f}万")
+                if max_decline_30d > max_decline_ratio:
+                    basic_fail_reasons.append(f"近30日最大回撤{max_decline_30d * 100:.1f}% > {max_decline:.0f}%")
+                basic_passed = len(basic_fail_reasons) == 0
+
+                # ============ 条件组检查 ============
+                # A: 主力持续流入
+                cond_a = main_5d > 0 and main_30d > 1e8
+                # B: 散户持续流出
+                cond_b = retail_5d < 0 and retail_30d < -5e7
+                # C: 筹码向主力集中
+                cond_c = (main_30d + medium_30d) > 0 and retail_30d < 0
+                # D: 价格位置合理
+                cond_d = current_price < high_30d * 0.95 and current_price > low_30d * 1.05
+                # E: 启动信号
+                cond_e = False
+                for i, k in enumerate(recent5):
+                    zdf = _to_float(k.get("zdf", 0))
+                    detail_idx = len(detail_main) - len(recent5) + i
+                    main_in_val = detail_main[detail_idx] if 0 <= detail_idx < len(detail_main) else 0
+                    if zdf > 5 and main_in_val > 3e7:
+                        cond_e = True
+                        break
+                # F: 洗盘特征
+                cond_f = False
+                for i, k in enumerate(recent5):
+                    zdf = _to_float(k.get("zdf", 0))
+                    detail_idx = len(detail_main) - len(recent5) + i
+                    main_in_val = detail_main[detail_idx] if 0 <= detail_idx < len(detail_main) else 0
+                    if zdf < -3 and main_in_val > 0:
+                        cond_f = True
+                        break
+                # G: 量价配合
+                up_hsls, down_hsls = [], []
+                for k in recent5:
+                    if _to_float(k.get("zdf", 0)) > 0:
+                        up_hsls.append(_to_float(k.get("hsl", 0)))
+                    elif _to_float(k.get("zdf", 0)) < 0:
+                        down_hsls.append(_to_float(k.get("hsl", 0)))
+                avg_up_hsl = sum(up_hsls) / len(up_hsls) if up_hsls else 0
+                avg_down_hsl = sum(down_hsls) / len(down_hsls) if down_hsls else 0
+                cond_g = avg_up_hsl > 0 and avg_down_hsl > 0 and avg_up_hsl > avg_down_hsl * 1.2
+                # H: 散户行为验证
+                retail_outflow_days = 0
+                for i in range(len(recent5)):
+                    detail_idx = len(detail_retail) - len(recent5) + i
+                    retail_in_val = detail_retail[detail_idx] if 0 <= detail_idx < len(detail_retail) else 0
+                    if retail_in_val < 0:
+                        retail_outflow_days += 1
+                cond_h = retail_outflow_days >= 3
+
+                # ============ 评分模型 ============
+                # 1. 主力建仓深度 (30分)
+                main_30d_ratio = main_30d / circ_mv if circ_mv > 0 else 0
+                dim_main_depth = 0
+                if main_30d_ratio > 0.05: dim_main_depth = 30
+                elif main_30d_ratio > 0.03: dim_main_depth = 20
+                elif main_30d_ratio > 0.01: dim_main_depth = 10
+                # 2. 散户割肉力度 (25分)
+                retail_30d_ratio = abs(retail_30d) / circ_mv if circ_mv > 0 else 0
+                dim_retail_panic = 0
+                if retail_30d_ratio > 0.05: dim_retail_panic = 25
+                elif retail_30d_ratio > 0.03: dim_retail_panic = 15
+                elif retail_30d_ratio > 0.01: dim_retail_panic = 5
+                # 3. 启动爆发力 (20分)
+                dim_breakout = 0
+                if max_5d_return > 10: dim_breakout = 20
+                elif max_5d_return > 7: dim_breakout = 15
+                elif max_5d_return > 5: dim_breakout = 10
+                # 4. 洗盘质量 (15分)
+                dim_wash = 0
+                if decline_main_in_days >= 3: dim_wash = 15
+                elif decline_main_in_days >= 2: dim_wash = 10
+                elif decline_main_in_days >= 1: dim_wash = 5
+                # 5. 位置安全垫 (10分)
+                dim_position = 0
+                if -0.05 < cost_deviation < 0.05: dim_position = 10
+                elif -0.10 < cost_deviation < 0.10: dim_position = 5
+
+                score = dim_main_depth + dim_retail_panic + dim_breakout + dim_wash + dim_position
+
+                # 评级
+                if score >= 80: grade = 'A'
+                elif score >= 60: grade = 'B'
+                elif score >= 40: grade = 'C'
+                else: grade = 'D'
+
+                # ============ 买卖信号判断 ============
+                buy_signal = None
+                sell_signal = None
+                sell_reason = ''
+
+                # 买入组合A（最强）：洗盘最后3日 + 价格合理
+                wash_last3 = TushareAPI._check_wash_last3_days(recent5, detail_main)
+                price_ok_a = avg_price_30d > 0 and current_price <= avg_price_30d * 1.02
+                if score >= 80 and wash_last3 and price_ok_a:
+                    buy_signal = 'A'
+                # 买入组合B（稳健）
+                if buy_signal is None:
+                    has_7pct_up = any(_to_float(k.get("zdf", 0)) > 7 for k in recent5)
+                    if score >= 60 and main_5d > 0 and retail_5d < 0 and has_7pct_up:
+                        buy_signal = 'B'
+
+                # 卖出/回避信号
+                if score < 40:
+                    sell_signal = 'SELL'
+                    sell_reason = f"评分{score}分 < 40分，主力出货/散户接盘"
+                if sell_signal is None and len(detail_main) >= 3:
+                    last3_main = detail_main[-3:]
+                    all_outflow = all(v < 0 for v in last3_main)
+                    total_outflow = abs(sum(last3_main))
+                    if all_outflow and total_outflow > 5e7:
+                        sell_signal = 'SELL'
+                        sell_reason = f"连续3日主力净流出，累计{total_outflow / 1e4:.0f}万"
+                if sell_signal is None and retail_30d > 0:
+                    sell_signal = 'SELL'
+                    sell_reason = '散户30日累计转正（从割肉变追涨）'
+                if sell_signal is None and current_price >= high_30d and len(detail_main) > 0 and detail_main[-1] < 0:
+                    sell_signal = 'SELL'
+                    sell_reason = '股价突破近30日最高价但主力当日净流出（拉高出货）'
+
+                results.append({
+                    "ts_code": ts_code,
+                    "name": name,
+                    "score": score,
+                    "grade": grade,
+                    "basic_passed": basic_passed,
+                    "basic_reason": "通过" if basic_passed else "; ".join(basic_fail_reasons),
+                    "condition_a": cond_a, "condition_b": cond_b,
+                    "condition_c": cond_c, "condition_d": cond_d,
+                    "condition_e": cond_e, "condition_f": cond_f,
+                    "condition_g": cond_g, "condition_h": cond_h,
+                    "dim_main_depth": dim_main_depth,
+                    "dim_retail_panic": dim_retail_panic,
+                    "dim_breakout_power": dim_breakout,
+                    "dim_wash_quality": dim_wash,
+                    "dim_position_safety": dim_position,
+                    "main_30d": main_30d,
+                    "retail_30d": retail_30d,
+                    "circ_mv": circ_mv,
+                    "current_price": current_price,
+                    "max_5d_return": max_5d_return,
+                    "decline_main_in_days": decline_main_in_days,
+                    "cost_deviation": cost_deviation,
+                    "avg_price_30d": avg_price_30d,
+                    "high_30d": high_30d,
+                    "low_30d": low_30d,
+                    "avg_amount_30d": avg_amount_30d,
+                    "max_decline_30d": max_decline_30d,
+                    "buy_signal": buy_signal,
+                    "sell_signal": sell_signal,
+                    "sell_reason": sell_reason,
+                })
+            except Exception as e:
+                import traceback
+                sys.stderr.write(f"[主力建仓] 处理 {ts_code} 失败: {e}\n{traceback.format_exc()}\n")
+                results.append(TushareAPI._make_main_in_empty(ts_code, ts_code, f"处理异常: {e}"))
+
+        # 按评分降序排列
+        results.sort(key=lambda x: x["score"], reverse=True)
+        passed_count = sum(1 for r in results if r["basic_passed"] and r["buy_signal"] is not None)
+
+        return {"results": results, "count": len(results), "passed_count": passed_count}
+
+    @staticmethod
+    def _make_main_in_empty(ts_code: str, name: str, reason: str) -> Dict[str, Any]:
+        return {
+            "ts_code": ts_code, "name": name,
+            "score": 0, "grade": "D",
+            "basic_passed": False, "basic_reason": reason,
+            "condition_a": False, "condition_b": False,
+            "condition_c": False, "condition_d": False,
+            "condition_e": False, "condition_f": False,
+            "condition_g": False, "condition_h": False,
+            "dim_main_depth": 0, "dim_retail_panic": 0,
+            "dim_breakout_power": 0, "dim_wash_quality": 0,
+            "dim_position_safety": 0,
+            "main_30d": 0, "retail_30d": 0,
+            "circ_mv": 0, "current_price": 0,
+            "max_5d_return": 0, "decline_main_in_days": 0,
+            "cost_deviation": 0,
+            "avg_price_30d": 0, "high_30d": 0, "low_30d": 0,
+            "avg_amount_30d": 0, "max_decline_30d": 0,
+            "buy_signal": None, "sell_signal": None, "sell_reason": "",
+        }
+
+    @staticmethod
+    def _compute_max_decline(prices: List[float]) -> float:
+        if len(prices) < 2:
+            return 0.0
+        max_drawdown = 0.0
+        peak = prices[0]
+        for p in prices:
+            if p > peak:
+                peak = p
+            dd = (peak - p) / peak if peak > 0 else 0
+            if dd > max_drawdown:
+                max_drawdown = dd
+        return max_drawdown
+
+    @staticmethod
+    def _compute_weighted_avg_price(klines: List[Dict]) -> float:
+        if not klines:
+            return 0.0
+        total_value = 0.0
+        total_vol = 0.0
+        for k in klines:
+            vol = _to_float(k.get("cjl", 0))
+            price = _to_float(k.get("sp", 0))
+            total_value += price * vol
+            total_vol += vol
+        return total_value / total_vol if total_vol > 0 else 0.0
+
+    @staticmethod
+    def _check_wash_last3_days(recent5: List[Dict], detail_main: List[float]) -> bool:
+        """检查最近3日是否有洗盘特征（下跌但主力在买）"""
+        if len(recent5) < 3 or len(detail_main) < 3:
+            return False
+        last3 = recent5[-3:]
+        for i, k in enumerate(last3):
+            zdf = _to_float(k.get("zdf", 0))
+            detail_idx = len(detail_main) - len(last3) + i
+            main_in_val = detail_main[detail_idx] if 0 <= detail_idx < len(detail_main) else 0
+            if zdf < -1 and main_in_val > 0:
+                return True
+        return False
 
     @staticmethod
     def get_top_list(date: Optional[str] = None) -> List[Dict[str, Any]]:
