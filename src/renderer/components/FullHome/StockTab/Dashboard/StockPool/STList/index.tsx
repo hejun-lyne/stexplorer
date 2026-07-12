@@ -793,12 +793,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           <Col span={2}>评级</Col>
           <Col span={2}>基础过滤</Col>
           <Col span={3}>
-            主力30日
-            <Button size="small" type="text" icon={sortTypes.main_30d == 1 ? <CaretUpOutlined /> : sortTypes.main_30d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('main_30d')} />
+            主力10日
+            <Button size="small" type="text" icon={sortTypes.main_10d == 1 ? <CaretUpOutlined /> : sortTypes.main_10d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('main_10d')} />
           </Col>
           <Col span={3}>
-            散户30日
-            <Button size="small" type="text" icon={sortTypes.retail_30d == 1 ? <CaretUpOutlined /> : sortTypes.retail_30d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('retail_30d')} />
+            散户10日
+            <Button size="small" type="text" icon={sortTypes.retail_10d == 1 ? <CaretUpOutlined /> : sortTypes.retail_10d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('retail_10d')} />
           </Col>
           <Col span={3}>
             启动信号
@@ -981,11 +981,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                     <span className="text-down" title={s.basic_reason}>✗</span>
                   )}
                 </Col>
-                <Col span={3} className={Utils.GetValueColor(s.main_30d).textClass}>
-                  {formatMoneyFlow(s.main_30d)}
+                <Col span={3} className={Utils.GetValueColor(s.main_10d).textClass}>
+                  {formatMoneyFlow(s.main_10d)}
                 </Col>
-                <Col span={3} className={Utils.GetValueColor(-s.retail_30d).textClass}>
-                  {formatMoneyFlow(s.retail_30d)}
+                <Col span={3} className={Utils.GetValueColor(-s.retail_10d).textClass}>
+                  {formatMoneyFlow(s.retail_10d)}
                 </Col>
                 <Col span={3} className={Utils.GetValueColor(s.max_5d_return).textClass}>
                   {s.max_5d_return?.toFixed?.(1) ?? s.max_5d_return}%

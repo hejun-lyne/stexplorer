@@ -1214,8 +1214,32 @@ class TushareAPI:
         return results
     
     @staticmethod
+    @staticmethod
+    def _try_fetch_index_kline(pro, ts_code: str, period: str, start_date: str, end_date_fmt: str):
+        """尝试用指定 ts_code 获取指数K线，返回 (df, None) 或 (None, error_dict)"""
+        try:
+            if period == 'daily':
+                df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
+            elif period == 'weekly':
+                df = pro.index_weekly(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
+            elif period == 'monthly':
+                df = pro.index_monthly(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
+            else:
+                df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
+            if df is not None and not df.empty:
+                return df, None
+            return None, None
+        except Exception as e:
+            return None, {"error": str(e)}
+
+    @staticmethod
     def _get_index_kline(secid: str, period: str = "daily", limit: int = 0, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
-        """获取指数K线数据（index_daily/weekly/monthly）"""
+        """获取指数K线数据（index_daily/weekly/monthly）
+
+        对于 market==1 且 code 以 000 或 9 开头的指数代码，
+        无法从代码本身区分是上证指数(.SH)还是中证指数(.CSI)，
+        因此先尝试 .CSI（中证指数），失败则 fallback 到 .SH（上证指数）。
+        """
         try:
             ts_code = convert_secid_to_ts_code(secid)
             end_date_std = _standardize_date(end_date) if end_date else ''
@@ -1238,17 +1262,35 @@ class TushareAPI:
                 start_date = (end_dt - timedelta(days=365 * 3)).strftime("%Y%m%d")
 
             pro = get_pro()
-            if period == 'daily':
-                df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
-            elif period == 'weekly':
-                df = pro.index_weekly(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
-            elif period == 'monthly':
-                df = pro.index_monthly(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
-            else:
-                df = pro.index_daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
+
+            # 对于 market==1 的 000xxx/9xxxxx 指数，无法区分上证(.SH)还是中证(.CSI)
+            # 先尝试 .CSI（中证指数），失败再 fallback 到 .SH
+            df = None
+            last_error = None
+            if "." in secid:
+                mk, code = secid.split(".")
+                if mk == "1" and len(code) == 6 and code.isdigit() and (code.startswith("000") or code.startswith("9")):
+                    csi_code = f"{code}.CSI"
+                    df, err = TushareAPI._try_fetch_index_kline(pro, csi_code, period, start_date, end_date_fmt)
+                    if df is not None:
+                        print(f"[_get_index_kline] 使用 .CSI 成功: {csi_code}")
+                    elif err:
+                        print(f"[_get_index_kline] .CSI 失败 ({err.get('error')}), 尝试 .SH: {csi_code}")
+                        last_error = err
+                    else:
+                        print(f"[_get_index_kline] .CSI 返回空, 尝试 .SH: {csi_code}")
+                    if df is None:
+                        # fallback 到 .SH
+                        df, err2 = TushareAPI._try_fetch_index_kline(pro, ts_code, period, start_date, end_date_fmt)
+                        if err2:
+                            last_error = err2
+
+            # 非 fallback 场景：直接使用 ts_code
+            if df is None and last_error is None:
+                df, last_error = TushareAPI._try_fetch_index_kline(pro, ts_code, period, start_date, end_date_fmt)
 
             if df is None or df.empty:
-                return {"error": "No data available"}
+                return last_error or {"error": "No data available"}
 
             df = df.sort_values('trade_date', ascending=True).reset_index(drop=True)
 
@@ -1519,14 +1561,18 @@ class TushareAPI:
         获取分时走势数据 - 使用腾讯财经数据源
         
         腾讯接口返回分笔成交数据，需按分钟聚合成与东财一致的分钟数据
-        对于 market==2 的指数/板块代码，使用东方财富分时接口（腾讯个股接口不支持）
+        对于指数/板块代码（market==2 或 is_index_code 为 True），使用东方财富分时接口（腾讯个股接口不支持）
         """
         if ak is None:
             return {"error": "akshare 未安装，无法获取分时数据"}
         try:
-            # 指数/板块代码（market==2），腾讯个股分时接口不支持，直接用东方财富
-            if "." in secid and secid.split(".")[0] == "2":
-                return TushareAPI._get_trend_from_eastmoney(secid)
+            # 指数/板块代码，腾讯个股分时接口不支持，直接用东方财富
+            # market==2：东财概念指数/板块
+            # market==1 + 指数代码：沪市/中证指数（如 1.000001 上证指数、1.000949 中证农业等）
+            if "." in secid:
+                mk = secid.split(".")[0]
+                if mk == "2" or is_index_code(secid):
+                    return TushareAPI._get_trend_from_eastmoney(secid)
 
             symbol = convert_secid_to_tx_symbol(secid)
             df = ak.stock_zh_a_tick_tx_js(symbol=symbol)
@@ -1597,9 +1643,11 @@ class TushareAPI:
             return trends
         except Exception as e:
             try:
-                # market==2 指数走东方财富接口
-                if "." in secid and secid.split(".")[0] == "2":
-                    return TushareAPI._get_trend_from_eastmoney(secid)
+                # 指数代码走东方财富分时接口
+                if "." in secid:
+                    mk = secid.split(".")[0]
+                    if mk == "2" or is_index_code(secid):
+                        return TushareAPI._get_trend_from_eastmoney(secid)
                 return TushareAPI._get_trend_from_163(secid)
             except:
                 return {"error": str(e)}
@@ -3535,14 +3583,14 @@ class TushareAPI:
             secid = f"{market}.{code}"
 
             try:
-                # 并行获取资金流向(30日)、K线(30日)、实时详情
+                # 并行获取资金流向(10日)、K线(10日)、实时详情
                 try:
-                    money_flow = TushareAPI.get_money_flow(code, days=30)
+                    money_flow = TushareAPI.get_money_flow(code, days=10)
                 except Exception:
                     money_flow = {"error": "获取资金流向异常"}
 
                 try:
-                    klines = TushareAPI.get_kline_data(secid, period="daily", limit=30)
+                    klines = TushareAPI.get_kline_data(secid, period="daily", limit=10)
                 except Exception:
                     klines = []
 
@@ -3571,22 +3619,22 @@ class TushareAPI:
                     current_price = _to_float(klines[-1].get("sp", 0))
 
                 # 资金流向
-                main_30d = _to_float(money_flow.get("main_30d", 0)) if isinstance(money_flow, dict) else 0
-                retail_30d = _to_float(money_flow.get("retail_30d", 0)) if isinstance(money_flow, dict) else 0
+                main_10d = _to_float(money_flow.get("main_10d", 0)) if isinstance(money_flow, dict) else 0
+                retail_10d = _to_float(money_flow.get("retail_10d", 0)) if isinstance(money_flow, dict) else 0
                 main_5d = _to_float(money_flow.get("main_5d", 0)) if isinstance(money_flow, dict) else 0
                 retail_5d = _to_float(money_flow.get("retail_5d", 0)) if isinstance(money_flow, dict) else 0
-                medium_30d = _to_float(money_flow.get("medium_30d", 0)) if isinstance(money_flow, dict) else 0
+                medium_10d = _to_float(money_flow.get("medium_10d", 0)) if isinstance(money_flow, dict) else 0
                 detail_main = money_flow.get("detail_main", []) if isinstance(money_flow, dict) else []
                 detail_retail = money_flow.get("detail_retail", []) if isinstance(money_flow, dict) else []
 
                 # K线价格数据
                 prices = [_to_float(k.get("sp", 0)) for k in klines]
-                high_30d = max(_to_float(k.get("zg", 0)) for k in klines)
-                low_30d = min(_to_float(k.get("zd", 0)) for k in klines)
-                cje_30d = [_to_float(k.get("cje", 0)) for k in klines]
-                avg_amount_30d = sum(cje_30d) / max(len(cje_30d), 1)
-                max_decline_30d = TushareAPI._compute_max_decline(prices)
-                avg_price_30d = TushareAPI._compute_weighted_avg_price(klines)
+                high_10d = max(_to_float(k.get("zg", 0)) for k in klines)
+                low_10d = min(_to_float(k.get("zd", 0)) for k in klines)
+                cje_10d = [_to_float(k.get("cje", 0)) for k in klines]
+                avg_amount_10d = sum(cje_10d) / max(len(cje_10d), 1)
+                max_decline_10d = TushareAPI._compute_max_decline(prices)
+                avg_price_10d = TushareAPI._compute_weighted_avg_price(klines)
 
                 # 近5日、近10日数据
                 recent5 = klines[-5:] if len(klines) >= 5 else klines
@@ -3605,27 +3653,27 @@ class TushareAPI:
                         decline_main_in_days += 1
 
                 # 成本偏离
-                cost_deviation = (current_price - avg_price_30d) / avg_price_30d if avg_price_30d > 0 else 0
+                cost_deviation = (current_price - avg_price_10d) / avg_price_10d if avg_price_10d > 0 else 0
 
                 # ============ 基础过滤 ============
                 basic_fail_reasons = []
                 if circ_mv > 0 and circ_mv < min_circ_mv_yuan:
                     basic_fail_reasons.append(f"流通市值{circ_mv / 1e8:.1f}亿 < {min_circ_mv:.0f}亿")
-                if avg_amount_30d > 0 and avg_amount_30d < min_avg_amount_yuan:
-                    basic_fail_reasons.append(f"日均成交额{avg_amount_30d / 1e4:.0f}万 < {min_avg_amount:.0f}万")
-                if max_decline_30d > max_decline_ratio:
-                    basic_fail_reasons.append(f"近30日最大回撤{max_decline_30d * 100:.1f}% > {max_decline:.0f}%")
+                if avg_amount_10d > 0 and avg_amount_10d < min_avg_amount_yuan:
+                    basic_fail_reasons.append(f"日均成交额{avg_amount_10d / 1e4:.0f}万 < {min_avg_amount:.0f}万")
+                if max_decline_10d > max_decline_ratio:
+                    basic_fail_reasons.append(f"近10日最大回撤{max_decline_10d * 100:.1f}% > {max_decline:.0f}%")
                 basic_passed = len(basic_fail_reasons) == 0
 
                 # ============ 条件组检查 ============
                 # A: 主力持续流入
-                cond_a = main_5d > 0 and main_30d > 1e8
+                cond_a = main_5d > 0 and main_10d > 1e8
                 # B: 散户持续流出
-                cond_b = retail_5d < 0 and retail_30d < -5e7
+                cond_b = retail_5d < 0 and retail_10d < -5e7
                 # C: 筹码向主力集中
-                cond_c = (main_30d + medium_30d) > 0 and retail_30d < 0
+                cond_c = (main_10d + medium_10d) > 0 and retail_10d < 0
                 # D: 价格位置合理
-                cond_d = current_price < high_30d * 0.95 and current_price > low_30d * 1.05
+                cond_d = current_price < high_10d * 0.95 and current_price > low_10d * 1.05
                 # E: 启动信号
                 cond_e = False
                 for i, k in enumerate(recent5):
@@ -3665,17 +3713,17 @@ class TushareAPI:
 
                 # ============ 评分模型 ============
                 # 1. 主力建仓深度 (30分)
-                main_30d_ratio = main_30d / circ_mv if circ_mv > 0 else 0
+                main_10d_ratio = main_10d / circ_mv if circ_mv > 0 else 0
                 dim_main_depth = 0
-                if main_30d_ratio > 0.05: dim_main_depth = 30
-                elif main_30d_ratio > 0.03: dim_main_depth = 20
-                elif main_30d_ratio > 0.01: dim_main_depth = 10
+                if main_10d_ratio > 0.05: dim_main_depth = 30
+                elif main_10d_ratio > 0.03: dim_main_depth = 20
+                elif main_10d_ratio > 0.01: dim_main_depth = 10
                 # 2. 散户割肉力度 (25分)
-                retail_30d_ratio = abs(retail_30d) / circ_mv if circ_mv > 0 else 0
+                retail_10d_ratio = abs(retail_10d) / circ_mv if circ_mv > 0 else 0
                 dim_retail_panic = 0
-                if retail_30d_ratio > 0.05: dim_retail_panic = 25
-                elif retail_30d_ratio > 0.03: dim_retail_panic = 15
-                elif retail_30d_ratio > 0.01: dim_retail_panic = 5
+                if retail_10d_ratio > 0.05: dim_retail_panic = 25
+                elif retail_10d_ratio > 0.03: dim_retail_panic = 15
+                elif retail_10d_ratio > 0.01: dim_retail_panic = 5
                 # 3. 启动爆发力 (20分)
                 dim_breakout = 0
                 if max_5d_return > 10: dim_breakout = 20
@@ -3706,7 +3754,7 @@ class TushareAPI:
 
                 # 买入组合A（最强）：洗盘最后3日 + 价格合理
                 wash_last3 = TushareAPI._check_wash_last3_days(recent5, detail_main)
-                price_ok_a = avg_price_30d > 0 and current_price <= avg_price_30d * 1.02
+                price_ok_a = avg_price_10d > 0 and current_price <= avg_price_10d * 1.02
                 if score >= 80 and wash_last3 and price_ok_a:
                     buy_signal = 'A'
                 # 买入组合B（稳健）
@@ -3726,12 +3774,12 @@ class TushareAPI:
                     if all_outflow and total_outflow > 5e7:
                         sell_signal = 'SELL'
                         sell_reason = f"连续3日主力净流出，累计{total_outflow / 1e4:.0f}万"
-                if sell_signal is None and retail_30d > 0:
+                if sell_signal is None and retail_10d > 0:
                     sell_signal = 'SELL'
-                    sell_reason = '散户30日累计转正（从割肉变追涨）'
-                if sell_signal is None and current_price >= high_30d and len(detail_main) > 0 and detail_main[-1] < 0:
+                    sell_reason = '散户10日累计转正（从割肉变追涨）'
+                if sell_signal is None and current_price >= high_10d and len(detail_main) > 0 and detail_main[-1] < 0:
                     sell_signal = 'SELL'
-                    sell_reason = '股价突破近30日最高价但主力当日净流出（拉高出货）'
+                    sell_reason = '股价突破近10日最高价但主力当日净流出（拉高出货）'
 
                 results.append({
                     "ts_code": ts_code,
@@ -3749,18 +3797,18 @@ class TushareAPI:
                     "dim_breakout_power": dim_breakout,
                     "dim_wash_quality": dim_wash,
                     "dim_position_safety": dim_position,
-                    "main_30d": main_30d,
-                    "retail_30d": retail_30d,
+                    "main_10d": main_10d,
+                    "retail_10d": retail_10d,
                     "circ_mv": circ_mv,
                     "current_price": current_price,
                     "max_5d_return": max_5d_return,
                     "decline_main_in_days": decline_main_in_days,
                     "cost_deviation": cost_deviation,
-                    "avg_price_30d": avg_price_30d,
-                    "high_30d": high_30d,
-                    "low_30d": low_30d,
-                    "avg_amount_30d": avg_amount_30d,
-                    "max_decline_30d": max_decline_30d,
+                    "avg_price_10d": avg_price_10d,
+                    "high_10d": high_10d,
+                    "low_10d": low_10d,
+                    "avg_amount_10d": avg_amount_10d,
+                    "max_decline_10d": max_decline_10d,
                     "buy_signal": buy_signal,
                     "sell_signal": sell_signal,
                     "sell_reason": sell_reason,
@@ -3789,12 +3837,12 @@ class TushareAPI:
             "dim_main_depth": 0, "dim_retail_panic": 0,
             "dim_breakout_power": 0, "dim_wash_quality": 0,
             "dim_position_safety": 0,
-            "main_30d": 0, "retail_30d": 0,
+            "main_10d": 0, "retail_10d": 0,
             "circ_mv": 0, "current_price": 0,
             "max_5d_return": 0, "decline_main_in_days": 0,
             "cost_deviation": 0,
-            "avg_price_30d": 0, "high_30d": 0, "low_30d": 0,
-            "avg_amount_30d": 0, "max_decline_30d": 0,
+            "avg_price_10d": 0, "high_10d": 0, "low_10d": 0,
+            "avg_amount_10d": 0, "max_decline_10d": 0,
             "buy_signal": None, "sell_signal": None, "sell_reason": "",
         }
 

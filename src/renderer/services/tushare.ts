@@ -1352,18 +1352,18 @@ interface MainInStockResult {
   dim_wash_quality: number;      // 洗盘质量得分
   dim_position_safety: number;   // 位置安全垫得分
   /** 指标数据 */
-  main_30d: number;        // 主力30日累计(元)
-  retail_30d: number;      // 散户30日累计(元)
+  main_10d: number;        // 主力10日累计(元)
+  retail_10d: number;      // 散户10日累计(元)
   circ_mv: number;         // 流通市值(元)
   current_price: number;   // 当前价
   max_5d_return: number;   // 近5日最大涨幅
   decline_main_in_days: number;  // 近10日下跌且主力流入日数
   cost_deviation: number;  // 成本偏离
-  avg_price_30d: number;   // 近30日加权均价
-  high_30d: number;        // 近30日最高价
-  low_30d: number;         // 近30日最低价
-  avg_amount_30d: number;  // 近30日日均成交额(元)
-  max_decline_30d: number; // 近30日最大回撤
+  avg_price_10d: number;   // 近10日加权均价
+  high_10d: number;        // 近10日最高价
+  low_10d: number;         // 近10日最低价
+  avg_amount_10d: number;  // 近10日日均成交额(元)
+  max_decline_10d: number; // 近10日最大回撤
   /** 买卖信号 */
   buy_signal: string | null;   // 'A' | 'B' | null
   sell_signal: string | null;  // 'SELL' | null
