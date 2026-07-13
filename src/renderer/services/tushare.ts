@@ -1345,15 +1345,18 @@ interface MainInStockResult {
   condition_f: boolean; // 洗盘特征
   condition_g: boolean; // 量价配合
   condition_h: boolean; // 散户行为验证
-  /** 评分维度 */
-  dim_main_depth: number;        // 主力建仓深度得分
-  dim_retail_panic: number;      // 散户割肉力度得分
-  dim_breakout_power: number;    // 启动爆发力得分
-  dim_wash_quality: number;      // 洗盘质量得分
-  dim_position_safety: number;   // 位置安全垫得分
+  /** 评分维度（优化版） */
+  dim_main_depth: number;        // 主力建仓深度得分（30日，40分）
+  dim_retail_panic: number;      // 散户割肉力度得分（30日，20分）
+  dim_trend_verify: number;      // 近期趋势验证得分（10日，20分）
+  dim_risk_warning: number;      // 短期风险预警得分（5日，20分，可为负）
   /** 指标数据 */
+  main_30d: number;        // 主力30日累计(元)
+  retail_30d: number;      // 散户30日累计(元)
   main_10d: number;        // 主力10日累计(元)
   retail_10d: number;      // 散户10日累计(元)
+  main_5d: number;         // 主力5日累计(元)
+  retail_5d: number;       // 散户5日累计(元)
   circ_mv: number;         // 流通市值(元)
   current_price: number;   // 当前价
   max_5d_return: number;   // 近5日最大涨幅

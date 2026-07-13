@@ -3583,9 +3583,9 @@ class TushareAPI:
             secid = f"{market}.{code}"
 
             try:
-                # 并行获取资金流向(10日)、K线(10日)、实时详情
+                # 并行获取资金流向(30日)、K线(10日)、实时详情
                 try:
-                    money_flow = TushareAPI.get_money_flow(code, days=10)
+                    money_flow = TushareAPI.get_money_flow(code, days=30)
                 except Exception:
                     money_flow = {"error": "获取资金流向异常"}
 
@@ -3623,6 +3623,8 @@ class TushareAPI:
                 retail_10d = _to_float(money_flow.get("retail_10d", 0)) if isinstance(money_flow, dict) else 0
                 main_5d = _to_float(money_flow.get("main_5d", 0)) if isinstance(money_flow, dict) else 0
                 retail_5d = _to_float(money_flow.get("retail_5d", 0)) if isinstance(money_flow, dict) else 0
+                main_30d = _to_float(money_flow.get("main_30d", 0)) if isinstance(money_flow, dict) else 0
+                retail_30d = _to_float(money_flow.get("retail_30d", 0)) if isinstance(money_flow, dict) else 0
                 medium_10d = _to_float(money_flow.get("medium_10d", 0)) if isinstance(money_flow, dict) else 0
                 detail_main = money_flow.get("detail_main", []) if isinstance(money_flow, dict) else []
                 detail_retail = money_flow.get("detail_retail", []) if isinstance(money_flow, dict) else []
@@ -3711,35 +3713,57 @@ class TushareAPI:
                         retail_outflow_days += 1
                 cond_h = retail_outflow_days >= 3
 
-                # ============ 评分模型 ============
-                # 1. 主力建仓深度 (30分)
-                main_10d_ratio = main_10d / circ_mv if circ_mv > 0 else 0
-                dim_main_depth = 0
-                if main_10d_ratio > 0.05: dim_main_depth = 30
-                elif main_10d_ratio > 0.03: dim_main_depth = 20
-                elif main_10d_ratio > 0.01: dim_main_depth = 10
-                # 2. 散户割肉力度 (25分)
-                retail_10d_ratio = abs(retail_10d) / circ_mv if circ_mv > 0 else 0
-                dim_retail_panic = 0
-                if retail_10d_ratio > 0.05: dim_retail_panic = 25
-                elif retail_10d_ratio > 0.03: dim_retail_panic = 15
-                elif retail_10d_ratio > 0.01: dim_retail_panic = 5
-                # 3. 启动爆发力 (20分)
-                dim_breakout = 0
-                if max_5d_return > 10: dim_breakout = 20
-                elif max_5d_return > 7: dim_breakout = 15
-                elif max_5d_return > 5: dim_breakout = 10
-                # 4. 洗盘质量 (15分)
-                dim_wash = 0
-                if decline_main_in_days >= 3: dim_wash = 15
-                elif decline_main_in_days >= 2: dim_wash = 10
-                elif decline_main_in_days >= 1: dim_wash = 5
-                # 5. 位置安全垫 (10分)
-                dim_position = 0
-                if -0.05 < cost_deviation < 0.05: dim_position = 10
-                elif -0.10 < cost_deviation < 0.10: dim_position = 5
+                # ============ 评分模型（优化版） ============
+                score = 0
 
-                score = dim_main_depth + dim_retail_panic + dim_breakout + dim_wash + dim_position
+                # 1. 主力建仓深度（30日，基础分，40分）
+                main_30d_ratio = main_30d / circ_mv if circ_mv > 0 else 0
+                dim_main_depth = 0
+                if main_30d_ratio > 0.05:
+                    score += 40
+                    dim_main_depth = 40
+                elif main_30d_ratio > 0.03:
+                    score += 25
+                    dim_main_depth = 25
+                elif main_30d_ratio > 0.01:
+                    score += 10
+                    dim_main_depth = 10
+
+                # 2. 散户割肉力度（30日，20分）
+                retail_30d_ratio = abs(retail_30d) / circ_mv if circ_mv > 0 else 0
+                dim_retail_panic = 0
+                if retail_30d_ratio > 0.05:
+                    score += 20
+                    dim_retail_panic = 20
+                elif retail_30d_ratio > 0.03:
+                    score += 12
+                    dim_retail_panic = 12
+                elif retail_30d_ratio > 0.01:
+                    score += 5
+                    dim_retail_panic = 5
+
+                # 3. 近期趋势验证（10日，20分）
+                # 30日流入 + 10日加速流入 = 主力在持续加码
+                dim_trend = 0
+                if main_10d > main_30d * 0.5 and main_10d > 0:  # 近10日贡献了30日的一半以上
+                    score += 20
+                    dim_trend = 20
+                elif main_10d > 0:
+                    score += 10
+                    dim_trend = 10
+
+                # 4. 短期风险预警（5日，20分）
+                dim_risk = 0
+                # 危险信号：近5日突然大额流出（超过30日累计的30%）
+                if main_5d < -abs(main_30d) * 0.3:
+                    score -= 20  # 扣分！可能是出货
+                    dim_risk = -20
+                # 积极信号：近5日继续流入
+                elif main_5d > main_30d * 0.2:
+                    score += 20
+                    dim_risk = 20
+
+                score = max(0, score)
 
                 # 评级
                 if score >= 80: grade = 'A'
@@ -3794,11 +3818,14 @@ class TushareAPI:
                     "condition_g": cond_g, "condition_h": cond_h,
                     "dim_main_depth": dim_main_depth,
                     "dim_retail_panic": dim_retail_panic,
-                    "dim_breakout_power": dim_breakout,
-                    "dim_wash_quality": dim_wash,
-                    "dim_position_safety": dim_position,
+                    "dim_trend_verify": dim_trend,
+                    "dim_risk_warning": dim_risk,
+                    "main_30d": main_30d,
+                    "retail_30d": retail_30d,
                     "main_10d": main_10d,
                     "retail_10d": retail_10d,
+                    "main_5d": main_5d,
+                    "retail_5d": retail_5d,
                     "circ_mv": circ_mv,
                     "current_price": current_price,
                     "max_5d_return": max_5d_return,
@@ -3835,9 +3862,9 @@ class TushareAPI:
             "condition_e": False, "condition_f": False,
             "condition_g": False, "condition_h": False,
             "dim_main_depth": 0, "dim_retail_panic": 0,
-            "dim_breakout_power": 0, "dim_wash_quality": 0,
-            "dim_position_safety": 0,
-            "main_10d": 0, "retail_10d": 0,
+            "dim_trend_verify": 0, "dim_risk_warning": 0,
+            "main_30d": 0, "retail_30d": 0,
+            "main_10d": 0, "retail_10d": 0, "main_5d": 0, "retail_5d": 0,
             "circ_mv": 0, "current_price": 0,
             "max_5d_return": 0, "decline_main_in_days": 0,
             "cost_deviation": 0,

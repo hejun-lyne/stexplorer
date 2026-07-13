@@ -87,6 +87,71 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     cacheKey: `GetMoneyFlowFromTushare/${code}`,
   });
 
+  // 主力建仓评分所需额外数据
+  const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
+  const [stockDetail, setStockDetail] = useState<any>(null);
+  const { run: runGetDetail } = useRequest(Services.Tushare.GetDetailFromTushare, {
+    throwOnError: true,
+    manual: true,
+    onSuccess: setStockDetail,
+    cacheKey: `GetDetailFromTushare/${secid}`,
+  });
+  const [klineData, setKlineData] = useState<any>(null);
+  const { run: runGetK } = useRequest(Services.Tushare.GetKFromTushare, {
+    throwOnError: true,
+    manual: true,
+    onSuccess: setKlineData,
+    cacheKey: `GetKFromTushare/mainIn/${secid}`,
+  });
+
+  // 计算主力建仓评分
+  const mainInScore = React.useMemo(() => {
+    if (!moneyFlow || !stockDetail || !klineData?.ks?.length) return null;
+
+    const circ_mv = (stockDetail.lt || 0) * 1e8; // lt单位是亿
+    const main_30d = moneyFlow.main_30d || 0;
+    const retail_30d = moneyFlow.retail_30d || 0;
+    const main_10d = moneyFlow.main_10d || 0;
+    const main_5d = moneyFlow.main_5d || 0;
+
+    let score = 0;
+    const dims: Record<string, number> = {};
+
+    // 1. 主力建仓深度（30日，40分）
+    const main_30d_ratio = circ_mv > 0 ? main_30d / circ_mv : 0;
+    if (main_30d_ratio > 0.05) { score += 40; dims.mainDepth = 40; }
+    else if (main_30d_ratio > 0.03) { score += 25; dims.mainDepth = 25; }
+    else if (main_30d_ratio > 0.01) { score += 10; dims.mainDepth = 10; }
+    else { dims.mainDepth = 0; }
+
+    // 2. 散户割肉力度（30日，20分）
+    const retail_30d_ratio = circ_mv > 0 ? Math.abs(retail_30d) / circ_mv : 0;
+    if (retail_30d_ratio > 0.05) { score += 20; dims.retailPanic = 20; }
+    else if (retail_30d_ratio > 0.03) { score += 12; dims.retailPanic = 12; }
+    else if (retail_30d_ratio > 0.01) { score += 5; dims.retailPanic = 5; }
+    else { dims.retailPanic = 0; }
+
+    // 3. 近期趋势验证（10日，20分）
+    if (main_10d > main_30d * 0.5 && main_10d > 0) { score += 20; dims.trend = 20; }
+    else if (main_10d > 0) { score += 10; dims.trend = 10; }
+    else { dims.trend = 0; }
+
+    // 4. 短期风险预警（5日，20分）
+    if (main_5d < -Math.abs(main_30d) * 0.3) { score -= 20; dims.risk = -20; }
+    else if (main_5d > main_30d * 0.2) { score += 20; dims.risk = 20; }
+    else { dims.risk = 0; }
+
+    score = Math.max(0, score);
+
+    // 评级
+    let grade = 'D';
+    if (score >= 80) grade = 'A';
+    else if (score >= 60) grade = 'B';
+    else if (score >= 40) grade = 'C';
+
+    return { score, grade, dims, main_30d_ratio, retail_30d_ratio };
+  }, [moneyFlow, stockDetail, klineData]);
+
   useEffect(() => {
     runGetLongHuBang(code);
     runGetBlockTrade(code);
@@ -95,6 +160,8 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     runGetZhiyaSum(code);
     runGetZhiyaDetail(code);
     runGetMoneyFlow(code, 30);
+    runGetDetail(secid);
+    runGetK(secid, 0 /* KLineType.Day */, 10);
   }, [code]);
 
   const [deptCodes, setDeptCodes] = useState([]);
@@ -294,6 +361,71 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
                 {moneyFlow.source && (
                   <div style={{ marginTop: 12, fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
                     数据来源：{moneyFlow.source === 'dc' ? '东方财富' : 'Tushare'}
+                  </div>
+                )}
+
+                {/* 主力建仓评分 */}
+                {mainInScore && (
+                  <div style={{ marginTop: 20, padding: '12px 16px', borderRadius: 8, backgroundColor: 'var(--card-background-color)', border: '1px solid var(--border-color)' }}>
+                    <Row className={styles.rowheader} style={{ marginBottom: 12 }}>
+                      <Col span={24}>主力建仓评分模型</Col>
+                    </Row>
+                    <Row style={{ marginBottom: 8, alignItems: 'center' }}>
+                      <Col span={6}>综合评分</Col>
+                      <Col span={6}>
+                        <span style={{ fontSize: 24, fontWeight: 'bold', color: mainInScore.grade === 'A' ? '#52c41a' : mainInScore.grade === 'B' ? '#1890ff' : mainInScore.grade === 'C' ? '#faad14' : '#ff4d4f' }}>
+                          {mainInScore.score}
+                        </span>
+                      </Col>
+                      <Col span={6}>评级</Col>
+                      <Col span={6}>
+                        <span style={{
+                          fontSize: 20, fontWeight: 'bold',
+                          color: mainInScore.grade === 'A' ? '#52c41a' : mainInScore.grade === 'B' ? '#1890ff' : mainInScore.grade === 'C' ? '#faad14' : '#ff4d4f',
+                        }}>
+                          {mainInScore.grade}
+                        </span>
+                      </Col>
+                    </Row>
+                    <div style={{ marginTop: 12 }}>
+                      <Row className={styles.rowheader} style={{ marginBottom: 6 }}>
+                        <Col span={10}>评分维度</Col>
+                        <Col span={7}>得分</Col>
+                        <Col span={7}>占比</Col>
+                      </Row>
+                      {[
+                        { label: '主力建仓深度(30日)', score: mainInScore.dims.mainDepth, max: 40 },
+                        { label: '散户割肉力度(30日)', score: mainInScore.dims.retailPanic, max: 20 },
+                        { label: '近期趋势验证(10日)', score: mainInScore.dims.trend, max: 20 },
+                        { label: '短期风险预警(5日)', score: mainInScore.dims.risk, max: 20 },
+                      ].map((dim) => (
+                        <Row key={dim.label} style={{ marginBottom: 4, fontSize: 13 }}>
+                          <Col span={10}>{dim.label}</Col>
+                          <Col span={7} className={Utils.GetValueColor(dim.score).textClass}>
+                            {dim.score}/{dim.max}
+                          </Col>
+                          <Col span={7}>
+                            <div style={{
+                              width: '100%', height: 4, borderRadius: 2,
+                              backgroundColor: 'var(--border-color)', overflow: 'hidden',
+                            }}>
+                              <div style={{
+                                width: `${Math.min(100, (Math.max(0, dim.score) / dim.max) * 100)}%`,
+                                height: '100%', borderRadius: 2,
+                                backgroundColor: dim.score >= dim.max * 0.6 ? '#52c41a' : dim.score > 0 ? '#faad14' : dim.score < 0 ? '#ff4d4f' : 'var(--border-color)',
+                                transition: 'width 0.3s',
+                              }} />
+                            </div>
+                          </Col>
+                        </Row>
+                      ))}
+                    </div>
+                    <div style={{ marginTop: 12, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+                      <Row style={{ marginBottom: 2 }}>
+                        <Col span={12}>主力30日/流通市值: {(mainInScore.main_30d_ratio * 100).toFixed(2)}%</Col>
+                        <Col span={12}>散户30日/流通市值: {(mainInScore.retail_30d_ratio * 100).toFixed(2)}%</Col>
+                      </Row>
+                    </div>
                   </div>
                 )}
               </div>
