@@ -2,13 +2,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
+import { Stock } from '@/types/stock';
 import { useRequest } from 'ahooks';
-import { Col, Collapse, Row, Tabs, Spin, Button } from 'antd';
+import { Col, Collapse, Row, Tabs, Spin, Button, Tooltip } from 'antd';
+import { QuestionCircleOutlined } from '@ant-design/icons';
 import DeptTradeBack from './DeptTradeBack';
 import { batch } from 'react-redux';
 
 export interface CoreTradeProps {
   code: string;
+  klines?: Stock.KLineItem[];
 }
 
 /** 格式化资金流向金额（元 -> 亿/万） */
@@ -23,7 +26,7 @@ const formatMoneyFlow = (val: number) => {
   return v.toFixed(0) + '元';
 };
 
-const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
+const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
   const [lhbangs, setLHBangs] = useState<any[]>();
   const { run: runGetLongHuBang } = useRequest(Services.Stock.GetLongHuBang, {
     throwOnError: true,
@@ -96,19 +99,12 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     onSuccess: setStockDetail,
     cacheKey: `GetDetailFromTushare/${secid}`,
   });
-  const [klineData, setKlineData] = useState<any>(null);
-  const { run: runGetK } = useRequest(Services.Tushare.GetKFromTushare, {
-    throwOnError: true,
-    manual: true,
-    onSuccess: setKlineData,
-    cacheKey: `GetKFromTushare/mainIn/${secid}`,
-  });
-
-  // 计算主力建仓评分
+  // 计算主力建仓评分 + 操作建议
   const mainInScore = React.useMemo(() => {
-    if (!moneyFlow || !stockDetail || !klineData?.ks?.length) return null;
+    if (!moneyFlow || !stockDetail) return null;
 
     const circ_mv = (stockDetail.lt || 0) * 1e8; // lt单位是亿
+    const total_amount_30d = moneyFlow.total_amount_30d || 0;
     const main_30d = moneyFlow.main_30d || 0;
     const retail_30d = moneyFlow.retail_30d || 0;
     const main_10d = moneyFlow.main_10d || 0;
@@ -117,19 +113,64 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     let score = 0;
     const dims: Record<string, number> = {};
 
-    // 1. 主力建仓深度（30日，40分）
-    const main_30d_ratio = circ_mv > 0 ? main_30d / circ_mv : 0;
-    if (main_30d_ratio > 0.05) { score += 40; dims.mainDepth = 40; }
-    else if (main_30d_ratio > 0.03) { score += 25; dims.mainDepth = 25; }
-    else if (main_30d_ratio > 0.01) { score += 10; dims.mainDepth = 10; }
-    else { dims.mainDepth = 0; }
+    // 1. 主力建仓深度（30日，40分）——双轨制
+    // 1A. 绝对金额（20分，按市值分档）
+    let mainDepthAbs = 0;
+    if (circ_mv > 200e8) {
+      if (main_30d > 10e8) { score += 20; mainDepthAbs = 20; }
+      else if (main_30d > 5e8) { score += 15; mainDepthAbs = 15; }
+      else if (main_30d > 1e8) { score += 10; mainDepthAbs = 10; }
+      else if (main_30d > 0) { score += 5; mainDepthAbs = 5; }
+    } else if (circ_mv > 50e8) {
+      if (main_30d > 5e8) { score += 20; mainDepthAbs = 20; }
+      else if (main_30d > 2e8) { score += 15; mainDepthAbs = 15; }
+      else if (main_30d > 0.5e8) { score += 10; mainDepthAbs = 10; }
+      else if (main_30d > 0) { score += 5; mainDepthAbs = 5; }
+    } else {
+      if (main_30d > 2e8) { score += 20; mainDepthAbs = 20; }
+      else if (main_30d > 1e8) { score += 15; mainDepthAbs = 15; }
+      else if (main_30d > 0.2e8) { score += 10; mainDepthAbs = 10; }
+      else if (main_30d > 0) { score += 5; mainDepthAbs = 5; }
+    }
 
-    // 2. 散户割肉力度（30日，20分）
-    const retail_30d_ratio = circ_mv > 0 ? Math.abs(retail_30d) / circ_mv : 0;
-    if (retail_30d_ratio > 0.05) { score += 20; dims.retailPanic = 20; }
-    else if (retail_30d_ratio > 0.03) { score += 12; dims.retailPanic = 12; }
-    else if (retail_30d_ratio > 0.01) { score += 5; dims.retailPanic = 5; }
-    else { dims.retailPanic = 0; }
+    // 1B. 主力净流入率（20分）
+    const main_in_rate = total_amount_30d > 0 ? main_30d / total_amount_30d : 0;
+    let mainDepthRate = 0;
+    if (main_in_rate > 0.05) { score += 20; mainDepthRate = 20; }
+    else if (main_in_rate > 0.03) { score += 12; mainDepthRate = 12; }
+    else if (main_in_rate > 0.01) { score += 6; mainDepthRate = 6; }
+    else if (main_in_rate > 0) { score += 2; mainDepthRate = 2; }
+
+    dims.mainDepth = mainDepthAbs + mainDepthRate;
+
+    // 2. 散户割肉力度（30日，20分）——双轨制（只有散户净流出才给分）
+    dims.retailPanic = 0;
+    if (retail_30d < 0) {
+      const absRetail = Math.abs(retail_30d);
+      let retailAbs = 0;
+      if (circ_mv > 200e8) {
+        if (absRetail > 5e8) { score += 10; retailAbs = 10; }
+        else if (absRetail > 3e8) { score += 7; retailAbs = 7; }
+        else if (absRetail > 1e8) { score += 4; retailAbs = 4; }
+      } else if (circ_mv > 50e8) {
+        if (absRetail > 3e8) { score += 10; retailAbs = 10; }
+        else if (absRetail > 1e8) { score += 7; retailAbs = 7; }
+        else if (absRetail > 0.5e8) { score += 4; retailAbs = 4; }
+      } else {
+        if (absRetail > 1e8) { score += 10; retailAbs = 10; }
+        else if (absRetail > 0.5e8) { score += 7; retailAbs = 7; }
+        else if (absRetail > 0.2e8) { score += 4; retailAbs = 4; }
+      }
+
+      // 2B. 散户净流出率（10分）
+      const retail_out_rate = total_amount_30d > 0 ? absRetail / total_amount_30d : 0;
+      let retailRate = 0;
+      if (retail_out_rate > 0.05) { score += 10; retailRate = 10; }
+      else if (retail_out_rate > 0.03) { score += 6; retailRate = 6; }
+      else if (retail_out_rate > 0.01) { score += 3; retailRate = 3; }
+
+      dims.retailPanic = retailAbs + retailRate;
+    }
 
     // 3. 近期趋势验证（10日，20分）
     if (main_10d > main_30d * 0.5 && main_10d > 0) { score += 20; dims.trend = 20; }
@@ -138,7 +179,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
 
     // 4. 短期风险预警（5日，20分）
     if (main_5d < -Math.abs(main_30d) * 0.3) { score -= 20; dims.risk = -20; }
-    else if (main_5d > main_30d * 0.2) { score += 20; dims.risk = 20; }
+    else if (main_5d < 0) { score -= 10; dims.risk = -10; }
     else { dims.risk = 0; }
 
     score = Math.max(0, score);
@@ -149,8 +190,46 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     else if (score >= 60) grade = 'B';
     else if (score >= 40) grade = 'C';
 
-    return { score, grade, dims, main_30d_ratio, retail_30d_ratio };
-  }, [moneyFlow, stockDetail, klineData]);
+    // ============ 操作建议（场景判断） ============
+    interface AdviceItem { scene: string; meaning: string; action: string; actionColor: string; }
+    let advice: AdviceItem | null = null;
+
+    const mainInflow = main_30d > 0;                    // 30日主力持续流入
+    const mainOutflow = main_30d <= 0;                   // 30日主力整体流出
+    const recentBigOutflow = main_5d < -Math.abs(main_30d) * 0.3;  // 近5日突然大额流出
+    const recentBigInflow = main_5d > Math.abs(main_30d) * 0.3;    // 近5日突然大额流入
+    const recentContinueOutflow = main_5d < 0;            // 近5日继续流出
+
+    // 场景B需要K线数据判断股价是否下跌，场景A/C/D不需要
+    if (klines?.length) {
+      const recentKlines = klines.slice(-5);
+      const zdf_5d = recentKlines.reduce((sum: number, k: Stock.KLineItem) => sum + (k.zdf || 0), 0);
+      const recentInflowSlow = main_5d > 0 && main_5d <= main_30d * 0.2; // 近5日流入但放缓
+      const priceDown = zdf_5d < -2;                       // 近5日股价下跌超过2%
+
+      if (mainInflow && recentBigOutflow) {
+        advice = { scene: '场景A', meaning: '主力在兑现利润，可能是阶段顶部', action: '减仓', actionColor: '#ff4d4f' };
+      } else if (mainInflow && recentInflowSlow && priceDown) {
+        advice = { scene: '场景B', meaning: '主力在洗盘，未出货', action: '关注低吸机会', actionColor: '#1890ff' };
+      } else if (mainOutflow && recentBigInflow) {
+        advice = { scene: '场景C', meaning: '可能是对倒拉高（诱多）', action: '警惕，不追', actionColor: '#faad14' };
+      } else if (mainOutflow && recentContinueOutflow) {
+        advice = { scene: '场景D', meaning: '下跌趋势确认', action: '回避', actionColor: '#ff4d4f' };
+      }
+    } else {
+      // K线数据未就绪时，场景A/C/D仍可判断（不依赖股价）
+      if (mainInflow && recentBigOutflow) {
+        advice = { scene: '场景A', meaning: '主力在兑现利润，可能是阶段顶部', action: '减仓', actionColor: '#ff4d4f' };
+      } else if (mainOutflow && recentBigInflow) {
+        advice = { scene: '场景C', meaning: '可能是对倒拉高（诱多）', action: '警惕，不追', actionColor: '#faad14' };
+      } else if (mainOutflow && recentContinueOutflow) {
+        advice = { scene: '场景D', meaning: '下跌趋势确认', action: '回避', actionColor: '#ff4d4f' };
+      }
+      // 场景B需要股价数据，K线未就绪时跳过
+    }
+
+    return { score, grade, dims, main_in_rate, advice };
+  }, [moneyFlow, stockDetail, klines]);
 
   useEffect(() => {
     runGetLongHuBang(code);
@@ -161,7 +240,6 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
     runGetZhiyaDetail(code);
     runGetMoneyFlow(code, 30);
     runGetDetail(secid);
-    runGetK(secid, 0 /* KLineType.Day */, 10);
   }, [code]);
 
   const [deptCodes, setDeptCodes] = useState([]);
@@ -394,13 +472,41 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
                         <Col span={7}>占比</Col>
                       </Row>
                       {[
-                        { label: '主力建仓深度(30日)', score: mainInScore.dims.mainDepth, max: 40 },
-                        { label: '散户割肉力度(30日)', score: mainInScore.dims.retailPanic, max: 20 },
-                        { label: '近期趋势验证(10日)', score: mainInScore.dims.trend, max: 20 },
-                        { label: '短期风险预警(5日)', score: mainInScore.dims.risk, max: 20 },
+                        {
+                          label: '主力建仓深度(30日)',
+                          score: mainInScore.dims.mainDepth,
+                          max: 40,
+                          tooltip: '双轨制评分（绝对金额20分 + 净流入率20分）：\n\n【绝对金额】按流通市值分档：\n大盘(>200亿): >10亿→20分, >5亿→15分, >1亿→10分, >0→5分\n中盘(50~200亿): >5亿→20分, >2亿→15分, >0.5亿→10分, >0→5分\n小盘(<50亿): >2亿→20分, >1亿→15分, >0.2亿→10分, >0→5分\n\n【净流入率】主力30日 / 近30日成交额：\n> 5% → 20分\n> 3% → 12分\n> 1% → 6分\n> 0% → 2分',
+                        },
+                        {
+                          label: '散户割肉力度(30日)',
+                          score: mainInScore.dims.retailPanic,
+                          max: 20,
+                          tooltip: '双轨制评分（仅散户净流出时给分）：\n\n【绝对金额(10分)】按流通市值分档：\n大盘(>200亿): |流出|>5亿→10分, >3亿→7分, >1亿→4分\n中盘(50~200亿): |流出|>3亿→10分, >1亿→7分, >0.5亿→4分\n小盘(<50亿): |流出|>1亿→10分, >0.5亿→7分, >0.2亿→4分\n\n【净流出率(10分)】|散户30日| / 近30日成交额：\n> 5% → 10分\n> 3% → 6分\n> 1% → 3分\n\n散户净流入时 → 0分',
+                        },
+                        {
+                          label: '近期趋势验证(10日)',
+                          score: mainInScore.dims.trend,
+                          max: 20,
+                          tooltip: '10日主力净流入 > 30日主力净流入 × 50% 且为正 → 20分\n10日主力净流入 > 0 → 10分\n10日主力净流入 ≤ 0 → 0分',
+                        },
+                        {
+                          label: '短期风险预警(5日)',
+                          score: mainInScore.dims.risk,
+                          max: 20,
+                          tooltip: '5日主力净流出 > |30日主力净流入| × 30% → 扣20分（出货风险）\n5日主力净流出 但未达上述阈值 → 扣10分（警惕）\n其他 → 0分',
+                        },
                       ].map((dim) => (
-                        <Row key={dim.label} style={{ marginBottom: 4, fontSize: 13 }}>
-                          <Col span={10}>{dim.label}</Col>
+                        <Row key={dim.label} style={{ marginBottom: 4, fontSize: 13, alignItems: 'center' }}>
+                          <Col span={10}>
+                            {dim.label}
+                            <Tooltip
+                              title={<div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>{dim.tooltip}</div>}
+                              placement="right"
+                            >
+                              <QuestionCircleOutlined style={{ marginLeft: 4, color: 'var(--secondary-text-color)', fontSize: 12, cursor: 'help' }} />
+                            </Tooltip>
+                          </Col>
                           <Col span={7} className={Utils.GetValueColor(dim.score).textClass}>
                             {dim.score}/{dim.max}
                           </Col>
@@ -420,10 +526,49 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code }) => {
                         </Row>
                       ))}
                     </div>
+                    {/* 操作建议 */}
+                    {mainInScore.advice && (
+                      <div style={{
+                        marginTop: 12, padding: '10px 12px', borderRadius: 6,
+                        backgroundColor: mainInScore.advice.actionColor + '15',
+                        borderLeft: `3px solid ${mainInScore.advice.actionColor}`,
+                      }}>
+                        <Row align="middle">
+                          <Col span={4} style={{ fontSize: 13, fontWeight: 'bold', color: mainInScore.advice.actionColor }}>
+                            {mainInScore.advice.scene}
+                            <Tooltip
+                              title={<div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
+                                场景A：30日主力持续流入 + 近5日突然大额流出{'\n'}
+                                场景B：30日主力持续流入 + 近5日流入放缓且股价下跌{'\n'}
+                                场景C：30日主力整体流出 + 近5日突然大额流入{'\n'}
+                                场景D：30日主力整体流出 + 近5日继续流出
+                              </div>}
+                              placement="top"
+                            >
+                              <QuestionCircleOutlined style={{ marginLeft: 4, color: mainInScore.advice.actionColor, fontSize: 11, cursor: 'help', opacity: 0.7 }} />
+                            </Tooltip>
+                          </Col>
+                          <Col span={10} style={{ fontSize: 12, color: 'var(--text-color)' }}>
+                            {mainInScore.advice.meaning}
+                          </Col>
+                          <Col span={6}>
+                            <span style={{
+                              fontSize: 15, fontWeight: 'bold', color: mainInScore.advice.actionColor,
+                              padding: '2px 10px', borderRadius: 4,
+                              backgroundColor: mainInScore.advice.actionColor + '20',
+                            }}>
+                              {mainInScore.advice.action}
+                            </span>
+                          </Col>
+                          <Col span={4} style={{ fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
+                            操作建议
+                          </Col>
+                        </Row>
+                      </div>
+                    )}
                     <div style={{ marginTop: 12, fontSize: 12, color: 'var(--secondary-text-color)' }}>
                       <Row style={{ marginBottom: 2 }}>
-                        <Col span={12}>主力30日/流通市值: {(mainInScore.main_30d_ratio * 100).toFixed(2)}%</Col>
-                        <Col span={12}>散户30日/流通市值: {(mainInScore.retail_30d_ratio * 100).toFixed(2)}%</Col>
+                        <Col span={12}>主力净流入率(30日): {(mainInScore.main_in_rate * 100).toFixed(2)}%</Col>
                       </Row>
                     </div>
                   </div>

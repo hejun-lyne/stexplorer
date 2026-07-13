@@ -1371,6 +1371,10 @@ interface MainInStockResult {
   buy_signal: string | null;   // 'A' | 'B' | null
   sell_signal: string | null;  // 'SELL' | null
   sell_reason: string;
+  /** 操作建议 */
+  advice_scene: string;     // 场景A/B/C/D
+  advice_meaning: string;   // 含义说明
+  advice_action: string;    // 操作建议
 }
 
 export async function MainInFilterStocksFromTushare(
