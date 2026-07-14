@@ -7,6 +7,7 @@ import { useRequest } from 'ahooks';
 import { Col, Collapse, Row, Tabs, Spin, Button, Tooltip } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
 import DeptTradeBack from './DeptTradeBack';
+import MoneyFlowChart from './MoneyFlowChart';
 import { batch } from 'react-redux';
 
 export interface CoreTradeProps {
@@ -238,7 +239,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
     runGetExchangeChange(code);
     runGetZhiyaSum(code);
     runGetZhiyaDetail(code);
-    runGetMoneyFlow(code, 30);
+    runGetMoneyFlow(code, 60);
     runGetDetail(secid);
   }, [code]);
 
@@ -440,6 +441,15 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                   <div style={{ marginTop: 12, fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
                     数据来源：{moneyFlow.source === 'dc' ? '东方财富' : 'Tushare'}
                   </div>
+                )}
+
+                {/* 资金流向曲线图 */}
+                {moneyFlow.detail_dates && moneyFlow.detail_dates.length > 0 && (
+                  <MoneyFlowChart
+                    detailMain={moneyFlow.detail_main}
+                    detailRetail={moneyFlow.detail_retail}
+                    detailDates={moneyFlow.detail_dates}
+                  />
                 )}
 
                 {/* 主力建仓评分 */}

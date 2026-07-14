@@ -1214,7 +1214,6 @@ class TushareAPI:
         return results
     
     @staticmethod
-    @staticmethod
     def _try_fetch_index_kline(pro, ts_code: str, period: str, start_date: str, end_date_fmt: str):
         """尝试用指定 ts_code 获取指数K线，返回 (df, None) 或 (None, error_dict)"""
         try:
