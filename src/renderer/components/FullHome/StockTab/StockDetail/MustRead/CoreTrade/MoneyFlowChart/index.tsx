@@ -9,6 +9,8 @@ export interface MoneyFlowChartProps {
   detailMain: number[];
   /** 每日散户净流入数组（元），按时间正序 */
   detailRetail: number[];
+  /** 每日中户净流入数组（元），按时间正序 */
+  detailMedium: number[];
   /** 日期数组，按时间正序 */
   detailDates: string[];
 }
@@ -25,7 +27,7 @@ const MAIN_CURVES: CurveConfig[] = [
   { key: 'main_3d', label: '主力(3日)', color: '#f57c00' },
   { key: 'main_5d', label: '主力(5日)', color: '#f5a623' },
   { key: 'main_10d', label: '主力(10日)', color: '#e8b339' },
-  { key: 'main_30d', label: '主力(30日)', color: '#d4c239' },
+  { key: 'main_20d', label: '主力(20日)', color: '#d4c239' },
   { key: 'main_60d', label: '主力(60日)', color: '#b8a83a' },
 ];
 
@@ -35,11 +37,21 @@ const RETAIL_CURVES: CurveConfig[] = [
   { key: 'retail_3d', label: '散户(3日)', color: '#1abc9c' },
   { key: 'retail_5d', label: '散户(5日)', color: '#16a085' },
   { key: 'retail_10d', label: '散户(10日)', color: '#27ae60' },
-  { key: 'retail_30d', label: '散户(30日)', color: '#229954' },
+  { key: 'retail_20d', label: '散户(20日)', color: '#229954' },
   { key: 'retail_60d', label: '散户(60日)', color: '#1e8449' },
 ];
 
-const ALL_CURVES = [...MAIN_CURVES, ...RETAIL_CURVES];
+/** 中户曲线配置 */
+const MEDIUM_CURVES: CurveConfig[] = [
+  { key: 'medium_1d', label: '中户(当日)', color: '#3498db' },
+  { key: 'medium_3d', label: '中户(3日)', color: '#2980b9' },
+  { key: 'medium_5d', label: '中户(5日)', color: '#5b6abf' },
+  { key: 'medium_10d', label: '中户(10日)', color: '#7c6ff7' },
+  { key: 'medium_20d', label: '中户(20日)', color: '#6c5ce7' },
+  { key: 'medium_60d', label: '中户(60日)', color: '#4a3cdb' },
+];
+
+const ALL_CURVES = [...MAIN_CURVES, ...RETAIL_CURVES, ...MEDIUM_CURVES];
 
 /** 计算滚动N日净流入和 */
 function rollingSum(arr: number[], windowSize: number): (number | null)[] {
@@ -67,7 +79,7 @@ function formatAmount(val: number): string {
 }
 
 const MoneyFlowChart: React.FC<MoneyFlowChartProps> = React.memo(
-  ({ detailMain, detailRetail, detailDates }) => {
+  ({ detailMain, detailRetail, detailMedium, detailDates }) => {
     const [loaded, setLoaded] = useState(false);
     const [selectedCurves, setSelectedCurves] = useState<Set<string>>(
       new Set(['main_5d', 'retail_5d'])
@@ -85,16 +97,22 @@ const MoneyFlowChart: React.FC<MoneyFlowChartProps> = React.memo(
         main_3d: rollingSum(detailMain, 3),
         main_5d: rollingSum(detailMain, 5),
         main_10d: rollingSum(detailMain, 10),
-        main_30d: rollingSum(detailMain, 30),
+        main_20d: rollingSum(detailMain, 20),
         main_60d: rollingSum(detailMain, 60),
         retail_1d: detailRetail,
         retail_3d: rollingSum(detailRetail, 3),
         retail_5d: rollingSum(detailRetail, 5),
         retail_10d: rollingSum(detailRetail, 10),
-        retail_30d: rollingSum(detailRetail, 30),
+        retail_20d: rollingSum(detailRetail, 20),
         retail_60d: rollingSum(detailRetail, 60),
+        medium_1d: detailMedium,
+        medium_3d: rollingSum(detailMedium, 3),
+        medium_5d: rollingSum(detailMedium, 5),
+        medium_10d: rollingSum(detailMedium, 10),
+        medium_20d: rollingSum(detailMedium, 20),
+        medium_60d: rollingSum(detailMedium, 60),
       };
-    }, [loaded, detailMain, detailRetail, detailDates]);
+    }, [loaded, detailMain, detailRetail, detailMedium, detailDates]);
 
     const toggleCurve = (key: string) => {
       setSelectedCurves((prev) => {
@@ -120,6 +138,17 @@ const MoneyFlowChart: React.FC<MoneyFlowChartProps> = React.memo(
       setSelectedCurves((prev) => {
         const next = new Set(prev);
         RETAIL_CURVES.forEach((c) => {
+          if (checked) next.add(c.key);
+          else next.delete(c.key);
+        });
+        return next;
+      });
+    };
+
+    const toggleAllMedium = (checked: boolean) => {
+      setSelectedCurves((prev) => {
+        const next = new Set(prev);
+        MEDIUM_CURVES.forEach((c) => {
           if (checked) next.add(c.key);
           else next.delete(c.key);
         });
@@ -280,6 +309,31 @@ const MoneyFlowChart: React.FC<MoneyFlowChartProps> = React.memo(
                   style={{ fontSize: 11 }}
                 >
                   <span style={{ color: c.color }}>{c.label.replace('散户(', '').replace(')', '')}</span>
+                </Checkbox>
+              ))}
+            </div>
+
+            {/* 中户曲线勾选 */}
+            <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <Checkbox
+                checked={MEDIUM_CURVES.every((c) => selectedCurves.has(c.key))}
+                indeterminate={
+                  MEDIUM_CURVES.some((c) => selectedCurves.has(c.key)) &&
+                  !MEDIUM_CURVES.every((c) => selectedCurves.has(c.key))
+                }
+                onChange={(e) => toggleAllMedium(e.target.checked)}
+                style={{ fontWeight: 'bold', color: '#3498db' }}
+              >
+                中户
+              </Checkbox>
+              {MEDIUM_CURVES.map((c) => (
+                <Checkbox
+                  key={c.key}
+                  checked={selectedCurves.has(c.key)}
+                  onChange={() => toggleCurve(c.key)}
+                  style={{ fontSize: 11 }}
+                >
+                  <span style={{ color: c.color }}>{c.label.replace('中户(', '').replace(')', '')}</span>
                 </Checkbox>
               ))}
             </div>

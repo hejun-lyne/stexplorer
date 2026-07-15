@@ -105,37 +105,37 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
     if (!moneyFlow || !stockDetail) return null;
 
     const circ_mv = (stockDetail.lt || 0) * 1e8; // lt单位是亿
-    const total_amount_30d = moneyFlow.total_amount_30d || 0;
-    const main_30d = moneyFlow.main_30d || 0;
-    const retail_30d = moneyFlow.retail_30d || 0;
+    const total_amount_20d = moneyFlow.total_amount_20d || 0;
+    const main_20d = moneyFlow.main_20d || 0;
+    const retail_20d = moneyFlow.retail_20d || 0;
     const main_10d = moneyFlow.main_10d || 0;
     const main_5d = moneyFlow.main_5d || 0;
 
     let score = 0;
     const dims: Record<string, number> = {};
 
-    // 1. 主力建仓深度（30日，40分）——双轨制
+    // 1. 主力建仓深度（20日，40分）——双轨制
     // 1A. 绝对金额（20分，按市值分档）
     let mainDepthAbs = 0;
     if (circ_mv > 200e8) {
-      if (main_30d > 10e8) { score += 20; mainDepthAbs = 20; }
-      else if (main_30d > 5e8) { score += 15; mainDepthAbs = 15; }
-      else if (main_30d > 1e8) { score += 10; mainDepthAbs = 10; }
-      else if (main_30d > 0) { score += 5; mainDepthAbs = 5; }
+      if (main_20d > 10e8) { score += 20; mainDepthAbs = 20; }
+      else if (main_20d > 5e8) { score += 15; mainDepthAbs = 15; }
+      else if (main_20d > 1e8) { score += 10; mainDepthAbs = 10; }
+      else if (main_20d > 0) { score += 5; mainDepthAbs = 5; }
     } else if (circ_mv > 50e8) {
-      if (main_30d > 5e8) { score += 20; mainDepthAbs = 20; }
-      else if (main_30d > 2e8) { score += 15; mainDepthAbs = 15; }
-      else if (main_30d > 0.5e8) { score += 10; mainDepthAbs = 10; }
-      else if (main_30d > 0) { score += 5; mainDepthAbs = 5; }
+      if (main_20d > 5e8) { score += 20; mainDepthAbs = 20; }
+      else if (main_20d > 2e8) { score += 15; mainDepthAbs = 15; }
+      else if (main_20d > 0.5e8) { score += 10; mainDepthAbs = 10; }
+      else if (main_20d > 0) { score += 5; mainDepthAbs = 5; }
     } else {
-      if (main_30d > 2e8) { score += 20; mainDepthAbs = 20; }
-      else if (main_30d > 1e8) { score += 15; mainDepthAbs = 15; }
-      else if (main_30d > 0.2e8) { score += 10; mainDepthAbs = 10; }
-      else if (main_30d > 0) { score += 5; mainDepthAbs = 5; }
+      if (main_20d > 2e8) { score += 20; mainDepthAbs = 20; }
+      else if (main_20d > 1e8) { score += 15; mainDepthAbs = 15; }
+      else if (main_20d > 0.2e8) { score += 10; mainDepthAbs = 10; }
+      else if (main_20d > 0) { score += 5; mainDepthAbs = 5; }
     }
 
     // 1B. 主力净流入率（20分）
-    const main_in_rate = total_amount_30d > 0 ? main_30d / total_amount_30d : 0;
+    const main_in_rate = total_amount_20d > 0 ? main_20d / total_amount_20d : 0;
     let mainDepthRate = 0;
     if (main_in_rate > 0.05) { score += 20; mainDepthRate = 20; }
     else if (main_in_rate > 0.03) { score += 12; mainDepthRate = 12; }
@@ -144,10 +144,10 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
 
     dims.mainDepth = mainDepthAbs + mainDepthRate;
 
-    // 2. 散户割肉力度（30日，20分）——双轨制（只有散户净流出才给分）
+    // 2. 散户割肉力度（20日，20分）——双轨制（只有散户净流出才给分）
     dims.retailPanic = 0;
-    if (retail_30d < 0) {
-      const absRetail = Math.abs(retail_30d);
+    if (retail_20d < 0) {
+      const absRetail = Math.abs(retail_20d);
       let retailAbs = 0;
       if (circ_mv > 200e8) {
         if (absRetail > 5e8) { score += 10; retailAbs = 10; }
@@ -164,7 +164,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
       }
 
       // 2B. 散户净流出率（10分）
-      const retail_out_rate = total_amount_30d > 0 ? absRetail / total_amount_30d : 0;
+      const retail_out_rate = total_amount_20d > 0 ? absRetail / total_amount_20d : 0;
       let retailRate = 0;
       if (retail_out_rate > 0.05) { score += 10; retailRate = 10; }
       else if (retail_out_rate > 0.03) { score += 6; retailRate = 6; }
@@ -174,12 +174,12 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
     }
 
     // 3. 近期趋势验证（10日，20分）
-    if (main_10d > main_30d * 0.5 && main_10d > 0) { score += 20; dims.trend = 20; }
+    if (main_10d > main_20d * 0.5 && main_10d > 0) { score += 20; dims.trend = 20; }
     else if (main_10d > 0) { score += 10; dims.trend = 10; }
     else { dims.trend = 0; }
 
     // 4. 短期风险预警（5日，20分）
-    if (main_5d < -Math.abs(main_30d) * 0.3) { score -= 20; dims.risk = -20; }
+    if (main_5d < -Math.abs(main_20d) * 0.3) { score -= 20; dims.risk = -20; }
     else if (main_5d < 0) { score -= 10; dims.risk = -10; }
     else { dims.risk = 0; }
 
@@ -195,17 +195,17 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
     interface AdviceItem { scene: string; meaning: string; action: string; actionColor: string; }
     let advice: AdviceItem | null = null;
 
-    const mainInflow = main_30d > 0;                    // 30日主力持续流入
-    const mainOutflow = main_30d <= 0;                   // 30日主力整体流出
-    const recentBigOutflow = main_5d < -Math.abs(main_30d) * 0.3;  // 近5日突然大额流出
-    const recentBigInflow = main_5d > Math.abs(main_30d) * 0.3;    // 近5日突然大额流入
+    const mainInflow = main_20d > 0;                    // 20日主力持续流入
+    const mainOutflow = main_20d <= 0;                   // 20日主力整体流出
+    const recentBigOutflow = main_5d < -Math.abs(main_20d) * 0.3;  // 近5日突然大额流出
+    const recentBigInflow = main_5d > Math.abs(main_20d) * 0.3;    // 近5日突然大额流入
     const recentContinueOutflow = main_5d < 0;            // 近5日继续流出
 
     // 场景B需要K线数据判断股价是否下跌，场景A/C/D不需要
     if (klines?.length) {
       const recentKlines = klines.slice(-5);
       const zdf_5d = recentKlines.reduce((sum: number, k: Stock.KLineItem) => sum + (k.zdf || 0), 0);
-      const recentInflowSlow = main_5d > 0 && main_5d <= main_30d * 0.2; // 近5日流入但放缓
+      const recentInflowSlow = main_5d > 0 && main_5d <= main_20d * 0.2; // 近5日流入但放缓
       const priceDown = zdf_5d < -2;                       // 近5日股价下跌超过2%
 
       if (mainInflow && recentBigOutflow) {
@@ -287,15 +287,18 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
           main_1d: moneyFlow.main_1d,
           main_3d: moneyFlow.main_3d,
           main_5d: moneyFlow.main_5d,
-          main_30d: moneyFlow.main_30d,
+          main_10d: moneyFlow.main_10d,
+          main_20d: moneyFlow.main_20d,
           retail_1d: moneyFlow.retail_1d,
           retail_3d: moneyFlow.retail_3d,
           retail_5d: moneyFlow.retail_5d,
-          retail_30d: moneyFlow.retail_30d,
+          retail_10d: moneyFlow.retail_10d,
+          retail_20d: moneyFlow.retail_20d,
           medium_1d: moneyFlow.medium_1d,
           medium_3d: moneyFlow.medium_3d,
           medium_5d: moneyFlow.medium_5d,
-          medium_30d: moneyFlow.medium_30d,
+          medium_10d: moneyFlow.medium_10d,
+          medium_20d: moneyFlow.medium_20d,
         },
         dailyDetails: moneyFlow.detail_dates.map((date: string, i: number) => ({
           date,
@@ -346,7 +349,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                   { label: '3日', main: moneyFlow.main_3d, medium: moneyFlow.medium_3d, retail: moneyFlow.retail_3d },
                   { label: '5日', main: moneyFlow.main_5d, medium: moneyFlow.medium_5d, retail: moneyFlow.retail_5d },
                   { label: '10日', main: moneyFlow.main_10d, medium: moneyFlow.medium_10d, retail: moneyFlow.retail_10d },
-                  { label: '30日', main: moneyFlow.main_30d, medium: moneyFlow.medium_30d, retail: moneyFlow.retail_30d },
+                  { label: '20日', main: moneyFlow.main_20d, medium: moneyFlow.medium_20d, retail: moneyFlow.retail_20d },
                 ].map((item) => (
                   <Row key={item.label} style={{ marginBottom: 6 }}>
                     <Col span={6}>{item.label}</Col>
@@ -405,7 +408,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                 {moneyFlow.detail_dates && moneyFlow.detail_dates.length > 0 && (
                   <div style={{ marginTop: 16 }}>
                     <Row className={styles.rowheader} style={{ marginBottom: 8 }} align="middle">
-                      <Col flex="auto">近30日逐日资金流向</Col>
+                      <Col flex="auto">近60日逐日资金流向</Col>
                       <Col>
                         <Button size="small" onClick={handleExportMoneyFlow}>导出JSON</Button>
                       </Col>
@@ -448,6 +451,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                   <MoneyFlowChart
                     detailMain={moneyFlow.detail_main}
                     detailRetail={moneyFlow.detail_retail}
+                    detailMedium={moneyFlow.detail_medium}
                     detailDates={moneyFlow.detail_dates}
                   />
                 )}
@@ -483,28 +487,28 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                       </Row>
                       {[
                         {
-                          label: '主力建仓深度(30日)',
+                          label: '主力建仓深度(20日)',
                           score: mainInScore.dims.mainDepth,
                           max: 40,
-                          tooltip: '双轨制评分（绝对金额20分 + 净流入率20分）：\n\n【绝对金额】按流通市值分档：\n大盘(>200亿): >10亿→20分, >5亿→15分, >1亿→10分, >0→5分\n中盘(50~200亿): >5亿→20分, >2亿→15分, >0.5亿→10分, >0→5分\n小盘(<50亿): >2亿→20分, >1亿→15分, >0.2亿→10分, >0→5分\n\n【净流入率】主力30日 / 近30日成交额：\n> 5% → 20分\n> 3% → 12分\n> 1% → 6分\n> 0% → 2分',
+                          tooltip: '双轨制评分（绝对金额20分 + 净流入率20分）：\n\n【绝对金额】按流通市值分档：\n大盘(>200亿): >10亿→20分, >5亿→15分, >1亿→10分, >0→5分\n中盘(50~200亿): >5亿→20分, >2亿→15分, >0.5亿→10分, >0→5分\n小盘(<50亿): >2亿→20分, >1亿→15分, >0.2亿→10分, >0→5分\n\n【净流入率】主力20日 / 近20日成交额：\n> 5% → 20分\n> 3% → 12分\n> 1% → 6分\n> 0% → 2分',
                         },
                         {
-                          label: '散户割肉力度(30日)',
+                          label: '散户割肉力度(20日)',
                           score: mainInScore.dims.retailPanic,
                           max: 20,
-                          tooltip: '双轨制评分（仅散户净流出时给分）：\n\n【绝对金额(10分)】按流通市值分档：\n大盘(>200亿): |流出|>5亿→10分, >3亿→7分, >1亿→4分\n中盘(50~200亿): |流出|>3亿→10分, >1亿→7分, >0.5亿→4分\n小盘(<50亿): |流出|>1亿→10分, >0.5亿→7分, >0.2亿→4分\n\n【净流出率(10分)】|散户30日| / 近30日成交额：\n> 5% → 10分\n> 3% → 6分\n> 1% → 3分\n\n散户净流入时 → 0分',
+                          tooltip: '双轨制评分（仅散户净流出时给分）：\n\n【绝对金额(10分)】按流通市值分档：\n大盘(>200亿): |流出|>5亿→10分, >3亿→7分, >1亿→4分\n中盘(50~200亿): |流出|>3亿→10分, >1亿→7分, >0.5亿→4分\n小盘(<50亿): |流出|>1亿→10分, >0.5亿→7分, >0.2亿→4分\n\n【净流出率(10分)】|散户20日| / 近20日成交额：\n> 5% → 10分\n> 3% → 6分\n> 1% → 3分\n\n散户净流入时 → 0分',
                         },
                         {
                           label: '近期趋势验证(10日)',
                           score: mainInScore.dims.trend,
                           max: 20,
-                          tooltip: '10日主力净流入 > 30日主力净流入 × 50% 且为正 → 20分\n10日主力净流入 > 0 → 10分\n10日主力净流入 ≤ 0 → 0分',
+                          tooltip: '10日主力净流入 > 20日主力净流入 × 50% 且为正 → 20分\n10日主力净流入 > 0 → 10分\n10日主力净流入 ≤ 0 → 0分',
                         },
                         {
                           label: '短期风险预警(5日)',
                           score: mainInScore.dims.risk,
                           max: 20,
-                          tooltip: '5日主力净流出 > |30日主力净流入| × 30% → 扣20分（出货风险）\n5日主力净流出 但未达上述阈值 → 扣10分（警惕）\n其他 → 0分',
+                          tooltip: '5日主力净流出 > |20日主力净流入| × 30% → 扣20分（出货风险）\n5日主力净流出 但未达上述阈值 → 扣10分（警惕）\n其他 → 0分',
                         },
                       ].map((dim) => (
                         <Row key={dim.label} style={{ marginBottom: 4, fontSize: 13, alignItems: 'center' }}>
@@ -548,10 +552,10 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                             {mainInScore.advice.scene}
                             <Tooltip
                               title={<div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
-                                场景A：30日主力持续流入 + 近5日突然大额流出{'\n'}
-                                场景B：30日主力持续流入 + 近5日流入放缓且股价下跌{'\n'}
-                                场景C：30日主力整体流出 + 近5日突然大额流入{'\n'}
-                                场景D：30日主力整体流出 + 近5日继续流出
+                                场景A：20日主力持续流入 + 近5日突然大额流出{'\n'}
+                                场景B：20日主力持续流入 + 近5日流入放缓且股价下跌{'\n'}
+                                场景C：20日主力整体流出 + 近5日突然大额流入{'\n'}
+                                场景D：20日主力整体流出 + 近5日继续流出
                               </div>}
                               placement="top"
                             >
@@ -578,7 +582,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                     )}
                     <div style={{ marginTop: 12, fontSize: 12, color: 'var(--secondary-text-color)' }}>
                       <Row style={{ marginBottom: 2 }}>
-                        <Col span={12}>主力净流入率(30日): {(mainInScore.main_in_rate * 100).toFixed(2)}%</Col>
+                        <Col span={12}>主力净流入率(20日): {(mainInScore.main_in_rate * 100).toFixed(2)}%</Col>
                       </Row>
                     </div>
                   </div>

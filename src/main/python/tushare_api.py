@@ -3444,8 +3444,8 @@ class TushareAPI:
         - 主力 = 大单 + 超大单
         - 散户 = 小单
         返回字段包含：
-        - main_1d / main_3d / main_5d / main_10d / main_30d: 各周期的主力净流入
-        - retail_1d / retail_3d / retail_5d / retail_10d / retail_30d: 各周期的散户净流入
+        - main_1d / main_3d / main_5d / main_10d / main_20d: 各周期的主力净流入
+        - retail_1d / retail_3d / retail_5d / retail_10d / retail_20d: 各周期的散户净流入
         - detail_dates: 每日明细的日期列表
         - detail_main: 每日主力净流入列表
         - detail_retail: 每日散户净流入列表
@@ -3494,7 +3494,7 @@ class TushareAPI:
                 if not daily_data:
                     return {"error": "No data for any trading day"}
 
-                # 计算各周期的累计值（1日/3日/5日/10日/30日）
+                # 计算各周期的累计值（1日/3日/5日/10日/20日）
                 def sum_period(data_list, n):
                     """取最近 n 天的累计，返回 (主力, 散户, 中户)"""
                     subset = data_list[-n:] if len(data_list) >= n else data_list
@@ -3507,7 +3507,7 @@ class TushareAPI:
                 main_3d, retail_3d, medium_3d = sum_period(daily_data, 3)
                 main_5d, retail_5d, medium_5d = sum_period(daily_data, 5)
                 main_10d, retail_10d, medium_10d = sum_period(daily_data, 10)
-                main_30d, retail_30d, medium_30d = sum_period(daily_data, 30)
+                main_20d, retail_20d, medium_20d = sum_period(daily_data, 20)
 
                 # 最新一日的详细分档数据
                 latest = daily_data[-1]
@@ -3519,19 +3519,19 @@ class TushareAPI:
                     "main_3d": round(main_3d, 2),
                     "main_5d": round(main_5d, 2),
                     "main_10d": round(main_10d, 2),
-                    "main_30d": round(main_30d, 2),
+                    "main_20d": round(main_20d, 2),
                     # 各周期散户净流入
                     "retail_1d": round(retail_1d, 2),
                     "retail_3d": round(retail_3d, 2),
                     "retail_5d": round(retail_5d, 2),
                     "retail_10d": round(retail_10d, 2),
-                    "retail_30d": round(retail_30d, 2),
+                    "retail_20d": round(retail_20d, 2),
                     # 各周期中户净流入
                     "medium_1d": round(medium_1d, 2),
                     "medium_3d": round(medium_3d, 2),
                     "medium_5d": round(medium_5d, 2),
                     "medium_10d": round(medium_10d, 2),
-                    "medium_30d": round(medium_30d, 2),
+                    "medium_20d": round(medium_20d, 2),
                     # 最新一日的分档数据
                     "main_in": latest.get("main_in", 0),
                     "small_in": latest.get("small_in", 0),
@@ -3545,7 +3545,7 @@ class TushareAPI:
                     "detail_retail": [round(d.get("small_in", 0), 2) for d in daily_data],
                     "detail_medium": [round(d.get("medium_in", 0), 2) for d in daily_data],
                     "detail_amount": [round(d.get("total_amount", 0), 2) for d in daily_data],
-                    "total_amount_30d": round(sum(d.get("total_amount", 0) for d in daily_data), 2),
+                    "total_amount_20d": round(sum(d.get("total_amount", 0) for d in daily_data), 2),
                 }
 
             # 无 days 参数：保持向后兼容，只返回当日数据
@@ -3590,7 +3590,7 @@ class TushareAPI:
             secid = f"{market}.{code}"
 
             try:
-                # 并行获取资金流向(30日)、K线(10日)、实时详情
+                # 并行获取资金流向(60日)、K线(10日)、实时详情
                 try:
                     money_flow = TushareAPI.get_money_flow(code, days=30)
                 except Exception:
@@ -3630,10 +3630,10 @@ class TushareAPI:
                 retail_10d = _to_float(money_flow.get("retail_10d", 0)) if isinstance(money_flow, dict) else 0
                 main_5d = _to_float(money_flow.get("main_5d", 0)) if isinstance(money_flow, dict) else 0
                 retail_5d = _to_float(money_flow.get("retail_5d", 0)) if isinstance(money_flow, dict) else 0
-                main_30d = _to_float(money_flow.get("main_30d", 0)) if isinstance(money_flow, dict) else 0
-                retail_30d = _to_float(money_flow.get("retail_30d", 0)) if isinstance(money_flow, dict) else 0
+                main_20d = _to_float(money_flow.get("main_20d", 0)) if isinstance(money_flow, dict) else 0
+                retail_20d = _to_float(money_flow.get("retail_20d", 0)) if isinstance(money_flow, dict) else 0
                 medium_10d = _to_float(money_flow.get("medium_10d", 0)) if isinstance(money_flow, dict) else 0
-                total_amount_30d = _to_float(money_flow.get("total_amount_30d", 0)) if isinstance(money_flow, dict) else 0
+                total_amount_20d = _to_float(money_flow.get("total_amount_20d", 0)) if isinstance(money_flow, dict) else 0
                 detail_main = money_flow.get("detail_main", []) if isinstance(money_flow, dict) else []
                 detail_retail = money_flow.get("detail_retail", []) if isinstance(money_flow, dict) else []
 
@@ -3724,27 +3724,27 @@ class TushareAPI:
                 # ============ 评分模型（双轨制：绝对金额 + 净流入率） ============
                 score = 0
 
-                # 1. 主力建仓深度（30日，40分）——双轨制
+                # 1. 主力建仓深度（20日，40分）——双轨制
                 # 1A. 绝对金额（20分，按市值分档）
                 dim_main_depth_abs = 0
                 if circ_mv > 200e8:  # 大盘股
-                    if main_30d > 10e8: score += 20; dim_main_depth_abs = 20
-                    elif main_30d > 5e8: score += 15; dim_main_depth_abs = 15
-                    elif main_30d > 1e8: score += 10; dim_main_depth_abs = 10
-                    elif main_30d > 0: score += 5; dim_main_depth_abs = 5
+                    if main_20d > 10e8: score += 20; dim_main_depth_abs = 20
+                    elif main_20d > 5e8: score += 15; dim_main_depth_abs = 15
+                    elif main_20d > 1e8: score += 10; dim_main_depth_abs = 10
+                    elif main_20d > 0: score += 5; dim_main_depth_abs = 5
                 elif circ_mv > 50e8:  # 中盘股
-                    if main_30d > 5e8: score += 20; dim_main_depth_abs = 20
-                    elif main_30d > 2e8: score += 15; dim_main_depth_abs = 15
-                    elif main_30d > 0.5e8: score += 10; dim_main_depth_abs = 10
-                    elif main_30d > 0: score += 5; dim_main_depth_abs = 5
+                    if main_20d > 5e8: score += 20; dim_main_depth_abs = 20
+                    elif main_20d > 2e8: score += 15; dim_main_depth_abs = 15
+                    elif main_20d > 0.5e8: score += 10; dim_main_depth_abs = 10
+                    elif main_20d > 0: score += 5; dim_main_depth_abs = 5
                 else:  # 小盘股
-                    if main_30d > 2e8: score += 20; dim_main_depth_abs = 20
-                    elif main_30d > 1e8: score += 15; dim_main_depth_abs = 15
-                    elif main_30d > 0.2e8: score += 10; dim_main_depth_abs = 10
-                    elif main_30d > 0: score += 5; dim_main_depth_abs = 5
+                    if main_20d > 2e8: score += 20; dim_main_depth_abs = 20
+                    elif main_20d > 1e8: score += 15; dim_main_depth_abs = 15
+                    elif main_20d > 0.2e8: score += 10; dim_main_depth_abs = 10
+                    elif main_20d > 0: score += 5; dim_main_depth_abs = 5
 
                 # 1B. 主力净流入率（20分）
-                main_in_rate = main_30d / total_amount_30d if total_amount_30d > 0 else 0
+                main_in_rate = main_20d / total_amount_20d if total_amount_20d > 0 else 0
                 dim_main_depth_rate = 0
                 if main_in_rate > 0.05: score += 20; dim_main_depth_rate = 20
                 elif main_in_rate > 0.03: score += 12; dim_main_depth_rate = 12
@@ -3753,11 +3753,11 @@ class TushareAPI:
 
                 dim_main_depth = dim_main_depth_abs + dim_main_depth_rate
 
-                # 2. 散户割肉力度（30日，20分）——双轨制（只有散户净流出才给分）
+                # 2. 散户割肉力度（20日，20分）——双轨制（只有散户净流出才给分）
                 dim_retail_panic = 0
-                if retail_30d < 0:
+                if retail_20d < 0:
                     # 2A. 绝对金额（10分，按市值分档）
-                    abs_retail = abs(retail_30d)
+                    abs_retail = abs(retail_20d)
                     dim_retail_abs = 0
                     if circ_mv > 200e8:
                         if abs_retail > 5e8: score += 10; dim_retail_abs = 10
@@ -3773,7 +3773,7 @@ class TushareAPI:
                         elif abs_retail > 0.2e8: score += 4; dim_retail_abs = 4
 
                     # 2B. 散户净流出率（10分）
-                    retail_out_rate = abs_retail / total_amount_30d if total_amount_30d > 0 else 0
+                    retail_out_rate = abs_retail / total_amount_20d if total_amount_20d > 0 else 0
                     dim_retail_rate = 0
                     if retail_out_rate > 0.05: score += 10; dim_retail_rate = 10
                     elif retail_out_rate > 0.03: score += 6; dim_retail_rate = 6
@@ -3783,7 +3783,7 @@ class TushareAPI:
 
                 # 3. 近期趋势验证（10日，20分）
                 dim_trend = 0
-                if main_10d > main_30d * 0.5 and main_10d > 0:  # 近10日贡献了30日的一半以上
+                if main_10d > main_20d * 0.5 and main_10d > 0:  # 近10日贡献了20日的一半以上
                     score += 20
                     dim_trend = 20
                 elif main_10d > 0:
@@ -3792,8 +3792,8 @@ class TushareAPI:
 
                 # 4. 短期风险预警（5日，20分）
                 dim_risk = 0
-                # 危险信号：近5日突然大额流出（超过30日累计的30%）
-                if main_5d < -abs(main_30d) * 0.3:
+                # 危险信号：近5日突然大额流出（超过20日累计的30%）
+                if main_5d < -abs(main_20d) * 0.3:
                     score -= 20
                     dim_risk = -20
                 # 次危险：近5日流出
@@ -3810,11 +3810,11 @@ class TushareAPI:
                 else: grade = 'D'
 
                 # ============ 操作建议（场景判断） ============
-                main_inflow = main_30d > 0                          # 30日主力持续流入
-                main_outflow = main_30d <= 0                        # 30日主力整体流出
-                recent_big_outflow = main_5d < -abs(main_30d) * 0.3  # 近5日突然大额流出
-                recent_big_inflow = main_5d > abs(main_30d) * 0.3   # 近5日突然大额流入
-                recent_inflow_slow = main_5d > 0 and main_5d <= main_30d * 0.2  # 近5日流入放缓
+                main_inflow = main_20d > 0                          # 20日主力持续流入
+                main_outflow = main_20d <= 0                        # 20日主力整体流出
+                recent_big_outflow = main_5d < -abs(main_20d) * 0.3  # 近5日突然大额流出
+                recent_big_inflow = main_5d > abs(main_20d) * 0.3   # 近5日突然大额流入
+                recent_inflow_slow = main_5d > 0 and main_5d <= main_20d * 0.2  # 近5日流入放缓
                 # 计算近5日股价涨跌幅
                 zdf_5d = sum(_to_float(k.get("zdf", 0)) for k in recent5) if recent5 else 0
                 price_down = zdf_5d < -2                           # 近5日股价下跌超2%
@@ -3890,14 +3890,14 @@ class TushareAPI:
                     "dim_retail_panic": dim_retail_panic,
                     "dim_trend_verify": dim_trend,
                     "dim_risk_warning": dim_risk,
-                    "main_30d": main_30d,
-                    "retail_30d": retail_30d,
+                    "main_20d": main_20d,
+                    "retail_20d": retail_20d,
                     "main_10d": main_10d,
                     "retail_10d": retail_10d,
                     "main_5d": main_5d,
                     "retail_5d": retail_5d,
                     "circ_mv": circ_mv,
-                    "total_amount_30d": total_amount_30d,
+                    "total_amount_20d": total_amount_20d,
                     "main_in_rate": main_in_rate,
                     "current_price": current_price,
                     "max_5d_return": max_5d_return,
@@ -3938,9 +3938,9 @@ class TushareAPI:
             "condition_g": False, "condition_h": False,
             "dim_main_depth": 0, "dim_retail_panic": 0,
             "dim_trend_verify": 0, "dim_risk_warning": 0,
-            "main_30d": 0, "retail_30d": 0,
+            "main_20d": 0, "retail_20d": 0,
             "main_10d": 0, "retail_10d": 0, "main_5d": 0, "retail_5d": 0,
-            "circ_mv": 0, "total_amount_30d": 0, "main_in_rate": 0,
+            "circ_mv": 0, "total_amount_20d": 0, "main_in_rate": 0,
             "current_price": 0,
             "max_5d_return": 0, "decline_main_in_days": 0,
             "cost_deviation": 0,

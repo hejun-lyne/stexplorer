@@ -966,23 +966,24 @@ export async function GetMoneyFlowFromTushare(secid: string, days?: number): Pro
         main_3d: result.main_3d,
         main_5d: result.main_5d,
         main_10d: result.main_10d,
-        main_30d: result.main_30d,
+        main_20d: result.main_20d,
         retail_1d: result.retail_1d,
         retail_3d: result.retail_3d,
         retail_5d: result.retail_5d,
         retail_10d: result.retail_10d,
-        retail_30d: result.retail_30d,
+        retail_20d: result.retail_20d,
         medium_1d: result.medium_1d,
         medium_3d: result.medium_3d,
         medium_5d: result.medium_5d,
         medium_10d: result.medium_10d,
-        medium_30d: result.medium_30d,
+        medium_20d: result.medium_20d,
         main_in: result.main_in,
         small_in: result.small_in,
         medium_in: result.medium_in,
         big_in: result.big_in,
         super_big_in: result.super_big_in,
         main_rate: result.main_rate,
+        total_amount_20d: result.total_amount_20d,
         detail_dates: result.detail_dates,
         detail_main: result.detail_main,
         detail_retail: result.detail_retail,
@@ -1317,7 +1318,7 @@ export interface BuySignalConfig {
  * 对股票列表进行过滤
  *
  * 对传入的股票列表逐一检查：识别资金流向与价格走势的背离，找出主力在偷偷收集筹码、散户在恐慌割肉的标的
- * 核心公式：找"主力30日净流入 > 流通市值3% + 散户30日净流出 > 流通市值3% + 近5日有涨停或大涨 + 下跌时主力还在买"的股票。
+ * 核心公式：找"主力20日净流入 > 流通市值3% + 散户20日净流出 > 流通市值3% + 近5日有涨停或大涨 + 下跌时主力还在买"的股票。
  *
  * @param tradeDate 交易日期
  * @param stocks ts_code 数组，如 ["000001.SZ", "600000.SH"]
@@ -1346,13 +1347,13 @@ interface MainInStockResult {
   condition_g: boolean; // 量价配合
   condition_h: boolean; // 散户行为验证
   /** 评分维度（优化版） */
-  dim_main_depth: number;        // 主力建仓深度得分（30日，40分）
-  dim_retail_panic: number;      // 散户割肉力度得分（30日，20分）
+  dim_main_depth: number;        // 主力建仓深度得分（20日，40分）
+  dim_retail_panic: number;      // 散户割肉力度得分（20日，20分）
   dim_trend_verify: number;      // 近期趋势验证得分（10日，20分）
   dim_risk_warning: number;      // 短期风险预警得分（5日，20分，可为负）
   /** 指标数据 */
-  main_30d: number;        // 主力30日累计(元)
-  retail_30d: number;      // 散户30日累计(元)
+  main_20d: number;        // 主力20日累计(元)
+  retail_20d: number;      // 散户20日累计(元)
   main_10d: number;        // 主力10日累计(元)
   retail_10d: number;      // 散户10日累计(元)
   main_5d: number;         // 主力5日累计(元)
