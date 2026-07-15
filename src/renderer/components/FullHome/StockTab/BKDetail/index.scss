@@ -6,38 +6,18 @@
   .left {
     background-color: var(--background-color);
     border-right: 5px solid var(--top-background-color);
-    height: calc(100vh);
+    height: 100%;
   }
 
   .right {
     background-color: var(--inner-color);
-    height: calc(100vh);
+    height: 100%;
 
     .rightTab {
       height: 100%;
       width: 100%;
       margin: 0;
       background-color: var(--nav-background-color);
-      display: flex;
-      flex-direction: column;
-
-      :global(.ant-tabs-nav) {
-        flex-shrink: 0;
-      }
-
-      :global(.ant-tabs-content-holder) {
-        flex: 1;
-        overflow: hidden;
-      }
-
-      :global(.ant-tabs-content) {
-        height: 100%;
-      }
-
-      :global(.ant-tabs-tabpane) {
-        height: 100%;
-        overflow: hidden;
-      }
     }
   }
 }
