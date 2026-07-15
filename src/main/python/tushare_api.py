@@ -3494,6 +3494,23 @@ class TushareAPI:
                 if not daily_data:
                     return {"error": "No data for any trading day"}
 
+                # 获取每日收盘价（用于计算平均成本）
+                close_prices = []
+                if not is_board:
+                    try:
+                        first_date = daily_data[0]["trade_date"].replace('-', '')
+                        last_date = daily_data[-1]["trade_date"].replace('-', '')
+                        daily_df = safe_api_call(pro.daily, ts_code=ts_code, start_date=first_date, end_date=last_date)
+                        if daily_df is not None and not daily_df.empty:
+                            daily_df = daily_df.sort_values('trade_date', ascending=True).reset_index(drop=True)
+                            price_map = {}
+                            for _, row in daily_df.iterrows():
+                                date_str_p = _standardize_date(row.get('trade_date', ''))
+                                price_map[date_str_p] = _to_float(row.get('close', 0))
+                            close_prices = [price_map.get(d.get("trade_date", ""), 0) for d in daily_data]
+                    except Exception:
+                        close_prices = [0] * len(daily_data)
+
                 # 计算各周期的累计值（1日/3日/5日/10日/20日）
                 def sum_period(data_list, n):
                     """取最近 n 天的累计，返回 (主力, 散户, 中户)"""
@@ -3502,6 +3519,14 @@ class TushareAPI:
                     retail_sum = sum(d.get("small_in", 0) for d in subset)
                     medium_sum = sum(d.get("medium_in", 0) for d in subset)
                     return main_sum, retail_sum, medium_sum
+
+                def avg_cost_period(n):
+                    """取最近 n 天的平均收盘价"""
+                    if not close_prices or n > len(close_prices):
+                        return 0
+                    subset = close_prices[-n:]
+                    valid = [p for p in subset if p > 0]
+                    return round(sum(valid) / len(valid), 2) if valid else 0
 
                 main_1d, retail_1d, medium_1d = sum_period(daily_data, 1)
                 main_3d, retail_3d, medium_3d = sum_period(daily_data, 3)
@@ -3532,6 +3557,12 @@ class TushareAPI:
                     "medium_5d": round(medium_5d, 2),
                     "medium_10d": round(medium_10d, 2),
                     "medium_20d": round(medium_20d, 2),
+                    # 各周期平均成本（收盘价均值）
+                    "avg_cost_1d": avg_cost_period(1),
+                    "avg_cost_3d": avg_cost_period(3),
+                    "avg_cost_5d": avg_cost_period(5),
+                    "avg_cost_10d": avg_cost_period(10),
+                    "avg_cost_20d": avg_cost_period(20),
                     # 最新一日的分档数据
                     "main_in": latest.get("main_in", 0),
                     "small_in": latest.get("small_in", 0),

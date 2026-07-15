@@ -345,22 +345,22 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                   <Col span={6}>散户</Col>
                 </Row>
                 {[
-                  { label: '今日', main: moneyFlow.main_1d, medium: moneyFlow.medium_1d, retail: moneyFlow.retail_1d },
-                  { label: '3日', main: moneyFlow.main_3d, medium: moneyFlow.medium_3d, retail: moneyFlow.retail_3d },
-                  { label: '5日', main: moneyFlow.main_5d, medium: moneyFlow.medium_5d, retail: moneyFlow.retail_5d },
-                  { label: '10日', main: moneyFlow.main_10d, medium: moneyFlow.medium_10d, retail: moneyFlow.retail_10d },
-                  { label: '20日', main: moneyFlow.main_20d, medium: moneyFlow.medium_20d, retail: moneyFlow.retail_20d },
+                  { label: '今日', main: moneyFlow.main_1d, medium: moneyFlow.medium_1d, retail: moneyFlow.retail_1d, cost: moneyFlow.avg_cost_1d },
+                  { label: '3日', main: moneyFlow.main_3d, medium: moneyFlow.medium_3d, retail: moneyFlow.retail_3d, cost: moneyFlow.avg_cost_3d },
+                  { label: '5日', main: moneyFlow.main_5d, medium: moneyFlow.medium_5d, retail: moneyFlow.retail_5d, cost: moneyFlow.avg_cost_5d },
+                  { label: '10日', main: moneyFlow.main_10d, medium: moneyFlow.medium_10d, retail: moneyFlow.retail_10d, cost: moneyFlow.avg_cost_10d },
+                  { label: '20日', main: moneyFlow.main_20d, medium: moneyFlow.medium_20d, retail: moneyFlow.retail_20d, cost: moneyFlow.avg_cost_20d },
                 ].map((item) => (
                   <Row key={item.label} style={{ marginBottom: 6 }}>
                     <Col span={6}>{item.label}</Col>
                     <Col span={6} className={Utils.GetValueColor(item.main).textClass}>
-                      {formatMoneyFlow(item.main)}
+                      {formatMoneyFlow(item.main)}{item.cost > 0 ? `（${item.cost}）` : ''}
                     </Col>
                     <Col span={6} className={Utils.GetValueColor(item.medium).textClass}>
-                      {formatMoneyFlow(item.medium)}
+                      {formatMoneyFlow(item.medium)}{item.cost > 0 ? `（${item.cost}）` : ''}
                     </Col>
                     <Col span={6} className={Utils.GetValueColor(item.retail).textClass}>
-                      {formatMoneyFlow(item.retail)}
+                      {formatMoneyFlow(item.retail)}{item.cost > 0 ? `（${item.cost}）` : ''}
                     </Col>
                   </Row>
                 ))}

@@ -2938,13 +2938,13 @@ export async function GetBlockTrades(code: string, page = 1) {
       responseType: 'json',
     });
     if (body.code != 0) {
-      console.error('GetLongHuBang' + body.message);
+      console.error('GetBlockTrades' + body.message);
       return null;
     }
     return body.result.data;
   } catch (error) {
     console.log(error);
-    return {};
+    return [];
   }
 }
 
@@ -2986,14 +2986,14 @@ export async function GetHolderChanges(code: string, page = 1) {
       responseType: 'json',
     });
     if (body.code != 0) {
-      console.error('GetLongHuBang' + body.message);
-      return {};
+      console.error('GetHolderChanges' + body.message);
+      return [];
     }
     console.log('GetHolderChanges', body);
     return body.result.data;
   } catch (error) {
     console.log(error);
-    return {};
+    return [];
   }
 }
 
