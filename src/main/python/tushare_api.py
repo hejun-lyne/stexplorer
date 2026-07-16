@@ -3330,30 +3330,35 @@ class TushareAPI:
     # ------------------ 资金流向 ------------------
 
     @staticmethod
-    def _calc_money_flow_from_row(row, is_board: bool = False) -> Dict[str, Any]:
-        """从数据行计算资金流向（用于 moneyflow / moneyflow_ind_dc 接口），所有金额统一返回为元
-        is_board: 板块数据金额单位已经是元；个股数据金额单位为万元需 *10000
+    def _calc_money_flow_from_row_dc_ind(row) -> Dict[str, Any]:
+        """从 moneyflow_ind_dc（东财板块）数据行计算资金流向，所有金额统一返回为元
+
+        moneyflow_ind_dc 返回的字段已经是净额（元），与 moneyflow_dc 类似：
+        - buy_sm_amount: 小单净额（散户）
+        - buy_md_amount: 中单净额（中户）
+        - buy_lg_amount: 大单净额
+        - buy_elg_amount: 超大单净额
+        - net_amount: 主力净额 = buy_lg_amount + buy_elg_amount
+        - net_amount_rate: 主力净流入占比
         """
-        multiplier = 1 if is_board else 10000
-        buy_sm = _to_float(row.get("buy_sm_amount", 0)) * multiplier
-        sell_sm = _to_float(row.get("sell_sm_amount", 0)) * multiplier
-        buy_md = _to_float(row.get("buy_md_amount", 0)) * multiplier
-        sell_md = _to_float(row.get("sell_md_amount", 0)) * multiplier
-        buy_lg = _to_float(row.get("buy_lg_amount", 0)) * multiplier
-        sell_lg = _to_float(row.get("sell_lg_amount", 0)) * multiplier
-        buy_elg = _to_float(row.get("buy_elg_amount", 0)) * multiplier
-        sell_elg = _to_float(row.get("sell_elg_amount", 0)) * multiplier
-        small_in = buy_sm - sell_sm
-        medium_in = buy_md - sell_md
-        big_in = buy_lg - sell_lg
-        super_big_in = buy_elg - sell_elg
-        # 主力净流入 = 大单 + 超大单（用分档数据计算，避免接口 net_mf_amount/net_amount 不一致）
+        small_in = _to_float(row.get("buy_sm_amount", 0))
+        medium_in = _to_float(row.get("buy_md_amount", 0))
+        big_in = _to_float(row.get("buy_lg_amount", 0))
+        super_big_in = _to_float(row.get("buy_elg_amount", 0))
+        # 主力净流入 = 大单净额 + 超大单净额
         main_in = big_in + super_big_in
-        # 主力净流入占比 = 主力净流入 / 总成交额（总买入 + 总卖出）
-        total_trade = buy_sm + sell_sm + buy_md + sell_md + buy_lg + sell_lg + buy_elg + sell_elg
-        main_rate = round(main_in / total_trade * 100, 2) if total_trade > 0 else 0
-        # total_trade 是买入+卖出总金额，要转为单边成交额
-        total_amount = total_trade / 2
+        # 主力净流入占比：优先使用接口返回的 net_amount_rate
+        main_rate = _to_float(row.get("net_amount_rate", 0))
+        # 如果 net_amount_rate 为 0 但主力不为 0，用反推计算
+        if main_rate == 0 and main_in != 0:
+            net_amount = _to_float(row.get("net_amount", 0))
+            if net_amount != 0:
+                net_amount_rate = _to_float(row.get("net_amount_rate", 0))
+                if net_amount_rate != 0:
+                    total_trade = abs(net_amount / net_amount_rate * 100)
+                    main_rate = round(main_in / total_trade * 100, 2) if total_trade > 0 else 0
+        # 总成交额（所有分档金额绝对值之和，用于计算净流入率）
+        total_amount = abs(small_in) + abs(medium_in) + abs(big_in) + abs(super_big_in)
         return {
             "main_in": round(main_in, 2),
             "small_in": round(small_in, 2),
@@ -3417,7 +3422,7 @@ class TushareAPI:
             if df is None or df.empty:
                 return None
             row = df.iloc[0]
-            return TushareAPI._calc_money_flow_from_row(row, is_board=True)
+            return TushareAPI._calc_money_flow_from_row_dc_ind(row)
         else:
             # 个股资金流向：东财 moneyflow_dc，字段为净额（万元），数据与东方财富APP一致
             ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
@@ -3479,13 +3484,13 @@ class TushareAPI:
                 if len(df) > days:
                     df = df.iloc[-days:]
 
-                # 计算每日数据：个股用 _calc_money_flow_from_row_dc，板块用 _calc_money_flow_from_row
+                # 计算每日数据：个股用 _calc_money_flow_from_row_dc，板块用 _calc_money_flow_from_row_dc_ind
                 daily_data = []
                 for _, row in df.iterrows():
                     date_val = row.get('trade_date', '')
                     date_str = _standardize_date(date_val)
                     if is_board:
-                        day_data = TushareAPI._calc_money_flow_from_row(row, is_board=True)
+                        day_data = TushareAPI._calc_money_flow_from_row_dc_ind(row)
                     else:
                         day_data = TushareAPI._calc_money_flow_from_row_dc(row)
                     day_data["trade_date"] = date_str
