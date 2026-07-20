@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import dayjs from 'dayjs';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
@@ -100,137 +101,76 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
     onSuccess: setStockDetail,
     cacheKey: `GetDetailFromTushare/${secid}`,
   });
-  // 计算主力建仓评分 + 操作建议
+
+  // 主力建仓分析（调用后端 main_in_filter）
+  const [mainInResult, setMainInResult] = useState<any>(null);
+  const { run: runMainInFilter, loading: mainInLoading } = useRequest(
+    async () => {
+      const ts_code = code.startsWith('6') ? `${code}.SH` : `${code}.SZ`;
+      const today = dayjs().format('YYYYMMDD');
+      const result = await Services.Tushare.MainInFilterStocksFromTushare(today, [ts_code]);
+      if (result.results && result.results.length > 0) {
+        return result.results[0];
+      }
+      return null;
+    },
+    {
+      throwOnError: false,
+      manual: true,
+      onSuccess: setMainInResult,
+    },
+  );
+
+  // 主力建仓评分 + 操作建议（使用后端 main_in_filter 结果）
   const mainInScore = React.useMemo(() => {
-    if (!moneyFlow || !stockDetail) return null;
+    if (!mainInResult) return null;
 
-    const circ_mv = (stockDetail.lt || 0) * 1e8; // lt单位是亿
-    const total_amount_20d = moneyFlow.total_amount_20d || 0;
-    const main_20d = moneyFlow.main_20d || 0;
-    const retail_20d = moneyFlow.retail_20d || 0;
-    const main_10d = moneyFlow.main_10d || 0;
-    const main_5d = moneyFlow.main_5d || 0;
+    const r = mainInResult;
+    const scene = r.advice_scene || '';
+    const isPositive = scene.startsWith('A') || scene.startsWith('B');
+    const isNegative = scene === 'C' || scene === 'D' || scene === 'E';
+    const actionColor = isPositive ? '#52c41a' : isNegative ? '#ff4d4f' : '#faad14';
 
-    let score = 0;
-    const dims: Record<string, number> = {};
-
-    // 1. 主力建仓深度（20日，40分）——双轨制
-    // 1A. 绝对金额（20分，按市值分档）
-    let mainDepthAbs = 0;
-    if (circ_mv > 200e8) {
-      if (main_20d > 10e8) { score += 20; mainDepthAbs = 20; }
-      else if (main_20d > 5e8) { score += 15; mainDepthAbs = 15; }
-      else if (main_20d > 1e8) { score += 10; mainDepthAbs = 10; }
-      else if (main_20d > 0) { score += 5; mainDepthAbs = 5; }
-    } else if (circ_mv > 50e8) {
-      if (main_20d > 5e8) { score += 20; mainDepthAbs = 20; }
-      else if (main_20d > 2e8) { score += 15; mainDepthAbs = 15; }
-      else if (main_20d > 0.5e8) { score += 10; mainDepthAbs = 10; }
-      else if (main_20d > 0) { score += 5; mainDepthAbs = 5; }
-    } else {
-      if (main_20d > 2e8) { score += 20; mainDepthAbs = 20; }
-      else if (main_20d > 1e8) { score += 15; mainDepthAbs = 15; }
-      else if (main_20d > 0.2e8) { score += 10; mainDepthAbs = 10; }
-      else if (main_20d > 0) { score += 5; mainDepthAbs = 5; }
-    }
-
-    // 1B. 主力净流入率（20分）
-    const main_in_rate = total_amount_20d > 0 ? main_20d / total_amount_20d : 0;
-    let mainDepthRate = 0;
-    if (main_in_rate > 0.05) { score += 20; mainDepthRate = 20; }
-    else if (main_in_rate > 0.03) { score += 12; mainDepthRate = 12; }
-    else if (main_in_rate > 0.01) { score += 6; mainDepthRate = 6; }
-    else if (main_in_rate > 0) { score += 2; mainDepthRate = 2; }
-
-    dims.mainDepth = mainDepthAbs + mainDepthRate;
-
-    // 2. 散户割肉力度（20日，20分）——双轨制（只有散户净流出才给分）
-    dims.retailPanic = 0;
-    if (retail_20d < 0) {
-      const absRetail = Math.abs(retail_20d);
-      let retailAbs = 0;
-      if (circ_mv > 200e8) {
-        if (absRetail > 5e8) { score += 10; retailAbs = 10; }
-        else if (absRetail > 3e8) { score += 7; retailAbs = 7; }
-        else if (absRetail > 1e8) { score += 4; retailAbs = 4; }
-      } else if (circ_mv > 50e8) {
-        if (absRetail > 3e8) { score += 10; retailAbs = 10; }
-        else if (absRetail > 1e8) { score += 7; retailAbs = 7; }
-        else if (absRetail > 0.5e8) { score += 4; retailAbs = 4; }
-      } else {
-        if (absRetail > 1e8) { score += 10; retailAbs = 10; }
-        else if (absRetail > 0.5e8) { score += 7; retailAbs = 7; }
-        else if (absRetail > 0.2e8) { score += 4; retailAbs = 4; }
-      }
-
-      // 2B. 散户净流出率（10分）
-      const retail_out_rate = total_amount_20d > 0 ? absRetail / total_amount_20d : 0;
-      let retailRate = 0;
-      if (retail_out_rate > 0.05) { score += 10; retailRate = 10; }
-      else if (retail_out_rate > 0.03) { score += 6; retailRate = 6; }
-      else if (retail_out_rate > 0.01) { score += 3; retailRate = 3; }
-
-      dims.retailPanic = retailAbs + retailRate;
-    }
-
-    // 3. 近期趋势验证（10日，20分）
-    if (main_10d > main_20d * 0.5 && main_10d > 0) { score += 20; dims.trend = 20; }
-    else if (main_10d > 0) { score += 10; dims.trend = 10; }
-    else { dims.trend = 0; }
-
-    // 4. 短期风险预警（5日，20分）
-    if (main_5d < -Math.abs(main_20d) * 0.3) { score -= 20; dims.risk = -20; }
-    else if (main_5d < 0) { score -= 10; dims.risk = -10; }
-    else { dims.risk = 0; }
-
-    score = Math.max(0, score);
-
-    // 评级
-    let grade = 'D';
-    if (score >= 80) grade = 'A';
-    else if (score >= 60) grade = 'B';
-    else if (score >= 40) grade = 'C';
-
-    // ============ 操作建议（场景判断） ============
-    interface AdviceItem { scene: string; meaning: string; action: string; actionColor: string; }
-    let advice: AdviceItem | null = null;
-
-    const mainInflow = main_20d > 0;                    // 20日主力持续流入
-    const mainOutflow = main_20d <= 0;                   // 20日主力整体流出
-    const recentBigOutflow = main_5d < -Math.abs(main_20d) * 0.3;  // 近5日突然大额流出
-    const recentBigInflow = main_5d > Math.abs(main_20d) * 0.3;    // 近5日突然大额流入
-    const recentContinueOutflow = main_5d < 0;            // 近5日继续流出
-
-    // 场景B需要K线数据判断股价是否下跌，场景A/C/D不需要
-    if (klines?.length) {
-      const recentKlines = klines.slice(-5);
-      const zdf_5d = recentKlines.reduce((sum: number, k: Stock.KLineItem) => sum + (k.zdf || 0), 0);
-      const recentInflowSlow = main_5d > 0 && main_5d <= main_20d * 0.2; // 近5日流入但放缓
-      const priceDown = zdf_5d < -2;                       // 近5日股价下跌超过2%
-
-      if (mainInflow && recentBigOutflow) {
-        advice = { scene: '场景A', meaning: '主力在兑现利润，可能是阶段顶部', action: '减仓', actionColor: '#ff4d4f' };
-      } else if (mainInflow && recentInflowSlow && priceDown) {
-        advice = { scene: '场景B', meaning: '主力在洗盘，未出货', action: '关注低吸机会', actionColor: '#1890ff' };
-      } else if (mainOutflow && recentBigInflow) {
-        advice = { scene: '场景C', meaning: '可能是对倒拉高（诱多）', action: '警惕，不追', actionColor: '#faad14' };
-      } else if (mainOutflow && recentContinueOutflow) {
-        advice = { scene: '场景D', meaning: '下跌趋势确认', action: '回避', actionColor: '#ff4d4f' };
-      }
-    } else {
-      // K线数据未就绪时，场景A/C/D仍可判断（不依赖股价）
-      if (mainInflow && recentBigOutflow) {
-        advice = { scene: '场景A', meaning: '主力在兑现利润，可能是阶段顶部', action: '减仓', actionColor: '#ff4d4f' };
-      } else if (mainOutflow && recentBigInflow) {
-        advice = { scene: '场景C', meaning: '可能是对倒拉高（诱多）', action: '警惕，不追', actionColor: '#faad14' };
-      } else if (mainOutflow && recentContinueOutflow) {
-        advice = { scene: '场景D', meaning: '下跌趋势确认', action: '回避', actionColor: '#ff4d4f' };
-      }
-      // 场景B需要股价数据，K线未就绪时跳过
-    }
-
-    return { score, grade, dims, main_in_rate, advice };
-  }, [moneyFlow, stockDetail, klines]);
+    return {
+      score: r.score,
+      grade: r.grade,
+      dims: {
+        mainDepth: r.dim_main_depth ?? 0,
+        retailPanic: r.dim_retail_panic ?? 0,
+        trend: r.dim_trend_verify ?? 0,
+        risk: r.dim_risk_warning ?? 0,
+      },
+      main_in_rate: 0, // 由资金流向数据补充
+      advice: scene ? {
+        scene: `场景${scene}`,
+        meaning: r.advice_meaning || '',
+        action: r.advice_action || '',
+        actionColor,
+        stop_loss: r.stop_loss,
+        target: r.target,
+      } : null,
+      // 后端返回的完整数据，供UI直接使用
+      main_20d: r.main_20d,
+      retail_20d: r.retail_20d,
+      main_10d: r.main_10d,
+      retail_10d: r.retail_10d,
+      main_5d: r.main_5d,
+      retail_5d: r.retail_5d,
+      circ_mv: r.circ_mv,
+      chg_10d: r.chg_10d,
+      buy_signal: r.buy_signal,
+      sell_signal: r.sell_signal,
+      sell_reason: r.sell_reason,
+      condition_a: r.condition_a,
+      condition_b: r.condition_b,
+      condition_c: r.condition_c,
+      condition_d: r.condition_d,
+      condition_e: r.condition_e,
+      condition_f: r.condition_f,
+      condition_g: r.condition_g,
+      condition_h: r.condition_h,
+    };
+  }, [mainInResult]);
 
   useEffect(() => {
     runGetLongHuBang(code);
@@ -241,6 +181,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
     runGetZhiyaDetail(code);
     runGetMoneyFlow(code, 60);
     runGetDetail(secid);
+    runMainInFilter();
   }, [code]);
 
   const [deptCodes, setDeptCodes] = useState([]);
@@ -457,7 +398,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                 )}
 
                 {/* 主力建仓评分 */}
-                {mainInScore && (
+                {mainInScore ? (
                   <div style={{ marginTop: 20, padding: '12px 16px', borderRadius: 8, backgroundColor: 'var(--card-background-color)', border: '1px solid var(--border-color)' }}>
                     <Row className={styles.rowheader} style={{ marginBottom: 12 }}>
                       <Col span={24}>主力建仓评分模型</Col>
@@ -552,41 +493,101 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                             {mainInScore.advice.scene}
                             <Tooltip
                               title={<div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
-                                场景A：20日主力持续流入 + 近5日突然大额流出{'\n'}
-                                场景B：20日主力持续流入 + 近5日流入放缓且股价下跌{'\n'}
-                                场景C：20日主力整体流出 + 近5日突然大额流入{'\n'}
-                                场景D：20日主力整体流出 + 近5日继续流出
+                                A-1 黄金买点：低位反弹后缩量回调，主力逆势吸筹，散户恐慌割肉{'\n'}
+                                A-2 优质买点：回调较深但主力未撤退，洗盘尾声即将二次拉升{'\n'}
+                                B-1 观察等待：反弹但主力吸筹偏弱，需要时间洗盘{'\n'}
+                                B-2 谨慎观察：反弹后主力未跟进，可能散户或游资推动{'\n'}
+                                C 诱多陷阱：主力已出货，当前加速下跌{'\n'}
+                                D 下跌趋势：已跌破反弹低点，新一轮下跌{'\n'}
+                                E 反弹高位：接近反弹高点，反弹末期{'\n'}
+                                F 信号不明：指标矛盾，无法明确判断
                               </div>}
                               placement="top"
                             >
                               <QuestionCircleOutlined style={{ marginLeft: 4, color: mainInScore.advice.actionColor, fontSize: 11, cursor: 'help', opacity: 0.7 }} />
                             </Tooltip>
                           </Col>
-                          <Col span={10} style={{ fontSize: 12, color: 'var(--text-color)' }}>
+                          <Col span={8} style={{ fontSize: 12, color: 'var(--text-color)' }}>
                             {mainInScore.advice.meaning}
                           </Col>
-                          <Col span={6}>
+                          <Col span={5}>
                             <span style={{
-                              fontSize: 15, fontWeight: 'bold', color: mainInScore.advice.actionColor,
-                              padding: '2px 10px', borderRadius: 4,
+                              fontSize: 14, fontWeight: 'bold', color: mainInScore.advice.actionColor,
+                              padding: '2px 8px', borderRadius: 4,
                               backgroundColor: mainInScore.advice.actionColor + '20',
                             }}>
                               {mainInScore.advice.action}
                             </span>
                           </Col>
-                          <Col span={4} style={{ fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
-                            操作建议
+                          <Col span={7} style={{ fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
+                          </Col>
+                        </Row>
+                        {(mainInScore.advice.stop_loss || mainInScore.advice.target) && (
+                          <Row align="middle" style={{ marginTop: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+                            {mainInScore.advice.stop_loss > 0 ? (
+                              <>
+                                <Col span={4} />
+                                <Col span={8}>
+                                  止损价：<span style={{ color: '#ff4d4f', fontWeight: 'bold' }}>{mainInScore.advice.stop_loss.toFixed(2)}</span>
+                                </Col>
+                              </>
+                            ) : <Col span={12} />}
+                            {mainInScore.advice.target > 0 ? (
+                              <Col span={5}>
+                                目标价：<span style={{ color: '#52c41a', fontWeight: 'bold' }}>{mainInScore.advice.target.toFixed(2)}</span>
+                              </Col>
+                            ) : null}
+                            <Col span={7} />
+                          </Row>
+                        )}
+                      </div>
+                    )}
+                    {/* 买卖信号 */}
+                    {(mainInScore.buy_signal || mainInScore.sell_signal) && (
+                      <div style={{
+                        marginTop: 12, padding: '8px 12px', borderRadius: 6,
+                        backgroundColor: mainInScore.buy_signal ? '#52c41a15' : '#ff4d4f15',
+                        borderLeft: `3px solid ${mainInScore.buy_signal ? '#52c41a' : '#ff4d4f'}`,
+                      }}>
+                        <Row align="middle">
+                          <Col span={4} style={{ fontSize: 13, fontWeight: 'bold', color: mainInScore.buy_signal ? '#52c41a' : '#ff4d4f' }}>
+                            交易信号
+                          </Col>
+                          <Col span={12}>
+                            {mainInScore.buy_signal === 'A' && (
+                              <span style={{ fontSize: 14, fontWeight: 'bold', color: '#52c41a' }}>强烈买入</span>
+                            )}
+                            {mainInScore.buy_signal === 'B' && (
+                              <span style={{ fontSize: 14, fontWeight: 'bold', color: '#389e0d' }}>可买入</span>
+                            )}
+                            {mainInScore.sell_signal === 'SELL' && (
+                              <Tooltip title={mainInScore.sell_reason}>
+                                <span style={{ fontSize: 14, fontWeight: 'bold', color: '#ff4d4f', cursor: 'help', borderBottom: '1px dashed #ff4d4f' }}>卖出信号</span>
+                              </Tooltip>
+                            )}
+                          </Col>
+                          <Col span={8} style={{ fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
+                            {mainInScore.sell_reason && <span title={mainInScore.sell_reason}>{mainInScore.sell_reason.length > 20 ? mainInScore.sell_reason.slice(0, 20) + '...' : mainInScore.sell_reason}</span>}
                           </Col>
                         </Row>
                       </div>
                     )}
                     <div style={{ marginTop: 12, fontSize: 12, color: 'var(--secondary-text-color)' }}>
                       <Row style={{ marginBottom: 2 }}>
-                        <Col span={12}>主力净流入率(20日): {(mainInScore.main_in_rate * 100).toFixed(2)}%</Col>
+                        <Col span={12}>主力10日: {formatMoneyFlow(mainInScore.main_10d)}</Col>
+                        <Col span={12}>散户5日: {formatMoneyFlow(mainInScore.retail_5d)}</Col>
+                      </Row>
+                      <Row style={{ marginBottom: 2 }}>
+                        <Col span={12}>近10日涨幅: {mainInScore.chg_10d?.toFixed?.(2) ?? '--'}%</Col>
+                        <Col span={12}>流通市值: {(mainInScore.circ_mv / 1e8).toFixed(1)}亿</Col>
                       </Row>
                     </div>
                   </div>
-                )}
+                ) : mainInLoading ? (
+                  <div style={{ marginTop: 20, textAlign: 'center', padding: 20 }}>
+                    <Spin /> 主力建仓分析中...
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div style={{ textAlign: 'center', padding: 40, color: 'var(--secondary-text-color)' }}>
