@@ -3673,14 +3673,18 @@ class TushareAPI:
                 detail_main = money_flow.get("detail_main", []) if isinstance(money_flow, dict) else []
                 detail_retail = money_flow.get("detail_retail", []) if isinstance(money_flow, dict) else []
 
-                # K线价格数据
+                # K线价格数据（全部，用于后续索引）
                 prices = [_to_float(k.get("sp", 0)) for k in klines]
-                high_10d = max(_to_float(k.get("zg", 0)) for k in klines)
-                low_10d = min(_to_float(k.get("zd", 0)) for k in klines)
-                cje_10d = [_to_float(k.get("cje", 0)) for k in klines]
+
+                # 近10日K线（变量名带 _10d 的指标统一使用最近10个交易日）
+                klines_10d = klines[-10:] if len(klines) >= 10 else klines
+                prices_10d = prices[-10:] if len(prices) >= 10 else prices
+                high_10d = max(_to_float(k.get("zg", 0)) for k in klines_10d)
+                low_10d = min(_to_float(k.get("zd", 0)) for k in klines_10d)
+                cje_10d = [_to_float(k.get("cje", 0)) for k in klines_10d]
                 avg_amount_10d = sum(cje_10d) / max(len(cje_10d), 1)
-                max_decline_10d = TushareAPI._compute_max_decline(prices)
-                avg_price_10d = TushareAPI._compute_weighted_avg_price(klines)
+                max_decline_10d = TushareAPI._compute_max_decline(prices_10d)
+                avg_price_10d = TushareAPI._compute_weighted_avg_price(klines_10d)
 
                 # 近5日、近10日数据
                 recent5 = klines[-5:] if len(klines) >= 5 else klines
@@ -3713,12 +3717,11 @@ class TushareAPI:
                 # ============ 反弹相关指标 ============
                 # 反弹低点（近10日最低价）
                 rebound_low = low_10d
-                # 反弹高点：低点之后出现的最高价
-                recent10_prices = prices[-10:] if len(prices) >= 10 else prices
-                if recent10_prices:
-                    min_price = min(recent10_prices)
-                    low_idx = recent10_prices.index(min_price)
-                    rebound_high = max(recent10_prices[low_idx:])
+                # 反弹高点：低点之后出现的最高收盘价
+                if prices_10d:
+                    min_price = min(prices_10d)
+                    low_idx = prices_10d.index(min_price)
+                    rebound_high = max(prices_10d[low_idx:])
                 else:
                     rebound_high = current_price
                 # 近10日最大反弹幅度
