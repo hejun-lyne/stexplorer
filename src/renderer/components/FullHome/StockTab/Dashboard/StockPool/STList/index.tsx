@@ -785,26 +785,34 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         </Row>
       ) : (
         <Row className={styles.header}>
-          <Col span={3}>股票名称</Col>
+          <Col span={2}>股票名称</Col>
           <Col span={2}>
             评分
             <Button size="small" type="text" icon={sortTypes.score == 1 ? <CaretUpOutlined /> : sortTypes.score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('score')} />
           </Col>
           <Col span={2}>评级</Col>
           <Col span={2}>基础过滤</Col>
+          <Col span={2}>
+            流通市值
+            <Button size="small" type="text" icon={sortTypes.circ_mv == 1 ? <CaretUpOutlined /> : sortTypes.circ_mv == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('circ_mv')} />
+          </Col>
+          <Col span={2}>
+            近10日涨幅
+            <Button size="small" type="text" icon={sortTypes.chg_10d == 1 ? <CaretUpOutlined /> : sortTypes.chg_10d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('chg_10d')} />
+          </Col>
           <Col span={3}>
             主力10日
             <Button size="small" type="text" icon={sortTypes.main_10d == 1 ? <CaretUpOutlined /> : sortTypes.main_10d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('main_10d')} />
           </Col>
-          <Col span={3}>
+          <Col span={2}>
             散户10日
             <Button size="small" type="text" icon={sortTypes.retail_10d == 1 ? <CaretUpOutlined /> : sortTypes.retail_10d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('retail_10d')} />
           </Col>
-          <Col span={3}>
+          <Col span={2}>
             启动信号
             <Button size="small" type="text" icon={sortTypes.max_5d_return == 1 ? <CaretUpOutlined /> : sortTypes.max_5d_return == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('max_5d_return')} />
           </Col>
-          <Col span={3}>买入信号</Col>
+          <Col span={2}>买入信号</Col>
           <Col span={3}>卖出信号</Col>
         </Row>
       )}
@@ -956,7 +964,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 className={styles.row}
                 style={{ backgroundColor: bgColor }}
               >
-                <Col span={3} style={{ cursor: 'pointer' }} onClick={() => {
+                <Col span={2} style={{ cursor: 'pointer' }} onClick={() => {
                   const code = s.ts_code.split('.').shift() || s.ts_code;
                   const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
                   onOpenStock(secid, s.name || s.ts_code);
@@ -981,16 +989,22 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                     <span className="text-down" title={s.basic_reason}>✗</span>
                   )}
                 </Col>
+                <Col span={2}>
+                  {(Number(s.circ_mv) / 1e8).toFixed(1)}亿
+                </Col>
+                <Col span={2} className={Utils.GetValueColor(s.chg_10d).textClass}>
+                  {s.chg_10d?.toFixed?.(2) ?? s.chg_10d}%
+                </Col>
                 <Col span={3} className={Utils.GetValueColor(s.main_10d).textClass}>
                   {formatMoneyFlow(s.main_10d)}
                 </Col>
-                <Col span={3} className={Utils.GetValueColor(-s.retail_10d).textClass}>
+                <Col span={2} className={Utils.GetValueColor(-s.retail_10d).textClass}>
                   {formatMoneyFlow(s.retail_10d)}
                 </Col>
-                <Col span={3} className={Utils.GetValueColor(s.max_5d_return).textClass}>
+                <Col span={2} className={Utils.GetValueColor(s.max_5d_return).textClass}>
                   {s.max_5d_return?.toFixed?.(1) ?? s.max_5d_return}%
                 </Col>
-                <Col span={3}>
+                <Col span={2}>
                   {s.buy_signal === 'A' ? (
                     <span className="text-up" style={{ fontWeight: 'bold' }}>最强A</span>
                   ) : s.buy_signal === 'B' ? (

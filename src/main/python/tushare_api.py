@@ -3633,7 +3633,7 @@ class TushareAPI:
                     money_flow = {"error": "获取资金流向异常"}
 
                 try:
-                    klines = TushareAPI.get_kline_data(secid, period="daily", limit=10)
+                    klines = TushareAPI.get_kline_data(secid, period="daily", limit=60)
                 except Exception:
                     klines = []
 
@@ -3688,6 +3688,90 @@ class TushareAPI:
 
                 # 近5日最大涨幅
                 max_5d_return = max(_to_float(k.get("zdf", 0)) for k in recent5)
+
+                # 近10日涨幅（最近10个交易日收盘价累计涨跌幅）
+                chg_10d = 0
+                if recent10 and len(recent10) >= 2:
+                    first_price = _to_float(recent10[0].get("sp", 0))
+                    last_price = _to_float(recent10[-1].get("sp", 0))
+                    if first_price > 0:
+                        chg_10d = round((last_price - first_price) / first_price * 100, 2)
+
+                # 近5日价格变化
+                if len(prices) >= 5:
+                    price_5d_ago = prices[-5]
+                    price_5d_change = (current_price - price_5d_ago) / price_5d_ago if price_5d_ago > 0 else 0
+                else:
+                    price_5d_change = 0
+
+                # 20日、60日高点（用于前置过滤）
+                recent20 = klines[-20:] if len(klines) >= 20 else klines
+                recent60 = klines[-60:] if len(klines) >= 60 else klines
+                high_20d = max(_to_float(k.get("zg", 0)) for k in recent20) if recent20 else current_price
+                high_60d = max(_to_float(k.get("zg", 0)) for k in recent60) if recent60 else current_price
+
+                # ============ 反弹相关指标 ============
+                # 反弹低点（近10日最低价）
+                rebound_low = low_10d
+                # 反弹高点：低点之后出现的最高价
+                recent10_prices = prices[-10:] if len(prices) >= 10 else prices
+                if recent10_prices:
+                    min_price = min(recent10_prices)
+                    low_idx = recent10_prices.index(min_price)
+                    rebound_high = max(recent10_prices[low_idx:])
+                else:
+                    rebound_high = current_price
+                # 近10日最大反弹幅度
+                rebound_amplitude = (rebound_high - rebound_low) / rebound_low if rebound_low > 0 else 0
+                # 回调幅度 = (反弹高点 - 当前价) / 反弹高点
+                callback_depth = (rebound_high - current_price) / rebound_high if rebound_high > 0 else 0
+                # 回调占比 = 回调幅度 / 反弹幅度
+                callback_ratio = callback_depth / rebound_amplitude if rebound_amplitude > 0 else 0
+                # 主力30日累计（用于场景C判断）
+                main_30d = sum(detail_main[-30:]) if detail_main else 0
+                # 5日前收盘价
+                price_5d_ago = prices[-5] if len(prices) >= 5 else 0
+
+                # ============ 前置过滤 ============
+                pre_filter_fail_reasons = []
+                if circ_mv < 30e8:
+                    pre_filter_fail_reasons.append(f"流通市值{circ_mv / 1e8:.1f}亿 < 30亿（排除小盘股）")
+                if avg_amount_10d < 0.5e8:
+                    pre_filter_fail_reasons.append(f"日均成交额{avg_amount_10d / 1e4:.0f}万 < 5000万（排除低流动性）")
+                if high_20d > 0 and current_price / high_20d > 0.90:
+                    pre_filter_fail_reasons.append(f"相对20日高点{current_price / high_20d:.2%} > 90%（不是低位）")
+                if high_60d > 0 and current_price / high_60d > 0.85:
+                    pre_filter_fail_reasons.append(f"相对60日高点{current_price / high_60d:.2%} > 85%（不是低位）")
+                if rebound_amplitude < 0.10:
+                    pre_filter_fail_reasons.append(f"近10日反弹幅度{rebound_amplitude:.1%} < 10%（没有反弹）")
+                if current_price <= rebound_low:
+                    pre_filter_fail_reasons.append(f"当前价{current_price:.2f} <= 反弹低点{rebound_low:.2f}（创新低）")
+
+                if pre_filter_fail_reasons:
+                    results.append({
+                        "ts_code": ts_code, "name": name,
+                        "score": 0, "grade": "D",
+                        "basic_passed": False, "basic_reason": "前置过滤: " + "; ".join(pre_filter_fail_reasons),
+                        "condition_a": False, "condition_b": False,
+                        "condition_c": False, "condition_d": False,
+                        "condition_e": False, "condition_f": False,
+                        "condition_g": False, "condition_h": False,
+                        "dim_main_depth": 0, "dim_retail_panic": 0,
+                        "dim_trend_verify": 0, "dim_risk_warning": 0,
+                        "main_20d": main_20d, "retail_20d": retail_20d,
+                        "main_10d": main_10d, "retail_10d": retail_10d, "main_5d": main_5d, "retail_5d": retail_5d,
+                        "circ_mv": circ_mv, "total_amount_20d": total_amount_20d, "main_in_rate": 0,
+                        "current_price": current_price,
+                        "max_5d_return": max_5d_return, "decline_main_in_days": 0,
+                        "cost_deviation": 0,
+                        "avg_price_10d": avg_price_10d, "high_10d": high_10d, "low_10d": low_10d,
+                        "avg_amount_10d": avg_amount_10d, "max_decline_10d": max_decline_10d,
+                        "chg_10d": chg_10d,
+                        "buy_signal": None, "sell_signal": "SELL", "sell_reason": "前置过滤未通过",
+                        "advice_scene": "前置过滤", "advice_meaning": "不满足主力建仓前置条件", "advice_action": "回避",
+                        "stop_loss": 0, "target": 0,
+                    })
+                    continue
 
                 # 近10日下跌且主力流入日数
                 decline_main_in_days = 0
@@ -3837,6 +3921,22 @@ class TushareAPI:
                     score -= 10
                     dim_risk = -10
 
+                # ============ 主力回调吸筹（背离信号） ============
+                if price_5d_change < -0.03 and main_5d > 0:
+                    score += 12  # 最强背离：价格跌3%以上但主力仍在流入
+                elif price_5d_change < 0 and main_5d > 0:
+                    score += 8   # 一般背离：价格微跌主力流入
+                elif main_5d > 0:
+                    score += 5   # 同步流入
+                else:
+                    score -= 8   # 主力流出，扣分
+
+                # ============ 散户回调行为（割肉信号） ============
+                if retail_5d < 0:      # 回调时散户割肉 → 筹码给主力
+                    score += 3
+                elif retail_5d > 0:    # 回调时散户抄底 → 和主力抢筹，不是好事
+                    score -= 2
+
                 score = max(0, score)
 
                 # 评级
@@ -3846,36 +3946,74 @@ class TushareAPI:
                 else: grade = 'D'
 
                 # ============ 操作建议（场景判断） ============
-                main_inflow = main_20d > 0                          # 20日主力持续流入
-                main_outflow = main_20d <= 0                        # 20日主力整体流出
-                recent_big_outflow = main_5d < -abs(main_20d) * 0.3  # 近5日突然大额流出
-                recent_big_inflow = main_5d > abs(main_20d) * 0.3   # 近5日突然大额流入
-                recent_inflow_slow = main_5d > 0 and main_5d <= main_20d * 0.2  # 近5日流入放缓
-                # 计算近5日股价涨跌幅
-                zdf_5d = sum(_to_float(k.get("zdf", 0)) for k in recent5) if recent5 else 0
-                price_down = zdf_5d < -2                           # 近5日股价下跌超2%
-                recent_continue_outflow = main_5d < 0               # 近5日继续流出
+                stop_loss = 0
+                target = 0
 
-                advice_scene = ""
-                advice_meaning = ""
-                advice_action = ""
+                # 场景A-1：黄金买点（最强信号）
+                if (score >= 70 and callback_ratio < 0.50 and current_price > rebound_low * 1.02
+                        and main_5d > 0 and price_5d_change < 0 and retail_5d < 0):
+                    advice_scene = "A-1"
+                    advice_meaning = "低位反弹后缩量回调，主力逆势吸筹，散户恐慌割肉"
+                    advice_action = "积极介入"
+                    stop_loss = rebound_low * 0.98
+                    target = rebound_high * 1.10
 
-                if main_inflow and recent_big_outflow:
-                    advice_scene = "场景A"
-                    advice_meaning = "主力在兑现利润，可能是阶段顶部"
-                    advice_action = "减仓"
-                elif main_inflow and recent_inflow_slow and price_down:
-                    advice_scene = "场景B"
-                    advice_meaning = "主力在洗盘，未出货"
-                    advice_action = "关注低吸机会"
-                elif main_outflow and recent_big_inflow:
-                    advice_scene = "场景C"
-                    advice_meaning = "可能是对倒拉高（诱多）"
-                    advice_action = "警惕，不追"
-                elif main_outflow and recent_continue_outflow:
-                    advice_scene = "场景D"
-                    advice_meaning = "下跌趋势确认"
+                # 场景A-2：优质买点
+                elif (score >= 60 and callback_ratio < 0.70 and current_price > rebound_low
+                      and main_5d > 0 and price_5d_change < 0):
+                    advice_scene = "A-2"
+                    advice_meaning = "回调较深但主力未撤退，洗盘尾声即将二次拉升"
+                    advice_action = "分批介入"
+                    stop_loss = rebound_low * 0.95
+                    target = rebound_high
+
+                # 场景B-1：观察等待
+                elif (score >= 50 and rebound_amplitude > 0.15 and current_price > rebound_low and main_5d > 0):
+                    advice_scene = "B-1"
+                    advice_meaning = "有反弹但主力吸筹力度偏弱，需要时间洗盘"
+                    advice_action = "关注，等缩量回调或主力加速流入"
+                    stop_loss = rebound_low * 0.95
+                    target = 0
+
+                # 场景B-2：谨慎观察
+                elif (score >= 50 and rebound_amplitude > 0.15 and current_price > rebound_low):
+                    advice_scene = "B-2"
+                    advice_meaning = "反弹后主力未跟进，可能由散户或游资推动"
+                    advice_action = "暂不介入，等主力流入确认"
+                    stop_loss = rebound_low * 0.95
+                    target = 0
+
+                # 场景C：诱多陷阱
+                elif (score < 50 and main_5d < -abs(main_30d) * 0.15 and price_5d_change < -0.05):
+                    advice_scene = "C"
+                    advice_meaning = "反弹可能是诱多，主力已出货，当前加速下跌"
                     advice_action = "回避"
+                    stop_loss = 0
+                    target = 0
+
+                # 场景D：下跌趋势
+                elif current_price <= rebound_low:
+                    advice_scene = "D"
+                    advice_meaning = "已跌破反弹低点，不是回调是新一轮下跌"
+                    advice_action = "坚决回避"
+                    stop_loss = 0
+                    target = 0
+
+                # 场景E：反弹高位
+                elif current_price >= rebound_high * 0.95:
+                    advice_scene = "E"
+                    advice_meaning = "已接近反弹高点，不是回调阶段是反弹末期"
+                    advice_action = "不追，等回调"
+                    stop_loss = 0
+                    target = 0
+
+                # 场景F：信号不明
+                else:
+                    advice_scene = "F"
+                    advice_meaning = "各项指标矛盾，无法形成明确判断"
+                    advice_action = "观望"
+                    stop_loss = 0
+                    target = 0
 
                 # ============ 买卖信号判断 ============
                 buy_signal = None
@@ -3944,12 +4082,15 @@ class TushareAPI:
                     "low_10d": low_10d,
                     "avg_amount_10d": avg_amount_10d,
                     "max_decline_10d": max_decline_10d,
+                    "chg_10d": chg_10d,
                     "buy_signal": buy_signal,
                     "sell_signal": sell_signal,
                     "sell_reason": sell_reason,
                     "advice_scene": advice_scene,
                     "advice_meaning": advice_meaning,
                     "advice_action": advice_action,
+                    "stop_loss": round(stop_loss, 2),
+                    "target": round(target, 2),
                 })
             except Exception as e:
                 import traceback
@@ -3982,8 +4123,10 @@ class TushareAPI:
             "cost_deviation": 0,
             "avg_price_10d": 0, "high_10d": 0, "low_10d": 0,
             "avg_amount_10d": 0, "max_decline_10d": 0,
+            "chg_10d": 0,
             "buy_signal": None, "sell_signal": None, "sell_reason": "",
             "advice_scene": "", "advice_meaning": "", "advice_action": "",
+            "stop_loss": 0, "target": 0,
         }
 
     @staticmethod

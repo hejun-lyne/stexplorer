@@ -1373,14 +1373,17 @@ interface MainInStockResult {
   low_10d: number;         // 近10日最低价
   avg_amount_10d: number;  // 近10日日均成交额(元)
   max_decline_10d: number; // 近10日最大回撤
+  chg_10d: number;         // 近10日涨幅(%)
   /** 买卖信号 */
   buy_signal: string | null;   // 'A' | 'B' | null
   sell_signal: string | null;  // 'SELL' | null
   sell_reason: string;
   /** 操作建议 */
-  advice_scene: string;     // 场景A/B/C/D
+  advice_scene: string;     // 场景A-1/A-2/B-1/B-2/C/D/E/F
   advice_meaning: string;   // 含义说明
   advice_action: string;    // 操作建议
+  stop_loss: number;        // 止损价
+  target: number;           // 目标价
 }
 
 export async function MainInFilterStocksFromTushare(
