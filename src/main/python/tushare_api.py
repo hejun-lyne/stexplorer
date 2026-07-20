@@ -3715,15 +3715,18 @@ class TushareAPI:
                 high_60d = max(_to_float(k.get("zg", 0)) for k in recent60) if recent60 else current_price
 
                 # ============ 反弹相关指标 ============
-                # 反弹低点（近10日最低价）
+                # 反弹低点（近10日日内最低价）
                 rebound_low = low_10d
-                # 反弹高点：低点之后出现的最高收盘价
-                if prices_10d:
-                    min_price = min(prices_10d)
-                    low_idx = prices_10d.index(min_price)
-                    rebound_high = max(prices_10d[low_idx:])
-                else:
-                    rebound_high = current_price
+                # 反弹高点：找到反弹低点所在K线的位置，取之后最高的日内最高价（zg）
+                rebound_high = current_price
+                if klines_10d:
+                    low_idx = -1
+                    for i, k in enumerate(klines_10d):
+                        if _to_float(k.get("zd", 0)) == rebound_low:
+                            low_idx = i
+                            break
+                    if low_idx >= 0:
+                        rebound_high = max(_to_float(k.get("zg", 0)) for k in klines_10d[low_idx:])
                 # 近10日最大反弹幅度
                 rebound_amplitude = (rebound_high - rebound_low) / rebound_low if rebound_low > 0 else 0
                 # 回调幅度 = (反弹高点 - 当前价) / 反弹高点
