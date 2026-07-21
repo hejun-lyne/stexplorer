@@ -164,6 +164,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
       circ_mv: r.circ_mv,
       chg_10d: r.chg_10d,
       buy_signal: r.buy_signal,
+      buy_reason: r.buy_reason || '',
       sell_signal: r.sell_signal,
       sell_reason: r.sell_reason,
       basic_passed: r.basic_passed,
@@ -172,6 +173,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
       bounce_reason: r.bounce_reason || '',
       market_pattern: r.market_pattern || '不明',
       consolidation_score: r.consolidation_score ?? 0,
+      consolidation_metrics: r.consolidation_metrics || {},
       is_pullback: r.is_pullback ?? false,
       condition_a: r.condition_a,
       condition_b: r.condition_b,
@@ -627,6 +629,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                             )}
                           </Col>
                           <Col span={8} style={{ fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
+                            {mainInScore.buy_reason && <span title={mainInScore.buy_reason}>{mainInScore.buy_reason.length > 20 ? mainInScore.buy_reason.slice(0, 20) + '...' : mainInScore.buy_reason}</span>}
                             {mainInScore.sell_reason && <span title={mainInScore.sell_reason}>{mainInScore.sell_reason.length > 20 ? mainInScore.sell_reason.slice(0, 20) + '...' : mainInScore.sell_reason}</span>}
                           </Col>
                         </Row>

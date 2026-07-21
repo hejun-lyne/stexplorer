@@ -1377,6 +1377,7 @@ interface MainInStockResult {
   chg_10d: number;         // 近10日涨幅(%)
   /** 买卖信号 */
   buy_signal: string | null;   // 'A' | 'B' | null
+  buy_reason: string;          // 买入理由
   sell_signal: string | null;  // 'SELL' | null
   sell_reason: string;
   /** 操作建议 */
@@ -1394,6 +1395,7 @@ interface MainInStockResult {
   bounce_reason: string;    // 反弹判断原因
   market_pattern: string;   // 形态识别：主升浪崩盘|反弹后回调|震荡筑底|下跌趋势|不明
   consolidation_score: number;  // 震荡筑底独立评分
+  consolidation_metrics: Record<string, number>;  // 横盘指标：趋势强度/波动率/区间宽度
   is_pullback: boolean;     // 是否处于反弹后回调阶段
 }
 
