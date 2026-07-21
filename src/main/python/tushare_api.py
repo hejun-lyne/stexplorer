@@ -3708,10 +3708,11 @@ class TushareAPI:
                 else:
                     price_5d_change = 0
 
-                # 20日、60日高点（用于前置过滤）
+                # 20日、60日高低点（用于前置过滤和震荡筑底判断）
                 recent20 = klines[-20:] if len(klines) >= 20 else klines
                 recent60 = klines[-60:] if len(klines) >= 60 else klines
                 high_20d = max(_to_float(k.get("zg", 0)) for k in recent20) if recent20 else current_price
+                low_20d = min(_to_float(k.get("zd", 0)) for k in recent20) if recent20 else current_price
                 high_60d = max(_to_float(k.get("zg", 0)) for k in recent60) if recent60 else current_price
 
                 # ============ 反弹相关指标 ============
@@ -3733,10 +3734,49 @@ class TushareAPI:
                 callback_depth = (rebound_high - current_price) / rebound_high if rebound_high > 0 else 0
                 # 回调占比 = 回调幅度 / 反弹幅度
                 callback_ratio = callback_depth / rebound_amplitude if rebound_amplitude > 0 else 0
-                # 主力30日累计（用于场景C判断）
+
+                # 有效性反弹判断（用收盘价，避免脉冲误导）
+                bounce_valid, bounce_reason, bounce_pct = TushareAPI.is_valid_bounce(klines, window=10)
+                # 主力30日累计（用于场景C和震荡筑底判断）
                 main_30d = sum(detail_main[-30:]) if detail_main else 0
+                # 散户30日累计
+                retail_30d = sum(detail_retail[-30:]) if detail_retail else 0
                 # 5日前收盘价
                 price_5d_ago = prices[-5] if len(prices) >= 5 else 0
+                # 近20日波动率（日涨跌幅标准差，用于震荡筑底判断）
+                zdf_20d = [_to_float(k.get("zdf", 0)) / 100 for k in recent20] if recent20 else []
+                if len(zdf_20d) >= 5:
+                    mean_zdf = sum(zdf_20d) / len(zdf_20d)
+                    volatility_20d = math.sqrt(sum((x - mean_zdf) ** 2 for x in zdf_20d) / len(zdf_20d))
+                else:
+                    volatility_20d = 0
+
+                # ============ 形态识别 ============
+                # 近10日涨跌幅最大/最小（小数）
+                zdf_10d = [_to_float(k.get("zdf", 0)) / 100 for k in klines_10d]
+                max_gain_10d = max(zdf_10d) if zdf_10d else 0
+                max_decline_10d_pct = min(zdf_10d) if zdf_10d else 0  # 负值
+
+                # 近20日收盘价序列（用于形态判断的波动率和趋势）
+                closes_20d = [_to_float(k.get("sp", 0)) for k in recent20] if recent20 else []
+                if len(closes_20d) >= 5:
+                    close_mean = sum(closes_20d) / len(closes_20d)
+                    close_volatility_20d = math.sqrt(sum((c - close_mean) ** 2 for c in closes_20d) / len(closes_20d)) / close_mean if close_mean > 0 else 0
+                    trend_20d = (closes_20d[-1] - closes_20d[0]) / closes_20d[0] if closes_20d[0] > 0 else 0
+                else:
+                    close_volatility_20d = 0
+                    trend_20d = 0
+
+                # 形态识别
+                market_pattern = TushareAPI._identify_pattern(
+                    max_gain_10d=max_gain_10d,
+                    max_decline_10d=max_decline_10d_pct,
+                    closes_20d=closes_20d,
+                    close_volatility_20d=close_volatility_20d,
+                    trend_20d=trend_20d,
+                    current_price=current_price,
+                    high_60d=high_60d,
+                )
 
                 # ============ 前置过滤 ============
                 pre_filter_fail_reasons = []
@@ -3753,6 +3793,9 @@ class TushareAPI:
                 if current_price <= rebound_low:
                     pre_filter_fail_reasons.append(f"当前价{current_price:.2f} <= 反弹低点{rebound_low:.2f}（创新低）")
 
+                if not bounce_valid:
+                    pre_filter_fail_reasons.append(f"无有效反弹: {bounce_reason}")
+
                 if pre_filter_fail_reasons:
                     results.append({
                         "ts_code": ts_code, "name": name,
@@ -3764,6 +3807,7 @@ class TushareAPI:
                         "condition_g": False, "condition_h": False,
                         "dim_main_depth": 0, "dim_retail_panic": 0,
                         "dim_trend_verify": 0, "dim_risk_warning": 0,
+                        "dim_bounce_quality": 0,
                         "main_20d": main_20d, "retail_20d": retail_20d,
                         "main_10d": main_10d, "retail_10d": retail_10d, "main_5d": main_5d, "retail_5d": retail_5d,
                         "circ_mv": circ_mv, "total_amount_20d": total_amount_20d, "main_in_rate": 0,
@@ -3776,6 +3820,11 @@ class TushareAPI:
                         "buy_signal": None, "sell_signal": "SELL", "sell_reason": "前置过滤未通过",
                         "advice_scene": "前置过滤", "advice_meaning": "不满足主力建仓前置条件", "advice_action": "回避",
                         "stop_loss": 0, "target": 0,
+                        "position_advice": "0", "hold_period": "观望", "add_point": "", "breakout_confirm": "",
+                        "bounce_valid": bounce_valid, "bounce_reason": bounce_reason,
+                        "market_pattern": market_pattern,
+                        "consolidation_score": 0,
+                        "is_pullback": False,
                     })
                     continue
 
@@ -3943,7 +3992,82 @@ class TushareAPI:
                 elif retail_5d > 0:    # 回调时散户抄底 → 和主力抢筹，不是好事
                     score -= 2
 
+                # ============ 低位反弹质量（25分） ============
+                dim_bounce_quality = 0
+                if bounce_valid:
+                    # 有效反弹：按反弹幅度阶梯给分
+                    if bounce_pct > 0.20:
+                        score += 15; dim_bounce_quality = 15
+                    elif bounce_pct > 0.15:
+                        score += 12; dim_bounce_quality = 12
+                    elif bounce_pct > 0.12:
+                        score += 8; dim_bounce_quality = 8
+                    else:
+                        score += 4; dim_bounce_quality = 4
+
+                    # 回调深度加分：反弹后充分回调是健康信号
+                    if callback_ratio > 0.30:
+                        score += 10; dim_bounce_quality += 10
+                    elif callback_ratio > 0.15:
+                        score += 6; dim_bounce_quality += 6
+                    elif callback_ratio > 0:
+                        score += 3; dim_bounce_quality += 3
+                else:
+                    # 非有效反弹：关注"低位横盘+主力吸筹"而非"反弹回调"
+                    if ("震荡筑底" in bounce_reason or "下跌中继" in bounce_reason):
+                        # 重新评估：是否处于低位横盘区间
+                        in_range = (low_20d > 0 and high_20d > 0
+                                    and current_price < high_20d * 0.85
+                                    and current_price > low_20d * 1.05)
+                        if in_range:
+                            # 在低位区间内横盘，主力仍在吸筹 → 给横盘吸筹分替代反弹分
+                            score += 15; dim_bounce_quality = 15
+
                 score = max(0, score)
+
+                # ============ 震荡筑底独立评分 ============
+                is_consolidation = (market_pattern == "震荡筑底")
+                consolidation_score = 0
+                if is_consolidation:
+                    # 1. 低位确认（15分）
+                    if high_60d > 0:
+                        price_position = current_price / high_60d
+                        if price_position < 0.75:
+                            consolidation_score += 15
+                        elif price_position < 0.85:
+                            consolidation_score += 10
+                        elif price_position < 0.95:
+                            consolidation_score += 5
+
+                    # 2. 横盘质量（20分）：用收盘价波动率
+                    if close_volatility_20d < 0.03:
+                        consolidation_score += 20
+                    elif close_volatility_20d < 0.05:
+                        consolidation_score += 15
+                    elif close_volatility_20d < 0.08:
+                        consolidation_score += 10
+
+                    # 3. 主力吸筹（35分）
+                    if main_30d > 0:
+                        consolidation_score += 10
+                    if main_10d > 0:
+                        consolidation_score += 10
+                    if main_5d > 0:
+                        consolidation_score += 10
+                    if main_5d > 0 and price_5d_change < 0:
+                        consolidation_score += 5  # 逆势吸筹
+
+                    # 4. 散户割肉（20分）
+                    if retail_30d < 0:
+                        consolidation_score += 20
+
+                    # 5. 风险扣分（10分）
+                    if max_decline_10d_pct < -0.05:
+                        consolidation_score -= 10
+
+                    consolidation_score = max(0, consolidation_score)
+                    # 震荡筑底形态下，使用独立评分
+                    score = consolidation_score
 
                 # 评级
                 if score >= 80: grade = 'A'
@@ -3954,72 +4078,129 @@ class TushareAPI:
                 # ============ 操作建议（场景判断） ============
                 stop_loss = 0
                 target = 0
+                position_advice = ""
+                hold_period = ""
+                add_point = ""
+                breakout_confirm = ""
 
-                # 场景A-1：黄金买点（最强信号）
-                if (score >= 70 and callback_ratio < 0.50 and current_price > rebound_low * 1.02
-                        and main_5d > 0 and price_5d_change < 0 and retail_5d < 0):
-                    advice_scene = "A-1"
-                    advice_meaning = "低位反弹后缩量回调，主力逆势吸筹，散户恐慌割肉"
-                    advice_action = "积极介入"
-                    stop_loss = rebound_low * 0.98
-                    target = rebound_high * 1.10
+                # 先判断是否处于"反弹后回调"阶段
+                is_pullback = TushareAPI._is_pullback_phase(
+                    closes_10d=prices_10d,
+                    current_price=current_price,
+                )
 
-                # 场景A-2：优质买点
-                elif (score >= 60 and callback_ratio < 0.70 and current_price > rebound_low
-                      and main_5d > 0 and price_5d_change < 0):
-                    advice_scene = "A-2"
-                    advice_meaning = "回调较深但主力未撤退，洗盘尾声即将二次拉升"
-                    advice_action = "分批介入"
-                    stop_loss = rebound_low * 0.95
-                    target = rebound_high
+                if is_pullback:
+                    # ============ 回调阶段建议 ============
+                    if (score >= 70 and callback_ratio < 0.50 and current_price > rebound_low * 1.02
+                            and main_5d > 0 and price_5d_change < 0 and retail_5d < 0):
+                        advice_scene = "A-1"
+                        advice_meaning = "低位反弹后缩量回调，主力逆势吸筹，散户恐慌割肉"
+                        advice_action = "积极介入"
+                        stop_loss = rebound_low * 0.98
+                        target = rebound_high * 1.10
+                        position_advice = "60-80%"
+                        hold_period = "5-10个交易日"
 
-                # 场景B-1：观察等待
-                elif (score >= 50 and rebound_amplitude > 0.15 and current_price > rebound_low and main_5d > 0):
-                    advice_scene = "B-1"
-                    advice_meaning = "有反弹但主力吸筹力度偏弱，需要时间洗盘"
-                    advice_action = "关注，等缩量回调或主力加速流入"
-                    stop_loss = rebound_low * 0.95
-                    target = 0
+                    elif (score >= 60 and callback_ratio < 0.70 and current_price > rebound_low
+                          and main_5d > 0 and price_5d_change < 0):
+                        advice_scene = "A-2"
+                        advice_meaning = "回调较深但主力未撤退，洗盘尾声即将二次拉升"
+                        advice_action = "分批介入"
+                        stop_loss = rebound_low * 0.95
+                        target = rebound_high
+                        position_advice = "40-60%"
+                        hold_period = "5-10个交易日"
 
-                # 场景B-2：谨慎观察
-                elif (score >= 50 and rebound_amplitude > 0.15 and current_price > rebound_low):
-                    advice_scene = "B-2"
-                    advice_meaning = "反弹后主力未跟进，可能由散户或游资推动"
-                    advice_action = "暂不介入，等主力流入确认"
-                    stop_loss = rebound_low * 0.95
-                    target = 0
+                    elif (score >= 50 and rebound_amplitude > 0.15 and current_price > rebound_low and main_5d > 0):
+                        advice_scene = "B-1"
+                        advice_meaning = "有反弹但主力吸筹力度偏弱"
+                        advice_action = "关注，等缩量回调或主力加速流入"
+                        stop_loss = rebound_low * 0.95
+                        position_advice = "0"
+                        hold_period = "观望"
 
-                # 场景C：诱多陷阱
-                elif (score < 50 and main_5d < -abs(main_30d) * 0.15 and price_5d_change < -0.05):
-                    advice_scene = "C"
-                    advice_meaning = "反弹可能是诱多，主力已出货，当前加速下跌"
-                    advice_action = "回避"
-                    stop_loss = 0
-                    target = 0
+                    elif (score >= 50 and rebound_amplitude > 0.15 and current_price > rebound_low):
+                        advice_scene = "B-2"
+                        advice_meaning = "反弹后主力未跟进，可能由散户或游资推动"
+                        advice_action = "暂不介入，等主力流入确认"
+                        stop_loss = rebound_low * 0.95
+                        position_advice = "0"
+                        hold_period = "观望"
 
-                # 场景D：下跌趋势
-                elif current_price <= rebound_low:
-                    advice_scene = "D"
-                    advice_meaning = "已跌破反弹低点，不是回调是新一轮下跌"
-                    advice_action = "坚决回避"
-                    stop_loss = 0
-                    target = 0
+                    elif (score >= 40 and current_price > rebound_low * 0.98 and current_price <= rebound_low * 1.02):
+                        advice_scene = "B-3"
+                        advice_meaning = "回调已接近反弹低点，若跌破则趋势破坏"
+                        advice_action = "暂不介入，观察是否跌破低点"
+                        stop_loss = rebound_low * 0.98
+                        position_advice = "0"
+                        hold_period = "观望"
 
-                # 场景E：反弹高位
-                elif current_price >= rebound_high * 0.95:
-                    advice_scene = "E"
-                    advice_meaning = "已接近反弹高点，不是回调阶段是反弹末期"
-                    advice_action = "不追，等回调"
-                    stop_loss = 0
-                    target = 0
+                    elif current_price >= rebound_high * 0.95:
+                        advice_scene = "E"
+                        advice_meaning = "已接近反弹高点，不是回调阶段是反弹末期"
+                        advice_action = "不追，等回调"
+                        stop_loss = rebound_high * 0.95
+                        position_advice = "0"
+                        hold_period = "观望"
 
-                # 场景F：信号不明
+                    else:
+                        advice_scene = "F"
+                        advice_meaning = "处于反弹后回调阶段，但指标矛盾"
+                        advice_action = "观望"
+                        position_advice = "0"
+                        hold_period = "观望"
+
                 else:
-                    advice_scene = "F"
-                    advice_meaning = "各项指标矛盾，无法形成明确判断"
-                    advice_action = "观望"
-                    stop_loss = 0
-                    target = 0
+                    # ============ 震荡筑底阶段建议 ============
+                    consolidation_range = high_20d - low_20d
+                    consolidation_center = (high_20d + low_20d) / 2
+                    current_position = (current_price - low_20d) / consolidation_range if consolidation_range > 0 else 0.5
+
+                    if (score >= 70 and main_30d > 0 and main_10d > 0 and main_5d > 0
+                            and retail_30d < 0 and current_position > 0.60):
+                        advice_scene = "G-1"
+                        advice_meaning = "低位横盘已久，主力吸筹充分，当前接近突破位"
+                        advice_action = "积极介入，突破加仓"
+                        stop_loss = low_20d * 0.98
+                        target = high_20d * 1.15
+                        breakout_confirm = f"放量突破{high_20d:.2f}"
+                        position_advice = "50-70%"
+                        hold_period = "10-20个交易日"
+
+                    elif (score >= 60 and main_30d > 0 and main_10d > 0 and retail_30d < 0):
+                        advice_scene = "G-2"
+                        advice_meaning = "低位横盘，主力在悄悄吸筹，但尚未完成"
+                        advice_action = "分批建仓，越跌越买"
+                        stop_loss = low_20d * 0.95
+                        target = high_20d * 1.10
+                        add_point = f"跌至{consolidation_center:.2f}附近"
+                        position_advice = "30-50%"
+                        hold_period = "10-20个交易日"
+
+                    elif (score >= 50 and main_30d > 0):
+                        advice_scene = "G-3"
+                        advice_meaning = "有横盘迹象，但主力吸筹力度不够，可能还需要时间"
+                        advice_action = "关注，等主力加速流入或放量突破"
+                        stop_loss = low_20d * 0.95
+                        target = high_20d
+                        add_point = f"放量突破{high_20d:.2f}"
+                        position_advice = "0-20%"
+                        hold_period = "观望"
+
+                    elif score >= 40:
+                        advice_scene = "G-4"
+                        advice_meaning = "价格横盘但主力未明显介入，可能是无主力状态"
+                        advice_action = "暂不介入，等主力信号"
+                        add_point = "主力5日转正且放量"
+                        position_advice = "0"
+                        hold_period = "观望"
+
+                    else:
+                        advice_scene = "F"
+                        advice_meaning = "处于震荡筑底阶段，但指标不足"
+                        advice_action = "观望"
+                        position_advice = "0"
+                        hold_period = "观望"
 
                 # ============ 买卖信号判断 ============
                 buy_signal = None
@@ -4070,6 +4251,7 @@ class TushareAPI:
                     "dim_retail_panic": dim_retail_panic,
                     "dim_trend_verify": dim_trend,
                     "dim_risk_warning": dim_risk,
+                    "dim_bounce_quality": dim_bounce_quality,
                     "main_20d": main_20d,
                     "retail_20d": retail_20d,
                     "main_10d": main_10d,
@@ -4097,6 +4279,14 @@ class TushareAPI:
                     "advice_action": advice_action,
                     "stop_loss": round(stop_loss, 2),
                     "target": round(target, 2),
+                    "position_advice": position_advice,
+                    "hold_period": hold_period,
+                    "add_point": add_point,
+                    "breakout_confirm": breakout_confirm,
+                    "bounce_valid": bounce_valid, "bounce_reason": bounce_reason,
+                    "market_pattern": market_pattern,
+                    "consolidation_score": consolidation_score if is_consolidation else 0,
+                    "is_pullback": is_pullback,
                 })
             except Exception as e:
                 import traceback
@@ -4121,6 +4311,7 @@ class TushareAPI:
             "condition_g": False, "condition_h": False,
             "dim_main_depth": 0, "dim_retail_panic": 0,
             "dim_trend_verify": 0, "dim_risk_warning": 0,
+            "dim_bounce_quality": 0,
             "main_20d": 0, "retail_20d": 0,
             "main_10d": 0, "retail_10d": 0, "main_5d": 0, "retail_5d": 0,
             "circ_mv": 0, "total_amount_20d": 0, "main_in_rate": 0,
@@ -4133,6 +4324,11 @@ class TushareAPI:
             "buy_signal": None, "sell_signal": None, "sell_reason": "",
             "advice_scene": "", "advice_meaning": "", "advice_action": "",
             "stop_loss": 0, "target": 0,
+            "position_advice": "", "hold_period": "", "add_point": "", "breakout_confirm": "",
+            "bounce_valid": False, "bounce_reason": "",
+            "market_pattern": "不明",
+            "consolidation_score": 0,
+            "is_pullback": False,
         }
 
     @staticmethod
@@ -4175,6 +4371,155 @@ class TushareAPI:
             if zdf < -1 and main_in_val > 0:
                 return True
         return False
+
+    @staticmethod
+    def _identify_pattern(max_gain_10d: float,
+                          max_decline_10d: float,
+                          closes_20d: List[float],
+                          close_volatility_20d: float,
+                          trend_20d: float,
+                          current_price: float,
+                          high_60d: float) -> str:
+        """
+        识别当前处于什么形态
+
+        Returns:
+            '主升浪崩盘' | '反弹后回调' | '震荡筑底' | '下跌趋势' | '不明'
+        """
+        # 1. 检查是否有"急涨+急跌"（主升浪崩盘）
+        if max_gain_10d > 0.20 and max_decline_10d < -0.15:
+            return '主升浪崩盘'
+
+        # 2. 检查是否处于"反弹后的回调"
+        if closes_20d and len(closes_20d) >= 10:
+            closes_10d = closes_20d[-10:]
+            high_close_10d = max(closes_10d)
+            high_idx = closes_10d.index(high_close_10d)
+            # 找高点之前的最低收盘价
+            before_high_closes = closes_10d[:high_idx + 1]
+            low_close_10d = min(before_high_closes) if before_high_closes else high_close_10d
+
+            # 当前价在高点附近 → 不是回调
+            if high_close_10d > 0 and current_price >= high_close_10d * 0.98:
+                pass  # 不在回调，继续判断
+            elif low_close_10d > 0 and current_price < low_close_10d * 0.98:
+                pass  # 已跌破低点，不是回调
+            else:
+                # 在高点和低点之间，可能是回调
+                if high_close_10d > 0:
+                    callback_pct = (high_close_10d - current_price) / high_close_10d
+                else:
+                    callback_pct = 0
+                if low_close_10d > 0:
+                    bounce_pct_10d = (high_close_10d - low_close_10d) / low_close_10d
+                else:
+                    bounce_pct_10d = 0
+
+                if bounce_pct_10d > 0.10 and callback_pct > 0.03:
+                    return '反弹后回调'
+
+        # 3. 检查是否"震荡筑底"：波动小、无趋势、相对60日高点低位
+        if (close_volatility_20d < 0.08 and abs(trend_20d) < 0.10
+                and high_60d > 0 and current_price < high_60d * 0.85):
+            return '震荡筑底'
+
+        # 4. 检查是否"下跌趋势"
+        if trend_20d < -0.15:
+            return '下跌趋势'
+
+        return '不明'
+
+    @staticmethod
+    def _is_pullback_phase(closes_10d: List[float], current_price: float) -> bool:
+        """
+        判断是否处于"反弹后的回调"阶段
+        条件：反弹幅度>10%，且当前价在高点和低点之间（有回调）
+        """
+        if not closes_10d or len(closes_10d) < 3:
+            return False
+
+        high_close_10d = max(closes_10d)
+        low_close_10d = min(closes_10d)
+
+        if high_close_10d <= 0 or low_close_10d <= 0:
+            return False
+
+        # 反弹幅度
+        bounce_amp = (high_close_10d - low_close_10d) / low_close_10d
+        # 回调幅度
+        callback_pct = (high_close_10d - current_price) / high_close_10d
+
+        # 必须满足：有反弹（>10%）、有回调（>3%）、未跌破低点
+        return (bounce_amp > 0.10 and callback_pct > 0.03
+                and current_price > low_close_10d * 0.98)
+
+    @staticmethod
+    def is_valid_bounce(klines: List[Dict], window: int = 10) -> Tuple[bool, str, float]:
+        """
+        判定近window日是否有有效反弹
+        核心：用收盘价而非日内价，避免脉冲误导
+
+        Args:
+            klines: K线数据列表，每条包含 sp(收盘)、kp(开盘)、zdf(涨跌幅)、date(日期)
+            window: 近N个交易日窗口
+
+        Returns:
+            (是否有效反弹, 原因描述, 反弹幅度)
+        """
+        period = klines[-window:] if len(klines) >= window else klines
+        if len(period) < 3:
+            return False, "K线数据不足(需至少3条)", 0.0
+
+        # 提取收盘价序列
+        closes = [_to_float(k.get("sp", 0)) for k in period]
+        opens = [_to_float(k.get("kp", 0)) for k in period]
+        zdflist = [_to_float(k.get("zdf", 0)) for k in period]
+
+        # 1. 找反弹低点（最低收盘价的位置）
+        low_val = min(closes)
+        low_idx = closes.index(low_val)
+
+        # 2. 找反弹高点（在低点之后的最高收盘价）
+        after_low_closes = closes[low_idx + 1:]
+        if not after_low_closes:
+            return False, "无低点后数据", 0.0
+
+        high_val = max(after_low_closes)
+        high_idx = closes.index(high_val, low_idx + 1)
+
+        # 3. 反弹幅度（用收盘价）
+        bounce_pct = (high_val - low_val) / low_val if low_val > 0 else 0
+
+        # 窗口内整体价格波动范围（用于区分震荡筑底/下跌中继）
+        window_min_close = min(closes)
+        window_max_close = max(closes)
+        window_range = (window_max_close - window_min_close) / window_min_close if window_min_close > 0 else 0
+
+        # 4. 反弹持续性（从低点到高点的区间）
+        bounce_slice = list(range(low_idx, high_idx + 1))
+        yang_count = sum(1 for i in bounce_slice if closes[i] > opens[i])
+        yang_ratio = yang_count / len(bounce_slice) if bounce_slice else 0
+        max_daily_gain = max(zdflist[i] for i in bounce_slice) if bounce_slice else 0
+
+        # 5. 反弹中收盘价是否创新低（低于低点收盘价的98%）
+        for i in bounce_slice:
+            if i > low_idx and closes[i] < low_val * 0.98:
+                return False, "反弹中收盘价创新低", 0.0
+
+        # 6. 综合判定
+        if bounce_pct < 0.10:
+            if window_range < 0.15:
+                return False, f"震荡筑底(幅度{bounce_pct:.1%})", bounce_pct
+            else:
+                return False, f"下跌中继(幅度{bounce_pct:.1%})", bounce_pct
+        if yang_count < 3:
+            return False, f"阳线数不足({yang_count}根)", bounce_pct
+        if yang_ratio < 0.50:
+            return False, f"阳线占比不足({yang_ratio:.0%})", bounce_pct
+        if max_daily_gain < 0.03:
+            return False, f"无中阳线(最大涨幅{max_daily_gain:.1%})", bounce_pct
+
+        return True, f"有效反弹(幅度{bounce_pct:.1%},阳线{yang_ratio:.0%})", bounce_pct
 
     @staticmethod
     def get_top_list(date: Optional[str] = None) -> List[Dict[str, Any]]:

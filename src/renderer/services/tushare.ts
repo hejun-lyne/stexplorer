@@ -1356,6 +1356,7 @@ interface MainInStockResult {
   dim_retail_panic: number;      // 散户割肉力度得分（20日，20分）
   dim_trend_verify: number;      // 近期趋势验证得分（10日，20分）
   dim_risk_warning: number;      // 短期风险预警得分（5日，20分，可为负）
+  dim_bounce_quality: number;    // 低位反弹质量得分（10日，25分）
   /** 指标数据 */
   main_20d: number;        // 主力20日累计(元)
   retail_20d: number;      // 散户20日累计(元)
@@ -1379,11 +1380,21 @@ interface MainInStockResult {
   sell_signal: string | null;  // 'SELL' | null
   sell_reason: string;
   /** 操作建议 */
-  advice_scene: string;     // 场景A-1/A-2/B-1/B-2/C/D/E/F
+  advice_scene: string;     // 场景A-1/A-2/B-1/B-2/B-3/E/F/G-1/G-2/G-3/G-4
   advice_meaning: string;   // 含义说明
   advice_action: string;    // 操作建议
   stop_loss: number;        // 止损价
   target: number;           // 目标价
+  position_advice: string;  // 仓位建议
+  hold_period: string;      // 持有周期
+  add_point: string;        // 加仓点
+  breakout_confirm: string; // 突破确认
+  /** 有效反弹检查 */
+  bounce_valid: boolean;    // 是否有有效反弹
+  bounce_reason: string;    // 反弹判断原因
+  market_pattern: string;   // 形态识别：主升浪崩盘|反弹后回调|震荡筑底|下跌趋势|不明
+  consolidation_score: number;  // 震荡筑底独立评分
+  is_pullback: boolean;     // 是否处于反弹后回调阶段
 }
 
 export async function MainInFilterStocksFromTushare(

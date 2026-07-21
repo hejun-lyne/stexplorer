@@ -127,8 +127,8 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
 
     const r = mainInResult;
     const scene = r.advice_scene || '';
-    const isPositive = scene.startsWith('A') || scene.startsWith('B');
-    const isNegative = scene === 'C' || scene === 'D' || scene === 'E';
+    const isPositive = scene.startsWith('A') || scene.startsWith('B') || scene === 'G-1' || scene === 'G-2';
+    const isNegative = scene === 'E' || scene === '前置过滤';
     const actionColor = isPositive ? '#52c41a' : isNegative ? '#ff4d4f' : '#faad14';
 
     return {
@@ -139,6 +139,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
         retailPanic: r.dim_retail_panic ?? 0,
         trend: r.dim_trend_verify ?? 0,
         risk: r.dim_risk_warning ?? 0,
+        bounceQuality: r.dim_bounce_quality ?? 0,
       },
       main_in_rate: 0, // 由资金流向数据补充
       advice: scene ? {
@@ -148,6 +149,10 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
         actionColor,
         stop_loss: r.stop_loss,
         target: r.target,
+        position_advice: r.position_advice || '',
+        hold_period: r.hold_period || '',
+        add_point: r.add_point || '',
+        breakout_confirm: r.breakout_confirm || '',
       } : null,
       // 后端返回的完整数据，供UI直接使用
       main_20d: r.main_20d,
@@ -161,6 +166,13 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
       buy_signal: r.buy_signal,
       sell_signal: r.sell_signal,
       sell_reason: r.sell_reason,
+      basic_passed: r.basic_passed,
+      basic_reason: r.basic_reason || '',
+      bounce_valid: r.bounce_valid,
+      bounce_reason: r.bounce_reason || '',
+      market_pattern: r.market_pattern || '不明',
+      consolidation_score: r.consolidation_score ?? 0,
+      is_pullback: r.is_pullback ?? false,
       condition_a: r.condition_a,
       condition_b: r.condition_b,
       condition_c: r.condition_c,
@@ -451,6 +463,12 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                           max: 20,
                           tooltip: '5日主力净流出 > |20日主力净流入| × 30% → 扣20分（出货风险）\n5日主力净流出 但未达上述阈值 → 扣10分（警惕）\n其他 → 0分',
                         },
+                        {
+                          label: '低位反弹质量(10日)',
+                          score: mainInScore.dims.bounceQuality,
+                          max: 25,
+                          tooltip: '用收盘价判断有效反弹，避免日内脉冲误导：\n\n【有效反弹】按反弹幅度阶梯：\n> 20% → 15分\n> 15% → 12分\n> 12% → 8分\n≥ 10% → 4分\n\n【回调深度加分】反弹后充分回调是健康信号：\n> 30% 回调占比 → +10分\n> 15% 回调占比 → +6分\n> 0% → +3分\n\n【震荡筑底/下跌中继】非有效反弹但低位横盘+主力吸筹：\n当前价 < 20日最高 × 85% 且当前价 > 20日最低 × 105% → 15分',
+                        },
                       ].map((dim) => (
                         <Row key={dim.label} style={{ marginBottom: 4, fontSize: 13, alignItems: 'center' }}>
                           <Col span={10}>
@@ -495,12 +513,16 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                               title={<div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
                                 A-1 黄金买点：低位反弹后缩量回调，主力逆势吸筹，散户恐慌割肉{'\n'}
                                 A-2 优质买点：回调较深但主力未撤退，洗盘尾声即将二次拉升{'\n'}
-                                B-1 观察等待：反弹但主力吸筹偏弱，需要时间洗盘{'\n'}
+                                B-1 观察等待：反弹但主力吸筹偏弱{'\n'}
                                 B-2 谨慎观察：反弹后主力未跟进，可能散户或游资推动{'\n'}
-                                C 诱多陷阱：主力已出货，当前加速下跌{'\n'}
-                                D 下跌趋势：已跌破反弹低点，新一轮下跌{'\n'}
+                                B-3 回调过深：回调接近反弹低点，若跌破则趋势破坏{'\n'}
                                 E 反弹高位：接近反弹高点，反弹末期{'\n'}
-                                F 信号不明：指标矛盾，无法明确判断
+                                F 信号不明：指标矛盾，无法明确判断{'\n'}
+                                {'\n'}
+                                G-1 筑底突破：低位横盘，主力吸筹充分，接近突破位{'\n'}
+                                G-2 筑底吸筹：低位横盘，主力悄悄吸筹，尚未完成{'\n'}
+                                G-3 筑底观察：有横盘迹象，主力吸筹力度不够{'\n'}
+                                G-4 弱势横盘：价格横盘但主力未介入
                               </div>}
                               placement="top"
                             >
@@ -509,6 +531,24 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                           </Col>
                           <Col span={8} style={{ fontSize: 12, color: 'var(--text-color)' }}>
                             {mainInScore.advice.meaning}
+                            {mainInScore.basic_passed === false && mainInScore.basic_reason && mainInScore.basic_reason !== '通过' && (
+                              <div style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginTop: 4 }}>
+                                {mainInScore.basic_reason}
+                              </div>
+                            )}
+                            {mainInScore.bounce_valid === false && mainInScore.bounce_reason && (
+                              <div style={{ fontSize: 11, color: '#faad14', marginTop: 2 }}>
+                                反弹: {mainInScore.bounce_reason}
+                              </div>
+                            )}
+                            {mainInScore.market_pattern && mainInScore.market_pattern !== '不明' && (
+                              <div style={{ fontSize: 11, color: '#1890ff', marginTop: 2 }}>
+                                形态: {mainInScore.market_pattern}
+                                {mainInScore.consolidation_score > 0 && (
+                                  <span>（震荡评分{mainInScore.consolidation_score}分）</span>
+                                )}
+                              </div>
+                            )}
                           </Col>
                           <Col span={5}>
                             <span style={{
@@ -522,22 +562,42 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                           <Col span={7} style={{ fontSize: 11, color: 'var(--secondary-text-color)', textAlign: 'right' }}>
                           </Col>
                         </Row>
-                        {(mainInScore.advice.stop_loss || mainInScore.advice.target) && (
+                        {(mainInScore.advice.stop_loss || mainInScore.advice.target || mainInScore.advice.position_advice) && (
                           <Row align="middle" style={{ marginTop: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>
                             {mainInScore.advice.stop_loss > 0 ? (
-                              <>
-                                <Col span={4} />
-                                <Col span={8}>
-                                  止损价：<span style={{ color: '#ff4d4f', fontWeight: 'bold' }}>{mainInScore.advice.stop_loss.toFixed(2)}</span>
-                                </Col>
-                              </>
-                            ) : <Col span={12} />}
-                            {mainInScore.advice.target > 0 ? (
-                              <Col span={5}>
-                                目标价：<span style={{ color: '#52c41a', fontWeight: 'bold' }}>{mainInScore.advice.target.toFixed(2)}</span>
+                              <Col span={6}>
+                                止损：<span style={{ color: '#ff4d4f', fontWeight: 'bold' }}>{mainInScore.advice.stop_loss.toFixed(2)}</span>
                               </Col>
-                            ) : null}
-                            <Col span={7} />
+                            ) : <Col span={6} />}
+                            {mainInScore.advice.target > 0 ? (
+                              <Col span={6}>
+                                目标：<span style={{ color: '#52c41a', fontWeight: 'bold' }}>{mainInScore.advice.target.toFixed(2)}</span>
+                              </Col>
+                            ) : <Col span={6} />}
+                            {mainInScore.advice.position_advice ? (
+                              <Col span={6}>
+                                仓位：<span style={{ fontWeight: 'bold' }}>{mainInScore.advice.position_advice}</span>
+                              </Col>
+                            ) : <Col span={6} />}
+                            {mainInScore.advice.hold_period ? (
+                              <Col span={6}>
+                                周期：<span style={{ fontWeight: 'bold' }}>{mainInScore.advice.hold_period}</span>
+                              </Col>
+                            ) : <Col span={6} />}
+                          </Row>
+                        )}
+                        {(mainInScore.advice.add_point || mainInScore.advice.breakout_confirm) && (
+                          <Row align="middle" style={{ marginTop: 4, fontSize: 11, color: 'var(--secondary-text-color)' }}>
+                            {mainInScore.advice.breakout_confirm ? (
+                              <Col span={12} style={{ color: '#1890ff' }}>
+                                突破确认：{mainInScore.advice.breakout_confirm}
+                              </Col>
+                            ) : <Col span={12} />}
+                            {mainInScore.advice.add_point ? (
+                              <Col span={12} style={{ color: '#faad14' }}>
+                                加仓点：{mainInScore.advice.add_point}
+                              </Col>
+                            ) : <Col span={12} />}
                           </Row>
                         )}
                       </div>
