@@ -4209,52 +4209,40 @@ class TushareAPI:
                         hold_period = "观望"
 
                 # ============ 买卖信号判断 ============
+                # 基于形态和评分生成买卖信号
                 buy_signal = None
                 buy_reason = ''
                 sell_signal = None
                 sell_reason = ''
 
-                # 形态A：反弹后回调的买入信号
-                if advice_scene == 'A-1' and score >= 70:
-                    # 检查回调是否结束：价格企稳 + 主力加速
-                    price_stable = abs(price_5d_change) < 0.02  # 近5日波动<2%
-                    main_accelerating = main_5d > main_10d * 0.6 if main_10d > 0 else main_5d > 0
-                    if price_stable and main_accelerating:
-                        buy_signal = 'A'
-                        buy_reason = f'黄金买点：回调结束，主力5日流入{main_5d / 1e8:.2f}亿，价格企稳'
-                    else:
-                        buy_signal = 'B'
-                        buy_reason = f'优质买点：回调中，主力持续流入'
-                elif advice_scene == 'A-2' and score >= 60:
-                    buy_signal = 'B'
-                    buy_reason = f'回调吸筹：主力5日流入{main_5d / 1e8:.2f}亿，散户割肉'
+                # ========== 形态A：反弹后回调 ==========
+                if advice_scene in ('A-1', 'A-2'):
+                    # 买入信号A（最强）：回调结束+主力加速流入
+                    if advice_scene == 'A-1' and score >= 70:
+                        # 检查是否回调结束：价格企稳+主力加速
+                        price_stable = abs(price_5d_change) < 0.02  # 近5日波动<2%
+                        main_accelerating = main_5d > main_10d * 0.6  # 5日占10日60%以上
+                        if price_stable and main_accelerating:
+                            buy_signal = 'A'
+                            buy_reason = f'黄金买点：回调结束，主力5日流入{main_5d / 1e8:.2f}亿，价格企稳'
+                        else:
+                            buy_signal = 'B'
+                            buy_reason = f'优质买点：回调中，主力持续流入'
 
-                # 卖出信号：形态A跌破反弹低点
-                if advice_scene in ('A-1', 'A-2') and sell_signal is None:
-                    if rebound_low > 0 and current_price < rebound_low * 0.98:
+                    # 买入信号B（稳健）：主力在回调中吸筹
+                    elif advice_scene == 'A-2' and score >= 60:
+                        buy_signal = 'B'
+                        buy_reason = f'回调吸筹：主力5日流入{main_5d / 1e8:.2f}亿，散户割肉'
+
+                    # 卖出信号：跌破反弹低点
+                    if current_price < rebound_low * 0.98:
                         sell_signal = 'SELL'
                         sell_reason = f'跌破反弹低点{rebound_low:.2f}，趋势破坏'
-                    elif target > 0 and current_price >= target * 0.95:
+
+                    # 卖出信号：反弹到目标位
+                    if target > 0 and current_price >= target * 0.95:
                         sell_signal = 'SELL'
                         sell_reason = f'接近目标价{target:.2f}，已达目标区间'
-
-                # 通用卖出/回避信号（非A形态或A形态未触发上述卖点时）
-                if sell_signal is None and score < 40:
-                    sell_signal = 'SELL'
-                    sell_reason = f"评分{score}分 < 40分，主力出货/散户接盘"
-                if sell_signal is None and len(detail_main) >= 3:
-                    last3_main = detail_main[-3:]
-                    all_outflow = all(v < 0 for v in last3_main)
-                    total_outflow = abs(sum(last3_main))
-                    if all_outflow and total_outflow > 5e7:
-                        sell_signal = 'SELL'
-                        sell_reason = f"连续3日主力净流出，累计{total_outflow / 1e4:.0f}万"
-                if sell_signal is None and retail_10d > 0:
-                    sell_signal = 'SELL'
-                    sell_reason = '散户10日累计转正（从割肉变追涨）'
-                if sell_signal is None and current_price >= high_10d and len(detail_main) > 0 and detail_main[-1] < 0:
-                    sell_signal = 'SELL'
-                    sell_reason = '股价突破近10日最高价但主力当日净流出（拉高出货）'
 
                 results.append({
                     "ts_code": ts_code,
