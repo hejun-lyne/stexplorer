@@ -1010,6 +1010,47 @@ export async function GetMoneyFlowFromTushare(secid: string, days?: number): Pro
   }
 }
 
+// ==================== 板块资金流向评分 ====================
+
+export interface BoardMoneyFlowScoreDim {
+  label: string;
+  score: number;
+  max: number;
+}
+
+export interface BoardMoneyFlowScoreResult {
+  score: number;
+  grade: string;
+  advice: string;
+  dims: {
+    strength: BoardMoneyFlowScoreDim;
+    divergence: BoardMoneyFlowScoreDim;
+    trend: BoardMoneyFlowScoreDim;
+    continuity: BoardMoneyFlowScoreDim;
+    risk: BoardMoneyFlowScoreDim;
+  };
+  main_rate: number;
+  main_20d: number;
+  retail_20d: number;
+  main_10d: number;
+  main_5d: number;
+  total_amount_20d: number;
+}
+
+export async function CalcBoardMoneyFlowScore(moneyFlow: Record<string, any>): Promise<BoardMoneyFlowScoreResult | null> {
+  try {
+    const result = await callTushare('calc_board_money_flow_score', { money_flow: moneyFlow });
+    if (result.error) {
+      console.error('[板块评分] 计算失败:', result.error);
+      return null;
+    }
+    return result as BoardMoneyFlowScoreResult;
+  } catch (error) {
+    logError(error, 'CalcBoardMoneyFlowScore', '板块资金流向评分失败');
+    return null;
+  }
+}
+
 // ==================== 基本面数据 ====================
 
 export async function GetFundamentalFromTushare(secid: string): Promise<any> {

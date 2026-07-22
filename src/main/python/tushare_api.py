@@ -3595,6 +3595,207 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
+    def calc_board_money_flow_score(money_flow: Dict[str, Any]) -> Dict[str, Any]:
+        """板块资金流向评分模型
+
+        针对板块的资金流向进行多维度评分，满分100分。
+
+        评分维度：
+        1. 主力资金强度(30分)：基于主力净流入率和绝对金额
+        2. 主力/散户背离(25分)：主力流入同时散户流出的背离程度
+        3. 资金趋势持续性(20分)：近期主力流入趋势加速情况
+        4. 流入连续性(15分)：主力连续流入天数
+        5. 短期风险预警(10分)：5日主力流出风险扣分
+
+        Args:
+            money_flow: get_money_flow() 返回的资金流向数据字典
+
+        Returns:
+            评分结果字典，包含总分、等级、各维度得分
+        """
+        if not money_flow or isinstance(money_flow, dict) and money_flow.get("error"):
+            return {"score": 0, "grade": "D", "error": "数据不可用"}
+
+        def _f(v):
+            try:
+                return float(v) if v is not None else 0.0
+            except (ValueError, TypeError):
+                return 0.0
+
+        main_1d = _f(money_flow.get("main_1d", 0))
+        main_3d = _f(money_flow.get("main_3d", 0))
+        main_5d = _f(money_flow.get("main_5d", 0))
+        main_10d = _f(money_flow.get("main_10d", 0))
+        main_20d = _f(money_flow.get("main_20d", 0))
+        retail_20d = _f(money_flow.get("retail_20d", 0))
+        retail_10d = _f(money_flow.get("retail_10d", 0))
+        retail_5d = _f(money_flow.get("retail_5d", 0))
+        main_rate = _f(money_flow.get("main_rate", 0))
+        total_amount_20d = _f(money_flow.get("total_amount_20d", 0))
+        detail_main = money_flow.get("detail_main", [])
+        detail_retail = money_flow.get("detail_retail", [])
+
+        # ============ 维度1: 主力资金强度 (满分30) ============
+        dim1_score = 0.0
+
+        # 1a. 主力净流入率得分 (15分)
+        if main_rate >= 10:
+            dim1_score += 15
+        elif main_rate >= 5:
+            dim1_score += 12
+        elif main_rate >= 2:
+            dim1_score += 8
+        elif main_rate >= 1:
+            dim1_score += 4
+        elif main_rate > 0:
+            dim1_score += 2
+
+        # 1b. 绝对金额得分 (15分)
+        if main_20d >= 50e8:
+            dim1_score += 15
+        elif main_20d >= 10e8:
+            dim1_score += 12
+        elif main_20d >= 5e8:
+            dim1_score += 8
+        elif main_20d >= 1e8:
+            dim1_score += 5
+        elif main_20d > 0:
+            dim1_score += 2
+
+        # ============ 维度2: 主力/散户背离度 (满分25) ============
+        dim2_score = 0.0
+
+        # 2a. 20日背离程度 (15分)
+        if main_20d > 0 and retail_20d < 0:
+            divergence_ratio = abs(retail_20d) / main_20d if main_20d > 0 else 0
+            if divergence_ratio >= 2:
+                dim2_score += 15
+            elif divergence_ratio >= 1:
+                dim2_score += 12
+            elif divergence_ratio >= 0.5:
+                dim2_score += 8
+            elif divergence_ratio > 0:
+                dim2_score += 5
+        elif main_20d > 0 and retail_20d > 0:
+            dim2_score += 2  # 主力流入但散户未割肉
+
+        # 2b. 10日背离天数 (10分)
+        detail_main_10d = detail_main[-10:] if len(detail_main) >= 10 else detail_main
+        detail_retail_10d = detail_retail[-10:] if len(detail_retail) >= 10 else detail_retail
+        if detail_main_10d and detail_retail_10d:
+            divergence_days = sum(
+                1 for m, r in zip(detail_main_10d, detail_retail_10d)
+                if _f(m) > 0 and _f(r) < 0
+            )
+            if divergence_days >= 7:
+                dim2_score += 10
+            elif divergence_days >= 5:
+                dim2_score += 7
+            elif divergence_days >= 3:
+                dim2_score += 4
+            elif divergence_days >= 1:
+                dim2_score += 2
+
+        # ============ 维度3: 资金趋势持续性 (满分20) ============
+        dim3_score = 0.0
+
+        # 3a. 10日 vs 20日趋势 (10分)
+        if main_10d > main_20d * 0.5 and main_10d > 0 and main_20d > 0:
+            dim3_score += 10
+        elif main_10d > 0:
+            dim3_score += 5
+
+        # 3b. 5日加速 (5分)
+        if main_5d > main_10d * 0.3 and main_5d > 0 and main_10d > 0:
+            dim3_score += 5
+
+        # 3c. 主力流入天数占比 (5分)
+        if detail_main_10d:
+            main_inflow_days = sum(1 for m in detail_main_10d if _f(m) > 0)
+            if main_inflow_days >= 8:
+                dim3_score += 5
+            elif main_inflow_days >= 6:
+                dim3_score += 3
+            elif main_inflow_days >= 4:
+                dim3_score += 1
+
+        # ============ 维度4: 流入连续性 (满分15) ============
+        dim4_score = 0.0
+        if detail_main:
+            consecutive = 0
+            for m in reversed(detail_main):
+                if _f(m) > 0:
+                    consecutive += 1
+                else:
+                    break
+            if consecutive >= 5:
+                dim4_score = 15
+            elif consecutive >= 3:
+                dim4_score = 10
+            elif consecutive >= 2:
+                dim4_score = 6
+            elif consecutive >= 1:
+                dim4_score = 3
+
+        # ============ 维度5: 短期风险预警 (满分10) ============
+        dim5_score = 10.0  # 默认满分，按风险扣分
+
+        # 5a. 5日主力流出风险
+        if main_5d < 0:
+            outflow_ratio = abs(main_5d) / abs(main_20d) if main_20d != 0 else 1
+            if outflow_ratio > 0.5:
+                dim5_score = 0   # 严重出货风险，扣光
+            elif outflow_ratio > 0.3:
+                dim5_score = 3   # 明显出货
+            else:
+                dim5_score = 6   # 轻度流出
+
+        # 5b. 3日转弱
+        if main_3d < 0 and main_1d < 0:
+            dim5_score = max(0, dim5_score - 3)
+
+        # ============ 汇总 ============
+        total_score = round(dim1_score + dim2_score + dim3_score + dim4_score + dim5_score, 1)
+
+        if total_score >= 75:
+            grade = "A"
+        elif total_score >= 55:
+            grade = "B"
+        elif total_score >= 35:
+            grade = "C"
+        else:
+            grade = "D"
+
+        # 生成操作建议
+        if grade == "A":
+            advice = "主力资金大幅流入，散户持续流出，资金面极强"
+        elif grade == "B":
+            advice = "主力资金流入明显，资金面偏多"
+        elif grade == "C":
+            advice = "主力资金流入一般，资金面中性"
+        else:
+            advice = "主力资金流出或流入不足，资金面偏弱"
+
+        return {
+            "score": total_score,
+            "grade": grade,
+            "advice": advice,
+            "dims": {
+                "strength": {"label": "主力资金强度", "score": dim1_score, "max": 30},
+                "divergence": {"label": "主力/散户背离", "score": dim2_score, "max": 25},
+                "trend": {"label": "资金趋势持续性", "score": dim3_score, "max": 20},
+                "continuity": {"label": "流入连续性", "score": dim4_score, "max": 15},
+                "risk": {"label": "短期风险预警", "score": dim5_score, "max": 10},
+            },
+            "main_rate": main_rate,
+            "main_20d": main_20d,
+            "retail_20d": retail_20d,
+            "main_10d": main_10d,
+            "main_5d": main_5d,
+            "total_amount_20d": total_amount_20d,
+        }
+
+    @staticmethod
     def main_in_filter(trade_date: str, stocks: List[str],
                        min_circ_mv: float = 20,
                        min_avg_amount: float = 5000,
@@ -3716,18 +3917,22 @@ class TushareAPI:
                 high_60d = max(_to_float(k.get("zg", 0)) for k in recent60) if recent60 else current_price
 
                 # ============ 反弹相关指标 ============
-                # 反弹低点（近10日日内最低价）
-                rebound_low = low_10d
-                # 反弹高点：找到反弹低点所在K线的位置，取之后最高的日内最高价（zg）
-                rebound_high = current_price
-                if klines_10d:
-                    low_idx = -1
-                    for i, k in enumerate(klines_10d):
-                        if _to_float(k.get("zd", 0)) == rebound_low:
-                            low_idx = i
-                            break
-                    if low_idx >= 0:
-                        rebound_high = max(_to_float(k.get("zg", 0)) for k in klines_10d[low_idx:])
+                # 反弹高点：近10日最高收盘价所在K线的日内最高价(zg)
+                # 反弹低点：该高点之前的日内最低价(zd)，即起涨点
+                # 关键：必须先有低点再有高点（反弹），不能是持续下跌后的最后一天低点
+                if prices_10d and len(prices_10d) >= 3:
+                    peak_close = max(prices_10d)
+                    peak_idx = prices_10d.index(peak_close)
+                    if peak_idx > 0:
+                        rebound_high = _to_float(klines_10d[peak_idx].get("zg", 0))
+                        rebound_low = min(_to_float(k.get("zd", 0)) for k in klines_10d[:peak_idx])
+                    else:
+                        # 峰值在第一天 → 持续下跌/上涨，不是有效反弹
+                        rebound_low = low_10d
+                        rebound_high = current_price
+                else:
+                    rebound_low = low_10d
+                    rebound_high = current_price
                 # 近10日最大反弹幅度
                 rebound_amplitude = (rebound_high - rebound_low) / rebound_low if rebound_low > 0 else 0
                 # 回调幅度 = (反弹高点 - 当前价) / 反弹高点
@@ -3743,6 +3948,11 @@ class TushareAPI:
                 retail_20d = sum(detail_retail[-20:]) if detail_retail else 0
                 # 5日前收盘价
                 price_5d_ago = prices[-5] if len(prices) >= 5 else 0
+                # 近60日收盘价（用于形态识别判断低位）
+                closes_60d = [_to_float(k.get("sp", 0)) for k in recent60] if recent60 else []
+                # 成交量序列（用于缩量判断）
+                volumes = [_to_float(k.get("cjl", 0)) for k in klines]
+
                 # 近20日波动率（日涨跌幅标准差，用于震荡筑底判断）
                 zdf_20d = [_to_float(k.get("zdf", 0)) / 100 for k in recent20] if recent20 else []
                 if len(zdf_20d) >= 5:
@@ -3771,16 +3981,68 @@ class TushareAPI:
                     close_volatility_20d = 0
                     trend_20d = 0
 
-                # 形态识别
-                market_pattern = TushareAPI._identify_pattern(
-                    max_gain_10d=max_gain_10d,
-                    max_decline_10d=max_decline_10d_pct,
-                    closes_20d=closes_20d,
-                    close_volatility_20d=close_volatility_20d,
-                    trend_20d=trend_20d,
-                    current_price=current_price,
-                    high_60d=high_60d,
-                )
+                # ============ 形态识别（按优先级顺序，先排除最危险的） ============
+                market_pattern = "不明"
+                is_excluded = False
+
+                # 1. 主升浪崩盘 → 直接排除
+                if TushareAPI._is_crash_after_pump(closes_20d, detail_main):
+                    market_pattern = "主升浪崩盘"
+                    is_excluded = True
+
+                # 2. 持续下跌趋势 → 直接排除
+                if not is_excluded and TushareAPI._is_downtrend(closes_20d):
+                    market_pattern = "下跌趋势"
+                    is_excluded = True
+
+                # 3. 下跌末期/寻底阶段 → 独立评分
+                if not is_excluded and TushareAPI._is_bottoming(
+                        closes_20d, current_price, volumes, detail_main):
+                    market_pattern = "下跌末期"
+
+                # 4. 震荡筑底
+                elif not is_excluded and TushareAPI._is_consolidation_pattern(
+                        closes_20d, closes_60d, current_price):
+                    market_pattern = "震荡筑底"
+
+                # 5. 反弹后回调
+                elif not is_excluded and TushareAPI._is_pullback_pattern(
+                        closes_20d, current_price, detail_main):
+                    market_pattern = "反弹后回调"
+
+                # 主升浪崩盘/下跌趋势 → 直接排除，返回0分
+                if is_excluded:
+                    results.append({
+                        "ts_code": ts_code, "name": name,
+                        "score": 0, "grade": "D",
+                        "basic_passed": False, "basic_reason": f"形态排除: {market_pattern}",
+                        "condition_a": False, "condition_b": False,
+                        "condition_c": False, "condition_d": False,
+                        "condition_e": False, "condition_f": False,
+                        "condition_g": False, "condition_h": False,
+                        "dim_main_depth": 0, "dim_retail_panic": 0,
+                        "dim_trend_verify": 0, "dim_risk_warning": 0,
+                        "dim_bounce_quality": 0,
+                        "main_20d": main_20d, "retail_20d": retail_20d,
+                        "main_10d": main_10d, "retail_10d": retail_10d, "main_5d": main_5d, "retail_5d": retail_5d,
+                        "circ_mv": circ_mv, "total_amount_20d": total_amount_20d, "main_in_rate": 0,
+                        "current_price": current_price,
+                        "max_5d_return": max_5d_return, "decline_main_in_days": 0,
+                        "cost_deviation": 0,
+                        "avg_price_10d": avg_price_10d, "high_10d": high_10d, "low_10d": low_10d,
+                        "avg_amount_10d": avg_amount_10d, "max_decline_10d": max_decline_10d,
+                        "chg_10d": chg_10d,
+                        "buy_signal": None, "buy_reason": "", "sell_signal": "SELL", "sell_reason": f"形态排除: {market_pattern}",
+                        "advice_scene": "排除", "advice_meaning": f"处于{market_pattern}阶段，不符合建仓条件", "advice_action": "回避",
+                        "stop_loss": 0, "target": 0,
+                        "position_advice": "0", "hold_period": "观望", "add_point": "", "breakout_confirm": "",
+                        "bounce_valid": bounce_valid, "bounce_reason": bounce_reason,
+                        "market_pattern": market_pattern,
+                        "consolidation_score": 0,
+                        "consolidation_metrics": {},
+                        "is_pullback": False,
+                    })
+                    continue
 
                 # ============ 前置过滤（基础硬性条件） ============
                 pre_filter_fail_reasons = []
@@ -4065,6 +4327,21 @@ class TushareAPI:
                     # 震荡筑底形态下，使用独立评分
                     score = consolidation_score
 
+                # ============ 下跌末期：采用独立评分（覆盖常规评分） ============
+                if market_pattern == "下跌末期":
+                    score = TushareAPI._score_bottoming(closes_20d, current_price, volumes, detail_main)
+                    # 下跌末期不计入常规维度，统一清零
+                    dim_main_depth = 0
+                    dim_retail_panic = 0
+                    dim_trend = 0
+                    dim_risk = 0
+                    dim_bounce_quality = 0
+                    # 防止被震荡筑底的建议误判
+                    is_consolidation = False
+                    consolidation_score = 0
+                    consol_range = (0.0, 0.0)
+                    consol_metrics = {}
+
                 # 评级
                 if score >= 80: grade = 'A'
                 elif score >= 60: grade = 'B'
@@ -4080,10 +4357,11 @@ class TushareAPI:
                 breakout_confirm = ""
 
                 # 先判断是否处于"反弹后回调"阶段
-                is_pullback = TushareAPI._is_pullback_phase(
-                    closes_10d=prices_10d,
-                    current_price=current_price,
-                )
+                is_pullback, pullback_peak_idx, pullback_low_price, pullback_high_price = \
+                    TushareAPI._is_pullback_phase(
+                        closes_10d=prices_10d,
+                        current_price=current_price,
+                    )
 
                 if is_pullback:
                     # ============ 回调阶段建议 ============
@@ -4147,8 +4425,40 @@ class TushareAPI:
                         hold_period = "观望"
 
                 else:
-                    # 不是回调阶段，检查是否横盘震荡
-                    if is_consolidation:
+                    # 不是回调阶段
+
+                    # ============ 下跌末期/寻底阶段建议 ============
+                    if market_pattern == "下跌末期":
+                        # 找近20日低点作为止损参考
+                        low_20d_close = min(closes_20d) if closes_20d else current_price
+                        high_20d_close = max(closes_20d) if closes_20d else current_price
+
+                        if score >= 30 and main_5d > 0:
+                            advice_scene = "H-1"
+                            advice_meaning = f"主力近5日开始流入，缩量寻底，可能接近底部"
+                            advice_action = "试探建仓，小仓位"
+                            stop_loss = low_20d_close * 0.95
+                            target = (low_20d_close + high_20d_close) / 2
+                            position_advice = "10-20%"
+                            hold_period = "等待反弹确认"
+
+                        elif score >= 20:
+                            advice_scene = "H-2"
+                            advice_meaning = f"仍在寻底，缩量但主力尚未明确流入"
+                            advice_action = "观察，等主力流入信号"
+                            stop_loss = low_20d_close * 0.95
+                            position_advice = "0"
+                            hold_period = "观望"
+
+                        else:
+                            advice_scene = "H-3"
+                            advice_meaning = f"下跌途中，尚未出现寻底信号"
+                            advice_action = "回避，等止跌+缩量信号"
+                            position_advice = "0"
+                            hold_period = "观望"
+
+                    # ============ 震荡筑底建议 ============
+                    elif is_consolidation:
                         consol_low, consol_high = consol_range
                         consolidation_center = (consol_low + consol_high) / 2
                         consolidation_width = consol_high - consol_low
@@ -4201,7 +4511,7 @@ class TushareAPI:
                             hold_period = "观望"
 
                     else:
-                        # 既不是回调也不是横盘，信号不明
+                        # 既不是回调、也不是横盘、也不是下跌末期，信号不明
                         advice_scene = "F"
                         advice_meaning = "不处于回调或横盘阶段，无法判断"
                         advice_action = "观望"
@@ -4441,28 +4751,41 @@ class TushareAPI:
         return '不明'
 
     @staticmethod
-    def _is_pullback_phase(closes_10d: List[float], current_price: float) -> bool:
+    def _is_pullback_phase(closes_10d: List[float], current_price: float) -> Tuple[bool, int, float, float]:
         """
-        判断是否处于"反弹后的回调"阶段
-        条件：反弹幅度>10%，且当前价在高点和低点之间（有回调）
+        判断是否处于"反弹后的回调"阶段。
+        关键：必须先有低点，再有反弹高点，当前价回调到两者之间。
+
+        Returns:
+            (是否为反弹后回调, 反弹高点索引, 反弹低点收盘价, 反弹高点收盘价)
         """
         if not closes_10d or len(closes_10d) < 3:
-            return False
+            return (False, -1, 0, 0)
 
-        high_close_10d = max(closes_10d)
-        low_close_10d = min(closes_10d)
+        # 找到最高收盘价及其位置
+        high_val = max(closes_10d)
+        high_idx = closes_10d.index(high_val)
 
-        if high_close_10d <= 0 or low_close_10d <= 0:
-            return False
+        # 高点必须在中间或之后（不是第一天），否则是持续下跌/上涨，不是反弹
+        if high_idx <= 0:
+            return (False, -1, 0, 0)
 
-        # 反弹幅度
-        bounce_amp = (high_close_10d - low_close_10d) / low_close_10d
-        # 回调幅度
-        callback_pct = (high_close_10d - current_price) / high_close_10d
+        # 找到高点之前的低点（起涨点）
+        low_val = min(closes_10d[:high_idx])
 
-        # 必须满足：有反弹（>10%）、有回调（>3%）、未跌破低点
-        return (bounce_amp > 0.10 and callback_pct > 0.03
-                and current_price > low_close_10d * 0.98)
+        if high_val <= 0 or low_val <= 0:
+            return (False, -1, 0, 0)
+
+        # 反弹幅度（低点→高点）
+        bounce_amp = (high_val - low_val) / low_val
+        # 回调幅度（高点→当前价）
+        callback_pct = (high_val - current_price) / high_val
+
+        # 必须满足：有反弹（>10%）、有回调（>3%）、未跌破起涨低点
+        is_pullback = (bounce_amp > 0.10 and callback_pct > 0.03
+                       and current_price > low_val * 0.98)
+
+        return (is_pullback, high_idx, low_val, high_val)
 
     @staticmethod
     def _is_consolidation(closes_20d: List[float]) -> Tuple[bool, Tuple[float, float], Dict[str, float]]:
@@ -4518,6 +4841,200 @@ class TushareAPI:
             '波动率': round(volatility, 4),
             '区间宽度': round(range_width, 4),
         }
+
+    # ============ 优化后的形态识别（按优先级顺序） ============
+
+    @staticmethod
+    def _is_crash_after_pump(closes_20d: List[float], detail_main: List[float]) -> bool:
+        """
+        识别"主升浪崩盘"：急涨后急跌
+        用20日累计涨跌幅 + 资金验证
+        """
+        if len(closes_20d) < 10:
+            return False
+
+        high_val = max(closes_20d)
+        high_idx = closes_20d.index(high_val)
+
+        if high_idx == 0:
+            return False
+
+        low_before = min(closes_20d[:high_idx])
+        if low_before <= 0:
+            return False
+
+        # 累计涨跌幅
+        cumulative_up = (high_val - low_before) / low_before
+        lowest_after = min(closes_20d[high_idx:])
+        cumulative_down = (lowest_after - high_val) / high_val
+
+        # 价格条件：累计涨幅>10% 且 累计跌幅<-15%
+        price_condition = cumulative_up > 0.10 and cumulative_down < -0.15
+
+        # 资金验证
+        if detail_main and len(detail_main) >= len(closes_20d):
+            offset = len(detail_main) - len(closes_20d)
+            pump_main = sum(detail_main[offset:offset + high_idx + 1])
+            dump_main = sum(detail_main[offset + high_idx:])
+            fund_condition = pump_main > 0 and dump_main < 0
+            return price_condition and fund_condition
+
+        return price_condition
+
+    @staticmethod
+    def _is_downtrend(closes_20d: List[float]) -> bool:
+        """
+        识别"持续下跌趋势"
+        多时间窗口判断：5日、10日、20日都下跌
+        """
+        if len(closes_20d) < 10:
+            return False
+
+        closes_5d = closes_20d[-5:]
+        closes_10d = closes_20d[-10:]
+
+        trend_5d = (closes_5d[-1] - closes_5d[0]) / closes_5d[0] if closes_5d[0] > 0 else 0
+        trend_10d = (closes_10d[-1] - closes_10d[0]) / closes_10d[0] if closes_10d[0] > 0 else 0
+        trend_20d = (closes_20d[-1] - closes_20d[0]) / closes_20d[0] if closes_20d[0] > 0 else 0
+
+        return trend_5d < -0.10 and trend_10d < -0.05 and trend_20d < -0.05
+
+    @staticmethod
+    def _is_bottoming(closes_20d: List[float], current_price: float,
+                      volumes: List[float], detail_main: List[float]) -> bool:
+        """
+        识别"下跌末期/寻底阶段"
+        特征：从高点跌幅>20% + 缩量 + 主力流出收窄
+        """
+        if len(closes_20d) < 10:
+            return False
+
+        # 1. 从高点跌幅>20%
+        high_20d = max(closes_20d)
+        decline_from_high = (current_price - high_20d) / high_20d if high_20d > 0 else 0
+        if decline_from_high >= -0.20:
+            return False
+
+        # 2. 缩量条件：近5日 < 近10日 * 0.8
+        shrink_condition = True
+        if volumes and len(volumes) >= 10:
+            vols_5d = volumes[-5:]
+            vols_10d = volumes[-10:]
+            avg_5d = sum(vols_5d) / len(vols_5d) if vols_5d else 0
+            avg_10d = sum(vols_10d) / len(vols_10d) if vols_10d else 0
+            shrink_condition = avg_5d < avg_10d * 0.8 if avg_10d > 0 else True
+
+        # 3. 资金验证：主力流出收窄（近3日 > 近5日）
+        fund_condition = True
+        if detail_main and len(detail_main) >= 5:
+            main_3d = sum(detail_main[-3:])
+            main_5d_val = sum(detail_main[-5:])
+            fund_condition = main_5d_val < 0 and main_3d > main_5d_val
+
+        return shrink_condition and fund_condition
+
+    @staticmethod
+    def _is_consolidation_pattern(closes_20d: List[float], closes_60d: List[float],
+                                   current_price: float) -> bool:
+        """
+        识别"震荡筑底"（形态识别用）
+        只看近10日波动率 + 处于60日高位下方
+        """
+        if len(closes_20d) < 10 or len(closes_60d) < 10:
+            return False
+
+        closes_10d = closes_20d[-10:]
+        mean_10d = sum(closes_10d) / len(closes_10d)
+        if mean_10d <= 0:
+            return False
+
+        # 近10日波动率
+        variance = sum((c - mean_10d) ** 2 for c in closes_10d) / len(closes_10d)
+        std_10d = math.sqrt(variance)
+        volatility_10d = std_10d / mean_10d
+
+        # 近10日趋势
+        trend_10d = (closes_10d[-1] - closes_10d[0]) / closes_10d[0] if closes_10d[0] > 0 else 0
+
+        # 处于低位：相对60日高点 < 85%
+        high_60d = max(closes_60d)
+        is_low = current_price < high_60d * 0.85 if high_60d > 0 else False
+
+        return volatility_10d < 0.06 and abs(trend_10d) < 0.05 and is_low
+
+    @staticmethod
+    def _is_pullback_pattern(closes_20d: List[float], current_price: float,
+                              detail_main: List[float]) -> bool:
+        """
+        识别"反弹后回调"（理想形态）
+        用近20日找反弹起点 + 资金验证回调期主力流入
+        """
+        if len(closes_20d) < 10:
+            return False
+
+        high_val = max(closes_20d)
+        high_idx = closes_20d.index(high_val)
+
+        if high_idx == 0:
+            return False
+
+        low_before = min(closes_20d[:high_idx])
+        if low_before <= 0:
+            return False
+
+        # 反弹幅度和回调幅度
+        bounce_amp = (high_val - low_before) / low_before
+        callback_pct = (high_val - current_price) / high_val
+
+        # 价格条件
+        price_cond = 0.10 < bounce_amp < 0.30 and 0.03 < callback_pct < 0.15
+        # 位置条件：低点上方2% ~ 高点下方2%
+        position_cond = low_before * 1.02 < current_price < high_val * 0.98
+
+        # 资金验证：回调期主力需流入
+        fund_cond = True
+        if detail_main and len(detail_main) >= len(closes_20d):
+            offset = len(detail_main) - len(closes_20d)
+            callback_main = sum(detail_main[offset + high_idx:])
+            fund_cond = callback_main > 0
+
+        return price_cond and position_cond and fund_cond
+
+    @staticmethod
+    def _score_bottoming(closes_20d: List[float], current_price: float,
+                         volumes: List[float], detail_main: List[float]) -> int:
+        """
+        下跌末期/寻底阶段评分
+        """
+        score_val = 0
+
+        # 跌幅越大，分数越低
+        high_20d = max(closes_20d)
+        decline = (current_price - high_20d) / high_20d if high_20d > 0 else 0
+        if decline < -0.30:
+            score_val -= 30
+        elif decline < -0.20:
+            score_val -= 20
+
+        # 主力开始流入，加分
+        if detail_main and len(detail_main) >= 3:
+            main_1d = detail_main[-1]
+            main_3d = sum(detail_main[-3:])
+            if main_1d > 0 and main_3d > 0:
+                score_val += 20
+            elif main_1d > 0:
+                score_val += 10
+
+        # 缩量明显，加分
+        if volumes and len(volumes) >= 10:
+            vols_5d = volumes[-5:]
+            vols_10d = volumes[-10:]
+            avg_5d = sum(vols_5d) / len(vols_5d) if vols_5d else 0
+            avg_10d = sum(vols_10d) / len(vols_10d) if vols_10d else 0
+            if avg_10d > 0 and avg_5d < avg_10d * 0.6:
+                score_val += 10
+
+        return max(0, score_val)
 
     @staticmethod
     def is_valid_bounce(klines: List[Dict], window: int = 10) -> Tuple[bool, str, float]:
@@ -4578,7 +5095,7 @@ class TushareAPI:
                 return False, f"震荡筑底(幅度{bounce_pct:.1%})", bounce_pct
             else:
                 return False, f"下跌中继(幅度{bounce_pct:.1%})", bounce_pct
-        if yang_count < 3:
+        if yang_count < 2:
             return False, f"阳线数不足({yang_count}根)", bounce_pct
         if yang_ratio < 0.50:
             return False, f"阳线占比不足({yang_ratio:.0%})", bounce_pct

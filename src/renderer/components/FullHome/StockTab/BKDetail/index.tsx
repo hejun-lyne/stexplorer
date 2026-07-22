@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Col, Row, Spin, Tabs } from 'antd';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Col, Row, Spin, Tabs, Tooltip } from 'antd';
+import { QuestionCircleOutlined } from '@ant-design/icons';
 import * as Helpers from '@/helpers';
 import * as Utils from '@/utils';
 import SplitPane from 'react-split-pane';
@@ -200,6 +201,148 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, active, onChangeUpdate, onOp
     runGetMoneyFlow(secid, 60);
   }, [secid]);
 
+  // 板块资金流向评分模型（基于已加载的资金流向数据，前端计算）
+  const boardFlowScore = useMemo(() => {
+    if (!moneyFlow || moneyFlow.error || !moneyFlow.detail_main || moneyFlow.detail_main.length === 0) {
+      return null;
+    }
+
+    const f = (v: any): number => {
+      const n = Number(v);
+      return isNaN(n) ? 0 : n;
+    };
+
+    const main_1d = f(moneyFlow.main_1d);
+    const main_3d = f(moneyFlow.main_3d);
+    const main_5d = f(moneyFlow.main_5d);
+    const main_10d = f(moneyFlow.main_10d);
+    const main_20d = f(moneyFlow.main_20d);
+    const retail_10d = f(moneyFlow.retail_10d);
+    const retail_20d = f(moneyFlow.retail_20d);
+    const main_rate = f(moneyFlow.main_rate);
+    const total_amount_20d = f(moneyFlow.total_amount_20d);
+    const detail_main: number[] = (moneyFlow.detail_main || []).map(f);
+    const detail_retail: number[] = (moneyFlow.detail_retail || []).map(f);
+
+    // ============ 维度1: 主力资金强度 (满分30) ============
+    let dim1_score = 0;
+
+    // 1a. 主力净流入率得分 (15分)
+    if (main_rate >= 10) dim1_score += 15;
+    else if (main_rate >= 5) dim1_score += 12;
+    else if (main_rate >= 2) dim1_score += 8;
+    else if (main_rate >= 1) dim1_score += 4;
+    else if (main_rate > 0) dim1_score += 2;
+
+    // 1b. 绝对金额得分 (15分)
+    if (main_20d >= 50e8) dim1_score += 15;
+    else if (main_20d >= 10e8) dim1_score += 12;
+    else if (main_20d >= 5e8) dim1_score += 8;
+    else if (main_20d >= 1e8) dim1_score += 5;
+    else if (main_20d > 0) dim1_score += 2;
+
+    // ============ 维度2: 主力/散户背离度 (满分25) ============
+    let dim2_score = 0;
+
+    // 2a. 20日背离程度 (15分)
+    if (main_20d > 0 && retail_20d < 0) {
+      const divergence_ratio = Math.abs(retail_20d) / main_20d;
+      if (divergence_ratio >= 2) dim2_score += 15;
+      else if (divergence_ratio >= 1) dim2_score += 12;
+      else if (divergence_ratio >= 0.5) dim2_score += 8;
+      else dim2_score += 5;
+    } else if (main_20d > 0 && retail_20d > 0) {
+      dim2_score += 2;
+    }
+
+    // 2b. 背离天数 (10分)
+    const dm10 = detail_main.slice(-10);
+    const dr10 = detail_retail.slice(-10);
+    if (dm10.length > 0 && dr10.length > 0) {
+      const divDays = dm10.filter((m, i) => m > 0 && dr10[i] < 0).length;
+      if (divDays >= 7) dim2_score += 10;
+      else if (divDays >= 5) dim2_score += 7;
+      else if (divDays >= 3) dim2_score += 4;
+      else if (divDays >= 1) dim2_score += 2;
+    }
+
+    // ============ 维度3: 资金趋势持续性 (满分20) ============
+    let dim3_score = 0;
+
+    if (main_10d > main_20d * 0.5 && main_10d > 0 && main_20d > 0) {
+      dim3_score += 10;
+    } else if (main_10d > 0) {
+      dim3_score += 5;
+    }
+
+    if (main_5d > main_10d * 0.3 && main_5d > 0 && main_10d > 0) {
+      dim3_score += 5;
+    }
+
+    if (dm10.length > 0) {
+      const inflowDays = dm10.filter((m) => m > 0).length;
+      if (inflowDays >= 8) dim3_score += 5;
+      else if (inflowDays >= 6) dim3_score += 3;
+      else if (inflowDays >= 4) dim3_score += 1;
+    }
+
+    // ============ 维度4: 流入连续性 (满分15) ============
+    let dim4_score = 0;
+    let consecutive = 0;
+    for (let i = detail_main.length - 1; i >= 0; i--) {
+      if (detail_main[i] > 0) consecutive++;
+      else break;
+    }
+    if (consecutive >= 5) dim4_score = 15;
+    else if (consecutive >= 3) dim4_score = 10;
+    else if (consecutive >= 2) dim4_score = 6;
+    else if (consecutive >= 1) dim4_score = 3;
+
+    // ============ 维度5: 短期风险预警 (满分10) ============
+    let dim5_score = 10;
+    if (main_5d < 0) {
+      const outflowRatio = Math.abs(main_5d) / (Math.abs(main_20d) || 1);
+      if (outflowRatio > 0.5) dim5_score = 0;
+      else if (outflowRatio > 0.3) dim5_score = 3;
+      else dim5_score = 6;
+    }
+    if (main_3d < 0 && main_1d < 0) {
+      dim5_score = Math.max(0, dim5_score - 3);
+    }
+
+    const totalScore = Math.round((dim1_score + dim2_score + dim3_score + dim4_score + dim5_score) * 10) / 10;
+    let grade: string;
+    if (totalScore >= 75) grade = 'A';
+    else if (totalScore >= 55) grade = 'B';
+    else if (totalScore >= 35) grade = 'C';
+    else grade = 'D';
+
+    let advice: string;
+    if (grade === 'A') advice = '主力资金大幅流入，散户持续流出，资金面极强';
+    else if (grade === 'B') advice = '主力资金流入明显，资金面偏多';
+    else if (grade === 'C') advice = '主力资金流入一般，资金面中性';
+    else advice = '主力资金流出或流入不足，资金面偏弱';
+
+    return {
+      score: totalScore,
+      grade,
+      advice,
+      dims: [
+        { label: '主力资金强度', score: dim1_score, max: 30, tooltip: '净流入率(15分) + 绝对金额(15分)，按档阶梯打分' },
+        { label: '主力/散户背离', score: dim2_score, max: 25, tooltip: '20日背离程度(15分) + 近10日背离天数(10分)，主力买散户卖为背离加分' },
+        { label: '资金趋势持续性', score: dim3_score, max: 20, tooltip: '10日趋势vs20日(10分) + 5日加速(5分) + 流入天数占比(5分)' },
+        { label: '流入连续性', score: dim4_score, max: 15, tooltip: '最近连续主力净流入天数：≥5天→15分, ≥3天→10分, ≥2天→6分, ≥1天→3分' },
+        { label: '短期风险预警', score: dim5_score, max: 10, tooltip: '5日主力流出超过20日的30%→扣分, 3日+1日双负→额外扣分' },
+      ],
+      main_rate,
+      main_20d,
+      retail_20d,
+      main_10d,
+      main_5d,
+      total_amount_20d,
+    };
+  }, [moneyFlow]);
+
   const handleExportMoneyFlow = useCallback(async () => {
     if (!moneyFlow || !moneyFlow.detail_dates || moneyFlow.detail_dates.length === 0) {
       const { dialog } = window.contextModules.electron;
@@ -380,6 +523,114 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, active, onChangeUpdate, onOp
                         <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>
                       ) : moneyFlow ? (
                         <div style={{ lineHeight: 1.8 }}>
+                          {/* ============ 板块资金流向评分模型 ============ */}
+                          {boardFlowScore && (
+                            <div style={{
+                              marginBottom: 16, padding: '12px 16px', borderRadius: 8,
+                              backgroundColor: 'var(--card-background-color)',
+                              border: '1px solid var(--border-color)',
+                            }}>
+                              <Row className={styles.rowheader} style={{ marginBottom: 12 }}>
+                                <Col span={24}>板块资金流向评分模型</Col>
+                              </Row>
+                              <Row style={{ marginBottom: 8, alignItems: 'center' }}>
+                                <Col span={6} style={{ fontSize: 13 }}>综合评分</Col>
+                                <Col span={6}>
+                                  <span style={{
+                                    fontSize: 24, fontWeight: 'bold',
+                                    color: boardFlowScore.grade === 'A' ? '#52c41a'
+                                      : boardFlowScore.grade === 'B' ? '#1890ff'
+                                      : boardFlowScore.grade === 'C' ? '#faad14'
+                                      : '#ff4d4f',
+                                  }}>
+                                    {boardFlowScore.score}
+                                  </span>
+                                </Col>
+                                <Col span={6} style={{ fontSize: 13 }}>评级</Col>
+                                <Col span={6}>
+                                  <span style={{
+                                    fontSize: 20, fontWeight: 'bold',
+                                    color: boardFlowScore.grade === 'A' ? '#52c41a'
+                                      : boardFlowScore.grade === 'B' ? '#1890ff'
+                                      : boardFlowScore.grade === 'C' ? '#faad14'
+                                      : '#ff4d4f',
+                                  }}>
+                                    {boardFlowScore.grade}
+                                  </span>
+                                </Col>
+                              </Row>
+                              <div style={{
+                                marginTop: 8, padding: '8px 12px', borderRadius: 6,
+                                backgroundColor: boardFlowScore.grade === 'A' ? '#52c41a15'
+                                  : boardFlowScore.grade === 'B' ? '#1890ff15'
+                                  : boardFlowScore.grade === 'C' ? '#faad1415'
+                                  : '#ff4d4f15',
+                                borderLeft: `3px solid ${
+                                  boardFlowScore.grade === 'A' ? '#52c41a'
+                                  : boardFlowScore.grade === 'B' ? '#1890ff'
+                                  : boardFlowScore.grade === 'C' ? '#faad14'
+                                  : '#ff4d4f'
+                                }`,
+                              }}>
+                                <span style={{ fontSize: 13 }}>{boardFlowScore.advice}</span>
+                              </div>
+                              <div style={{ marginTop: 12 }}>
+                                <Row className={styles.rowheader} style={{ marginBottom: 6 }}>
+                                  <Col span={10} style={{ fontSize: 12 }}>评分维度</Col>
+                                  <Col span={7} style={{ fontSize: 12 }}>得分</Col>
+                                  <Col span={7} style={{ fontSize: 12 }}>占比</Col>
+                                </Row>
+                                {boardFlowScore.dims.map((dim) => (
+                                  <Row key={dim.label} style={{ marginBottom: 4, fontSize: 12, alignItems: 'center' }}>
+                                    <Col span={10}>
+                                      {dim.label}
+                                      <Tooltip
+                                        title={<div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>{dim.tooltip}</div>}
+                                        placement="right"
+                                      >
+                                        <QuestionCircleOutlined
+                                          style={{
+                                            marginLeft: 4, color: 'var(--secondary-text-color)',
+                                            fontSize: 12, cursor: 'help',
+                                          }}
+                                        />
+                                      </Tooltip>
+                                    </Col>
+                                    <Col span={7} className={Utils.GetValueColor(dim.score).textClass}>
+                                      {dim.score}/{dim.max}
+                                    </Col>
+                                    <Col span={7}>
+                                      <div style={{
+                                        width: '100%', height: 4, borderRadius: 2,
+                                        backgroundColor: 'var(--border-color)', overflow: 'hidden',
+                                      }}>
+                                        <div style={{
+                                          width: `${Math.min(100, (Math.max(0, dim.score) / dim.max) * 100)}%`,
+                                          height: '100%', borderRadius: 2,
+                                          backgroundColor:
+                                            dim.score >= dim.max * 0.6 ? '#52c41a'
+                                            : dim.score > 0 ? '#faad14'
+                                            : dim.score < 0 ? '#ff4d4f'
+                                            : 'var(--border-color)',
+                                          transition: 'width 0.3s',
+                                        }} />
+                                      </div>
+                                    </Col>
+                                  </Row>
+                                ))}
+                              </div>
+                              <div style={{ marginTop: 10, fontSize: 11, color: 'var(--secondary-text-color)' }}>
+                                <Row style={{ marginBottom: 2 }}>
+                                  <Col span={12}>主力20日: {formatMoneyFlow(boardFlowScore.main_20d)}</Col>
+                                  <Col span={12}>主力10日: {formatMoneyFlow(boardFlowScore.main_10d)}</Col>
+                                </Row>
+                                <Row style={{ marginBottom: 2 }}>
+                                  <Col span={12}>散户20日: {formatMoneyFlow(boardFlowScore.retail_20d)}</Col>
+                                  <Col span={12}>净流入率: {boardFlowScore.main_rate.toFixed(2)}%</Col>
+                                </Row>
+                              </div>
+                            </div>
+                          )}
                           {/* 主力资金流向汇总 */}
                           <Row style={{ marginBottom: 8, color: 'var(--secondary-text-color)' }}>
                             <Col span={6}>周期</Col>

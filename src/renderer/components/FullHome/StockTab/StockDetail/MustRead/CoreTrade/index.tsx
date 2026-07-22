@@ -127,8 +127,8 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
 
     const r = mainInResult;
     const scene = r.advice_scene || '';
-    const isPositive = scene.startsWith('A') || scene.startsWith('B') || scene === 'G-1' || scene === 'G-2';
-    const isNegative = scene === 'E' || scene === '前置过滤';
+    const isPositive = scene.startsWith('A') || scene.startsWith('B') || scene === 'G-1' || scene === 'G-2' || scene === 'H-1';
+    const isNegative = scene === 'E' || scene === '前置过滤' || scene === 'H-3';
     const actionColor = isPositive ? '#52c41a' : isNegative ? '#ff4d4f' : '#faad14';
 
     return {
@@ -524,7 +524,11 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                                 G-1 筑底突破：低位横盘，主力吸筹充分，接近突破位{'\n'}
                                 G-2 筑底吸筹：低位横盘，主力悄悄吸筹，尚未完成{'\n'}
                                 G-3 筑底观察：有横盘迹象，主力吸筹力度不够{'\n'}
-                                G-4 弱势横盘：价格横盘但主力未介入
+                                G-4 弱势横盘：价格横盘但主力未介入{'\n'}
+                                {'\n'}
+                                H-1 寻底完成：主力流入，缩量寻底，可试探建仓{'\n'}
+                                H-2 仍在寻底：缩量但主力未明确流入{'\n'}
+                                H-3 下跌途中：尚未出现寻底信号，回避
                               </div>}
                               placement="top"
                             >
