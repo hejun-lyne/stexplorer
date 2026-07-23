@@ -808,12 +808,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             散户10日
             <Button size="small" type="text" icon={sortTypes.retail_10d == 1 ? <CaretUpOutlined /> : sortTypes.retail_10d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('retail_10d')} />
           </Col>
-          <Col span={2}>
-            启动信号
-            <Button size="small" type="text" icon={sortTypes.max_5d_return == 1 ? <CaretUpOutlined /> : sortTypes.max_5d_return == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('max_5d_return')} />
+          <Col span={3}>
+            场景
+            <Button size="small" type="text" icon={sortTypes.score == 1 ? <CaretUpOutlined /> : sortTypes.score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('score')} />
           </Col>
-          <Col span={2}>买入信号</Col>
-          <Col span={3}>卖出信号</Col>
+          <Col span={4}>操作建议</Col>
         </Row>
       )}
       <div className={classNames(styles.table, styles.moreheader)}>
@@ -951,13 +950,20 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           })
         ) : (
           showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
-            const hasBuySignal = s.buy_signal !== null;
-            const hasSellSignal = s.sell_signal !== null;
-            const bgColor = hasSellSignal
-              ? 'rgba(255, 77, 79, 0.08)'
-              : hasBuySignal
-                ? 'rgba(82, 196, 26, 0.08)'
-                : undefined;
+            const sceneCode = s.advice_scene || '';
+            const isActiveScene = /^A-/.test(sceneCode) || sceneCode === 'G-1';
+            const isWatchScene = /^(B-|G-[23])/.test(sceneCode);
+            const isWeakScene = /^(G-4|H-1)/.test(sceneCode);
+            const isAvoidScene = /^(E|F|H-[23])/.test(sceneCode);
+            const bgColor = isActiveScene
+              ? 'rgba(82, 196, 26, 0.08)'
+              : isWatchScene
+                ? 'rgba(24, 144, 255, 0.06)'
+                : isWeakScene
+                  ? 'rgba(250, 173, 20, 0.06)'
+                  : isAvoidScene
+                    ? 'rgba(255, 77, 79, 0.06)'
+                    : undefined;
             return (
               <Row
                 key={s.ts_code}
@@ -1001,21 +1007,20 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 <Col span={2} className={Utils.GetValueColor(-s.retail_10d).textClass}>
                   {formatMoneyFlow(s.retail_10d)}
                 </Col>
-                <Col span={2} className={Utils.GetValueColor(s.max_5d_return).textClass}>
-                  {s.max_5d_return?.toFixed?.(1) ?? s.max_5d_return}%
+                <Col span={3} title={s.advice_meaning}>
+                  <span style={{
+                    color: isActiveScene ? '#52c41a' : isWatchScene ? '#1890ff' : isWeakScene ? '#faad14' : isAvoidScene ? '#ff4d4f' : '#999',
+                    fontWeight: isActiveScene ? 'bold' : 'normal',
+                  }}>
+                    {sceneCode || '--'}
+                  </span>
                 </Col>
-                <Col span={2}>
-                  {s.buy_signal === 'A' ? (
-                    <span className="text-up" style={{ fontWeight: 'bold' }}>最强A</span>
-                  ) : s.buy_signal === 'B' ? (
-                    <span style={{ color: '#1890ff' }}>稳健B</span>
-                  ) : (
-                    <span style={{ color: '#999' }}>--</span>
-                  )}
-                </Col>
-                <Col span={3}>
-                  {hasSellSignal ? (
-                    <span className="text-down" title={s.sell_reason}>回避</span>
+                <Col span={4}>
+                  {sceneCode ? (
+                    <span title={`止损: ${s.stop_loss?.toFixed?.(2) ?? s.stop_loss ?? '--'} | 目标: ${s.target?.toFixed?.(2) ?? s.target ?? '--'} | ${s.hold_period || '--'}`}>
+                      <span style={{ color: '#333' }}>{s.advice_action || '--'}</span>
+                      {s.position_advice && <span style={{ color: '#999', marginLeft: 4, fontSize: 12 }}>({s.position_advice})</span>}
+                    </span>
                   ) : (
                     <span style={{ color: '#999' }}>--</span>
                   )}
