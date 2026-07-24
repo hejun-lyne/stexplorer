@@ -49,8 +49,11 @@ const AddStockContent: React.FC<AddStockContentProps> = ({ defaultName, onEnter,
   });
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { data: detailSecid, show: showDetailDrawer, set: setDetailDrawer, close: closeDetailDrawer } = useDrawer('');
-  async function onAdd(secid: string, type: number) {
+  async function onAdd(secid: string, type: number, name?: string) {
     const [details, responseTrends, responseFFlows] = await Helpers.Stock.GetStockDetailAndTrendsAndFlows(kLineApiSourceSetting, secid);
+    if (name) {
+      details.name = name;
+    }
     if (details) {
       setNone(false);
       dispatch(addStockAction(details, type, responseTrends?.trends, responseFFlows?.ffTrends));
@@ -110,7 +113,7 @@ const AddStockContent: React.FC<AddStockContentProps> = ({ defaultName, onEnter,
                       <button
                         className={styles.select}
                         onClick={(e) => {
-                          onAdd(secid, Type);
+                          onAdd(secid, Type, Name);
                           e.stopPropagation();
                         }}
                       >

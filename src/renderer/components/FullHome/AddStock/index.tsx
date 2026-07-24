@@ -93,7 +93,7 @@ const AddStock: React.FC<AddStockProps> = ({ onClose, onOpenStock, text }) => {
                       <button
                         className={styles.select}
                         onClick={(e) => {
-                          onAdd(secid, Type);
+                          onAdd(secid, Type, Name);
                           e.stopPropagation();
                         }}
                       >

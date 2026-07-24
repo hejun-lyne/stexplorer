@@ -26,13 +26,14 @@ import STRanking from '../StockDetail/STRanking';
 
 export interface BKDetailProps {
   secid: string;
+  name: string;
   active: boolean;
   onChangeUpdate: (tid: string, change: number) => void;
   onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number) => void;
   onOpenUrl: (url: string) => void;
 }
 
-const BKDetail: React.FC<BKDetailProps> = ({ secid, active, onChangeUpdate, onOpenStock, onOpenUrl }) => {
+const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate, onOpenStock, onOpenUrl }) => {
   const config = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]);
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const [detail, setDetail] = useState<Stock.DetailItem>({ secid });
@@ -120,11 +121,30 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, active, onChangeUpdate, onOp
   );
 
   const dispatch = useDispatch();
-  const addBK = useCallback(() => {
-    if (detail) {
-      dispatch(addStockAction(detail, Helpers.Stock.GetStockType(secid), undefined, undefined, monitors));
+  const addBK = useCallback(async () => {
+    let currentDetail = detail;
+    // 如果详情未加载完成（如初始状态只有 secid），先获取完整数据
+    if (!currentDetail.zx) {
+      const d = await Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid);
+      if (d) {
+        currentDetail = d;
+        setDetail(d);
+      }
     }
-  }, [secid, detail]);
+    // 确保 name/code/market 完整（API 返回的指数详情可能缺失这些字段）
+    if (currentDetail && currentDetail.zx) {
+      const dotIndex = secid.indexOf('.');
+      const market = dotIndex > 0 ? secid.substring(0, dotIndex) : '';
+      const code = dotIndex > 0 ? secid.substring(dotIndex + 1) : secid;
+      const completedDetail = {
+        ...currentDetail,
+        name: currentDetail.name || name,
+        code: currentDetail.code || code,
+        market: currentDetail.market || market,
+      };
+      dispatch(addStockAction(completedDetail, Helpers.Stock.GetStockType(secid), undefined, undefined, monitors));
+    }
+  }, [secid, detail, kLineApiSourceSetting, monitors, name]);
   const removeBK = useCallback(() => {
     if (config) {
       dispatch(deleteStockAction(secid));

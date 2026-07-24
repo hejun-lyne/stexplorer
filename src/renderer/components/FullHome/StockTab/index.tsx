@@ -283,6 +283,7 @@ const StockTab: React.FC<StockTabProps> = React.memo(
                         <BKDetail
                           active={activeTabid === tab.tid}
                           secid={tab.tid}
+                          name={tab.name}
                           onChangeUpdate={onStockChange}
                           onOpenStock={onNewStock}
                           onOpenUrl={onNewSite}
