@@ -3970,6 +3970,12 @@ class TushareAPI:
                 recent3 = klines[-3:] if len(klines) >= 3 else klines
                 zdf_3d = [_to_float(k.get("zdf", 0)) / 100 for k in recent3]
                 max_decline_3d_pct = min(zdf_3d) if zdf_3d else 0  # 负值
+                # 根据板块确定近乎跌停阈值：主板10%涨跌幅限制，创业板/科创板20%
+                # 688xxx 科创板(20%)，30xxxx 创业板(20%)，其他主板/中小板(10%)
+                if code.startswith('688') or code.startswith('30'):
+                    near_limit_down_threshold = -0.19  # 20%涨跌幅限制，接近跌停取-19%
+                else:
+                    near_limit_down_threshold = -0.09  # 10%涨跌幅限制，接近跌停取-9%
 
                 # 近20日收盘价序列（用于形态判断的波动率和趋势）
                 closes_20d = [_to_float(k.get("sp", 0)) for k in recent20] if recent20 else []
@@ -4050,8 +4056,8 @@ class TushareAPI:
                     pre_filter_fail_reasons.append(f"流通市值{circ_mv / 1e8:.1f}亿 < 30亿（市值太小）")
                 if avg_amount_10d < 0.5e8:
                     pre_filter_fail_reasons.append(f"日均成交额{avg_amount_10d / 1e4:.0f}万 < 5000万（流动性差）")
-                if max_decline_3d_pct < -0.09:
-                    pre_filter_fail_reasons.append(f"近3日最大跌幅{max_decline_3d_pct:.1%} < -9%（近期有跌停）")
+                if max_decline_3d_pct < near_limit_down_threshold:
+                    pre_filter_fail_reasons.append(f"近3日最大跌幅{max_decline_3d_pct:.1%} < {near_limit_down_threshold:.0%}（近期有跌停）")
 
                 if pre_filter_fail_reasons:
                     results.append({
