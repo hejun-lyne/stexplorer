@@ -1574,24 +1574,33 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         if (!trendd || trendd.length == 0) {
           return;
         }
+        // 使用 ref 获取最新分时数据，避免 useThrottleFn 闭包过期导致重复拼接
+        const currentTrends = trendDataRef.current.trends;
         let trends: Stock.TrendItem[] = [];
-        if (trendData.trends.length > 0) {
+        if (currentTrends.length > 0) {
           // 已有数据
           if (trendDates.length > 1 && currentTrendDate != trendDates[trendDates.length - 1]) {
             // 正在展示历史数据
             return;
           }
-          // 新数据，拼接到最后
+          // 新数据，找重叠点拼接
           let found = false;
-          for (let i = 0; i < trendData.trends.length; i++) {
-            if (trendData.trends[i].datetime == trendd[0].datetime) {
-              trends = trendData.trends.slice(0, i).concat(trendd);
+          for (let i = 0; i < currentTrends.length; i++) {
+            if (currentTrends[i].datetime == trendd[0].datetime) {
+              trends = currentTrends.slice(0, i).concat(trendd);
               found = true;
               break;
             }
           }
           if (!found) {
-            trends = trendData.trends.concat(trendd);
+            // 未找到重叠点：检查新数据是否已完全包含在现有数据中（避免重复追加）
+            const lastExistingTime = currentTrends[currentTrends.length - 1]?.datetime || '';
+            const lastNewTime = trendd[trendd.length - 1]?.datetime || '';
+            if (lastExistingTime && lastNewTime && lastNewTime <= lastExistingTime) {
+              // 新数据的时间范围不超出已有数据，无需更新
+              return;
+            }
+            trends = currentTrends.concat(trendd);
           }
         } else {
           trends = trendd;
@@ -1722,9 +1731,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           if (!data.length) {
             return;
           }
+          // 使用 ref 避免闭包过期: useEffect 依赖 [active]，回调中 trendData 始终为初始空值
+          const currentTrends = trendDataRef.current.trends;
           // 如果数据一致无需更新
-          if (trendData.trends.length) {
-            const lastTick = trendData.trends.slice(-1)[0].datetime;
+          if (currentTrends.length) {
+            const lastTick = currentTrends.slice(-1)[0].datetime;
             if (lastTick === data.slice(-1)[0].datetime) {
               return;
             }
