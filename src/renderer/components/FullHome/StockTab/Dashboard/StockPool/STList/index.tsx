@@ -933,7 +933,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                   ) : s.signal_type === 'callback' ? (
                     <span style={{ color: '#faad14' }}>回调</span>
                   ) : (
-                    <span style={{ color: '#999' }}>--</span>
+                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
                   )}
                 </Col>
                 <Col span={4}>
@@ -1009,7 +1009,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 </Col>
                 <Col span={3} title={s.advice_meaning}>
                   <span style={{
-                    color: isActiveScene ? '#52c41a' : isWatchScene ? '#1890ff' : isWeakScene ? '#faad14' : isAvoidScene ? '#ff4d4f' : '#999',
+                    color: isActiveScene ? '#52c41a' : isWatchScene ? '#1890ff' : isWeakScene ? '#faad14' : isAvoidScene ? '#ff4d4f' : 'var(--reverse-text-color)',
                     fontWeight: isActiveScene ? 'bold' : 'normal',
                   }}>
                     {sceneCode || '--'}
@@ -1018,11 +1018,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 <Col span={4}>
                   {sceneCode ? (
                     <span title={`止损: ${s.stop_loss?.toFixed?.(2) ?? s.stop_loss ?? '--'} | 目标: ${s.target?.toFixed?.(2) ?? s.target ?? '--'} | ${s.hold_period || '--'}`}>
-                      <span style={{ color: '#333' }}>{s.advice_action || '--'}</span>
-                      {s.position_advice && <span style={{ color: '#999', marginLeft: 4, fontSize: 12 }}>({s.position_advice})</span>}
+                      <span style={{ color: 'var(--main-text-color)' }}>{s.advice_action || '--'}</span>
+                      {s.position_advice && <span style={{ color: 'var(--reverse-text-color)', marginLeft: 4, fontSize: 12 }}>({s.position_advice})</span>}
                     </span>
                   ) : (
-                    <span style={{ color: '#999' }}>--</span>
+                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
                   )}
                 </Col>
               </Row>
