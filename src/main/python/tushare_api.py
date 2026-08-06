@@ -541,7 +541,9 @@ class TushareAPI:
                 return []
             df['cal_date'] = pd.to_datetime(df['cal_date'])
             result = {"dates": df['cal_date'].dt.strftime('%Y-%m-%d').tolist()}
-            write_cache(cache_key, result)
+            # 只有 zx 有效时才缓存，避免缓存空价格数据
+            if close_p > 0:
+                write_cache(cache_key, result)
             return result
         except Exception as e:
             return {"error": str(e)}
@@ -907,26 +909,62 @@ class TushareAPI:
             # 缓存 key：按板块代码隔离，缓存 1 小时
             cache_key = f"dc_index_board_{ts_code}"
             cached = read_cache(cache_key, max_age_hours=1)
-            if cached is not None:
+            # 只有缓存有效且 zx 不为 0 才直接返回（zx==0 说明之前数据不完整，需要重新拉取补全）
+            if cached is not None and cached.get("zx", 0) > 0:
                 return cached
 
-            # 先查行业板块，失败再查概念板块
-            df = safe_api_call(pro.dc_index, idx_type="行业板块")
-            if isinstance(df, dict) and df.get("error"):
-                df = safe_api_call(pro.dc_index, idx_type="概念板块")
-            if isinstance(df, dict) and df.get("error"):
-                return df
-            if df is None or df.empty:
-                return {"error": "Board not found"}
+            # 先查行业板块，找不到再查概念板块
+            board_row = None
+            for idx_type in ["行业板块", "概念板块"]:
+                df = safe_api_call(pro.dc_index, idx_type=idx_type)
+                if isinstance(df, dict) and df.get("error"):
+                    continue
+                if df is None or df.empty:
+                    continue
+                board_row = df[df['ts_code'] == ts_code]
+                if not board_row.empty:
+                    break
 
-            board_row = df[df['ts_code'] == ts_code]
-            if board_row.empty:
-                return {"error": f"Board {ts_code} not found"}
+            if board_row is None or board_row.empty:
+                return {"error": f"Board {ts_code} not found in dc_index"}
 
             row = board_row.iloc[0]
             close_p = _to_float(row.get('close', 0))
             pre_close = _to_float(row.get('pre_close', 0))
-            zdd = close_p - pre_close if pre_close > 0 else 0
+            volume = _to_int(row.get('volume', 0))
+            amount = _to_float(row.get('amount', 0))
+            high = _to_float(row.get('high', 0))
+            low = _to_float(row.get('low', 0))
+            open_p = _to_float(row.get('open', 0))
+            turnover_rate = _to_float(row.get('turnover_rate', 0))
+            float_mv = _to_float(row.get('float_mv', 0))
+            total_mv = _to_float(row.get('total_mv', 0))
+
+            # dc_index 可能缺少最新价（如部分概念板块），用 dc_daily 补全
+            if close_p == 0:
+                try:
+                    daily_df = safe_api_call(pro.dc_daily, ts_code=ts_code,
+                                             start_date=(datetime.now() - timedelta(days=10)).strftime("%Y%m%d"),
+                                             end_date=datetime.now().strftime("%Y%m%d"))
+                    if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
+                        daily_df = daily_df.sort_values('trade_date', ascending=False)
+                        latest = daily_df.iloc[0]
+                        close_p = _to_float(latest.get('close', 0))
+                        pre_close = _to_float(latest.get('pre_close', 0)) or pre_close
+                        volume = _to_int(latest.get('vol', 0)) or volume
+                        amount = _to_float(latest.get('amount', 0)) or amount
+                        high = _to_float(latest.get('high', 0)) or high
+                        low = _to_float(latest.get('low', 0)) or low
+                        open_p = _to_float(latest.get('open', 0)) or open_p
+                        print(f"[_get_board_realtime] dc_daily 补全成功 for {ts_code}: close={close_p}")
+                    else:
+                        print(f"[_get_board_realtime] dc_daily 无数据 for {ts_code}: type={type(daily_df)}, "
+                              f"empty={daily_df.empty if isinstance(daily_df, pd.DataFrame) else 'N/A'}")
+                except Exception as e:
+                    print(f"[_get_board_realtime] dc_daily 补全失败 for {ts_code}: {e}")
+
+            # 更新 zdd/zdf（dc_daily 补全后 pre_close 可能也变了）
+            zdd = close_p - pre_close if close_p > 0 and pre_close > 0 else 0
             zdf = (zdd / pre_close * 100) if pre_close > 0 else 0
 
             result = {
@@ -936,20 +974,22 @@ class TushareAPI:
                 "zs": pre_close,
                 "zdf": round(zdf, 2),
                 "zdd": round(zdd, 2),
-                "cjl": _to_int(row.get('volume', 0)),
-                "cje": round(_to_float(row.get('amount', 0)), 2),
-                "zg": _to_float(row.get('high', 0)),
-                "zd": _to_float(row.get('low', 0)),
-                "jk": _to_float(row.get('open', 0)),
+                "cjl": volume,
+                "cje": round(amount, 2),
+                "zg": high,
+                "zd": low,
+                "jk": open_p,
                 "lb": 0,
-                "hsl": _to_float(row.get('turnover_rate', 0)),
+                "hsl": turnover_rate,
                 "syl": 0,
                 "sjl": 0,
-                "lt": _to_float(row.get('float_mv', 0)),
-                "zsz": _to_float(row.get('total_mv', 0)),
+                "lt": float_mv,
+                "zsz": total_mv,
             }
 
-            write_cache(cache_key, result)
+            # 只有 zx 有效时才缓存，避免缓存空价格数据
+            if close_p > 0:
+                write_cache(cache_key, result)
             return result
         except Exception as e:
             return {"error": str(e)}
@@ -1898,7 +1938,9 @@ class TushareAPI:
                 "date": target_date,
             }
             if isinstance(result, dict) and result.get("boards"):
-                write_cache(cache_key, result)
+                # 只有 zx 有效时才缓存，避免缓存空价格数据
+                if close_p > 0:
+                    write_cache(cache_key, result)
             return result
         except Exception as e:
             # 请求失败时，如果有缓存则返回过期缓存（降级）
