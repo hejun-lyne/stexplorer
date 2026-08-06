@@ -1,7 +1,7 @@
 import React, { useCallback, useRef } from 'react';
 import { useState } from 'react';
 import classnames from 'classnames';
-import { Input, List, Popover, message, Progress } from 'antd';
+import { Input, List, Popover, message, Progress, Button, Divider, Tooltip, Empty } from 'antd';
 import {
   ArrowLeftOutlined,
   ArrowRightOutlined,
@@ -12,6 +12,13 @@ import {
   PlayCircleOutlined,
   DownloadOutlined,
   CopyOutlined,
+  VideoCameraOutlined,
+  AudioOutlined,
+  CodeOutlined,
+  CloudOutlined,
+  FileOutlined,
+  LinkOutlined,
+  CheckOutlined,
 } from '@ant-design/icons';
 import styles from './index.scss';
 import { NoteTabId } from '../..';
@@ -37,19 +44,35 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
   const inputRef = useRef<Input>(null);
   const [edittext, setEdittext] = useState<string | undefined>(undefined);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   if (edittext && document.activeElement !== inputRef.current?.input) {
     setEdittext(undefined);
   }
 
-  const handleCopyVideoUrl = useCallback((src: string) => {
+  const handleCopyVideoUrl = useCallback((src: string, index?: number) => {
     try {
       const { clipboard } = window.contextModules.electron;
       clipboard.writeText(src);
       message.success('已复制视频链接');
+      if (index !== undefined) {
+        setCopiedIndex(index);
+        setTimeout(() => setCopiedIndex(null), 2000);
+      }
     } catch (e) {
       message.error('复制失败');
     }
   }, []);
+
+  const handleCopyAllUrls = useCallback(() => {
+    try {
+      const allUrls = props.videos.map((v, i) => `${i + 1}. [${v.type.toUpperCase()}] ${v.src}`).join('\n');
+      const { clipboard } = window.contextModules.electron;
+      clipboard.writeText(allUrls);
+      message.success(`已复制 ${props.videos.length} 个视频链接`);
+    } catch (e) {
+      message.error('复制失败');
+    }
+  }, [props.videos]);
 
   const handleDownloadVideo = useCallback(async (item: DetectedVideo) => {
     try {
@@ -139,6 +162,19 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
     }
   };
 
+  const getVideoTypeIcon = (type: string) => {
+    const props = { style: { fontSize: 13 } };
+    switch (type) {
+      case 'm3u8': return <CloudOutlined {...props} />;
+      case 'video': return <VideoCameraOutlined {...props} />;
+      case 'audio': return <AudioOutlined {...props} />;
+      case 'blob': return <FileOutlined {...props} />;
+      case 'mse': return <CodeOutlined {...props} />;
+      case 'iframe': return <LinkOutlined {...props} />;
+      default: return <VideoCameraOutlined {...props} />;
+    }
+  };
+
   function renderMenu() {
     return (
       <div className={styles.bar}>
@@ -193,53 +229,126 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
         </Popover>
         <Popover
           placement="bottom"
-          title={`检测到 ${props.videos.length} 个视频`}
           style={{ backgroundColor: '#333' }}
           content={() =>
             props.videos.length ? (
-              <List
-                size="small"
-                dataSource={props.videos}
-                style={{ maxWidth: 480, maxHeight: 400, overflow: 'auto' }}
-                renderItem={(item) => {
-                  const progress = downloadProgress[item.src];
-                  return (
-                    <List.Item style={{ padding: '8px 0', flexDirection: 'column', alignItems: 'stretch' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
-                        <div className={styles.videoItem} onClick={() => handleCopyVideoUrl(item.src)}>
-                          <span
-                            className={styles.videoType}
-                            style={{ backgroundColor: getVideoTypeColor(item.type) }}
-                          >
-                            {getVideoTypeLabel(item)}
-                          </span>
-                          <span className={styles.videoSrc} title={item.src}>{item.src}</span>
+              <div className={styles.videoPopover}>
+                <div className={styles.videoHeader}>
+                  <span className={styles.videoHeaderTitle}>
+                    <PlayCircleOutlined style={{ marginRight: 6 }} />
+                    检测到 {props.videos.length} 个媒体资源
+                  </span>
+                  <div className={styles.videoHeaderActions}>
+                    <Tooltip title="复制全部链接">
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CopyOutlined />}
+                        onClick={handleCopyAllUrls}
+                      />
+                    </Tooltip>
+                  </div>
+                </div>
+                <Divider style={{ margin: '0 0 8px' }} />
+                <div className={styles.videoList}>
+                  {props.videos.map((item, index) => {
+                    const progress = downloadProgress[item.src];
+                    const isDownloading = progress !== undefined && progress < 100;
+                    const isDone = progress !== undefined && progress >= 100;
+                    return (
+                      <div key={index} className={styles.videoCard}>
+                        <div className={styles.videoCardHeader}>
+                          <Tooltip title={getVideoTypeLabel(item)}>
+                            <span
+                              className={styles.videoType}
+                              style={{ backgroundColor: getVideoTypeColor(item.type) }}
+                            >
+                              {getVideoTypeIcon(item.type)}
+                              <span className={styles.videoTypeLabel}>{getVideoTypeLabel(item)}</span>
+                            </span>
+                          </Tooltip>
+                          <span className={styles.videoIndex}>#{index + 1}</span>
                         </div>
-                        <div className={styles.videoAction} onClick={() => handleCopyVideoUrl(item.src)} title="复制链接">
-                          <CopyOutlined />
-                        </div>
-                        {item.type !== 'iframe' && (
-                          <div className={styles.videoAction} onClick={() => handleDownloadVideo(item)} title="下载">
-                            <DownloadOutlined />
+                        {item.title && (
+                          <div className={styles.videoTitle} title={item.title}>
+                            {item.title}
                           </div>
                         )}
+                        <div
+                          className={styles.videoUrlRow}
+                          onClick={() => handleCopyVideoUrl(item.src, index)}
+                          title="点击复制链接"
+                        >
+                          <code className={styles.videoSrc}>{item.src}</code>
+                        </div>
+                        {item.mimeType && (
+                          <div className={styles.videoMime}>
+                            <Tooltip title="MIME 类型">
+                              <span className={styles.videoMimeTag}>{item.mimeType}</span>
+                            </Tooltip>
+                          </div>
+                        )}
+                        {isDownloading && (
+                          <div className={styles.videoProgress}>
+                            <Progress
+                              percent={Math.round(progress)}
+                              size="small"
+                              status="active"
+                              strokeColor={{
+                                '0%': getVideoTypeColor(item.type),
+                                '100%': '#87d068',
+                              }}
+                            />
+                          </div>
+                        )}
+                        {isDone && (
+                          <div className={styles.videoProgressDone}>
+                            <CheckOutlined style={{ color: '#52c41a', marginRight: 4 }} />
+                            <span style={{ color: '#52c41a', fontSize: 12 }}>下载完成</span>
+                          </div>
+                        )}
+                        <div className={styles.videoCardActions}>
+                          <Tooltip title={copiedIndex === index ? '已复制' : '复制链接'}>
+                            <Button
+                              size="small"
+                              type="text"
+                              className={styles.videoCardBtn}
+                              icon={copiedIndex === index ? <CheckOutlined style={{ color: '#52c41a' }} /> : <CopyOutlined />}
+                              onClick={() => handleCopyVideoUrl(item.src, index)}
+                            />
+                          </Tooltip>
+                          {item.type !== 'iframe' && (
+                            <Tooltip title={isDownloading ? `下载中 ${Math.round(progress)}%` : '下载'}>
+                              <Button
+                                size="small"
+                                type="text"
+                                className={styles.videoCardBtn}
+                                icon={<DownloadOutlined />}
+                                onClick={() => handleDownloadVideo(item)}
+                                loading={isDownloading}
+                                disabled={isDownloading}
+                              />
+                            </Tooltip>
+                          )}
+                        </div>
                       </div>
-                      {progress !== undefined && progress < 100 && (
-                        <div style={{ marginTop: 4, paddingLeft: 4 }}>
-                          <Progress size="small" percent={Math.round(progress)} status="active" />
-                        </div>
-                      )}
-                      {item.mimeType && (
-                        <div style={{ fontSize: 11, color: '#999', marginTop: 2, paddingLeft: 4 }}>
-                          {item.mimeType}
-                        </div>
-                      )}
-                    </List.Item>
-                  );
-                }}
-              />
+                    );
+                  })}
+                </div>
+              </div>
             ) : (
-              <div style={{ padding: '8px 16px', color: '#999' }}>未检测到视频</div>
+              <div className={styles.videoEmpty}>
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description={
+                    <span style={{ color: '#999' }}>
+                      当前页面未检测到视频资源
+                      <br />
+                      <span style={{ fontSize: 12 }}>播放视频后会自动检测</span>
+                    </span>
+                  }
+                />
+              </div>
             )
           }
           trigger="click"
