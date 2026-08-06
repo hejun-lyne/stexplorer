@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { useState } from 'react';
 import SiteBar from './SiteBar';
 import styles from './index.scss';
@@ -39,6 +39,7 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
     const [stared, setStared] = useState(stars.find((s) => s.url === tab.url) ? true : false);
     const [siteUrl, setSiteUrl] = useState(tab.url);
     const [videos, setVideos] = useState<DetectedVideo[]>([]);
+    const videoPollRef = useRef<NodeJS.Timeout | null>(null);
     const dispatch = useDispatch();
 
     // 检测网页中的视频（含 m3u8/mpd 等流媒体）
@@ -293,24 +294,70 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
             return videos;
           })()
         `);
-        setVideos(result || []);
+        setVideos((prev) => {
+          const newVideos = result || [];
+          if (newVideos.length === 0) return prev; // 没检测到新视频，保留已有结果
+          const map = new Map<string, DetectedVideo>();
+          // 已检测到的在前，保持顺序稳定
+          prev.forEach((v) => map.set(v.src, v));
+          newVideos.forEach((v: DetectedVideo) => {
+            if (!map.has(v.src)) map.set(v.src, v);
+          });
+          return Array.from(map.values());
+        });
       } catch (e) {
         console.error('Detect videos failed:', e);
-        setVideos([]);
+        // 出错不清空已有列表
       }
     }, []);
 
-    // 多次轮询检测
+    // 多次轮询检测（初始 burst + 持续轮询）
     const scheduleDetectVideos = useCallback((wv: any) => {
       if (!wv) return;
+
+      // 清除之前的定时器
+      if (videoPollRef.current) {
+        clearInterval(videoPollRef.current);
+        videoPollRef.current = null;
+      }
+
+      // 立即检测一次
       detectVideos(wv);
+
+      // 初始 burst：快速多次检测，应对页面动态加载
       const delays = [1000, 2000, 3000, 5000, 8000];
       const timers: NodeJS.Timeout[] = [];
-      delays.forEach(d => {
+      delays.forEach((d) => {
         timers.push(setTimeout(() => detectVideos(wv), d));
       });
-      return () => timers.forEach(t => clearTimeout(t));
+
+      // burst 结束后启动持续轮询，每隔 10 秒检测一次新资源
+      timers.push(setTimeout(() => {
+        videoPollRef.current = setInterval(() => {
+          if (wv && !wv.isDestroyed?.()) {
+            detectVideos(wv);
+          }
+        }, 10_000);
+      }, 10_000)); // 在首次检测后 10 秒开启轮询，与 burst 最后一批错开
+
+      return () => {
+        timers.forEach((t) => clearTimeout(t));
+        if (videoPollRef.current) {
+          clearInterval(videoPollRef.current);
+          videoPollRef.current = null;
+        }
+      };
     }, [detectVideos]);
+
+    // 组件卸载时清理轮询定时器
+    useEffect(() => {
+      return () => {
+        if (videoPollRef.current) {
+          clearInterval(videoPollRef.current);
+          videoPollRef.current = null;
+        }
+      };
+    }, []);
 
     return (
       <>
@@ -339,6 +386,11 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
             }
           }}
           onChangeUrl={(url) => {
+            // 切换 URL 时清理轮询
+            if (videoPollRef.current) {
+              clearInterval(videoPollRef.current);
+              videoPollRef.current = null;
+            }
             setSiteUrl(url);
             setVideos([]);
             if (cans.wv) cans.wv.loadURL(url);

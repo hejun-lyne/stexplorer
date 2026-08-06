@@ -504,7 +504,10 @@ async function init() {
     const downloadStream = async (downloadUrl: string, outputPath: string, onProgress?: (received: number, total: number) => void) => {
       const stream = got.stream(downloadUrl, {
         retry: 2,
-        timeout: { request: 30000 },
+        timeout: {
+          response: 30000, // 30 秒内没收到首个字节才算连接超时
+          read: 30000,     // 30 秒内没收到新数据才算传输超时（不限总用时）
+        },
         followRedirect: true,
       });
       const writeStream = fs.createWriteStream(outputPath);

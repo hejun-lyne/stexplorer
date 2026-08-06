@@ -105,26 +105,33 @@
   gap: 8px;
 
   &::-webkit-scrollbar {
-    width: 4px;
+    width: 5px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
   }
   &::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 2px;
+    background-color: color-mix(in srgb, var(--main-text-color) 18%, transparent);
+    border-radius: 8px;
+
+    &:hover {
+      background-color: color-mix(in srgb, var(--main-text-color) 30%, transparent);
+    }
   }
 }
 
 // ===== 视频卡片 =====
 .videoCard {
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid color-mix(in srgb, var(--main-text-color) 12%, transparent);
   border-radius: 8px;
   padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  transition: all 0.2s ease;
+  background: color-mix(in srgb, var(--main-text-color) 5%, transparent);
+  transition: border-color 0.2s ease, background 0.2s ease;
   position: relative;
 
   &:hover {
-    border-color: rgba(255, 255, 255, 0.15);
-    background: rgba(255, 255, 255, 0.06);
+    border-color: color-mix(in srgb, var(--main-text-color) 22%, transparent);
+    background: color-mix(in srgb, var(--main-text-color) 9%, transparent);
   }
 }
 
@@ -157,7 +164,7 @@
 
 .videoIndex {
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.25);
+  color: color-mix(in srgb, var(--main-text-color) 35%, transparent);
   font-weight: 500;
   letter-spacing: 0.5px;
 }
@@ -171,7 +178,7 @@
   text-overflow: ellipsis;
   margin-bottom: 4px;
   padding: 4px 8px;
-  background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--main-text-color) 6%, transparent);
   border-radius: 4px;
   line-height: 1.4;
 }
@@ -180,19 +187,18 @@
   cursor: pointer;
   padding: 4px 8px;
   border-radius: 5px;
-  background: rgba(0, 0, 0, 0.15);
+  background: color-mix(in srgb, var(--main-text-color) 5%, transparent);
   transition: background 0.15s;
   margin-bottom: 2px;
 
   &:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--main-text-color) 10%, transparent);
   }
 }
 
 .videoSrc {
   font-size: 0.8rem;
   color: var(--main-text-color);
-  opacity: 0.75;
   word-break: break-all;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -213,8 +219,8 @@
 .videoMimeTag {
   display: inline-block;
   font-size: 10px;
-  color: rgba(255, 255, 255, 0.4);
-  background: rgba(255, 255, 255, 0.04);
+  color: color-mix(in srgb, var(--main-text-color) 50%, transparent);
+  background: color-mix(in srgb, var(--main-text-color) 6%, transparent);
   padding: 1px 6px;
   border-radius: 3px;
   font-family: 'SF Mono', Monaco, monospace;
@@ -228,9 +234,10 @@
   :global {
     .ant-progress-text {
       font-size: 12px !important;
+      color: var(--main-text-color) !important;
     }
     .ant-progress-inner {
-      background-color: rgba(255, 255, 255, 0.08) !important;
+      background-color: color-mix(in srgb, var(--main-text-color) 10%, transparent) !important;
     }
   }
 }
@@ -240,8 +247,18 @@
   padding: 4px 8px;
   display: flex;
   align-items: center;
-  background: rgba(82, 196, 26, 0.08);
+  background: color-mix(in srgb, var(--main-text-color) 6%, transparent);
   border-radius: 4px;
+}
+
+.videoProgressDoneIcon {
+  margin-right: 4px;
+  color: #52c41a;
+}
+
+.videoProgressDoneText {
+  font-size: 12px;
+  color: #52c41a;
 }
 
 // ===== 卡片操作按钮 =====
@@ -250,23 +267,21 @@
   align-items: center;
   justify-content: flex-end;
   gap: 2px;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--main-text-color) 10%, transparent);
 }
 
 .videoCardBtn {
   width: 28px !important;
   height: 28px !important;
   border-radius: 6px !important;
-  color: var(--main-text-color) !important;
-  opacity: 0.6;
+  color: color-mix(in srgb, var(--main-text-color) 60%, transparent) !important;
   transition: all 0.15s;
 
   &:hover {
-    opacity: 1;
-    background: rgba(255, 255, 255, 0.1) !important;
     color: var(--primary-color) !important;
+    background: color-mix(in srgb, var(--main-text-color) 10%, transparent) !important;
   }
 }
 
@@ -274,6 +289,36 @@
 .videoEmpty {
   padding: 24px 16px;
   min-width: 260px;
+}
+
+.videoEmptyText {
+  color: color-mix(in srgb, var(--main-text-color) 55%, transparent);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.videoEmptyHint {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--main-text-color) 38%, transparent);
+}
+
+// ===== Popover 遮罩主题适配 =====
+.videoPopoverOverlay {
+  :global {
+    .ant-popover-inner {
+      background-color: var(--top-background-color) !important;
+    }
+    .ant-popover-title {
+      color: var(--main-text-color) !important;
+      border-bottom-color: color-mix(in srgb, var(--main-text-color) 10%, transparent) !important;
+    }
+    .ant-popover-inner-content {
+      color: var(--main-text-color) !important;
+    }
+    .ant-popover-arrow-content {
+      --antd-arrow-background-color: var(--top-background-color) !important;
+    }
+  }
 }
 
 // ===== 旧样式保留（兼容） =====
@@ -300,6 +345,6 @@
   border-radius: 4px;
   &:hover {
     color: var(--primary-color);
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: color-mix(in srgb, var(--main-text-color) 10%, transparent);
   }
 }

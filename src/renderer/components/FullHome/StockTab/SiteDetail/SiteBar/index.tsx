@@ -229,7 +229,7 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
         </Popover>
         <Popover
           placement="bottom"
-          style={{ backgroundColor: '#333' }}
+          overlayClassName={styles.videoPopoverOverlay}
           content={() =>
             props.videos.length ? (
               <div className={styles.videoPopover}>
@@ -303,8 +303,8 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
                         )}
                         {isDone && (
                           <div className={styles.videoProgressDone}>
-                            <CheckOutlined style={{ color: '#52c41a', marginRight: 4 }} />
-                            <span style={{ color: '#52c41a', fontSize: 12 }}>下载完成</span>
+                            <CheckOutlined className={styles.videoProgressDoneIcon} />
+                            <span className={styles.videoProgressDoneText}>下载完成</span>
                           </div>
                         )}
                         <div className={styles.videoCardActions}>
@@ -341,10 +341,10 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
                   description={
-                    <span style={{ color: '#999' }}>
+                    <span className={styles.videoEmptyText}>
                       当前页面未检测到视频资源
                       <br />
-                      <span style={{ fontSize: 12 }}>播放视频后会自动检测</span>
+                      <span className={styles.videoEmptyHint}>播放视频后会自动检测</span>
                     </span>
                   }
                 />

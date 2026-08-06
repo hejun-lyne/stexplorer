@@ -26,9 +26,14 @@ declare namespace IndexScssNamespace {
     videoMimeTag: string;
     videoProgress: string;
     videoProgressDone: string;
+    videoProgressDoneIcon: string;
+    videoProgressDoneText: string;
     videoCardActions: string;
     videoCardBtn: string;
     videoEmpty: string;
+    videoEmptyText: string;
+    videoEmptyHint: string;
+    videoPopoverOverlay: string;
     videoItem: string;
     videoAction: string;
   }
