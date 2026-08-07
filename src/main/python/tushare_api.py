@@ -1942,7 +1942,7 @@ class TushareAPI:
                 if close_p > 0:
                     write_cache(cache_key, result)
             return result
-        except Exception as e:
+        except Exception as e: 
             # 请求失败时，如果有缓存则返回过期缓存（降级）
             if isinstance(cached, dict) and cached.get("boards"):
                 print(f"[板块请求失败，返回过期缓存] {bk_type} date={target_date}: {e}")
@@ -3839,8 +3839,6 @@ class TushareAPI:
 
     @staticmethod
     def main_in_filter(trade_date: str, stocks: List[str],
-                       min_circ_mv: float = 20,
-                       min_avg_amount: float = 5000,
                        max_decline: float = 30) -> Dict[str, Any]:
         """主力建仓信号识别（批量分析）
         
@@ -3850,15 +3848,11 @@ class TushareAPI:
         Args:
             trade_date: 交易日期（YYYYMMDD）
             stocks: ts_code 数组，如 ["000001.SZ", "600000.SH"]
-            min_circ_mv: 流通市值下限（亿），默认20
-            min_avg_amount: 日均成交额下限（万），默认5000
             max_decline: 最大回撤（%），默认30
         
         Returns:
             {"results": [...], "count": N, "passed_count": N}
         """
-        min_circ_mv_yuan = min_circ_mv * 1e8   # 亿 -> 元
-        min_avg_amount_yuan = min_avg_amount * 1e4  # 万 -> 元
         max_decline_ratio = max_decline / 100.0
 
         results = []
@@ -4094,10 +4088,10 @@ class TushareAPI:
 
                 # ============ 前置过滤（基础硬性条件） ============
                 pre_filter_fail_reasons = []
-                if circ_mv < 30e8:
-                    pre_filter_fail_reasons.append(f"流通市值{circ_mv / 1e8:.1f}亿 < 30亿（市值太小）")
-                if avg_amount_10d < 0.5e8:
-                    pre_filter_fail_reasons.append(f"日均成交额{avg_amount_10d / 1e4:.0f}万 < 5000万（流动性差）")
+                if circ_mv < 10e8:
+                    pre_filter_fail_reasons.append(f"流通市值{circ_mv / 1e8:.1f}亿 < 10亿（市值太小）")
+                if avg_amount_10d < 0.3e8:
+                    pre_filter_fail_reasons.append(f"日均成交额{avg_amount_10d / 1e4:.0f}万 < 3000万（流动性差）")
                 if max_decline_3d_pct < near_limit_down_threshold:
                     pre_filter_fail_reasons.append(f"近3日最大跌幅{max_decline_3d_pct:.1%} < {near_limit_down_threshold:.0%}（近期有跌停）")
 
@@ -4146,14 +4140,44 @@ class TushareAPI:
                 # 成本偏离
                 cost_deviation = (current_price - avg_price_10d) / avg_price_10d if avg_price_10d > 0 else 0
 
+                # ============ 换手率数据预处理 ============
+                # 通过 Tushare daily_basic 获取近10日数据，字段包含 turnover_rate（基于总股本）和 turnover_rate_f（基于自由流通股）
+                # 建议用 turnover_rate_f，更能反映真实可交易筹码的活跃度
+                start_date = (datetime.strptime(trade_date, '%Y%m%d') - timedelta(days=15)).strftime('%Y%m%d')
+                avg_turnover_5d = 0.0
+                try:
+                    pro = get_pro()
+                    df_daily_basic = safe_api_call(pro.daily_basic, ts_code=ts_code,
+                                                   start_date=start_date, end_date=trade_date,
+                                                   fields='ts_code,trade_date,turnover_rate,turnover_rate_f')
+                    if isinstance(df_daily_basic, pd.DataFrame) and not df_daily_basic.empty:
+                        # 计算 5日平均换手率（Tushare 返回的是百分比数值，如 2.5 表示 2.5%）
+                        df_daily_basic = df_daily_basic.sort_values('trade_date')
+                        avg_turnover_5d = df_daily_basic['turnover_rate_f'].tail(5).mean()
+                except Exception:
+                    avg_turnover_5d = 0.0
+
                 # ============ 基础过滤 ============
                 basic_fail_reasons = []
-                if circ_mv > 0 and circ_mv < min_circ_mv_yuan:
-                    basic_fail_reasons.append(f"流通市值{circ_mv / 1e8:.1f}亿 < {min_circ_mv:.0f}亿")
-                if avg_amount_10d > 0 and avg_amount_10d < min_avg_amount_yuan:
-                    basic_fail_reasons.append(f"日均成交额{avg_amount_10d / 1e4:.0f}万 < {min_avg_amount:.0f}万")
+
+                # 换手率过滤：根据流通市值动态设置最低换手率阈值
+                # 大盘（>500亿）: 0.5% — 大盘股天然换手低，阈值不宜过高
+                # 中盘（50-500亿）: 1.0% — 大多数策略的舒适区
+                # 小盘（<50亿）: 2.0% — 小盘股换手普遍高，低于2%说明极度冷门
+                if circ_mv > 500e8:
+                    min_turnover = 0.5
+                elif circ_mv >= 50e8:
+                    min_turnover = 1.0
+                else:
+                    min_turnover = 2.0
+
+                if avg_turnover_5d > 0 and avg_turnover_5d < min_turnover:
+                    basic_fail_reasons.append(f"5日平均换手率{avg_turnover_5d:.2f}% < {min_turnover:.1f}%（{('大盘' if circ_mv > 500e8 else '中盘' if circ_mv >= 50e8 else '小盘')}阈值）")
+
+                # 最大回撤过滤（保留不变）
                 if max_decline_10d > max_decline_ratio:
                     basic_fail_reasons.append(f"近10日最大回撤{max_decline_10d * 100:.1f}% > {max_decline:.0f}%")
+
                 basic_passed = len(basic_fail_reasons) == 0
 
                 # ============ 条件组检查 ============

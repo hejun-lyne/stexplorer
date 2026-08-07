@@ -1450,8 +1450,6 @@ export async function MainInFilterStocksFromTushare(
       trade_date: _tradeDate,
       stocks,
     };
-    if (config?.min_circ_mv) params.min_circ_mv = config.min_circ_mv;
-    if (config?.min_avg_amount) params.min_avg_amount = config.min_avg_amount;
     if (config?.max_decline_from_high) params.max_decline = config.max_decline_from_high;
 
     const result = await callTushare('main_in_filter', params);
