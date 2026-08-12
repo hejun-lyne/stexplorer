@@ -40,11 +40,14 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
     const [siteUrl, setSiteUrl] = useState(tab.url);
     const [videos, setVideos] = useState<DetectedVideo[]>([]);
     const videoPollRef = useRef<NodeJS.Timeout | null>(null);
+    const videoTimersRef = useRef<NodeJS.Timeout[]>([]);
+    const webViewReadyRef = useRef(false);
     const dispatch = useDispatch();
 
     // 检测网页中的视频（含 m3u8/mpd 等流媒体）
     const detectVideos = useCallback(async (wv: any) => {
-      if (!wv) return;
+      // WebView 必须已 attach 到 DOM 且 dom-ready 已触发才能调用 executeJavaScript
+      if (!wv || wv.isDestroyed?.() || !webViewReadyRef.current) return;
       try {
         // 注入增强版资源捕获 hook
         await wv.executeJavaScript(`
@@ -316,47 +319,41 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
       if (!wv) return;
 
       // 清除之前的定时器
-      if (videoPollRef.current) {
-        clearInterval(videoPollRef.current);
-        videoPollRef.current = null;
-      }
+      cleanupVideoPoll();
 
       // 立即检测一次
       detectVideos(wv);
 
       // 初始 burst：快速多次检测，应对页面动态加载
       const delays = [1000, 2000, 3000, 5000, 8000];
-      const timers: NodeJS.Timeout[] = [];
       delays.forEach((d) => {
-        timers.push(setTimeout(() => detectVideos(wv), d));
+        videoTimersRef.current.push(setTimeout(() => detectVideos(wv), d));
       });
 
       // burst 结束后启动持续轮询，每隔 10 秒检测一次新资源
-      timers.push(setTimeout(() => {
+      videoTimersRef.current.push(setTimeout(() => {
         videoPollRef.current = setInterval(() => {
-          if (wv && !wv.isDestroyed?.()) {
-            detectVideos(wv);
-          }
+          detectVideos(wv);
         }, 10_000);
       }, 10_000)); // 在首次检测后 10 秒开启轮询，与 burst 最后一批错开
-
-      return () => {
-        timers.forEach((t) => clearTimeout(t));
-        if (videoPollRef.current) {
-          clearInterval(videoPollRef.current);
-          videoPollRef.current = null;
-        }
-      };
     }, [detectVideos]);
+
+    // 清理所有视频检测定时器
+    const cleanupVideoPoll = useCallback(() => {
+      videoTimersRef.current.forEach((t) => clearTimeout(t));
+      videoTimersRef.current = [];
+      if (videoPollRef.current) {
+        clearInterval(videoPollRef.current);
+        videoPollRef.current = null;
+      }
+    }, []);
 
     // 组件卸载时清理轮询定时器
     useEffect(() => {
       return () => {
-        if (videoPollRef.current) {
-          clearInterval(videoPollRef.current);
-          videoPollRef.current = null;
-        }
+        cleanupVideoPoll();
       };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     return (
@@ -386,11 +383,9 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
             }
           }}
           onChangeUrl={(url) => {
-            // 切换 URL 时清理轮询
-            if (videoPollRef.current) {
-              clearInterval(videoPollRef.current);
-              videoPollRef.current = null;
-            }
+            // 切换 URL 时清理轮询和重置就绪状态
+            cleanupVideoPoll();
+            webViewReadyRef.current = false;
             setSiteUrl(url);
             setVideos([]);
             if (cans.wv) cans.wv.loadURL(url);
@@ -413,6 +408,7 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
               });
               setStared(stars.find((s) => s.url === url) !== undefined);
               onSiteUpdated(tab.tid, undefined, url);
+              webViewReadyRef.current = true;
               scheduleDetectVideos(wv);
             }}
             onPageTitleUpdated={({ title }) => {
@@ -424,6 +420,7 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
               onNewWindow(e.url);
             }}
             onDomReady={(e) => {
+              webViewReadyRef.current = true;
               e.target.insertCSS('.no-select{ -webkit-user-select: auto !important; user-select: auto !important;}');
               detectVideos(e.target);
             }}
