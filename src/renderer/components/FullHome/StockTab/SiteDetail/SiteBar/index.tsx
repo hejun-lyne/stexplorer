@@ -38,6 +38,7 @@ export interface SiteBarProps {
   onChangeUrl: (url: string) => void;
   getEditingNotes: () => NoteTabId[];
   confirmReferTab: (tad: NoteTabId) => void;
+  onDownloadBlob?: (src: string, savePath: string, onProgress: (p: number) => void) => Promise<void>;
 }
 
 const SiteBar: React.FC<SiteBarProps> = (props) => {
@@ -76,6 +77,11 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
 
   const handleDownloadVideo = useCallback(async (item: DetectedVideo) => {
     try {
+      const isBlob = item.type === 'blob' || item.type === 'mse' || item.src.startsWith('blob:');
+      if (isBlob && !props.onDownloadBlob) {
+        message.error({ content: '当前版本不支持下载该视频', key: item.src });
+        return;
+      }
       const isM3U8 = item.type === 'm3u8' || item.src.toLowerCase().includes('.m3u8');
       const extMap: Record<string, string> = {
         audio: '.mp3',
@@ -102,6 +108,26 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
       const downloadKey = item.src;
       message.loading({ content: isM3U8 ? '解析 M3U8 并下载中...' : '下载中...', key: downloadKey, duration: 0 });
       setDownloadProgress((prev) => ({ ...prev, [downloadKey]: 0 }));
+
+      if (isBlob) {
+        // blob:/MSE 视频无法由主进程直接下载，需从 webview 页面内读取数据再写文件
+        try {
+          await props.onDownloadBlob!(item.src, result.filePath, (p) => {
+            setDownloadProgress((prev) => ({ ...prev, [downloadKey]: p }));
+          });
+          message.success({ content: '下载完成', key: downloadKey });
+        } catch (e: any) {
+          message.error({ content: '下载失败: ' + (e.message || String(e)), key: downloadKey });
+          console.error('Download video failed:', e);
+        } finally {
+          setDownloadProgress((prev) => {
+            const next = { ...prev };
+            delete next[downloadKey];
+            return next;
+          });
+        }
+        return;
+      }
 
       // 使用新的 IPC 接口下载
       const { ipcRenderer } = window.contextModules.electron;
