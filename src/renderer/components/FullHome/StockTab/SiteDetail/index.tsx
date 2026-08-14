@@ -45,16 +45,26 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
     const prevHookDebugLenRef = useRef(0);
     const prevHookUrlsLenRef = useRef(0);
     const dispatch = useDispatch();
+    // webview 代际：URL 切换 / webview 销毁 / 组件卸载时递增，使旧代际的 burst/轮询检测立即失效
+    const genRef = useRef(0);
+
+    // 检查 wv 是否仍存活且代际匹配，避免对已销毁的 webview 调用 executeJavaScript
+    // 触发 Electron 内部报错（GUEST_VIEW_MANAGER_CALL: reply was never sent）
+    const isWebViewAlive = useCallback((wv: any, gen: number) => {
+      return !!wv && !wv.isDestroyed?.() && webViewReadyRef.current && genRef.current === gen;
+    }, []);
 
     // 检测网页中的视频（含 m3u8/mpd 等流媒体）
     const detectVideos = useCallback(async (wv: any, source = 'unknown') => {
+      const gen = genRef.current;
       // WebView 必须已 attach 到 DOM 且 dom-ready 已触发才能调用 executeJavaScript
-      if (!wv || wv.isDestroyed?.() || !webViewReadyRef.current) {
+      if (!isWebViewAlive(wv, gen)) {
         console.log('[DetectVideos] skip', { source, ready: webViewReadyRef.current });
         return;
       }
       try {
         console.log('[DetectVideos] start', { source, url: wv.getURL ? wv.getURL() : '' });
+        if (!isWebViewAlive(wv, gen)) return; // 调用前再次确认，避免竞态
         // 注入增强版资源捕获 hook
         await wv.executeJavaScript(`
           (function() {
@@ -267,6 +277,7 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
           })();
         `);
 
+        if (!isWebViewAlive(wv, gen)) return; // 页面可能已切换/销毁，丢弃本次结果
         // 获取所有视频
         const rawResult: any = await wv.executeJavaScript(`
           (function() {
@@ -408,10 +419,16 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
           return Array.from(map.values());
         });
       } catch (e) {
+        // webview 销毁/页面切换期间调用失败是正常竞态（GUEST_VIEW_MANAGER_CALL: reply was never sent），静默处理
+        const errMsg = String((e as any)?.message || e || '');
+        if (!isWebViewAlive(wv, gen) || /GUEST_VIEW_MANAGER_CALL|reply was never sent|destroyed/i.test(errMsg)) {
+          console.debug('[DetectVideos] aborted:', source, errMsg.slice(0, 120));
+          return;
+        }
         console.error('Detect videos failed:', e, 'source:', source);
         // 出错不清空已有列表
       }
-    }, []);
+    }, [isWebViewAlive]);
 
     // 多次轮询检测（初始 burst + 持续轮询）
     const scheduleDetectVideos = useCallback((wv: any, source = 'did-finish-load') => {
@@ -562,6 +579,7 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
     // 组件卸载时清理轮询定时器
     useEffect(() => {
       return () => {
+        genRef.current++;
         cleanupVideoPoll();
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -595,7 +613,8 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
             }
           }}
           onChangeUrl={(url) => {
-            // 切换 URL 时清理轮询和重置就绪状态
+            // 切换 URL 时清理轮询和重置就绪状态（旧 webview 的检测全部失效）
+            genRef.current++;
             cleanupVideoPoll();
             webViewReadyRef.current = false;
             prevHookDebugLenRef.current = 0;
@@ -622,8 +641,19 @@ const SiteDetail: React.FC<StockDetailProps> = React.memo(
               });
               setStared(stars.find((s) => s.url === url) !== undefined);
               onSiteUpdated(tab.tid, undefined, url);
+              // 新代际：旧的 burst/轮询检测全部失效
+              genRef.current++;
               webViewReadyRef.current = true;
               scheduleDetectVideos(wv);
+              // webview 被销毁时（关闭标签/切换页面）立即作废当前代际，避免对已销毁实例发起调用
+              if (!(wv as any).__detectDestroyedBound) {
+                (wv as any).__detectDestroyedBound = true;
+                wv.addEventListener('destroyed', () => {
+                  genRef.current++;
+                  webViewReadyRef.current = false;
+                  cleanupVideoPoll();
+                });
+              }
             }}
             onPageTitleUpdated={({ title }) => {
               setTitle(title);

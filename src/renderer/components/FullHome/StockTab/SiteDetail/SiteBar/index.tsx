@@ -1,7 +1,8 @@
 import React, { useCallback, useRef } from 'react';
 import { useState } from 'react';
 import classnames from 'classnames';
-import { Input, List, Popover, message, Progress, Button, Divider, Tooltip, Empty } from 'antd';
+import { useDispatch, useSelector } from 'react-redux';
+import { Input, List, Popover, message, Button, Divider, Tooltip, Empty } from 'antd';
 import {
   ArrowLeftOutlined,
   ArrowRightOutlined,
@@ -19,10 +20,17 @@ import {
   FileOutlined,
   LinkOutlined,
   CheckOutlined,
+  LoadingOutlined,
 } from '@ant-design/icons';
 import styles from './index.scss';
 import { NoteTabId } from '../..';
 import { DetectedVideo } from '..';
+import { StoreState } from '@/reducers/types';
+import {
+  addDownloadTaskAction,
+  setDownloadStatusAction,
+  updateDownloadProgressAction,
+} from '@/actions/download';
 
 export interface SiteBarProps {
   url: string;
@@ -44,8 +52,9 @@ export interface SiteBarProps {
 const SiteBar: React.FC<SiteBarProps> = (props) => {
   const inputRef = useRef<Input>(null);
   const [edittext, setEdittext] = useState<string | undefined>(undefined);
-  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const dispatch = useDispatch();
+  const downloadTasks = useSelector((state: StoreState) => state.download.tasks);
   if (edittext && document.activeElement !== inputRef.current?.input) {
     setEdittext(undefined);
   }
@@ -75,8 +84,8 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
     }
   }, [props.videos]);
 
-  const handleDownloadVideo = useCallback(async (item: DetectedVideo) => {
-    try {
+  const handleDownloadVideo = useCallback(
+    async (item: DetectedVideo) => {
       const isBlob = item.type === 'blob' || item.type === 'mse' || item.src.startsWith('blob:');
       if (isBlob && !props.onDownloadBlob) {
         message.error({ content: '当前版本不支持下载该视频', key: item.src });
@@ -105,64 +114,80 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
       });
       if (result.canceled || !result.filePath) return;
 
-      const downloadKey = item.src;
-      message.loading({ content: isM3U8 ? '解析 M3U8 并下载中...' : '下载中...', key: downloadKey, duration: 0 });
-      setDownloadProgress((prev) => ({ ...prev, [downloadKey]: 0 }));
-
-      if (isBlob) {
-        // blob:/MSE 视频无法由主进程直接下载，需从 webview 页面内读取数据再写文件
-        try {
-          await props.onDownloadBlob!(item.src, result.filePath, (p) => {
-            setDownloadProgress((prev) => ({ ...prev, [downloadKey]: p }));
-          });
-          message.success({ content: '下载完成', key: downloadKey });
-        } catch (e: any) {
-          message.error({ content: '下载失败: ' + (e.message || String(e)), key: downloadKey });
-          console.error('Download video failed:', e);
-        } finally {
-          setDownloadProgress((prev) => {
-            const next = { ...prev };
-            delete next[downloadKey];
-            return next;
-          });
-        }
-        return;
-      }
-
-      // 使用新的 IPC 接口下载
-      const { ipcRenderer } = window.contextModules.electron;
-
-      // 监听进度
-      const progressHandler = (_: any, data: { url: string; progress: number }) => {
-        if (data.url === downloadKey) {
-          setDownloadProgress((prev) => ({ ...prev, [downloadKey]: data.progress }));
-        }
-      };
-      ipcRenderer.on('download-video-progress', progressHandler);
-
-      try {
-        await ipcRenderer.invoke('download-video-advanced', {
+      const downloadKey = `${item.src}_${Date.now()}`;
+      const taskTitle = item.title || defaultPath;
+      // 注册全局下载任务（进度展示迁移到右侧"下载记录"）
+      dispatch(
+        addDownloadTaskAction({
+          key: downloadKey,
+          title: taskTitle,
+          type: item.type,
           url: item.src,
           savePath: result.filePath,
+          resumable: !isBlob,
           isM3U8,
-        });
-        message.success({ content: '下载完成', key: downloadKey });
-      } catch (e: any) {
-        message.error({ content: '下载失败: ' + (e.message || String(e)), key: downloadKey });
+        })
+      );
+
+      try {
+        if (isBlob) {
+          // blob:/MSE 视频无法由主进程直接下载，需从 webview 页面内读取数据再写文件
+          try {
+            await props.onDownloadBlob!(item.src, result.filePath, (p) => {
+              dispatch(updateDownloadProgressAction(downloadKey, p));
+            });
+            dispatch(setDownloadStatusAction(downloadKey, 'done'));
+            message.success({ content: '下载完成，可在下载记录中查看', key: downloadKey });
+          } catch (e: any) {
+            dispatch(setDownloadStatusAction(downloadKey, 'failed', e.message || String(e)));
+            message.error({ content: '下载失败: ' + (e.message || String(e)), key: downloadKey });
+            console.error('Download video failed:', e);
+          }
+          return;
+        }
+
+        // 使用支持断点续传的下载接口（暂停后可从断点继续）
+        const { downloads, ipcRenderer } = window.contextModules.electron;
+
+        // 监听进度（DownloadRecords 也会按 taskId 全局监听，这里作为兜底）
+        const progressHandler = (_: any, data: { taskId?: string; url: string; progress: number }) => {
+          if (data.taskId === downloadKey || data.url === item.src) {
+            dispatch(updateDownloadProgressAction(downloadKey, data.progress));
+          }
+        };
+        ipcRenderer.on('download-video-progress', progressHandler);
+
+        try {
+          await downloads.start({
+            taskId: downloadKey,
+            url: item.src,
+            savePath: result.filePath,
+            isM3U8,
+            title: taskTitle,
+            type: item.type,
+          });
+          dispatch(setDownloadStatusAction(downloadKey, 'done'));
+          message.success({ content: '下载完成，可在下载记录中查看', key: downloadKey });
+        } catch (e: any) {
+          if (e?.code === 'PAUSED') {
+            // 用户可能在下载记录中暂停或删除，静默同步状态即可
+            dispatch(setDownloadStatusAction(downloadKey, 'paused'));
+          } else {
+            dispatch(setDownloadStatusAction(downloadKey, 'failed', e.message || String(e)));
+            message.error({ content: '下载失败: ' + (e.message || String(e)), key: downloadKey });
+            console.error('Download video failed:', e);
+          }
+        } finally {
+          ipcRenderer.off('download-video-progress', progressHandler);
+        }
+      } catch (e) {
+        dispatch(setDownloadStatusAction(downloadKey, 'failed', e instanceof Error ? e.message : String(e)));
+        message.error({ content: '下载失败', key: item.src });
         console.error('Download video failed:', e);
-      } finally {
-        ipcRenderer.off('download-video-progress', progressHandler);
-        setDownloadProgress((prev) => {
-          const next = { ...prev };
-          delete next[downloadKey];
-          return next;
-        });
       }
-    } catch (e) {
-      message.error({ content: '下载失败', key: item.src });
-      console.error('Download video failed:', e);
-    }
-  }, []);
+    },
+    [props.onDownloadBlob]
+  );
 
   const getVideoTypeLabel = (item: DetectedVideo) => {
     const labels: Record<string, string> = {
@@ -278,9 +303,9 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
                 <Divider style={{ margin: '0 0 8px' }} />
                 <div className={styles.videoList}>
                   {props.videos.map((item, index) => {
-                    const progress = downloadProgress[item.src];
-                    const isDownloading = progress !== undefined && progress < 100;
-                    const isDone = progress !== undefined && progress >= 100;
+                    const isDownloading = downloadTasks.some(
+                      (t) => t.url === item.src && t.status === 'downloading'
+                    );
                     return (
                       <div key={index} className={styles.videoCard}>
                         <div className={styles.videoCardHeader}>
@@ -315,22 +340,9 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
                           </div>
                         )}
                         {isDownloading && (
-                          <div className={styles.videoProgress}>
-                            <Progress
-                              percent={Math.round(progress)}
-                              size="small"
-                              status="active"
-                              strokeColor={{
-                                '0%': getVideoTypeColor(item.type),
-                                '100%': '#87d068',
-                              }}
-                            />
-                          </div>
-                        )}
-                        {isDone && (
-                          <div className={styles.videoProgressDone}>
-                            <CheckOutlined className={styles.videoProgressDoneIcon} />
-                            <span className={styles.videoProgressDoneText}>下载完成</span>
+                          <div className={styles.videoProgressHint}>
+                            <LoadingOutlined style={{ color: getVideoTypeColor(item.type) }} />
+                            <span>下载中，进度见右侧「下载记录」</span>
                           </div>
                         )}
                         <div className={styles.videoCardActions}>
@@ -344,7 +356,7 @@ const SiteBar: React.FC<SiteBarProps> = (props) => {
                             />
                           </Tooltip>
                           {item.type !== 'iframe' && (
-                            <Tooltip title={isDownloading ? `下载中 ${Math.round(progress)}%` : '下载'}>
+                            <Tooltip title={isDownloading ? '下载中，详见右侧下载记录' : '下载'}>
                               <Button
                                 size="small"
                                 type="text"

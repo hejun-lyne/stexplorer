@@ -13,6 +13,7 @@ import SettingContent from '@/components/SettingContent';
 import MyStrategies from './MyStrategies';
 import StrategyGroupDetail from './MyStrategies/StrategyGroupDetail';
 import MessageBar from './MessageBar';
+import DownloadRecords from './DownloadRecords';
 
 export interface RightSiderProps {
   activeSecid: string;
@@ -88,6 +89,9 @@ const RightSider: React.FC<RightSiderProps> = ({
         </Tabs.TabPane>
         <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>知识库</span>} key={'knowhow'}>
           <NoteBooks openBook={openBook} openNote={openNote} />
+        </Tabs.TabPane>
+        <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>下载记录</span>} key={'downloads'}>
+          <DownloadRecords />
         </Tabs.TabPane>
       </Tabs>
       <MessageBar />

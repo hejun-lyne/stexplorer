@@ -17,6 +17,27 @@ declare global {
           writeImage: (dataUrl: string) => void;
         };
         downloadVideo: (url: string, savePath: string) => Promise<string>;
+        downloads: {
+          start: (opts: { taskId: string; url: string; savePath: string; isM3U8?: boolean; title?: string; type?: string }) => Promise<string>;
+          pause: (taskId: string) => Promise<boolean>;
+          cancel: (taskId: string) => Promise<boolean>;
+          remove: (taskId: string) => Promise<boolean>;
+          list: () => Promise<
+            {
+              taskId: string;
+              url: string;
+              savePath: string;
+              title: string;
+              type: string;
+              isM3U8: boolean;
+              status: string;
+              progress: number;
+              error?: string;
+              createdAt: number;
+              finishedAt?: number;
+            }[]
+          >;
+        };
         invoke: {
           showCurrentWindow: () => void;
           getShouldUseDarkColors: () => Promise<boolean>;

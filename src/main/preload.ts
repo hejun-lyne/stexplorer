@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('contextModules', {
   electron: {
     shell: {
       openExternal: shell.openExternal,
+      showItemInFolder: shell.showItemInFolder,
     },
     ipcRenderer: {
       invoke: ipcRenderer.invoke,
@@ -78,6 +79,14 @@ contextBridge.exposeInMainWorld('contextModules', {
       writeImage: (dataUrl: string) => clipboard.writeImage(nativeImage.createFromDataURL(dataUrl)),
     },
     downloadVideo: (url: string, savePath: string) => ipcRenderer.invoke('download-video', { url, savePath }),
+    downloads: {
+      start: (opts: { taskId: string; url: string; savePath: string; isM3U8?: boolean; title?: string; type?: string }) =>
+        ipcRenderer.invoke('download-start', opts),
+      pause: (taskId: string) => ipcRenderer.invoke('download-pause', { taskId }),
+      cancel: (taskId: string) => ipcRenderer.invoke('download-cancel', { taskId }),
+      remove: (taskId: string) => ipcRenderer.invoke('download-remove', { taskId }),
+      list: () => ipcRenderer.invoke('download-list'),
+    },
     saveImage: (filePath: string, dataUrl: string) => {
       const imageBuffer = base64ToBuffer(dataUrl);
       fs.writeFileSync(filePath, imageBuffer);

@@ -73,7 +73,8 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
     },
     electron: {
         shell: {
-            openExternal: electron_1.shell.openExternal
+            openExternal: electron_1.shell.openExternal,
+            showItemInFolder: electron_1.shell.showItemInFolder
         },
         ipcRenderer: {
             invoke: electron_1.ipcRenderer.invoke,
@@ -91,6 +92,7 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
                     'close-current-tab',
                     'message-to-worker',
                     'message-from-worker',
+                    'execute-worker-task',
                     'on-console-log',
                     'on-progress-log',
                     'download-video-progress',
@@ -137,6 +139,15 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
             writeImage: function (dataUrl) { return electron_1.clipboard.writeImage(electron_1.nativeImage.createFromDataURL(dataUrl)); }
         },
         downloadVideo: function (url, savePath) { return electron_1.ipcRenderer.invoke('download-video', { url: url, savePath: savePath }); },
+        downloads: {
+            start: function (opts) {
+                return electron_1.ipcRenderer.invoke('download-start', opts);
+            },
+            pause: function (taskId) { return electron_1.ipcRenderer.invoke('download-pause', { taskId: taskId }); },
+            cancel: function (taskId) { return electron_1.ipcRenderer.invoke('download-cancel', { taskId: taskId }); },
+            remove: function (taskId) { return electron_1.ipcRenderer.invoke('download-remove', { taskId: taskId }); },
+            list: function () { return electron_1.ipcRenderer.invoke('download-list'); }
+        },
         saveImage: function (filePath, dataUrl) {
             var imageBuffer = (0, util_1.base64ToBuffer)(dataUrl);
             fs.writeFileSync(filePath, imageBuffer);

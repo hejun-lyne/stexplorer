@@ -11,6 +11,7 @@ import { app, globalShortcut, ipcMain, nativeTheme, dialog } from 'electron';
 import { get } from 'https';
 import { get as httpGet } from 'http';
 import got from 'got';
+import { DownloadManager, DownloadStartOptions } from './downloadManager';
 import windowStateKeeper from 'electron-window-state';
 import contextMenu from 'electron-context-menu';
 import { appIcon, generateWalletIcon } from './icon';
@@ -30,7 +31,6 @@ import * as ts from 'typescript';
 import { PromiseWorker } from './promiseWorker';
 import * as localFileStorage from './localFileStorage';
 import os from 'os';
-import * as crypto from 'crypto';
 
 let willQuitApp = false;
 
@@ -496,239 +496,46 @@ async function init() {
     });
   });
 
-  // 高级视频下载
+  // 高级视频下载（断点续传：m3u8 分片缓存续传 + 单文件 Range 续传）
+  const downloadManager = new DownloadManager();
   ipcMain.handle('download-video-advanced', async (event, { url, savePath, isM3U8 }: { url: string; savePath: string; isM3U8?: boolean }) => {
+    const taskId = `${url}_${Date.now()}`;
     const sendProgress = (progress: number) => {
       event.sender.send('download-video-progress', { url, progress });
     };
-
-    const downloadStream = async (downloadUrl: string, outputPath: string, onProgress?: (received: number, total: number) => void) => {
-      const stream = got.stream(downloadUrl, {
-        retry: 2,
-        timeout: {
-          response: 30000, // 30 秒内没收到首个字节才算连接超时
-          read: 30000,     // 30 秒内没收到新数据才算传输超时（不限总用时）
-        },
-        followRedirect: true,
-      });
-      const writeStream = fs.createWriteStream(outputPath);
-      return new Promise<void>((resolve, reject) => {
-        let received = 0;
-        let total = 0;
-        stream.on('response', (res) => {
-          const cl = res.headers['content-length'];
-          total = parseInt(Array.isArray(cl) ? cl[0] : (cl || '0'), 10);
-        });
-        stream.on('data', (chunk: Buffer) => {
-          received += chunk.length;
-          if (onProgress && total > 0) {
-            onProgress(received, total);
-          }
-        });
-        stream.on('error', reject);
-        writeStream.on('error', reject);
-        writeStream.on('finish', () => {
-          writeStream.close();
-          resolve();
-        });
-        stream.pipe(writeStream);
-      });
-    };
-
-    const downloadM3U8 = async (m3u8Url: string, outputPath: string): Promise<string> => {
-      const m3u8Text = await got(m3u8Url, {
-        retry: 2,
-        timeout: { request: 15000 },
-        followRedirect: true,
-      }).text();
-
-      const lines = m3u8Text.split(/\r?\n/);
-
-      // 解析 m3u8 内相对地址：兼容 /绝对路径、相对路径、// 协议相对、完整 URL
-      const resolveUrl = (ref: string, base: string): string => {
-        if (/^https?:\/\//i.test(ref)) return ref;
-        return new URL(ref, base).toString();
-      };
-
-      // 检测是否为 master 播放列表（包含 #EXT-X-STREAM-INF 变体流）
-      const hasStreamInf = lines.some((l) => l.trim().startsWith('#EXT-X-STREAM-INF'));
-      if (hasStreamInf) {
-        let bestBandwidth = 0;
-        let bestUrl = '';
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (line.startsWith('#EXT-X-STREAM-INF')) {
-            const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
-            const bandwidth = bandwidthMatch ? parseInt(bandwidthMatch[1], 10) : 0;
-            const nextLine = lines[i + 1] ? lines[i + 1].trim() : '';
-            if (nextLine && !nextLine.startsWith('#')) {
-              if (bandwidth > bestBandwidth) {
-                bestBandwidth = bandwidth;
-                bestUrl = nextLine;
-              }
-            }
-          }
-        }
-        if (!bestUrl) throw new Error('M3U8 中未找到有效的变体流');
-        return downloadM3U8(resolveUrl(bestUrl, m3u8Url), outputPath);
-      }
-
-      interface KeyInfo {
-        method: string;
-        uri: string; // 原始 URI（可能相对路径 / 绝对路径 / data:）
-        iv?: string; // 十六进制 IV（不含 0x 前缀）
-      }
-      interface SegmentInfo {
-        url: string;
-        key: KeyInfo | null;
-        seq: number; // 媒体序列号，用于缺省 IV 时的默认值
-      }
-
-      const tsSegments: SegmentInfo[] = [];
-      let currentKey: KeyInfo | null = null;
-      let mediaSequence = 0;
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
-          mediaSequence = parseInt(line.substring(line.indexOf(':') + 1).trim(), 10);
-          continue;
-        }
-        if (line.startsWith('#EXT-X-KEY:')) {
-          const attrs = line.substring('#EXT-X-KEY:'.length);
-          const methodMatch = attrs.match(/METHOD=([^,]+)/);
-          const method = methodMatch ? methodMatch[1].trim() : '';
-          if (method === 'AES-128') {
-            const uriMatch = attrs.match(/URI="([^"]+)"/);
-            const ivMatch = attrs.match(/IV=0x([0-9a-fA-F]+)/);
-            currentKey = {
-              method,
-              uri: uriMatch ? uriMatch[1] : '',
-              iv: ivMatch ? ivMatch[1] : undefined,
-            };
-          } else if (method.toUpperCase() === 'NONE') {
-            currentKey = null;
-          }
-          continue;
-        }
-        if (line.startsWith('#')) continue;
-        if (!line) continue;
-        tsSegments.push({ url: resolveUrl(line, m3u8Url), key: currentKey, seq: mediaSequence });
-        mediaSequence++;
-      }
-
-      // AES-128 解密辅助：key 缓存（同一个播放列表通常只有 1 个 key）
-      const keyCache = new Map<string, Buffer>();
-      const getKeyBuffer = async (keyInfo: KeyInfo): Promise<Buffer> => {
-        if (keyCache.has(keyInfo.uri)) return keyCache.get(keyInfo.uri)!;
-        let keyBuf: Buffer;
-        if (keyInfo.uri.startsWith('data:')) {
-          // data:application/octet-stream;base64,xxx
-          const commaIdx = keyInfo.uri.indexOf(',');
-          const b64 = commaIdx >= 0 ? keyInfo.uri.substring(commaIdx + 1) : '';
-          keyBuf = Buffer.from(b64, 'base64');
-        } else {
-          const keyUrl = resolveUrl(keyInfo.uri, m3u8Url);
-          keyBuf = await got(keyUrl, {
-            retry: 2,
-            timeout: { request: 15000 },
-            followRedirect: true,
-          }).buffer();
-        }
-        if (keyBuf.length !== 16) {
-          throw new Error('AES-128 密钥长度异常（需要 16 字节）');
-        }
-        keyCache.set(keyInfo.uri, keyBuf);
-        return keyBuf;
-      };
-
-      const decryptSegment = (data: Buffer, seg: SegmentInfo): Buffer => {
-        const keyInfo = seg.key;
-        if (!keyInfo) return data;
-        const keyBuf = keyCache.get(keyInfo.uri)!;
-        let iv: Buffer;
-        if (keyInfo.iv) {
-          iv = Buffer.from(keyInfo.iv, 'hex');
-          if (iv.length !== 16) iv = iv.subarray(0, 16);
-        } else {
-          // 未指定 IV 时，按 RFC 8216 使用媒体序列号作为 16 字节大端整数
-          iv = Buffer.alloc(16);
-          iv.writeBigUInt64BE(BigInt(seg.seq), 8);
-        }
-        const decipher = crypto.createDecipheriv('aes-128-cbc', keyBuf as any, iv as any);
-        const part1: Uint8Array = new Uint8Array(decipher.update(data as any) as any);
-        const part2: Uint8Array = new Uint8Array(decipher.final() as any);
-        return Buffer.concat([part1, part2]);
-      };
-
-      const tmpDir = path.join(app.getPath('temp'), `m3u8_${Date.now()}`);
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const outputStream = fs.createWriteStream(outputPath);
-
-      for (let i = 0; i < tsSegments.length; i++) {
-        const seg = tsSegments[i];
-        const tsPath = path.join(tmpDir, `seg_${i.toString().padStart(5, '0')}.ts`);
-        try {
-          await downloadStream(seg.url, tsPath);
-        } catch (e) {
-          outputStream.destroy();
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-          throw new Error(`下载 TS 分片 ${i + 1}/${tsSegments.length} 失败: ${seg.url}`);
-        }
-        let tsBuffer = fs.readFileSync(tsPath);
-        if (seg.key) {
-          try {
-            await getKeyBuffer(seg.key);
-            tsBuffer = decryptSegment(tsBuffer, seg);
-          } catch (e: any) {
-            outputStream.destroy();
-            fs.rmSync(tmpDir, { recursive: true, force: true });
-            throw new Error(`解密 TS 分片 ${i + 1}/${tsSegments.length} 失败: ${e?.message || String(e)}`);
-          }
-        }
-        outputStream.write(tsBuffer);
-        fs.unlinkSync(tsPath);
-        sendProgress(((i + 1) / tsSegments.length) * 100);
-      }
-
-      await new Promise<void>((resolve, reject) => {
-        outputStream.on('finish', resolve);
-        outputStream.on('error', reject);
-        outputStream.end();
-      });
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-      sendProgress(100);
-      return outputPath;
-    };
-
     try {
-      let finalIsM3U8 = isM3U8;
-      if (!finalIsM3U8) {
-        try {
-          const headRes = await got.head(url, { retry: 2, timeout: { request: 10000 }, followRedirect: true });
-          const ct = headRes.headers['content-type'] || '';
-          if (/mpegurl|x-mpegurl|m3u8/i.test(ct)) {
-            finalIsM3U8 = true;
-          }
-        } catch (e) {
-          finalIsM3U8 = /\.m3u8([?#]|$)/i.test(url);
-        }
-      }
-
-      if (!finalIsM3U8) {
-        await downloadStream(url, savePath, (received, total) => {
-          if (total > 0) sendProgress((received / total) * 100);
-        });
-        sendProgress(100);
-        return savePath;
-      }
-
-      return await downloadM3U8(url, savePath);
+      await downloadManager.start({ taskId, url, savePath, isM3U8 }, sendProgress);
+      return savePath;
     } catch (e: any) {
+      if (e?.code === 'PAUSED') {
+        throw new Error('下载未完成');
+      }
       sendProgress(0);
       throw e;
     }
   });
+
+  // 断点续传下载管理接口（支持暂停/继续/取消，任务可跨重启恢复）
+  ipcMain.handle('download-start', (event, opts: DownloadStartOptions) => {
+    const { taskId, url } = opts;
+    const sendProgress = (progress: number) => {
+      event.sender.send('download-video-progress', { taskId, url, progress });
+    };
+    return downloadManager.start(opts, sendProgress);
+  });
+  ipcMain.handle('download-pause', (_event, { taskId }: { taskId: string }) => {
+    downloadManager.pause(taskId);
+    return true;
+  });
+  ipcMain.handle('download-cancel', (_event, { taskId }: { taskId: string }) => {
+    downloadManager.cancel(taskId);
+    return true;
+  });
+  ipcMain.handle('download-remove', (_event, { taskId }: { taskId: string }) => {
+    downloadManager.remove(taskId);
+    return true;
+  });
+  ipcMain.handle('download-list', () => downloadManager.getAll());
 
   // blob: 视频下载 —— 渲染进程在 webview 页面内 fetch 出 blob 数据，分块以 base64 回传，主进程写入文件
   ipcMain.handle('blob-download-chunk', async (event, { savePath, data, append }: { savePath: string; data: string; append?: boolean }) => {

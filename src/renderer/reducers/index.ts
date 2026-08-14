@@ -9,6 +9,7 @@ import storage from './storage';
 import baidu from './baidu';
 import strategy from './strategy';
 import training from './training';
+import download from './download';
 
 export default function createRootReducer() {
   return combineReducers({
@@ -21,6 +22,7 @@ export default function createRootReducer() {
     storage,
     baidu,
     strategy,
-    training
+    training,
+    download
   });
 }
