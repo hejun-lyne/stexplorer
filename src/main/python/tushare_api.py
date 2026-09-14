@@ -541,9 +541,7 @@ class TushareAPI:
                 return []
             df['cal_date'] = pd.to_datetime(df['cal_date'])
             result = {"dates": df['cal_date'].dt.strftime('%Y-%m-%d').tolist()}
-            # 只有 zx 有效时才缓存，避免缓存空价格数据
-            if close_p > 0:
-                write_cache(cache_key, result)
+            write_cache(cache_key, result)
             return result
         except Exception as e:
             return {"error": str(e)}
@@ -1938,9 +1936,7 @@ class TushareAPI:
                 "date": target_date,
             }
             if isinstance(result, dict) and result.get("boards"):
-                # 只有 zx 有效时才缓存，避免缓存空价格数据
-                if close_p > 0:
-                    write_cache(cache_key, result)
+                write_cache(cache_key, result)
             return result
         except Exception as e: 
             # 请求失败时，如果有缓存则返回过期缓存（降级）
@@ -3982,6 +3978,11 @@ class TushareAPI:
                 main_20d = sum(detail_main[-20:]) if detail_main else 0
                 # 散户20日累计
                 retail_20d = sum(detail_retail[-20:]) if detail_retail else 0
+                # 20日资金变盘：主力/散户20日累计线金叉死叉识别
+                flow_cross = TushareAPI._detect_flow_cross_20d(detail_main, detail_retail, window=20)
+                flow_cross_20d = flow_cross.get("type", "")
+                flow_cross_20d_days = flow_cross.get("days_ago", -1)
+                flow_cross_20d_zone = flow_cross.get("zone", "")
                 # 5日前收盘价
                 price_5d_ago = prices[-5] if len(prices) >= 5 else 0
                 # 近60日收盘价（用于形态识别判断低位）
@@ -4083,6 +4084,8 @@ class TushareAPI:
                         "consolidation_score": 0,
                         "consolidation_metrics": {},
                         "is_pullback": False,
+                        "flow_cross_20d": flow_cross_20d, "flow_cross_20d_days": flow_cross_20d_days,
+                        "flow_cross_20d_zone": flow_cross_20d_zone,
                     })
                     continue
 
@@ -4125,6 +4128,8 @@ class TushareAPI:
                         "consolidation_score": 0,
                         "consolidation_metrics": {},
                         "is_pullback": False,
+                        "flow_cross_20d": flow_cross_20d, "flow_cross_20d_days": flow_cross_20d_days,
+                        "flow_cross_20d_zone": flow_cross_20d_zone,
                     })
                     continue
 
@@ -4679,6 +4684,9 @@ class TushareAPI:
                     "consolidation_score": consolidation_score if is_consolidation else 0,
                     "consolidation_metrics": consol_metrics if is_consolidation else {},
                     "is_pullback": is_pullback,
+                    "flow_cross_20d": flow_cross_20d,
+                    "flow_cross_20d_days": flow_cross_20d_days,
+                    "flow_cross_20d_zone": flow_cross_20d_zone,
                 })
             except Exception as e:
                 import traceback
@@ -4690,6 +4698,86 @@ class TushareAPI:
         passed_count = sum(1 for r in results if r["basic_passed"] and r["buy_signal"] is not None)
 
         return {"results": results, "count": len(results), "passed_count": passed_count}
+
+    @staticmethod
+    def _detect_flow_cross_20d(detail_main: List[float], detail_retail: List[float],
+                               window: int = 20) -> Dict[str, Any]:
+        """20日资金变盘：识别主力20日累计线与散户20日累计线的金叉/死叉
+
+        对应交易数据-资金流向趋势图中的 20日主力线 与 20日散户线：
+        - 金叉：主力线自下而上穿越散户线（筹码由散户向主力转移的转折点）
+        - 死叉：主力线自上而下穿越散户线
+
+        Args:
+            detail_main: 主力每日净流入序列（时间升序）
+            detail_retail: 散户每日净流入序列（时间升序）
+            window: 累计窗口，默认20日
+
+        Returns:
+            {
+              "type": "金叉"/"死叉"/"",   # 最近一次变盘类型，空串=无交叉
+              "days_ago": N,              # 距今交易日数，0=当日，-1=无交叉
+              "zone": "之上"/"之下"/"",   # 交叉点位于0轴之上还是之下，空串=无交叉
+              "main_line": float,         # 当前主力20日累计值
+              "retail_line": float,       # 当前散户20日累计值
+              "crosses": [...]            # 窗口内全部交叉点 [{"type", "days_ago", "zone", "value"}]
+            }
+        """
+        empty = {"type": "", "days_ago": -1, "zone": "", "main_line": 0.0, "retail_line": 0.0, "crosses": []}
+        try:
+            if not detail_main or not detail_retail:
+                return empty
+            n = min(len(detail_main), len(detail_retail))
+            if n < window + 1:
+                return empty
+
+            main_arr = detail_main[-n:]
+            retail_arr = detail_retail[-n:]
+
+            # 滚动 window 日累计线（仅从完整窗口开始计算）
+            main_line = [sum(main_arr[i - window + 1: i + 1]) for i in range(window - 1, n)]
+            retail_line = [sum(retail_arr[i - window + 1: i + 1]) for i in range(window - 1, n)]
+
+            # 识别交叉点：diff 符号变化即为变盘
+            crosses = []  # 按时间升序
+            prev_diff = main_line[0] - retail_line[0]
+            for j in range(1, len(main_line)):
+                curr_diff = main_line[j] - retail_line[j]
+                days_ago = len(main_line) - 1 - j
+                cross_type = ""
+                if prev_diff <= 0 < curr_diff:
+                    cross_type = "金叉"
+                elif prev_diff >= 0 > curr_diff:
+                    cross_type = "死叉"
+                if cross_type:
+                    # 交叉点位置 = 两线相交处的值，用于区分0轴之上/之下
+                    cross_value = (main_line[j] + retail_line[j]) / 2
+                    crosses.append({
+                        "type": cross_type,
+                        "days_ago": days_ago,
+                        "zone": "之上" if cross_value > 0 else "之下",
+                        "value": round(cross_value, 2),
+                    })
+                prev_diff = curr_diff
+
+            if not crosses:
+                return {
+                    "type": "", "days_ago": -1, "zone": "",
+                    "main_line": main_line[-1], "retail_line": retail_line[-1],
+                    "crosses": [],
+                }
+
+            latest = crosses[-1]  # 最近一次变盘
+            return {
+                "type": latest["type"],
+                "days_ago": latest["days_ago"],
+                "zone": latest.get("zone", ""),
+                "main_line": main_line[-1],
+                "retail_line": retail_line[-1],
+                "crosses": crosses,
+            }
+        except Exception:
+            return empty
 
     @staticmethod
     def _make_main_in_empty(ts_code: str, name: str, reason: str) -> Dict[str, Any]:
@@ -4722,6 +4810,7 @@ class TushareAPI:
             "consolidation_score": 0,
             "consolidation_metrics": {},
             "is_pullback": False,
+            "flow_cross_20d": "", "flow_cross_20d_days": -1, "flow_cross_20d_zone": "",
         }
 
     @staticmethod

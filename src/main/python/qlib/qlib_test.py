@@ -1,34 +1,76 @@
 import qlib
 from qlib.constant import REG_CN
 
-# 初始化 Qlib，指定数据路径
-provider_uri = "~/.qlib/qlib_data/cn_data"
-qlib.init(provider_uri=provider_uri, region=REG_CN)
 
-# 2. 获取交易日历  
-from qlib.data import D  
-print("前两个交易日：")  
-print(D.calendar(start_time='2010-01-01', end_time='2017-12-31', freq='day')[:2])  
-# 输出: [Timestamp('2010-01-04'), Timestamp('2010-01-05')]  
-  
-# 3. 解析股票池  
-print("\nA股全部股票池配置：")  
-print(D.instruments(market='all'))  
-# 输出: {'market': 'all', 'filter_pipe': []}  
-  
-# 4. 列出沪深300成分股（2010-2017）  
-instruments = D.instruments(market='csi300')  
-print("\n沪深300前6只：")  
-print(D.list_instruments(instruments=instruments,  
-                         start_time='2010-01-01',  
-                         end_time='2017-12-31',  
-                         as_list=True)[:6])  
-# 输出: ['SH600036', 'SH600110', 'SH600087', 'SH600900', 'SH600089', 'SZ000912']  
-  
-# 5. 取特征数据  
-instruments = ['SH600000']  
-fields = ['$close', '$volume', 'Ref($close, 1)', 'Mean($close, 3)', '$high-$low']  
-df = D.features(instruments, fields,  
-                start_time='2010-01-01', end_time='2017-12-31', freq='day')  
-print("\nSH600000 前5行：")  
-print(df.head())
+def main():
+    # 初始化 Qlib，指定数据路径
+    provider_uri = "~/.qlib/qlib_data/cn_data"
+    qlib.init(provider_uri=provider_uri, region=REG_CN)
+
+    from qlib.contrib.model.gbdt import LGBModel
+    from qlib.contrib.data.handler import Alpha158
+    from qlib.utils import init_instance_by_config, flatten_dict
+    from qlib.workflow import R
+    from qlib.workflow.record_temp import SignalRecord, PortAnaRecord
+
+    market = "csi300"
+    benchmark = "SH000300"
+
+    data_handler_config = {
+        "start_time": "2008-01-01",
+        "end_time": "2020-08-01",
+        "fit_start_time": "2008-01-01",
+        "fit_end_time": "2014-12-31",
+        "instruments": market,
+    }
+
+    task = {
+        "model": {
+            "class": "LGBModel",
+            "module_path": "qlib.contrib.model.gbdt",
+            "kwargs": {
+                "loss": "mse",
+                "colsample_bytree": 0.8879,
+                "learning_rate": 0.0421,
+                "subsample": 0.8789,
+                "lambda_l1": 205.6999,
+                "lambda_l2": 580.9768,
+                "max_depth": 8,
+                "num_leaves": 210,
+                "num_threads": 20,
+            },
+        },
+        "dataset": {
+            "class": "DatasetH",
+            "module_path": "qlib.data.dataset",
+            "kwargs": {
+                "handler": {
+                    "class": "Alpha158",
+                    "module_path": "qlib.contrib.data.handler",
+                    "kwargs": data_handler_config,
+                },
+                "segments": {
+                    "train": ("2008-01-01", "2014-12-31"),
+                    "valid": ("2015-01-01", "2016-12-31"),
+                    "test":  ("2017-01-01", "2020-08-01"),
+                },
+            },
+        },
+    }
+
+    # 实例化
+    model = init_instance_by_config(task["model"])
+    dataset = init_instance_by_config(task["dataset"])
+
+    # 训练 + 记录
+    with R.start(experiment_name="workflow"):
+        R.log_params(**flatten_dict(task))
+        model.fit(dataset)
+
+        recorder = R.get_recorder()
+        sr = SignalRecord(model, dataset, recorder)
+        sr.generate()
+
+
+if __name__ == '__main__':
+    main()
