@@ -399,6 +399,49 @@ export class DownloadManager {
     const segments = playlist.segments;
     const total = segments.length;
 
+    // 分片级重试配置：源站抖动 / 限流 / 偶发网络错误时自动重试，避免单个分片失败导致整个任务中断
+    const SEGMENT_MAX_ATTEMPTS = 4; // 每个分片最多尝试 4 次（首次 + 3 次重试）
+    const RETRY_BASE_DELAY = 600; // 重试基础延迟 ms，指数退避（600 / 1200 / 2400）
+
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    /**
+     * 下载单个分片，失败时按指数退避自动重试。
+     * 仅网络/源站类错误触发重试；用户暂停（abort）时立即中断，不做无意义重试。
+     */
+    const downloadSegmentWithRetry = async (
+      seg: M3U8Segment,
+      tmpPath: string,
+      index: number
+    ): Promise<void> => {
+      let lastErr: Error | null = null;
+      for (let attempt = 1; attempt <= SEGMENT_MAX_ATTEMPTS; attempt++) {
+        if (signal.aborted) throw new Error('下载已暂停');
+        try {
+          await this.downloadToFile(seg.url, tmpPath, signal);
+          return;
+        } catch (e: any) {
+          lastErr = e;
+          if (signal.aborted) throw new Error('下载已暂停');
+          try {
+            fs.unlinkSync(tmpPath); // 清掉半截文件，避免污染下一次重试
+          } catch {
+            /* ignore */
+          }
+          if (attempt < SEGMENT_MAX_ATTEMPTS) {
+            const delay = RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
+            console.warn(
+              `[DownloadManager] TS 分片 ${index}/${total} 下载失败（第 ${attempt} 次尝试），${delay}ms 后重试：${e?.message || e}`
+            );
+            await sleep(delay);
+          }
+        }
+      }
+      throw new Error(
+        `下载 TS 分片 ${index}/${total} 失败（重试 ${SEGMENT_MAX_ATTEMPTS - 1} 次后仍失败）: ${seg.url}${lastErr ? ` | ${lastErr.message}` : ''}`
+      );
+    };
+
     // 统计已缓存分片，得出续传起点
     let completed = 0;
     for (let i = 0; i < total; i++) {
@@ -413,8 +456,12 @@ export class DownloadManager {
       const segPath = this.segPath(task, i);
       if (fs.existsSync(segPath) && fs.statSync(segPath).size > 0) continue;
       const tmpPath = segPath + '.tmp';
+
+      // 下载分片（网络层失败自动重试）
+      await downloadSegmentWithRetry(seg, tmpPath, i + 1);
+
+      // 解密 & 落盘（本地操作，失败不重试）
       try {
-        await this.downloadToFile(seg.url, tmpPath, signal);
         let data = fs.readFileSync(tmpPath);
         if (seg.key) {
           const key = await getKeyBuffer(seg.key);
@@ -428,8 +475,7 @@ export class DownloadManager {
         } catch {
           /* ignore */
         }
-        if (signal.aborted) throw new Error('下载已暂停');
-        throw new Error(`下载 TS 分片 ${i + 1}/${total} 失败: ${seg.url}`);
+        throw new Error(`处理 TS 分片 ${i + 1}/${total} 失败: ${seg.url}`);
       }
       completed++;
       onProgress((completed / total) * 100);
