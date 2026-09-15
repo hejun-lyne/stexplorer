@@ -1438,6 +1438,10 @@ interface MainInStockResult {
   consolidation_score: number;  // 震荡筑底独立评分
   consolidation_metrics: Record<string, number>;  // 横盘指标：趋势强度/波动率/区间宽度
   is_pullback: boolean;     // 是否处于反弹后回调阶段
+  /** 20日资金变盘：主力/散户20日累计线金叉死叉 */
+  flow_cross_20d: string;      // '金叉' | '死叉' | ''（无交叉）
+  flow_cross_20d_days: number; // 距今交易日数，0=当日，-1=无交叉
+  flow_cross_20d_zone: string; // 交叉点位置：'之上' | '之下' | ''（无交叉）
 }
 
 export async function MainInFilterStocksFromTushare(

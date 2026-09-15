@@ -808,11 +808,15 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             散户10日
             <Button size="small" type="text" icon={sortTypes.retail_10d == 1 ? <CaretUpOutlined /> : sortTypes.retail_10d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('retail_10d')} />
           </Col>
-          <Col span={3}>
+          <Col span={2}>
             场景
             <Button size="small" type="text" icon={sortTypes.score == 1 ? <CaretUpOutlined /> : sortTypes.score == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('score')} />
           </Col>
-          <Col span={4}>操作建议</Col>
+          <Col span={2} title="20日主力/散户累计线金叉死叉：轴上=交叉点位于0轴上方（净流入区间），轴下=0轴下方（净流出区间）">
+            20日变盘
+            <Button size="small" type="text" icon={sortTypes.flow_cross_20d_days == 1 ? <CaretUpOutlined /> : sortTypes.flow_cross_20d_days == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('flow_cross_20d_days')} />
+          </Col>
+          <Col span={3}>操作建议</Col>
         </Row>
       )}
       <div className={classNames(styles.table, styles.moreheader)}>
@@ -1007,7 +1011,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 <Col span={2} className={Utils.GetValueColor(-s.retail_10d).textClass}>
                   {formatMoneyFlow(s.retail_10d)}
                 </Col>
-                <Col span={3} title={s.advice_meaning}>
+                <Col span={2} title={s.advice_meaning}>
                   <span style={{
                     color: isActiveScene ? '#52c41a' : isWatchScene ? '#1890ff' : isWeakScene ? '#faad14' : isAvoidScene ? '#ff4d4f' : 'var(--reverse-text-color)',
                     fontWeight: isActiveScene ? 'bold' : 'normal',
@@ -1015,7 +1019,34 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                     {sceneCode || '--'}
                   </span>
                 </Col>
-                <Col span={4}>
+                <Col span={2} title={s.flow_cross_20d
+                  ? `20日资金${s.flow_cross_20d}（交叉点位于0轴${s.flow_cross_20d_zone}，即${s.flow_cross_20d_zone === '之上' ? '净流入' : '净流出'}区间）：主力20日累计线${s.flow_cross_20d === '金叉' ? '上穿' : '下穿'}散户20日累计线${s.flow_cross_20d_days >= 0 ? `，距今${s.flow_cross_20d_days}个交易日` : ''}`
+                  : '近20日主力/散户累计线无交叉'}>
+                  {s.flow_cross_20d ? (
+                    <span style={{ whiteSpace: 'nowrap' }}>
+                      {s.flow_cross_20d_zone && (
+                        <span style={{
+                          color: s.flow_cross_20d_zone === '之上' ? '#fa8c16' : 'var(--reverse-text-color)',
+                          fontSize: 11,
+                          marginRight: 1,
+                        }}>
+                          {s.flow_cross_20d_zone === '之上' ? '轴上' : '轴下'}
+                        </span>
+                      )}
+                      <span style={{ color: s.flow_cross_20d === '金叉' ? '#52c41a' : '#ff4d4f', fontWeight: 'bold' }}>
+                        {s.flow_cross_20d}
+                      </span>
+                      {s.flow_cross_20d_days >= 0 && (
+                        <span style={{ color: 'var(--reverse-text-color)', fontSize: 11, marginLeft: 2 }}>
+                          {s.flow_cross_20d_days}日
+                        </span>
+                      )}
+                    </span>
+                  ) : (
+                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
+                  )}
+                </Col>
+                <Col span={3}>
                   {sceneCode ? (
                     <span title={`止损: ${s.stop_loss?.toFixed?.(2) ?? s.stop_loss ?? '--'} | 目标: ${s.target?.toFixed?.(2) ?? s.target ?? '--'} | ${s.hold_period || '--'}`}>
                       <span style={{ color: 'var(--main-text-color)' }}>{s.advice_action || '--'}</span>
