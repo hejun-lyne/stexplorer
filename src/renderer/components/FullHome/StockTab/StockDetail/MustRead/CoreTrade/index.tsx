@@ -9,6 +9,7 @@ import { Col, Collapse, Row, Tabs, Spin, Button, Tooltip } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
 import DeptTradeBack from './DeptTradeBack';
 import MoneyFlowChart from './MoneyFlowChart';
+import ShortTermScore from './ShortTermScore';
 import { batch } from 'react-redux';
 
 export interface CoreTradeProps {
@@ -661,6 +662,11 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                 暂无资金流向数据
               </div>
             )}
+          </div>
+        </Tabs.TabPane>
+        <Tabs.TabPane tab={<span>短线评分</span>} key={'shortscore'}>
+          <div className={styles.cardcontent}>
+            <ShortTermScore code={code} moneyFlow={moneyFlow} circMv={mainInResult?.circ_mv} />
           </div>
         </Tabs.TabPane>
         <Tabs.TabPane tab={<span>龙虎榜</span>} key={'lhb'}>

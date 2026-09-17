@@ -1228,6 +1228,27 @@ export async function GetUpRatioFromTushare(dates: string[]): Promise<Record<str
     return {};
   }
 }
+
+/**
+ * 获取按流通市值分档的市场成交活跃度统计（用于短线评分的量能横向对比）
+ * @param date 交易日期 (YYYYMMDD 或 YYYY-MM-DD)，不传则默认最近交易日
+ * @returns { date, tiers: { small/mid/large: { count, avg_amount, median_amount, avg_turnover } }, total_count }，失败返回 null
+ */
+export async function GetMarketActivityStatsFromTushare(date?: string): Promise<any> {
+  try {
+    const params: Record<string, any> = {};
+    if (date) params.date = date;
+    const result = await callTushare('get_market_activity_stats', params);
+    if (result.error || typeof result !== 'object') {
+      console.error('获取市值档成交统计失败:', result.error || 'Invalid response');
+      return null;
+    }
+    return result;
+  } catch (error) {
+    logError(error, 'GetMarketActivityStatsFromTushare', '获取市值档成交统计失败');
+    return null;
+  }
+}
 // ==================== 涨停股票评分 (LimitUpScorer) ====================
 
 /**

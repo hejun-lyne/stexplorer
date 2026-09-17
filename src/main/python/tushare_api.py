@@ -3055,6 +3055,112 @@ class TushareAPI:
                 result[key] = {"error": str(e)}
         return result
 
+    @staticmethod
+    def get_market_activity_stats(date: Optional[str] = None) -> Dict[str, Any]:
+        """获取按流通市值分档的市场成交活跃度统计
+
+        用于短线评分中"量能活跃度"的横向对比：个股成交额 / 同市值档平均成交额。
+        市值分档与主力建仓评分保持一致：小盘(<50亿)、中盘(50~200亿)、大盘(>200亿)。
+
+        支持磁盘缓存（market_activity_stats_map.json）：历史日期长期有效，当天数据缓存 1 小时。
+
+        Args:
+            date: 交易日期(YYYYMMDD)，不传则默认最近交易日
+
+        Returns:
+            {
+                "date": "20240101",
+                "tiers": {
+                    "small": {"count": 2000, "avg_amount": 150000000.0, "median_amount": 120000000.0, "avg_turnover": 2.5},
+                    "mid":   {"count": 1500, "avg_amount": 400000000.0, "median_amount": 380000000.0, "avg_turnover": 1.8},
+                    "large": {"count": 300,  "avg_amount": 1200000000.0, "median_amount": 900000000.0, "avg_turnover": 1.2}
+                },
+                "total_count": 3800
+            }
+        """
+        try:
+            pro = get_pro()
+            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+            today_str = datetime.now().strftime('%Y%m%d')
+            cache_key = "market_activity_stats_map"
+
+            # 读取统一缓存文件（历史日期长期有效）
+            cached = read_cache(cache_key, max_age_hours=8760)
+            if not isinstance(cached, dict):
+                cached = {}
+
+            # 命中缓存检查
+            if target_date in cached:
+                if target_date != today_str:
+                    print(f"[市值档成交统计缓存命中] {target_date}")
+                    return cached[target_date]
+                # 当天数据：检查文件修改时间是否超过 1 小时
+                path = _cache_path(cache_key)
+                if os.path.exists(path):
+                    mtime = os.path.getmtime(path)
+                    age_hours = (datetime.now().timestamp() - mtime) / 3600
+                    if age_hours <= 1:
+                        print(f"[市值档成交统计缓存命中] {target_date}")
+                        return cached[target_date]
+                cached.pop(target_date, None)
+
+            # 1. 获取全市场每日指标（流通市值、换手率在 daily_basic；成交额在 daily）
+            daily_basic = safe_api_call(pro.daily_basic, trade_date=target_date)
+            if isinstance(daily_basic, dict) and daily_basic.get("error"):
+                return daily_basic
+            if daily_basic is None or daily_basic.empty:
+                return {"error": f"No daily_basic data available for date {target_date}"}
+            daily = safe_api_call(pro.daily, trade_date=target_date)
+            if isinstance(daily, dict) and daily.get("error"):
+                return daily
+            if daily is None or daily.empty:
+                return {"error": f"No daily data available for date {target_date}"}
+
+            # 2. 清洗数据（circ_mv 单位: 万元；amount 单位: 千元），按 ts_code 合并成交额
+            df = daily_basic[['ts_code', 'circ_mv', 'turnover_rate']].merge(
+                daily[['ts_code', 'amount']], on='ts_code', how='inner'
+            )
+            df[['circ_mv', 'amount', 'turnover_rate']] = df[['circ_mv', 'amount', 'turnover_rate']].apply(
+                pd.to_numeric, errors='coerce'
+            )
+            df = df.dropna(subset=['circ_mv', 'amount'])
+            if df.empty:
+                return {"error": f"No valid circ_mv/amount data for date {target_date}"}
+
+            circ_mv_yi = df['circ_mv'] / 10000.0  # 流通市值（亿元）
+            amount_yuan = df['amount'] * 1000.0    # 成交额（元）
+
+            # 3. 按市值分档统计
+            tiers = {}
+            buckets = [
+                ("small", circ_mv_yi < 50),
+                ("mid", (circ_mv_yi >= 50) & (circ_mv_yi < 200)),
+                ("large", circ_mv_yi >= 200),
+            ]
+            for name, mask in buckets:
+                sub_amount = amount_yuan[mask]
+                sub_turnover = df['turnover_rate'][mask]
+                tiers[name] = {
+                    "count": int(mask.sum()),
+                    "avg_amount": round(float(sub_amount.mean()), 2) if len(sub_amount) else 0.0,
+                    "median_amount": round(float(sub_amount.median()), 2) if len(sub_amount) else 0.0,
+                    "avg_turnover": round(float(sub_turnover.mean()), 4) if len(sub_turnover) else 0.0,
+                }
+
+            result = {
+                "date": target_date,
+                "tiers": tiers,
+                "total_count": int(len(df)),
+            }
+
+            # 4. 补充缓存
+            cached[target_date] = result
+            write_cache(cache_key, cached)
+            print(f"[市值档成交统计缓存更新] {target_date}，当前共 {len(cached)} 个日期")
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
     # ------------------ 选股模块 - 步骤拆分接口 ------------------
 
     @staticmethod
