@@ -23,6 +23,8 @@ import { batch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { scoreColor } from '@/helpers/shortTermScore';
+import { computeShortTermScoreRows, ShortTermScoreItem, ShortTermScoreRow } from '@/helpers/shortTermScoreList';
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -54,7 +56,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
 
   // 选股流程状态
-  const [displayMode, setDisplayMode] = useState<'stocks' | 'leaders' | 'risk' | 'signals' | 'mainIn'>('stocks');
+  const [displayMode, setDisplayMode] = useState<'stocks' | 'leaders' | 'risk' | 'signals' | 'mainIn' | 'shortScore'>('stocks');
 
   // 龙头股识别
   const [leaderLoading, setLeaderLoading] = useState(false);
@@ -87,7 +89,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [mainInProgress, setMainInProgress] = useState(0);
   const isMainInPausedRef = React.useRef(false);
   const mainInIndexRef = React.useRef(0);
+
+  // 短线评分
+  const [shortScoreLoading, setShortScoreLoading] = useState(false);
+  const [shortScoreData, setShortScoreData] = useState<ShortTermScoreRow[]>([]);
+  const [shortScoreProgress, setShortScoreProgress] = useState(0);
+  const isShortScorePausedRef = React.useRef(false);
+  const shortScoreRemainingRef = React.useRef<ShortTermScoreItem[]>([]);
+  const shortScoreTotalRef = React.useRef(0);
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { stockConfigsMapping } = useSelector((state: StoreState) => state.stock);
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
     manual: true,
@@ -449,6 +460,91 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
   }, [mainInLoading, mainInData.length, displayMode, signalData, riskData, leaderData, leaderDisplayCount, stocks]);
 
+  // ========== 短线评分 ==========
+  const handleShortScore = useCallback(async () => {
+    if (shortScoreLoading) {
+      isShortScorePausedRef.current = true;
+      return;
+    }
+    // 获取当前显示的股票列表（沿用选股漏斗：优先取上一步的有效结果）
+    const lookupName = (code: string) => stocks.find((s) => s.code === code)?.name || '';
+    const lookupHybk = (code: string) => {
+      const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
+      return stockConfigsMapping[secid]?.hybk || null;
+    };
+    let currentItems: ShortTermScoreItem[] = [];
+    if (displayMode === 'mainIn') {
+      currentItems = mainInData.filter((d: any) => d.buy_signal).map((d: any) => {
+        const code = d.ts_code.split('.')[0];
+        return { code, name: d.name || lookupName(code), circMv: Number(d.circ_mv) || undefined, hybk: lookupHybk(code) };
+      });
+    } else if (displayMode === 'signals') {
+      currentItems = signalData.filter((d: any) => d.has_signal).map((d: any) => {
+        const code = d.ts_code.split('.')[0];
+        return { code, name: lookupName(code), hybk: lookupHybk(code) };
+      });
+    } else if (displayMode === 'risk') {
+      currentItems = riskData.filter((d: any) => d.passed).map((d: any) => {
+        const code = d.ts_code.split('.')[0];
+        return { code, name: lookupName(code), hybk: lookupHybk(code) };
+      });
+    } else if (displayMode === 'leaders') {
+      currentItems = leaderData.slice(0, leaderDisplayCount).map((d: any) => {
+        const code = d.ts_code.split('.')[0];
+        return { code, name: lookupName(code), hybk: lookupHybk(code) };
+      });
+    } else {
+      currentItems = stocks.map((s) => ({
+        code: s.code,
+        name: s.name,
+        circMv: (s as any).lt ? (s as any).lt * 1e8 : undefined,
+        hybk: lookupHybk(s.code),
+      }));
+    }
+
+    // 暂停后恢复：继续处理剩余未评分项；全新开始：重置
+    if (shortScoreRemainingRef.current.length === 0) {
+      if (currentItems.length === 0) {
+        console.log('[短线评分] 没有可评分的股票');
+        return;
+      }
+      setShortScoreData([]);
+      setShortScoreProgress(0);
+      shortScoreTotalRef.current = currentItems.length;
+      shortScoreRemainingRef.current = [...currentItems];
+    }
+
+    isShortScorePausedRef.current = false;
+    setShortScoreLoading(true);
+    setDisplayMode('shortScore');
+    setCurrentPage(1);
+
+    try {
+      await computeShortTermScoreRows(shortScoreRemainingRef.current, {
+        source: kLineApiSourceSetting,
+        concurrency: 3,
+        shouldStop: () => isShortScorePausedRef.current,
+        onRow: (row, item) => {
+          // 从剩余队列中移除已完成的（支持暂停后恢复）
+          const idx = shortScoreRemainingRef.current.findIndex((x) => x.code === item.code);
+          if (idx >= 0) {
+            shortScoreRemainingRef.current.splice(idx, 1);
+          }
+          setShortScoreData((prev) => [...prev, row]);
+          setShortScoreProgress(Math.round(((shortScoreTotalRef.current - shortScoreRemainingRef.current.length) / shortScoreTotalRef.current) * 100));
+        },
+      });
+      if (!isShortScorePausedRef.current) {
+        setShortScoreProgress(100);
+        console.log(`[短线评分] 完成，共 ${shortScoreTotalRef.current} 只`);
+      }
+    } catch (e) {
+      console.error('短线评分失败:', e);
+    } finally {
+      setShortScoreLoading(false);
+    }
+  }, [shortScoreLoading, displayMode, signalData, riskData, leaderData, leaderDisplayCount, mainInData, stocks, kLineApiSourceSetting, stockConfigsMapping]);
+
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
       if (!s) return;
@@ -598,6 +694,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       return list as any;
     }
 
+    if (displayMode === 'shortScore') {
+      let list = [...shortScoreData];
+      const keys = Object.keys(sortTypes);
+      if (keys.length === 1) {
+        list.sort((a: any, b: any) => {
+          const left = Number(a[keys[0]]);
+          const right = Number(b[keys[0]]);
+          if (left === right) return 0;
+          const t = sortTypes[keys[0]];
+          return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+        });
+      }
+      return list as any;
+    }
+
     let list = filterStocks.filter((s) => {
       if (nameFilter && !s.name.includes(nameFilter)) return false;
       return true;
@@ -607,7 +718,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData]);
   return (
     <>
       <div className={classNames(styles.header, styles.actbar)}>
@@ -683,6 +794,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             style={{ marginLeft: 4 }}
           >
             主力建仓
+          </Button>
+          <Button
+            size="small"
+            onClick={handleShortScore}
+            loading={shortScoreLoading && shortScoreProgress === 0}
+            style={{ marginLeft: 4 }}
+          >
+            短线评分
           </Button>
           {displayMode !== 'stocks' && (
             <Button
@@ -782,6 +901,37 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             回调深度
             <Button size="small" type="text" icon={sortTypes.callback_depth == 1 ? <CaretUpOutlined /> : sortTypes.callback_depth == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('callback_depth')} />
           </Col>
+        </Row>
+      ) : displayMode === 'shortScore' ? (
+        <Row className={styles.header}>
+          <Col span={2}>股票名称</Col>
+          <Col span={2}>
+            评分
+            <Button size="small" type="text" icon={sortTypes.total == 1 ? <CaretUpOutlined /> : sortTypes.total == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('total')} />
+          </Col>
+          <Col span={1}>评级</Col>
+          <Col span={2}>
+            个股
+            <Button size="small" type="text" icon={sortTypes.stockScore == 1 ? <CaretUpOutlined /> : sortTypes.stockScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('stockScore')} />
+          </Col>
+          <Col span={2}>
+            板块
+            <Button size="small" type="text" icon={sortTypes.sectorScore == 1 ? <CaretUpOutlined /> : sortTypes.sectorScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('sectorScore')} />
+          </Col>
+          <Col span={2}>
+            大盘
+            <Button size="small" type="text" icon={sortTypes.marketScore == 1 ? <CaretUpOutlined /> : sortTypes.marketScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('marketScore')} />
+          </Col>
+          <Col span={4}>
+            RSI
+            <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
+          </Col>
+          <Col span={4}>板块趋势</Col>
+          <Col span={2}>
+            资金
+            <Button size="small" type="text" icon={sortTypes.moneyScore == 1 ? <CaretUpOutlined /> : sortTypes.moneyScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('moneyScore')} />
+          </Col>
+          <Col span={3}>建议</Col>
         </Row>
       ) : (
         <Row className={styles.header}>
@@ -948,6 +1098,63 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 </Col>
                 <Col span={4}>
                   {s.signal_detail?.callback_depth?.toFixed?.(2) ?? s.signal_detail?.callback_depth ?? '--'}%
+                </Col>
+              </Row>
+            );
+          })
+        ) : displayMode === 'shortScore' ? (
+          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+            const gradeColor = s.grade === 'A' ? '#52c41a' : s.grade === 'B' ? '#1890ff' : s.grade === 'C' ? '#faad14' : s.grade === 'D' ? '#ff4d4f' : 'var(--reverse-text-color)';
+            const rowBg =
+              s.grade === 'A' ? 'rgba(82, 196, 26, 0.08)'
+                : s.grade === 'B' ? 'rgba(24, 144, 255, 0.06)'
+                  : s.grade === 'D' ? 'rgba(255, 77, 79, 0.06)'
+                    : undefined;
+            return (
+              <Row
+                key={s.code}
+                className={styles.row}
+                style={{ backgroundColor: rowBg }}
+              >
+                <Col span={2} style={{ cursor: 'pointer' }} onClick={() => {
+                  const secid = s.code.startsWith('6') ? `1.${s.code}` : `0.${s.code}`;
+                  onOpenStock(secid, s.name || s.code);
+                }}>
+                  <span style={{ color: '#1890ff' }}>{s.name || s.code}</span>
+                </Col>
+                <Col span={2} style={{ color: s.total == null ? 'var(--reverse-text-color)' : scoreColor(s.total), fontWeight: 'bold' }} title={s.summary}>
+                  {s.total == null ? '--' : s.total.toFixed(1)}
+                </Col>
+                <Col span={1}>
+                  <span style={{ color: gradeColor, fontWeight: 'bold' }}>{s.grade || '--'}</span>
+                </Col>
+                <Col span={2} className={s.stockScore == null ? '' : Utils.GetValueColor(s.stockScore - 50).textClass}>
+                  {s.stockScore == null ? '--' : s.stockScore.toFixed(0)}
+                </Col>
+                <Col span={2} className={s.sectorScore == null ? '' : Utils.GetValueColor(s.sectorScore - 50).textClass}>
+                  {s.sectorScore == null ? '--' : s.sectorScore.toFixed(0)}
+                </Col>
+                <Col span={2} className={s.marketScore == null ? '' : Utils.GetValueColor(s.marketScore - 50).textClass}>
+                  {s.marketScore == null ? '--' : s.marketScore.toFixed(0)}
+                </Col>
+                <Col span={4} title={s.error || s.rsiPattern}>
+                  {s.error ? (
+                    <span style={{ color: '#ff4d4f', fontSize: 12 }}>{s.error}</span>
+                  ) : (
+                    <span style={{ fontSize: 12 }}>
+                      {s.rsiScore == null ? '--' : `${s.rsiScore.toFixed(0)}/30`}
+                      <span style={{ color: 'var(--secondary-text-color)', marginLeft: 4 }}>{s.rsiPattern || '--'}</span>
+                    </span>
+                  )}
+                </Col>
+                <Col span={4} style={{ fontSize: 12 }} title={s.sectorTrend}>
+                  {s.sectorTrend || '--'}
+                </Col>
+                <Col span={2} title={s.moneyNote} className={s.moneyScore == null ? '' : Utils.GetValueColor(s.moneyScore - 17).textClass}>
+                  {s.moneyScore == null ? '--' : s.moneyScore.toFixed(0)}
+                </Col>
+                <Col span={3} style={{ fontSize: 12 }}>
+                  {s.total == null ? '--' : s.advice || '--'}
                 </Col>
               </Row>
             );
