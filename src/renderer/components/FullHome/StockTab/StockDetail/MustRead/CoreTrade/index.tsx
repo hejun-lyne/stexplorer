@@ -286,7 +286,12 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
   return (
     <div className={styles.coretrade}>
       <DeptTradeBack codes={deptCodes} visible={modelVisible} close={() => setModelVisible(false)} />
-      <Tabs tabPosition="left" defaultActiveKey={'moneyflow'} style={{ height: '100%' }}>
+      <Tabs tabPosition="left" defaultActiveKey={'shortscore'} style={{ height: '100%' }}>
+        <Tabs.TabPane tab={<span>短线评分</span>} key={'shortscore'}>
+          <div className={styles.cardcontent}>
+            <ShortTermScore code={code} moneyFlow={moneyFlow} circMv={mainInResult?.circ_mv} />
+          </div>
+        </Tabs.TabPane>
         <Tabs.TabPane tab={<span>资金流向</span>} key={'moneyflow'}>
           <div className={styles.cardcontent}>
             {moneyFlowLoading ? (
@@ -662,11 +667,6 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                 暂无资金流向数据
               </div>
             )}
-          </div>
-        </Tabs.TabPane>
-        <Tabs.TabPane tab={<span>短线评分</span>} key={'shortscore'}>
-          <div className={styles.cardcontent}>
-            <ShortTermScore code={code} moneyFlow={moneyFlow} circMv={mainInResult?.circ_mv} />
           </div>
         </Tabs.TabPane>
         <Tabs.TabPane tab={<span>龙虎榜</span>} key={'lhb'}>

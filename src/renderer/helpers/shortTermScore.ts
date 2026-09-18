@@ -54,10 +54,16 @@ export const SHORT_TERM_SCORE_CONFIG = {
   // ---- 个股-RSI ----
   rsiShort: 6,
   rsiLong: 24,
-  rsiOverbought: 80, // RSI6 绝对超买阈值
+  rsiOverbought: 80, // RSI6 绝对超买阈值（真实超买的主口径）
   rsiOversold: 30, // RSI6 绝对超卖阈值
-  rsiOverboughtPercentile: 0.85, // RSI6 历史分位超买阈值
+  rsiOverboughtRelaxed: 72, // 弱势行情下的超买补充口径：绝对值可放宽，但必须处于极高历史分位
+  rsiOverboughtPercentile: 0.95, // 补充口径要求的历史分位（配合 rsiOverboughtRelaxed 使用）
   rsiExtremeSpread: 10, // 超买/超卖确认：RSI6 与 RSI24 差值绝对值下限
+  rsiStateLookback: 60, // 极值状态识别窗口（日）：在窗口内寻找最近一次真实超买/超卖
+  rsiPullbackMaxDays: 25, // 距最近一次真实超买超过该天数，不再认定为"超买后回踩"
+  rsiCrossFreshDays: 15, // 超卖后的上穿（金叉）在该天数内才认定为有效
+  rsiBreakSpread: 3, // 判定"贴近24日线"的容差（RSI6 - RSI24）
+  rsiPullbackBreakSpread: 8, // 回踩过程中允许的最大跌破幅度：超过则认为已破位，不算回踩
   // ---- 个股-资金 ----
   moneyWindow: 20, // 主力/散户累计净流入窗口（日）
   moneyShapeDays: 30, // 微笑/悲伤曲线形态识别窗口（日）
@@ -448,8 +454,16 @@ export interface RsiScoreResult {
 
 /**
  * RSI(6/24) 指标评分：
- * 最佳为超买后6日线回踩24日线企稳；其次为超卖后6日线上穿24日线；
- * 应避免持续超买钝化与死叉。
+ * 最佳为【真实超买状态】后6日线回踩24日线企稳；其次为超卖后6日线上穿24日线；应避免持续超买钝化与死叉。
+ *
+ * 判定原则（先定"格局"，再定形态）：
+ * 在回看窗口内找到最近一次真实超买状态与最近一次真实超卖状态，谁的日期更靠后，当前就属于哪一种格局：
+ *  - 最近一次是超买  → 才可能判定为"超买后回踩"；
+ *  - 最近一次是超卖  → 其后的一切上行（哪怕中途冲高再回落）都属于"超卖后反抽/金叉"，
+ *    避免如 601360.SH 这类"从深度超卖金叉 24 日线后又回落至线附近"被误判成超买后回踩。
+ * 所谓"真实极值状态"必须同时满足：RSI6 绝对值越界 + 与 24 日线拉开明显差值。
+ * 历史分位只作为弱势行情下的补充口径（要求极高绝对值 + 极高历史分位），不再作为超买主口径，
+ * 否则长期弱势股一旦反弹到中高位就会被历史分位误判成超买。
  */
 export function scoreStockRsi(
   stockKlines: Stock.KLineItem[],
@@ -470,60 +484,83 @@ export function scoreStockRsi(
   const rsi24 = rsi24s[n - 1];
   const spread = rsi6 - rsi24;
 
-  // RSI6 历史分位（可用历史内）
+  // ---- RSI6 历史分位（可用历史内）----
   const hist = rsi6s.slice(start);
-  const rsi6Percentile = hist.length ? hist.filter((v) => v < rsi6).length / hist.length : 0.5;
-
-  // ---- 情形识别（按时间序：以最近一次极值事件为准，避免被更早的旧信号霸占判定）----
-  const s20 = Math.max(start, n - 20);
-  const rsi6Win = rsi6s.slice(s20);
-  const peak20 = Math.max(...rsi6Win);
-  const trough20 = Math.min(...rsi6Win);
-  // 最近一次峰值/谷值位置（各自取最近一次出现）
-  const idxPeak = s20 + rsi6Win.lastIndexOf(peak20);
-  const idxTrough = s20 + rsi6Win.lastIndexOf(trough20);
-  // 超买/超卖确认：除 RSI6 绝对值（或高分位）外，极值当日还须与 24 日线拉开明显差值（|RSI6-RSI24| ≥ rsiExtremeSpread），
-  // 单纯 RSI6 绝对值低/高但与 24 日线贴合的，属于正常波动而非超买/超卖状态
-  const spreadAt = (i: number) => rsi6s[i] - rsi24s[i];
-  const peakSpread = spreadAt(idxPeak);
-  const troughSpread = spreadAt(idxTrough);
-  // 近20日内 RSI6 曾真正超买：绝对值口径为主；
-  // 高分位口径须绝对值 >= 65，避免长期弱势股历史分位失真（整段历史偏低，刚反弹上50就成"高分位"被误判超买）
-  const overboughtRecent =
-    (peak20 > cfg.rsiOverbought ||
-      (peak20 > 65 && hist.filter((x) => x < peak20).length / hist.length > cfg.rsiOverboughtPercentile)) &&
-    peakSpread > cfg.rsiExtremeSpread;
-  // 近20日内 RSI6 曾真正超卖：绝对值 + 与24日线差值双重确认
-  const oversoldRecent = trough20 < cfg.rsiOversold && troughSpread < -cfg.rsiExtremeSpread;
-  // 最近一次极值是超买峰值（超卖反弹后又冲高），还是超卖谷底
-  const lastExtremeIsPeak = idxPeak > idxTrough;
-
-  // 超买后回踩：最近极值为超买峰值，6日线已从峰值回落、贴近24日线
-  const pullback =
-    overboughtRecent &&
-    lastExtremeIsPeak &&
-    spread < 5 &&
-    spread > -3 &&
-    rsi6 < peak20 - 5 && // 已从峰值明显回落
-    rsi6 < cfg.rsiOverbought + 10;
-  // 回踩后已拐头企稳（当日 RSI6 不再下行）
-  const pullbackStabilized = pullback && rsi6s[n - 1] >= rsi6s[n - 2];
-
-  // 超卖后金叉：近10日内 RSI6 上穿 RSI24，且穿越前 RSI6 曾超卖；
-  // 若金叉发生在最近一次超买峰值之前（其后又冲高回落），则旧金叉失效，形态已演进为"超买后回落"
-  let oversoldCross = false;
-  for (let i = Math.max(start + 1, n - 10); i < n; i++) {
-    if (rsi6s[i - 1] <= rsi24s[i - 1] && rsi6s[i] > rsi24s[i]) {
-      const bStart = Math.max(start, i - 10);
-      const before = rsi6s.slice(bStart, i + 1);
-      // 穿越前曾真正超卖：绝对值 + 与24日线差值双重确认
-      const oversoldBefore = before.some((v, j) => v < cfg.rsiOversold && spreadAt(bStart + j) < -cfg.rsiExtremeSpread);
-      if (oversoldBefore && !(overboughtRecent && idxPeak > i)) {
-        oversoldCross = true;
-      }
-      break;
+  const sortedHist = [...hist].sort((a, b) => a - b);
+  /** 某数值处在历史分位的位置 0~1 */
+  const percentileOf = (v: number) => {
+    if (!sortedHist.length) return 0.5;
+    let lo = 0;
+    let hi = sortedHist.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sortedHist[mid] < v) lo = mid + 1;
+      else hi = mid;
     }
+    return lo / sortedHist.length;
+  };
+  const rsi6Percentile = percentileOf(rsi6);
+
+  const spreadAt = (i: number) => rsi6s[i] - rsi24s[i];
+
+  // 真实极值状态：绝对值越界 + 与 24 日线拉开差值。单纯与 24 日线贴合的是正常波动，不算超买/超卖。
+  const isOverboughtState = (i: number) =>
+    (rsi6s[i] >= cfg.rsiOverbought ||
+      (rsi6s[i] >= cfg.rsiOverboughtRelaxed && percentileOf(rsi6s[i]) >= cfg.rsiOverboughtPercentile)) &&
+    spreadAt(i) >= cfg.rsiExtremeSpread;
+  const isOversoldState = (i: number) => rsi6s[i] <= cfg.rsiOversold && spreadAt(i) <= -cfg.rsiExtremeSpread;
+
+  // ---- 最近一次真实超买/超卖状态 ----
+  const lookbackStart = Math.max(start, n - cfg.rsiStateLookback);
+  let lastOverboughtIdx = -1;
+  let lastOversoldIdx = -1;
+  for (let i = n - 1; i >= lookbackStart; i--) {
+    if (lastOverboughtIdx < 0 && isOverboughtState(i)) lastOverboughtIdx = i;
+    if (lastOversoldIdx < 0 && isOversoldState(i)) lastOversoldIdx = i;
+    if (lastOverboughtIdx >= 0 && lastOversoldIdx >= 0) break;
   }
+  // 当前格局：两者都为 -1 时均不成立
+  const overboughtRegime = lastOverboughtIdx > lastOversoldIdx;
+  const reboundRegime = lastOversoldIdx > lastOverboughtIdx;
+
+  // ---- 超买后回踩：最近一次真实超买之后，6日线自上方回落至24日线附近，且未破位 ----
+  let pullback = false;
+  if (overboughtRegime && n - 1 - lastOverboughtIdx <= cfg.rsiPullbackMaxDays) {
+    let peakAfter = rsi6s[lastOverboughtIdx];
+    let minSpreadAfter = spreadAt(lastOverboughtIdx);
+    for (let i = lastOverboughtIdx + 1; i < n; i++) {
+      peakAfter = Math.max(peakAfter, rsi6s[i]);
+      minSpreadAfter = Math.min(minSpreadAfter, spreadAt(i));
+    }
+    pullback =
+      rsi6 <= peakAfter - 5 && // 已从超买峰值明显回落
+      spread <= 5 &&
+      spread >= -cfg.rsiBreakSpread && // 当前贴近24日线（含小幅虚破）
+      minSpreadAfter >= -cfg.rsiPullbackBreakSpread; // 回落过程中未大幅跌破24日线（未破位）
+  }
+
+  // ---- 超卖后反抽：自最近一次超卖之后的交叉情况（记录最近一次上穿日期与最近一次交叉方向）----
+  let crossUpIdx = -1;
+  let lastCrossDir: 'up' | 'down' | null = null;
+  let troughAfterOversold = 0;
+  if (reboundRegime) {
+    // 超卖谷底参考值：从超卖状态日往前多看 5 日再取最小值，
+    // 避免"超卖状态日就是今天"时谷底取到当日、导致刚反弹的第一天无法体现"已脱离谷底"
+    const troughFrom = Math.max(start, lastOversoldIdx - 5);
+    let trough = rsi6s[troughFrom];
+    for (let i = troughFrom; i < n; i++) {
+      trough = Math.min(trough, rsi6s[i]);
+      if (i <= lastOversoldIdx) continue;
+      if (rsi6s[i - 1] <= rsi24s[i - 1] && rsi6s[i] > rsi24s[i]) {
+        crossUpIdx = i;
+        lastCrossDir = 'up';
+      } else if (rsi6s[i - 1] >= rsi24s[i - 1] && rsi6s[i] < rsi24s[i]) {
+        lastCrossDir = 'down';
+      }
+    }
+    troughAfterOversold = trough;
+  }
+  const freshCross = crossUpIdx >= 0 && n - 1 - crossUpIdx <= cfg.rsiCrossFreshDays;
 
   // 近5日死叉
   let deadCross = false;
@@ -540,16 +577,40 @@ export function scoreStockRsi(
 
   let score: number;
   let pattern: string;
-  if (pullbackStabilized) {
-    score = 30;
-    pattern = '超买后回踩24日线企稳（最佳买点）';
-  } else if (pullback) {
-    score = 26;
-    pattern = '超买后回落，6日线临近24日线（回踩中）';
-  } else if (oversoldCross) {
-    score = 26;
-    pattern = '超卖后6日线上穿24日线（金叉）';
-  } else if (!lastExtremeIsPeak && oversoldRecent && rsi6 < rsi24 && rsi6 >= rsi6s[n - 2] && rsi6 - trough20 > 5) {
+  if (pullback) {
+    const stabilized = rsi6s[n - 1] >= rsi6s[n - 2];
+    score = stabilized ? 30 : 26;
+    pattern = stabilized ? '超买后回踩24日线企稳（最佳买点）' : '超买后回落，6日线临近24日线（回踩中）';
+  } else if (reboundRegime && freshCross) {
+    // 格局是"超卖后反抽"，且近期确实发生过高位金叉：
+    // 即便中途冲高后再度回落贴近 24 日线，也仍属于超卖反弹结构，不能算超买回踩；
+    // 若最近一次交叉已转为死叉，则说明金叉结构被破坏（6日线在24日线附近反复），需如实降档
+    if (lastCrossDir === 'up') {
+      if (spread >= 0) {
+        score = 26;
+        pattern = '超卖后6日线上穿24日线（金叉）';
+      } else if (spread >= -cfg.rsiBreakSpread) {
+        score = 22;
+        pattern = '超卖后6日线上穿24日线，当前回落至24日线附近整理';
+      } else {
+        score = 16;
+        pattern = '超卖后6日线上穿24日线，但已再度跌回24日线下方';
+      }
+    } else if (spread >= -cfg.rsiBreakSpread) {
+      // 刚下穿（最近一次交叉为死叉）但尚未远离24日线：区分"正在回抽"还是"贴线震荡"
+      const spreadRising = spread > spreadAt(n - 2);
+      if (spreadRising) {
+        score = 20;
+        pattern = '超卖反弹后6日线回抽24日线（接近金叉）';
+      } else {
+        score = 16;
+        pattern = '超卖反弹后6日线刚下穿24日线，在24日线下方震荡';
+      }
+    } else {
+      score = 12;
+      pattern = '超卖反弹后6日线再度跌回24日线下方，反弹结构转弱';
+    }
+  } else if (reboundRegime && rsi6 < rsi24 && rsi6 >= rsi6s[n - 2] && rsi6 - troughAfterOversold > 5) {
     // 超卖后反弹修复中：RSI6 已显著脱离超卖谷底且当日回升，但尚未上穿24日线
     score = 18;
     pattern = '超卖后反弹修复中（尚未金叉）';

@@ -11,6 +11,7 @@ import * as Enums from '@/utils/enums';
 import { KLineType } from '@/utils/enums';
 import styles from '../../index.scss';
 import * as Score from '@/helpers/shortTermScore';
+import MoneyFlowChart from '../MoneyFlowChart';
 
 export interface ShortTermScoreProps {
   code: string;
@@ -497,13 +498,24 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             <Tooltip
               title={
                 <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
-                  {`RSI(6/24) 从优到劣：
-1. 超买后6日线回踩24日线企稳 → 30分（最佳）
-2. 超卖后6日线上穿24日线 → 26分
-3. 多头排列强势区 → 20分
-4. 空头排列弱势区 → 10分
-5. 持续超买钝化 → 8分（追高风险）
-6. 近期死叉 → 6分`}
+                  {`先判定“格局”，再识别形态：
+格局 = 回看60日内，最近一次【真实超买】(RSI6≥80，或≥72且处95%以上历史分位，且与24日线差值≥10) 与最近一次【真实超卖】(RSI6≤30且差值≤-10) 谁更靠后。
+· 最近一次是超买 → 才可能判定“超买后回踩”
+· 最近一次是超卖 → 之后的走势一律归为“超卖后反抽”（即使中途冲高再回落），不会被误判成超买回踩
+
+评分（高→低）：
+1. 超买后回踩24日线企稳 → 30分（最佳）
+2. 超买后回落、临近24日线（回踩中）→ 26分
+3. 超卖后6日线上穿24日线（金叉）→ 26分
+4. 超卖上穿后回落至24日线附近整理 → 22分
+5. 超卖反弹后回抽24日线（接近金叉）→ 20分
+6. RSI多头排列强势区 → 20分
+7. 超卖后反弹修复中（尚未金叉）→ 18分
+8. 超卖上穿后跌回24日线下方（含刚下穿震荡）→ 16分
+9. 超卖反弹后再度跌回24日线下方，结构转弱 → 12分
+10. RSI空头排列弱势区 → 10分
+11. 持续超买钝化 → 8分（追高风险）
+12. 近期6日线下穿24日线（死叉）→ 6分`}
                 </div>
               }
               placement="right"
@@ -563,6 +575,15 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             {money.note}
           </div>
         )}
+        {/* 资金流向趋势图（与资金流向 Tab 同源数据） */}
+        {moneyFlow?.detail_dates?.length ? (
+          <MoneyFlowChart
+            detailMain={moneyFlow.detail_main || []}
+            detailRetail={moneyFlow.detail_retail || []}
+            detailMedium={moneyFlow.detail_medium || []}
+            detailDates={moneyFlow.detail_dates}
+          />
+        ) : null}
       </div>
     </div>
   );
