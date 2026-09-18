@@ -413,6 +413,20 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
               <Col span={6}>板块短期趋势</Col>
               <Col span={18}>{sector.trendDesc}</Col>
             </Row>
+            {sector.trendScore != null && (
+              <Row style={{ marginBottom: 4, fontSize: 12 }}>
+                <Col span={6}>趋势分（择时位置）</Col>
+                <Col span={18}>
+                  {sector.trendScore.toFixed(1)}
+                  {sector.positionDesc ? (
+                    <span style={{ marginLeft: 6, color: 'var(--secondary-text-color)' }}>{sector.positionDesc}</span>
+                  ) : null}
+                  {sector.trendPenalty ? (
+                    <span style={{ marginLeft: 6, color: '#faad14' }}>已偏离反转点，追高下调 {sector.trendPenalty.toFixed(0)} 分</span>
+                  ) : null}
+                </Col>
+              </Row>
+            )}
             <Row style={{ marginBottom: 4, fontSize: 12 }}>
               <Col span={6}>个股与板块关系</Col>
               <Col span={18}>{sector.relationDesc}</Col>
@@ -433,7 +447,10 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
               </Col>
             </Row>
             <div style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginTop: 4 }}>
-              板块取自"核心交易-板块"页设置的活跃板块（未设置时自动取所属板块第一个）；趋同按涨幅差评分，正向背离（板块弱个股强）加分，负向背离减分
+              板块取自"核心交易-板块"页设置的活跃板块（未设置时自动取所属板块第一个）。
+              趋势分以20日均线为多空分界，并按"离趋势反转点（阶段低点）的位置"择时：距阶段低点涨幅、距低点天数、
+              MA20乖离越大越下调（避免追高），越接近反转点分越高；再叠加关系修正——趋同按涨幅差评分，
+              正向背离（板块弱个股强）加分，负向背离减分
             </div>
           </>
         ) : (
@@ -469,7 +486,13 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   ≥2倍满分，≥1.2倍80%，0.5倍以下0分
 纵向(40%)：5日均量/20日均量，≥1.2倍视为放量：
   放量上涨+5分，缩量下跌-5分
-无同类数据时降级为仅按自身量能趋势评分。`}
+
+择时位置修正（找买点，与板块同逻辑）：量能刚由萎缩转为温和放量分最高，以下情况下调——
+ · 成交额/同类均值 > 2倍（过热）：每超1倍扣6分
+ · 自放量启动日涨幅 > 8%（已走远）：每超1%扣1.5分（无启动日时退化为近5日涨幅）
+ · 距放量启动日 > 5日且放量仍在持续：每多1日扣1分
+  放量启动日 = 近20日内首个「5日均量/20日均量 ≥ 1.3」的交易日
+衰减下限5分。无同类数据时降级为仅按自身量能趋势评分。`}
                 </div>
               }
               placement="right"

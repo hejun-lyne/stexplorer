@@ -48,6 +48,11 @@ export const SHORT_TERM_SCORE_CONFIG = {
   sectorDays: 20, // 板块趋势判断窗口
   sectorCompareDays: 10, // 个股与板块区间对比窗口
   sectorNoNewLowDays: 3, // 企稳判定：连续N日不创新低
+  // 反转点位置（择时）：越靠近反转点分越高，已走远则衰减
+  sectorBiasAllow: 3, // 20日均线乖离容忍（%）：超出的部分按每1%扣3分
+  sectorRiseAllow: 6, // 距阶段低点涨幅容忍（%）：超出的部分按每1%扣2.5分
+  sectorFreshDays: 6, // 距阶段低点天数容忍（日）：超出的部分按每日扣1.5分
+  sectorTrendFloor: 30, // 正向趋势（up/bounce）经追高衰减后的最低分（与持续下跌同档：都不适合当下买入）
   // ---- 个股子项权重（满分即权重，合计 100）----
   stockDims: {
     volume: 30, // 量能活跃度
@@ -57,6 +62,13 @@ export const SHORT_TERM_SCORE_CONFIG = {
   // ---- 个股-量能 ----
   mvSmallBound: 50e8, // 小盘上限（元）
   mvMidBound: 200e8, // 中盘上限（元）
+  // 量能择时位置（与板块同逻辑：刚温和放量分最高，过热/已走远则下调）
+  volRatioAllow: 2, // 5日均成交额/同类市值均值 的容忍倍数，超出部分按每1倍扣6分
+  volRiseAllow: 8, // 近5日累计涨幅容忍(%)，超出部分每1%扣1.5分
+  volStartRatio: 1.3, // 放量启动判定：5日均量 / 20日均量 ≥ 该倍数
+  volStartLookback: 20, // 放量启动日回看窗口(日)
+  volFreshDays: 5, // 距放量启动日天数容忍(日)，超出部分每日扣1分
+  volScoreFloor: 5, // 量能分经"过热/追高"衰减后的最低分
   // ---- 个股-RSI ----
   rsiShort: 6,
   rsiLong: 24,
@@ -231,9 +243,17 @@ export interface SectorScoreResult {
   boardZdf: number; // 板块区间涨幅(%)（对比窗口）
   stockZdf: number; // 个股区间涨幅(%)（对比窗口）
   diff: number; // 个股 - 板块
+  /** 趋势分（仅趋势维度、含追高衰减，未加个股/板块关系修正） */
+  trendScore?: number;
+  trendPenalty?: number; // 因"已偏离反转点（追高）"被下调的分数
+  positionDesc?: string; // 择时位置说明（距低点涨幅/天数/MA20乖离）
+  daysSinceLow?: number; // 距阶段低点天数
+  riseFromLow?: number; // 距阶段低点涨幅(%)
+  bias20?: number; // 20日均线乖离(%)
 }
 
-const TREND_BASE: Record<SectorTrendType, number> = { up: 70, bounce: 55, flat: 45, down: 30 };
+// 趋势基准分：正向趋势只作为"上限"，实际得分再按距反转点的位置衰减（见 scoreSector）
+const TREND_BASE: Record<SectorTrendType, number> = { up: 72, bounce: 70, flat: 45, down: 30 };
 const TREND_DESC: Record<SectorTrendType, string> = {
   up: '板块短期上升趋势',
   bounce: '板块下跌后反弹',
@@ -247,11 +267,17 @@ const RELATION_DESC: Record<SectorRelation, string> = {
 };
 
 /**
- * 板块表现评分：先判定板块短期趋势（上升 > 回升/企稳 > 横盘 > 持续下跌），
- * 再看个股与板块的趋同/背离关系及区间涨幅差值做修正。
+ * 板块表现评分 = 趋势分（择时位置修正后）+ 个股/板块关系修正。
  *
- * 趋势判定以 20 日均线（MA20）为多空分界：收盘站上 MA20 一律不再判为"持续下跌"，
- * 只有「跌破MA20 + 20日区间为负 + 短期均线空头」才认定为持续下跌。
+ * 1) 趋势类型判定以 20 日均线（MA20）为多空分界：收盘站上 MA20 一律不再判为"持续下跌"，
+ *    只有「跌破MA20 + 20日区间为负 + 短期均线空头」才认定为持续下跌。
+ * 2) 择时位置修正（本模块的核心）：目标是找"短线最佳买点"，因此不是涨得越多分越高，
+ *    而是"离趋势反转点（阶段低点）越近分越高"。正向趋势（up/bounce）会按三个维度衰减：
+ *      ① 20日均线乖离（超 sectorBiasAllow 部分每 1% 扣 3 分）
+ *      ② 距阶段低点涨幅（超 sectorRiseAllow 部分每 1% 扣 2.5 分）
+ *      ③ 距阶段低点天数（超 sectorFreshDays 部分每日扣 1.5 分）
+ *    衰减下限为 sectorTrendFloor，避免"已大幅拉升的板块"仍得高分（追高风险）。
+ * 3) 关系修正：趋同按涨幅差评分；正向背离（板块弱个股强）加分；负向背离减分。
  */
 export function scoreSector(
   stockKlines: Stock.KLineItem[],
@@ -298,13 +324,16 @@ export function scoreSector(
   const shortBull = ma5 >= ma10; // 5/10日线多头
   // 前期存在明显下跌
   const priorDecline = ret20 < -5 || drawdown < -5;
-  // 企稳判定：以窗口内最低收盘为阶段低点，从低点往后数
+  // 反转点（阶段低点）：窗口内最低收盘，从低点往后数
   const bWinCloses = bCloses.slice(-(cfg.sectorDays + 1));
   let lowIdx = 0;
   bWinCloses.forEach((c, i) => {
     if (c <= bWinCloses[lowIdx]) lowIdx = i; // 取最近一次最低点
   });
   const daysSinceLow = bWinCloses.length - 1 - lowIdx; // 低点距今天数
+  const low20 = bWinCloses[lowIdx];
+  const riseFromLow = low20 > 0 ? (lastClose / low20 - 1) * 100 : 0; // 距阶段低点涨幅(%)
+  const bias20 = ma20 > 0 ? (lastClose / ma20 - 1) * 100 : 0; // 20日均线乖离(%)
   // 底分型：低点出现在 2 日及以前，且此后收盘逐步回升、未再创新低
   const afterLow = bWinCloses.slice(lowIdx + 1);
   const bottomFractal =
@@ -339,6 +368,25 @@ export function scoreSector(
     trendDesc = TREND_DESC.flat;
   }
 
+  // ---- 择时位置修正：寻找短线最佳买点，离反转点越近分越高，已走远则衰减 ----
+  // 三个"追高"维度：20日均线乖离 / 距阶段低点涨幅 / 距阶段低点天数（时间越久越不新鲜）
+  const extensionPenalty =
+    Math.max(0, bias20 - cfg.sectorBiasAllow) * 3 +
+    Math.max(0, riseFromLow - cfg.sectorRiseAllow) * 2.5 +
+    Math.max(0, daysSinceLow - cfg.sectorFreshDays) * 1.5;
+  const isPositiveTrend = trendType === 'up' || trendType === 'bounce';
+  const trendScore = isPositiveTrend
+    ? clamp(TREND_BASE[trendType] - extensionPenalty, cfg.sectorTrendFloor, TREND_BASE[trendType])
+    : TREND_BASE[trendType];
+  if (isPositiveTrend) {
+    // 描述保持简短（股票池列表直接用该字段），位置明细由详情页单独展示
+    trendDesc += extensionPenalty > 0 ? '（已偏离反转点，按追高下调评分）' : '（位置接近反转点）';
+  }
+  /** 择时位置说明（详情页展示用） */
+  const positionDesc = isPositiveTrend
+    ? `距阶段低点${riseFromLow >= 0 ? '+' : ''}${riseFromLow.toFixed(1)}%（${daysSinceLow}日前见低）｜MA20乖离${bias20 >= 0 ? '+' : ''}${bias20.toFixed(1)}%`
+    : '';
+
   // ---- 个股与板块关系 ----
   const sCloses = stockKlines.map((k) => k.sp);
   const bZdf = rangeChange(bCloses, cfg.sectorCompareDays) ?? 0;
@@ -370,7 +418,7 @@ export function scoreSector(
 
   return {
     available: true,
-    score: clamp(TREND_BASE[trendType] + modifier, 0, 100),
+    score: clamp(trendScore + modifier, 0, 100),
     boardName,
     trendType,
     trendDesc,
@@ -379,6 +427,12 @@ export function scoreSector(
     boardZdf: bZdf,
     stockZdf: sZdf,
     diff,
+    trendScore,
+    trendPenalty: isPositiveTrend ? extensionPenalty : 0,
+    positionDesc,
+    daysSinceLow,
+    riseFromLow,
+    bias20,
   };
 }
 
@@ -393,6 +447,9 @@ export interface VolumeScoreResult {
   volTrend?: number; // 5日均量 / 20日均量
   zdf5?: number; // 近5日累计涨幅
   degraded?: string; // 降级说明（无同类数据时）
+  volPenalty?: number; // 因"过热/已走远（追高）"被下调的分数
+  daysSinceVolStart?: number | null; // 距放量启动日天数（null = 窗口内未放量）
+  positionDesc?: string; // 择时位置说明
 }
 
 /** 根据流通市值(元)选择市值档 */
@@ -404,7 +461,10 @@ export function pickMarketTier(circMv: number | null | undefined, cfg: ScoreConf
 }
 
 /**
- * 量能活跃度：横向（相比同类市值股票平均成交额）+ 纵向（自身量能趋势，量价配合）。
+ * 量能活跃度：横向（相比同类市值股票平均成交额）+ 纵向（自身量能趋势，量价配合），
+ * 再按"离放量启动点的位置"做择时修正（与板块同逻辑，目标是找短线买点）：
+ * 量能刚从萎缩转为温和放量时分最高；若已放量过热（成交额倍数过高）、
+ * 伴随涨幅过大（近5日涨幅高）或距放量启动日已久，则下调评分（避免追高）。
  */
 export function scoreStockVolume(
   stockKlines: Stock.KLineItem[],
@@ -426,38 +486,85 @@ export function scoreStockVolume(
 
   const tier = pickMarketTier(circMv, cfg);
   const tierStat = stats?.tiers?.[tier];
+  const ratio = tierStat && tierStat.avg_amount > 0 ? avgAmount5 / tierStat.avg_amount : null;
+
+  // ---- 放量启动日：回看窗口内首个"5日均量 / 20日均量 ≥ volStartRatio"的交易日 ----
+  let volStartIdx = -1;
+  for (let i = Math.max(19, cjls.length - 1 - cfg.volStartLookback); i < cjls.length; i++) {
+    const m5 = mean(cjls.slice(i - 4, i + 1));
+    const m20 = mean(cjls.slice(i - 19, i + 1));
+    if (m20 > 0 && m5 / m20 >= cfg.volStartRatio) {
+      volStartIdx = i;
+      break;
+    }
+  }
+  const daysSinceVolStart = volStartIdx >= 0 ? cjls.length - 1 - volStartIdx : null;
+
+  // ---- 择时位置修正：过热 / 追高 / 已走远则下调 ----
+  // 与板块同一套三维度：① 成交额倍数过热（对应板块的均线乖离）
+  //                   ② 自放量启动日以来的涨幅（对应板块的"距阶段低点涨幅"，无启动日时回退近5日涨幅）
+  //                   ③ 距放量启动日天数（对应板块的"距阶段低点天数"）
+  const volStartClose = volStartIdx >= 0 ? stockKlines[volStartIdx].sp : 0;
+  const riseSinceVolStart = volStartClose > 0 ? (stockKlines[stockKlines.length - 1].sp / volStartClose - 1) * 100 : null;
+  const riseForChase = riseSinceVolStart !== null ? riseSinceVolStart : zdf5;
+  const hotRatio = ratio !== null && ratio > cfg.volRatioAllow ? (ratio - cfg.volRatioAllow) * 6 : 0; // 成交额过热
+  const chasingRise = Math.max(0, riseForChase - cfg.volRiseAllow) * 1.5; // 启动以来涨幅过大
+  // 距启动点已远：仅在放量仍在持续（当前量能仍处启动水平）时才惩罚；
+  // 若量能已消退（回到萎缩/持平），说明这波放量结束，不应再按"已走远"扣分
+  const volStillActive = volTrend >= cfg.volStartRatio;
+  const staleVol = daysSinceVolStart !== null && volStillActive ? Math.max(0, daysSinceVolStart - cfg.volFreshDays) * 1 : 0;
+  const extensionPenalty = hotRatio + chasingRise + staleVol;
+  const applyTiming = (base: number) => clamp(base - extensionPenalty, cfg.volScoreFloor, Math.max(base, cfg.volScoreFloor));
+  const timingDesc = [
+    daysSinceVolStart !== null ? `距放量启动${daysSinceVolStart}日` : '窗口内未见放量启动',
+    riseSinceVolStart !== null
+      ? `自启动${riseSinceVolStart >= 0 ? '+' : ''}${riseSinceVolStart.toFixed(1)}%`
+      : `近5日涨幅${zdf5 >= 0 ? '+' : ''}${zdf5.toFixed(1)}%`,
+    ratio !== null ? `成交额为同类${ratio.toFixed(2)}倍` : '',
+  ]
+    .filter(Boolean)
+    .join('｜');
+  const timingNote = extensionPenalty > 0 ? `；${timingDesc}，已过热/走远（下调${extensionPenalty.toFixed(0)}分）` : `；${timingDesc}`;
+  const ratioDesc = ratio === null ? '未知' : ratio >= 2 ? '显著活跃' : ratio >= 1.2 ? '较为活跃' : ratio >= 0.7 ? '中等' : '清淡';
 
   // 纵向：自身量能趋势 + 量价配合（最多 40% 权重 + 奖惩）
   let vScore = max * 0.4 * clamp((volTrend - 0.7) / 0.8, 0, 1);
   if (volTrend >= 1.2 && zdf5 > 0) vScore += 5; // 放量上涨
   if (volTrend <= 0.8 && zdf5 < 0) vScore -= 5; // 缩量下跌
   vScore = clamp(vScore, 0, max * 0.4 + 5);
+  const volTurnDesc = `量能${volTrend >= 1.2 ? '放大' : volTrend >= 0.9 ? '持平' : '萎缩'}（${volTrend.toFixed(2)}倍）`;
 
-  if (tierStat && tierStat.avg_amount > 0) {
+  if (ratio !== null) {
     // 横向：相比同类市值股票平均成交额
-    const ratio = avgAmount5 / tierStat.avg_amount;
     const hScore = max * 0.6 * clamp((ratio - 0.5) / 1.5, 0, 1);
-    const ratioDesc = ratio >= 2 ? '显著活跃' : ratio >= 1.2 ? '较为活跃' : ratio >= 0.7 ? '中等' : '清淡';
+    const base = clamp(hScore + vScore, 0, max);
     return {
-      score: clamp(hScore + vScore, 0, max),
+      score: applyTiming(base),
       max,
       available: true,
-      note: `同类市值成交${ratioDesc}（5日均额为同类${ratio.toFixed(2)}倍），量能${volTrend >= 1.2 ? '放大' : volTrend >= 0.9 ? '持平' : '萎缩'}（${volTrend.toFixed(2)}倍）`,
+      note: `同类市值成交${ratioDesc}（5日均额为同类${ratio.toFixed(2)}倍），${volTurnDesc}${timingNote}`,
       ratio,
       volTrend,
       zdf5,
+      volPenalty: base - applyTiming(base),
+      daysSinceVolStart,
+      positionDesc: timingDesc,
     };
   }
 
   // 降级：无同类市值数据，仅用自身量能趋势
+  const base = clamp(max * clamp((volTrend - 0.7) / 0.9, 0, 1) + (volTrend >= 1.2 && zdf5 > 0 ? 5 : 0), 0, max);
   return {
-    score: clamp(max * clamp((volTrend - 0.7) / 0.9, 0, 1) + (volTrend >= 1.2 && zdf5 > 0 ? 5 : 0), 0, max),
+    score: applyTiming(base),
     max,
     available: true,
     degraded: '无同类市值统计数据，仅按自身量能趋势评分',
-    note: `量能${volTrend >= 1.2 ? '放大' : volTrend >= 0.9 ? '持平' : '萎缩'}（${volTrend.toFixed(2)}倍）`,
+    note: `${volTurnDesc}${timingNote}`,
     volTrend,
     zdf5,
+    volPenalty: base - applyTiming(base),
+    daysSinceVolStart,
+    positionDesc: timingDesc,
   };
 }
 
