@@ -80,9 +80,10 @@ function formatAmount(val: number): string {
 
 const MoneyFlowChart: React.FC<MoneyFlowChartProps> = React.memo(
   ({ detailMain, detailRetail, detailMedium, detailDates }) => {
-    const [loaded, setLoaded] = useState(false);
+    // 默认直接展开图表（不点"加载"按钮），并默认勾选20日主力/散户曲线
+    const [loaded, setLoaded] = useState(true);
     const [selectedCurves, setSelectedCurves] = useState<Set<string>>(
-      new Set(['main_5d', 'retail_5d'])
+      new Set(['main_20d', 'retail_20d'])
     );
     const { darkMode } = useHomeContext();
     // chartRef 容器始终渲染，保证 useResizeEchart 能正常初始化

@@ -22,11 +22,11 @@ export interface ShortTermScoreRow {
   stockScore: number | null; // 个股维度得分
   sectorScore: number | null; // 板块维度得分
   marketScore: number | null; // 大盘维度得分
-  volumeScore: number | null; // 量能得分 /35
-  rsiScore: number | null; // RSI得分 /30
+  volumeScore: number | null; // 量能得分 /30
+  rsiScore: number | null; // RSI得分 /40
   rsiPattern: string; // RSI命中情形
   sectorTrend: string; // 板块趋势描述
-  moneyScore: number | null; // 资金得分 /35
+  moneyScore: number | null; // 资金得分 /30
   moneyNote: string; // 资金形态说明
   error?: string; // 评分失败原因
 }

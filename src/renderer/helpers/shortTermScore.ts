@@ -48,6 +48,12 @@ export const SHORT_TERM_SCORE_CONFIG = {
   sectorDays: 20, // 板块趋势判断窗口
   sectorCompareDays: 10, // 个股与板块区间对比窗口
   sectorNoNewLowDays: 3, // 企稳判定：连续N日不创新低
+  // ---- 个股子项权重（满分即权重，合计 100）----
+  stockDims: {
+    volume: 30, // 量能活跃度
+    rsi: 40, // RSI(6/24) 择时指标：短线择时核心，权重最高
+    money: 30, // 资金指标（主力/散户20日曲线形态）
+  },
   // ---- 个股-量能 ----
   mvSmallBound: 50e8, // 小盘上限（元）
   mvMidBound: 200e8, // 中盘上限（元）
@@ -61,7 +67,8 @@ export const SHORT_TERM_SCORE_CONFIG = {
   rsiExtremeSpread: 10, // 超买/超卖确认：RSI6 与 RSI24 差值绝对值下限
   rsiStateLookback: 60, // 极值状态识别窗口（日）：在窗口内寻找最近一次真实超买/超卖
   rsiPullbackMaxDays: 25, // 距最近一次真实超买超过该天数，不再认定为"超买后回踩"
-  rsiCrossFreshDays: 15, // 超卖后的上穿（金叉）在该天数内才认定为有效
+  rsiCrossFreshDays: 3, // 金叉/死叉时效（日）：超过该天数的交叉视为失效，改按当前的均线排列判定
+  rsiOversoldCrossDays: 5, // "超卖后金叉"额外要求：从上穿日往回倒推该天数内须出现过真实超卖状态（否则只是普通交叉）
   rsiBreakSpread: 3, // 判定"贴近24日线"的容差（RSI6 - RSI24）
   rsiPullbackBreakSpread: 8, // 回踩过程中允许的最大跌破幅度：超过则认为已破位，不算回踩
   // ---- 个股-资金 ----
@@ -240,8 +247,11 @@ const RELATION_DESC: Record<SectorRelation, string> = {
 };
 
 /**
- * 板块表现评分：先判定板块短期趋势（上升 > 下跌反弹 > 持续下跌），
+ * 板块表现评分：先判定板块短期趋势（上升 > 回升/企稳 > 横盘 > 持续下跌），
  * 再看个股与板块的趋同/背离关系及区间涨幅差值做修正。
+ *
+ * 趋势判定以 20 日均线（MA20）为多空分界：收盘站上 MA20 一律不再判为"持续下跌"，
+ * 只有「跌破MA20 + 20日区间为负 + 短期均线空头」才认定为持续下跌。
  */
 export function scoreSector(
   stockKlines: Stock.KLineItem[],
@@ -268,19 +278,24 @@ export function scoreSector(
     return { ...empty, reason: '个股K线数据不足' };
   }
 
-  // ---- 板块短期趋势 ----
+  // ---- 板块短期趋势（以 MA20 为多空分界）----
   const bCloses = boardKlines.map((k) => k.sp);
   const bWin = bCloses.slice(-(cfg.sectorDays + 1));
+  const lastClose = bCloses[bCloses.length - 1];
   const ret20 = rangeChange(bCloses, cfg.sectorDays) ?? 0;
   const ret5 = rangeChange(bCloses, 5) ?? 0;
   const ma5 = mean(bCloses.slice(-5));
   const ma10 = mean(bCloses.slice(-10));
+  const ma20 = mean(bCloses.slice(-cfg.sectorDays));
+  const ma20Prev = mean(bCloses.slice(-cfg.sectorDays - 5, -5)); // 5日前的MA20，判断20日线方向
   const ma5Prev = mean(bCloses.slice(-8, -3));
-  const high10 = Math.max(...bCloses.slice(-10));
-  const highPrev10 = Math.max(...bCloses.slice(-20, -10));
   const high20 = Math.max(...bWin);
-  const drawdown = (bCloses[bCloses.length - 1] / high20 - 1) * 100;
+  const drawdown = (lastClose / high20 - 1) * 100;
 
+  // 20日线多空分界与短期均线形态
+  const aboveMa20 = lastClose > ma20;
+  const ma20Rising = ma20 > ma20Prev;
+  const shortBull = ma5 >= ma10; // 5/10日线多头
   // 前期存在明显下跌
   const priorDecline = ret20 < -5 || drawdown < -5;
   // 企稳判定：以窗口内最低收盘为阶段低点，从低点往后数
@@ -300,9 +315,14 @@ export function scoreSector(
 
   let trendType: SectorTrendType;
   let trendDesc: string;
-  if (ret20 > 3 && ma5 > ma10 && high10 >= highPrev10) {
+  if (aboveMa20 && shortBull && ret20 > 0 && (ma20Rising || ma5 > ma20)) {
+    // 站上20日线 + 短期均线多头 + 区间正收益 → 上升趋势
     trendType = 'up';
     trendDesc = TREND_DESC.up;
+  } else if (aboveMa20 && (ret5 > 0 || ma20Rising || ma5 > ma5Prev)) {
+    // 站上20日线但短期均线尚未走顺：不判为持续下跌，按回升/反弹处理
+    trendType = 'bounce';
+    trendDesc = `板块站上20日均线（MA20 ${ma20.toFixed(2)}），短线回升`;
   } else if (drawdown < -8 && ret5 > 2 && ma5 > ma5Prev) {
     trendType = 'bounce';
     trendDesc = '板块超跌反弹';
@@ -310,9 +330,10 @@ export function scoreSector(
     // 下跌后企稳：出现底分型或连续 N 日不创新低，不再判定为持续下跌
     trendType = 'bounce';
     trendDesc = bottomFractal ? '板块下跌后企稳（出现底分型）' : `板块下跌后企稳（连续${cfg.sectorNoNewLowDays}日未创新低）`;
-  } else if (ret20 < 0 && ma5 < ma10) {
+  } else if (!aboveMa20 && ret20 < 0 && !shortBull) {
+    // 只有同时跌破20日线、区间为负、短期均线空头，才认定为持续下跌
     trendType = 'down';
-    trendDesc = TREND_DESC.down;
+    trendDesc = `${TREND_DESC.down}（跌破20日均线）`;
   } else {
     trendType = 'flat';
     trendDesc = TREND_DESC.flat;
@@ -364,7 +385,7 @@ export function scoreSector(
 // ==================== 个股-量能活跃度 ====================
 
 export interface VolumeScoreResult {
-  score: number; // 0~35
+  score: number; // 0~30（= stockDims.volume）
   max: number;
   available: boolean;
   note: string;
@@ -391,7 +412,7 @@ export function scoreStockVolume(
   circMv: number | null | undefined,
   cfg: ScoreConfig = SHORT_TERM_SCORE_CONFIG,
 ): VolumeScoreResult {
-  const max = 35;
+  const max = cfg.stockDims.volume;
   if (!stockKlines || stockKlines.length < 25) {
     return { score: 0, max, available: false, note: 'K线数据不足' };
   }
@@ -443,7 +464,7 @@ export function scoreStockVolume(
 // ==================== 个股-RSI 指标 ====================
 
 export interface RsiScoreResult {
-  score: number; // 0~30
+  score: number; // 0~40（= stockDims.rsi）
   max: number;
   available: boolean;
   pattern: string; // 命中情形
@@ -464,12 +485,19 @@ export interface RsiScoreResult {
  * 所谓"真实极值状态"必须同时满足：RSI6 绝对值越界 + 与 24 日线拉开明显差值。
  * 历史分位只作为弱势行情下的补充口径（要求极高绝对值 + 极高历史分位），不再作为超买主口径，
  * 否则长期弱势股一旦反弹到中高位就会被历史分位误判成超买。
+ *
+ * 交叉的时效性：金叉/死叉只在 cfg.rsiCrossFreshDays（默认3日）内有效，
+ * 过期后一律改按当前均线排列判定（多头/空头排列），避免 6日线与24日线反复缠绕时长期挂着"金叉"高分。
+ * 并且"超卖后金叉"还要求：从上穿日往回倒推 cfg.rsiOversoldCrossDays（默认5日）内出现过真实超卖状态，
+ * 超卖早已过去（区间内 6/24 线反复缠绕）时的上穿只是普通交叉，不予加分。
  */
 export function scoreStockRsi(
   stockKlines: Stock.KLineItem[],
   cfg: ScoreConfig = SHORT_TERM_SCORE_CONFIG,
 ): RsiScoreResult {
-  const max = 30;
+  const max = cfg.stockDims.rsi;
+  // 形态基础分（原 30 分制 × max/30 取整，保持各形态相对高低不变）
+  const s = (v: number) => Math.round((v * max) / 30);
   const empty: RsiScoreResult = { score: 0, max, available: false, pattern: '', rsi6: 0, rsi24: 0, rsi6Percentile: 0 };
   if (!stockKlines || stockKlines.length < cfg.rsiLong + 30) {
     return { ...empty, pattern: 'K线数据不足' };
@@ -539,37 +567,51 @@ export function scoreStockRsi(
       minSpreadAfter >= -cfg.rsiPullbackBreakSpread; // 回落过程中未大幅跌破24日线（未破位）
   }
 
-  // ---- 超卖后反抽：自最近一次超卖之后的交叉情况（记录最近一次上穿日期与最近一次交叉方向）----
+  // ---- 交叉的时效性：金叉/死叉只在 rsiCrossFreshDays 日内有效，过期后按当前的均线排列判定 ----
   let crossUpIdx = -1;
-  let lastCrossDir: 'up' | 'down' | null = null;
+  let crossDownIdx = -1;
+  // 起点为"rsiCrossFreshDays 日前"，保证刚好 rsiCrossFreshDays 日前发生的交叉仍在时效内
+  for (let i = Math.max(start + 1, n - 1 - cfg.rsiCrossFreshDays); i < n; i++) {
+    if (rsi6s[i - 1] <= rsi24s[i - 1] && rsi6s[i] > rsi24s[i]) crossUpIdx = i;
+    else if (rsi6s[i - 1] >= rsi24s[i - 1] && rsi6s[i] < rsi24s[i]) crossDownIdx = i;
+  }
+  // 时效窗口内最近一次交叉的方向（两者不可能同日，取更晚的一个）
+  const hasFreshCross = crossUpIdx >= 0 || crossDownIdx >= 0;
+  const freshCrossIsUp = crossUpIdx > crossDownIdx;
+  const freshCrossDaysAgo = hasFreshCross ? n - 1 - Math.max(crossUpIdx, crossDownIdx) : null;
+  // "超卖后金叉/死叉"：从上穿（下穿）日往回倒推 rsiOversoldCrossDays 日内，须出现过真实超卖状态。
+  // 超卖早已过去（期间 6/24 线反复缠绕）时，此后的交叉只是普通交叉，不能算作超卖后金叉。
+  const crossAfterOversold = (crossIdx: number) => {
+    if (crossIdx < 0) return false;
+    const from = Math.max(start, crossIdx - cfg.rsiOversoldCrossDays);
+    for (let i = from; i <= crossIdx; i++) {
+      if (isOversoldState(i)) return true;
+    }
+    return false;
+  };
+  const crossFromOversold = crossAfterOversold(crossUpIdx);
+  const crossDownFromOversold = crossAfterOversold(crossDownIdx);
+
+  // ---- 超卖后反抽：超卖谷底参考值（判断是否已明显脱离谷底）----
   let troughAfterOversold = 0;
   if (reboundRegime) {
-    // 超卖谷底参考值：从超卖状态日往前多看 5 日再取最小值，
+    // 从超卖状态日往前多看 5 日再取最小值，
     // 避免"超卖状态日就是今天"时谷底取到当日、导致刚反弹的第一天无法体现"已脱离谷底"
     const troughFrom = Math.max(start, lastOversoldIdx - 5);
     let trough = rsi6s[troughFrom];
-    for (let i = troughFrom; i < n; i++) {
-      trough = Math.min(trough, rsi6s[i]);
-      if (i <= lastOversoldIdx) continue;
-      if (rsi6s[i - 1] <= rsi24s[i - 1] && rsi6s[i] > rsi24s[i]) {
-        crossUpIdx = i;
-        lastCrossDir = 'up';
-      } else if (rsi6s[i - 1] >= rsi24s[i - 1] && rsi6s[i] < rsi24s[i]) {
-        lastCrossDir = 'down';
-      }
-    }
+    for (let i = troughFrom; i < n; i++) trough = Math.min(trough, rsi6s[i]);
     troughAfterOversold = trough;
   }
-  const freshCross = crossUpIdx >= 0 && n - 1 - crossUpIdx <= cfg.rsiCrossFreshDays;
 
-  // 近5日死叉
-  let deadCross = false;
-  for (let i = Math.max(start + 1, n - 5); i < n; i++) {
-    if (rsi6s[i - 1] >= rsi24s[i - 1] && rsi6s[i] < rsi24s[i]) {
-      deadCross = true;
-      break;
-    }
+  // 最近一次上穿（不限时效，仅用于形态描述：区分"金叉已过时效"与"本就无金叉"）
+  let lastCrossUpIdx = -1;
+  for (let i = Math.max(start + 1, n - cfg.rsiStateLookback); i < n; i++) {
+    if (rsi6s[i - 1] <= rsi24s[i - 1] && rsi6s[i] > rsi24s[i]) lastCrossUpIdx = i;
   }
+
+  // 6日线在24日线下方、但正在向上收敛 → 接近金叉（前瞻信号，非已发生的交叉）
+  const approachingCross =
+    !hasFreshCross && rsi6 < rsi24 && spread >= -cfg.rsiBreakSpread && spread > spreadAt(n - 2);
 
   // 持续超买钝化：连续5日 RSI6 > 80 且与24日线差值大
   const last5 = rsi6s.slice(-5);
@@ -577,54 +619,67 @@ export function scoreStockRsi(
 
   let score: number;
   let pattern: string;
+  // 交叉的时效描述：金叉/死叉只在其时效窗口内作为形态依据
+  const crossAgo = freshCrossDaysAgo === 0 ? '当日' : `${freshCrossDaysAgo}日前`;
+
   if (pullback) {
     const stabilized = rsi6s[n - 1] >= rsi6s[n - 2];
-    score = stabilized ? 30 : 26;
+    score = stabilized ? s(30) : s(26);
     pattern = stabilized ? '超买后回踩24日线企稳（最佳买点）' : '超买后回落，6日线临近24日线（回踩中）';
-  } else if (reboundRegime && freshCross) {
-    // 格局是"超卖后反抽"，且近期确实发生过高位金叉：
-    // 即便中途冲高后再度回落贴近 24 日线，也仍属于超卖反弹结构，不能算超买回踩；
-    // 若最近一次交叉已转为死叉，则说明金叉结构被破坏（6日线在24日线附近反复），需如实降档
-    if (lastCrossDir === 'up') {
-      if (spread >= 0) {
-        score = 26;
-        pattern = '超卖后6日线上穿24日线（金叉）';
-      } else if (spread >= -cfg.rsiBreakSpread) {
-        score = 22;
-        pattern = '超卖后6日线上穿24日线，当前回落至24日线附近整理';
-      } else {
-        score = 16;
-        pattern = '超卖后6日线上穿24日线，但已再度跌回24日线下方';
-      }
+  } else if (hasFreshCross && freshCrossIsUp && crossFromOversold) {
+    // 超卖后金叉：上穿紧跟在最近一次真实超卖之后（时效窗口内），才是超卖反转买点
+    if (spread >= 0) {
+      score = s(26);
+      pattern = `超卖后${crossAgo}6日线上穿24日线（金叉）`;
     } else if (spread >= -cfg.rsiBreakSpread) {
-      // 刚下穿（最近一次交叉为死叉）但尚未远离24日线：区分"正在回抽"还是"贴线震荡"
-      const spreadRising = spread > spreadAt(n - 2);
-      if (spreadRising) {
-        score = 20;
-        pattern = '超卖反弹后6日线回抽24日线（接近金叉）';
-      } else {
-        score = 16;
-        pattern = '超卖反弹后6日线刚下穿24日线，在24日线下方震荡';
-      }
+      score = s(22);
+      pattern = '超卖后上穿24日线后回落至线附近整理（金叉待确认）';
     } else {
-      score = 12;
-      pattern = '超卖反弹后6日线再度跌回24日线下方，反弹结构转弱';
+      score = s(16);
+      pattern = '超卖后上穿24日线后已跌回24日线下方（金叉失效）';
+    }
+  } else if (hasFreshCross && freshCrossIsUp) {
+    // 近3日内上穿，但距最近一次真实超卖已超过时效窗口（区间反复缠绕）→ 不按超卖后金叉加分
+    if (spread >= -cfg.rsiBreakSpread) {
+      score = s(20);
+      pattern = '近3日内6日线上穿24日线（非超卖反转，不加分）';
+    } else {
+      score = s(12);
+      pattern = '近3日内6日线上穿24日线后跌回24日线下方（上穿失效）';
+    }
+  } else if (reboundRegime && approachingCross) {
+    // 时效内无新交叉，但6日线在24日线下方向上收敛 → 等待金叉
+    score = s(20);
+    pattern = '超卖反弹后6日线回抽24日线（接近金叉）';
+  } else if (hasFreshCross && !freshCrossIsUp) {
+    // 时效窗口内的死叉：金叉结构已被破坏
+    if (crossDownFromOversold) {
+      // 直接把 RSI6 打进超卖区的死叉：短线已进入超卖，等待企稳信号
+      score = s(12);
+      pattern = `超卖后${crossAgo}6日线下穿24日线，RSI6已进入超卖区（死叉，等待企稳）`;
+    } else if (reboundRegime) {
+      score = spread >= -cfg.rsiBreakSpread ? s(16) : s(12);
+      pattern =
+        spread >= -cfg.rsiBreakSpread
+          ? `反弹结构中${crossAgo}6日线下穿24日线，在24日线下方震荡（死叉）`
+          : '反弹结构中6日线再度跌回24日线下方，结构转弱';
+    } else {
+      score = spread >= -cfg.rsiBreakSpread ? s(8) : s(6);
+      pattern = `${crossAgo}6日线下穿24日线，在24日线下方震荡（死叉）`;
     }
   } else if (reboundRegime && rsi6 < rsi24 && rsi6 >= rsi6s[n - 2] && rsi6 - troughAfterOversold > 5) {
     // 超卖后反弹修复中：RSI6 已显著脱离超卖谷底且当日回升，但尚未上穿24日线
-    score = 18;
+    score = s(18);
     pattern = '超卖后反弹修复中（尚未金叉）';
-  } else if (deadCross) {
-    score = 6;
-    pattern = '近期6日线下穿24日线（死叉）';
   } else if (persistentOverbought) {
-    score = 8;
+    score = s(8);
     pattern = '持续超买钝化，追高风险大';
   } else if (rsi6 > rsi24) {
-    score = 20;
-    pattern = 'RSI多头排列，处于强势区';
+    // 交叉已过时效（或从未出现）：按当前均线排列判定，不再算作金叉
+    score = s(20);
+    pattern = lastCrossUpIdx >= 0 ? 'RSI多头排列，处于强势区（金叉时效已过）' : 'RSI多头排列，处于强势区';
   } else {
-    score = 10;
+    score = s(10);
     pattern = 'RSI空头排列，处于弱势区';
   }
 
@@ -636,7 +691,7 @@ export function scoreStockRsi(
 export type MoneyShape = 'smile' | 'sad' | 'flat' | 'unknown';
 
 export interface MoneyScoreResult {
-  score: number; // 0~35
+  score: number; // 0~30（= stockDims.money）
   max: number;
   available: boolean;
   shape: MoneyShape;
@@ -665,7 +720,9 @@ export function scoreStockMoney(
   detailRetail: number[] | null | undefined,
   cfg: ScoreConfig = SHORT_TERM_SCORE_CONFIG,
 ): MoneyScoreResult {
-  const max = 35;
+  const max = cfg.stockDims.money;
+  // 形态基础分（原 35 分制 × max/35 取整，保持各形态相对高低不变）
+  const s = (v: number) => Math.round((v * max) / 35);
   const empty: MoneyScoreResult = {
     score: 0,
     max,
@@ -746,30 +803,30 @@ export function scoreStockMoney(
   let score: number;
   let note: string;
   if (shape === 'smile' && cross === 'up') {
-    // 微笑曲线金叉：越新鲜越强，随时间衰减回落到形态分（18）
-    score = 18 + (aboveZero ? 12 : 4) * upFresh;
+    // 微笑曲线金叉：越新鲜越强，随时间衰减回落到形态分（s(18)）
+    score = s(18) + (aboveZero ? s(12) : s(4)) * upFresh;
     note = `微笑曲线${ageDesc}上穿散户线${aboveZero ? '且在0轴上方' : '，尚未站上0轴'}`;
   } else if (aboveZero && mainLast > retailLast) {
-    score = 24 + 4 * upFresh;
+    score = s(24) + s(4) * upFresh;
     note = `主力20日净流入为正且强于散户${cross === 'up' ? `（${ageDesc}上穿）` : ''}`;
   } else if (shape === 'smile') {
-    score = 18;
+    score = s(18);
     note = '主力线呈U型，等待上穿确认';
   } else if (shape === 'sad' && cross === 'down') {
-    // 悲伤曲线死叉：越新鲜惩罚越重，随时间衰减回升到形态分（8）
-    score = 8 - (aboveZero ? 2 : 5) * downFresh;
+    // 悲伤曲线死叉：越新鲜惩罚越重，随时间衰减回升到形态分（s(8)）
+    score = s(8) - (aboveZero ? s(2) : s(5)) * downFresh;
     note = `悲伤曲线${ageDesc}下穿散户线${aboveZero ? '' : '且在0轴下方'}`;
   } else if (shape === 'sad') {
-    score = 8;
+    score = s(8);
     note = '主力线呈倒U型，资金撤离迹象';
   } else if (aboveZero) {
-    score = 18 - 3 * downFresh;
+    score = s(18) - s(3) * downFresh;
     note = `主力20日净流入为正${cross === 'down' ? `（${ageDesc}被下穿，注意风险）` : ''}`;
   } else if (cross === 'down') {
-    score = 12 - 4 * downFresh;
+    score = s(12) - s(4) * downFresh;
     note = `主力线${ageDesc}下穿散户线且在0轴下方`;
   } else {
-    score = 12;
+    score = s(12);
     note = '主力资金观望，方向不明';
   }
 
@@ -800,7 +857,7 @@ export interface StockScoreResult {
   degraded: string[];
 }
 
-/** 个股表现评分 = 量能活跃度(35) + RSI(30) + 资金(35)，子项缺失时按剩余权重归一化 */
+/** 个股表现评分 = 量能活跃度 + RSI择时 + 资金（分值即权重，见 stockDims），子项缺失时按剩余权重归一化 */
 export function scoreStock(
   volume: VolumeScoreResult,
   rsi: RsiScoreResult,

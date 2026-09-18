@@ -1142,7 +1142,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                     <span style={{ color: '#ff4d4f', fontSize: 12 }}>{s.error}</span>
                   ) : (
                     <span style={{ fontSize: 12 }}>
-                      {s.rsiScore == null ? '--' : `${s.rsiScore.toFixed(0)}/30`}
+                      {s.rsiScore == null ? '--' : `${s.rsiScore.toFixed(0)}/40`}
                       <span style={{ color: 'var(--secondary-text-color)', marginLeft: 4 }}>{s.rsiPattern || '--'}</span>
                     </span>
                   )}
@@ -1150,7 +1150,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 <Col span={4} style={{ fontSize: 12 }} title={s.sectorTrend}>
                   {s.sectorTrend || '--'}
                 </Col>
-                <Col span={2} title={s.moneyNote} className={s.moneyScore == null ? '' : Utils.GetValueColor(s.moneyScore - 17).textClass}>
+                <Col span={2} title={s.moneyNote} className={s.moneyScore == null ? '' : Utils.GetValueColor(s.moneyScore - 15).textClass}>
                   {s.moneyScore == null ? '--' : s.moneyScore.toFixed(0)}
                 </Col>
                 <Col span={3} style={{ fontSize: 12 }}>
