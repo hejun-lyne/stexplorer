@@ -262,7 +262,10 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             <Tooltip
               title={
                 <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
-                  {`综合评分 = 个股(50%) + 板块(30%) + 大盘(20%)，缺失维度按剩余权重归一化。
+                  {`综合评分 = 个股(${(Score.SHORT_TERM_SCORE_CONFIG.weights.stock * 100).toFixed(0)}%) + 板块(${(
+                    Score.SHORT_TERM_SCORE_CONFIG.weights.sector * 100
+                  ).toFixed(0)}%) + 大盘(${(Score.SHORT_TERM_SCORE_CONFIG.weights.market * 100).toFixed(0)}%)，缺失维度按剩余权重归一化。
+板块维度以"个股相对板块的相对强度"为主（板块自身强弱只作窄区间背景），避免高分股票集中在当前最强板块。
 个股得分过低时触发一票否决（总分封顶${Score.SHORT_TERM_SCORE_CONFIG.vetoCap}）。
 等级：A(≥80) / B(≥65) / C(≥50) / D(<50)`}
                 </div>
@@ -297,9 +300,9 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
           </Col>
         </Row>
         {[
-          { label: '个股表现', weight: '权重50%', r: stock.score, available: stock.available, reason: stock.reason },
-          { label: '板块表现', weight: '权重30%', r: sector.score, available: sector.available, reason: sector.reason },
-          { label: '大盘表现', weight: '权重20%', r: market.score, available: market.available, reason: market.reason },
+          { label: '个股表现', weight: `权重${(Score.SHORT_TERM_SCORE_CONFIG.weights.stock * 100).toFixed(0)}%`, r: stock.score, available: stock.available, reason: stock.reason },
+          { label: '板块表现', weight: `权重${(Score.SHORT_TERM_SCORE_CONFIG.weights.sector * 100).toFixed(0)}%`, r: sector.score, available: sector.available, reason: sector.reason },
+          { label: '大盘表现', weight: `权重${(Score.SHORT_TERM_SCORE_CONFIG.weights.market * 100).toFixed(0)}%`, r: market.score, available: market.available, reason: market.reason },
         ].map((dim) => (
           <Row key={dim.label} style={{ marginBottom: 6, fontSize: 13, alignItems: 'center' }}>
             <Col span={6}>
@@ -400,7 +403,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         }}
       >
         <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
-          <Col span={20}>板块表现评分（{sector.boardName || '未识别板块'}）</Col>
+          <Col span={20}>板块/相对强度评分（{sector.boardName || '未识别板块'}）</Col>
           <Col span={4} style={{ textAlign: 'right' }}>
             <span style={{ fontSize: 16, fontWeight: 'bold', color: Score.scoreColor(sector.score) }}>
               {sector.available ? sector.score.toFixed(1) : '--'}
@@ -413,11 +416,22 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
               <Col span={6}>板块短期趋势</Col>
               <Col span={18}>{sector.trendDesc}</Col>
             </Row>
-            {sector.trendScore != null && (
+            {sector.relScore != null && (
               <Row style={{ marginBottom: 4, fontSize: 12 }}>
-                <Col span={6}>趋势分（择时位置）</Col>
+                <Col span={6}>个股相对强度</Col>
                 <Col span={18}>
-                  {sector.trendScore.toFixed(1)}
+                  {sector.relScore.toFixed(1)}
+                  <span style={{ marginLeft: 6, color: 'var(--secondary-text-color)' }}>
+                    （10日超额 {sector.diff >= 0 ? '+' : ''}{sector.diff.toFixed(2)}%）
+                  </span>
+                </Col>
+              </Row>
+            )}
+            {sector.envScore != null && (
+              <Row style={{ marginBottom: 4, fontSize: 12 }}>
+                <Col span={6}>板块环境分（背景）</Col>
+                <Col span={18}>
+                  {sector.envScore.toFixed(1)}
                   {sector.positionDesc ? (
                     <span style={{ marginLeft: 6, color: 'var(--secondary-text-color)' }}>{sector.positionDesc}</span>
                   ) : null}
@@ -448,9 +462,12 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             </Row>
             <div style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginTop: 4 }}>
               板块取自"核心交易-板块"页设置的活跃板块（未设置时自动取所属板块第一个）。
-              趋势分以20日均线为多空分界，并按"离趋势反转点（阶段低点）的位置"择时：距阶段低点涨幅、距低点天数、
-              MA20乖离越大越下调（避免追高），越接近反转点分越高；再叠加关系修正——趋同按涨幅差评分，
-              正向背离（板块弱个股强）加分，负向背离减分
+              本维度 = 相对强度(
+              {(Score.SHORT_TERM_SCORE_CONFIG.sectorRelWeight * 100).toFixed(0)}%
+              ，个股10日涨幅相对板块的超额 + 是否站上自身20日线) + 板块环境(
+              {((1 - Score.SHORT_TERM_SCORE_CONFIG.sectorRelWeight) * 100).toFixed(0)}%
+              ，板块趋势按"离反转点位置"择时后压缩到窄区间作背景)。
+              这样同一板块的股票不会被板块整体强弱一起抬分，只有相对板块更强（且自身在20日线上方）的个股才加分
             </div>
           </>
         ) : (

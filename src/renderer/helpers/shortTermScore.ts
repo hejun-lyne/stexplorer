@@ -53,6 +53,14 @@ export const SHORT_TERM_SCORE_CONFIG = {
   sectorRiseAllow: 6, // 距阶段低点涨幅容忍（%）：超出的部分按每1%扣2.5分
   sectorFreshDays: 6, // 距阶段低点天数容忍（日）：超出的部分按每日扣1.5分
   sectorTrendFloor: 30, // 正向趋势（up/bounce）经追高衰减后的最低分（与持续下跌同档：都不适合当下买入）
+  // 板块维度构成：以"个股相对板块的相对强度"为主，板块自身强弱只作窄区间背景，
+  // 避免同一板块的股票被整体抬分（高评分股票全部集中在当前最强板块）
+  sectorRelWeight: 0.6, // 相对强度占比（其余为板块环境分）
+  sectorRelBase: 50, // 相对强度基准分（超额收益为0时）
+  sectorRelPerPct: 3, // 每 1% 超额收益（个股区间涨幅 - 板块区间涨幅）对应的分值
+  sectorStockAboveBonus: 8, // 个股站上自己的20日均线加/减分
+  sectorEnvBase: 45, // 板块环境分下限（板块趋势分为 down 档时）
+  sectorEnvSpan: 30, // 板块环境分跨度（趋势分为 up 档时 env = base + span）
   // ---- 个股子项权重（满分即权重，合计 100）----
   stockDims: {
     volume: 30, // 量能活跃度
@@ -89,7 +97,8 @@ export const SHORT_TERM_SCORE_CONFIG = {
   moneyCrossRecentDays: 5, // 交叉检测窗口（日）
   moneyCrossDecay: 0.8, // 交叉时效衰减系数：刚交叉 1.0，每过一日乘一次（3日后约 0.5）
   // ---- 综合权重 ----
-  weights: { stock: 0.5, sector: 0.3, market: 0.2 },
+  // 板块权重从 0.3 下调到 0.2：板块强弱是环境因素，若权重过高会导致高评分股票过度集中在当前强势板块
+  weights: { stock: 0.6, sector: 0.2, market: 0.2 },
   vetoThreshold: 40, // 个股得分低于该值触发一票否决
   vetoCap: 55, // 一票否决后的总分上限
 };
@@ -247,6 +256,8 @@ export interface SectorScoreResult {
   trendScore?: number;
   trendPenalty?: number; // 因"已偏离反转点（追高）"被下调的分数
   positionDesc?: string; // 择时位置说明（距低点涨幅/天数/MA20乖离）
+  envScore?: number; // 板块环境分（趋势分压缩后的窄区间，作背景）
+  relScore?: number; // 个股相对强度分（个股 vs 板块）
   daysSinceLow?: number; // 距阶段低点天数
   riseFromLow?: number; // 距阶段低点涨幅(%)
   bias20?: number; // 20日均线乖离(%)
@@ -277,7 +288,8 @@ const RELATION_DESC: Record<SectorRelation, string> = {
  *      ② 距阶段低点涨幅（超 sectorRiseAllow 部分每 1% 扣 2.5 分）
  *      ③ 距阶段低点天数（超 sectorFreshDays 部分每日扣 1.5 分）
  *    衰减下限为 sectorTrendFloor，避免"已大幅拉升的板块"仍得高分（追高风险）。
- * 3) 关系修正：趋同按涨幅差评分；正向背离（板块弱个股强）加分；负向背离减分。
+ * 3) 维度构成：以"个股相对板块的相对强度"为主（sectorRelWeight，默认60%），板块自身强弱只作为窄区间
+ *    背景分（envScore，sectorEnvBase ~ base+span）。这样同一板块的股票不会因为板块当红而被整体抬分。
  */
 export function scoreSector(
   stockKlines: Stock.KLineItem[],
@@ -389,6 +401,7 @@ export function scoreSector(
 
   // ---- 个股与板块关系 ----
   const sCloses = stockKlines.map((k) => k.sp);
+  const sLast = sCloses[sCloses.length - 1];
   const bZdf = rangeChange(bCloses, cfg.sectorCompareDays) ?? 0;
   const sZdf = rangeChange(sCloses, cfg.sectorCompareDays) ?? 0;
   const diff = sZdf - bZdf;
@@ -404,21 +417,25 @@ export function scoreSector(
     relation = 'negative-divergence';
   }
 
-  let modifier: number;
-  if (relation === 'sync') {
-    // 趋同：按区间涨幅差值打分，强于板块加分、弱于板块减分
-    modifier = clamp(diff * 4, -25, 25);
-  } else if (relation === 'positive-divergence') {
-    // 正向背离：板块弱个股强，独立行情，高分
-    modifier = clamp(20 + diff * 1.5, 10, 30);
-  } else {
-    // 负向背离：板块强个股弱，最弱形态
-    modifier = clamp(-18 + diff * 1.5, -30, -12);
-  }
+  // ---- 个股相对强度分：个股 vs 板块（去"板块整体强→成分股齐涨"的同质加分）----
+  const sMa20 = mean(sCloses.slice(-cfg.sectorDays));
+  const stockAboveMa20 = sLast > sMa20;
+  const relScore = clamp(
+    cfg.sectorRelBase + diff * cfg.sectorRelPerPct + (stockAboveMa20 ? cfg.sectorStockAboveBonus : -cfg.sectorStockAboveBonus),
+    0,
+    100,
+  );
+
+  // ---- 板块环境分：把板块趋势分压缩到窄区间（仅作背景，避免板块强弱主导个股评分）----
+  const envScore =
+    cfg.sectorEnvBase +
+    ((trendScore - TREND_BASE.down) / (TREND_BASE.up - TREND_BASE.down)) * cfg.sectorEnvSpan;
+
+  const sectorScore = clamp(relScore * cfg.sectorRelWeight + envScore * (1 - cfg.sectorRelWeight), 0, 100);
 
   return {
     available: true,
-    score: clamp(trendScore + modifier, 0, 100),
+    score: sectorScore,
     boardName,
     trendType,
     trendDesc,
@@ -430,6 +447,8 @@ export function scoreSector(
     trendScore,
     trendPenalty: isPositiveTrend ? extensionPenalty : 0,
     positionDesc,
+    envScore,
+    relScore,
     daysSinceLow,
     riseFromLow,
     bias20,
