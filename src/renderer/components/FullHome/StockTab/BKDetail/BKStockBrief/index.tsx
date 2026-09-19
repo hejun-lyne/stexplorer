@@ -695,6 +695,10 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
     const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
     const { darkMode } = useHomeContext();
     const [detail, setDetail] = useState<Stock.DetailItem>({ secid });
+    // 推送回调里读最新行情用 ref：detail 变化时不能重建订阅，否则会形成
+    // 「订阅 → 推送 → setDetail → effect 重跑 → 重订阅 → 又推送」的死循环（UI 卡死）
+    const detailRef = useRef(detail);
+    detailRef.current = detail;
     const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
     const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid), {
       throwOnError: true,
@@ -706,7 +710,9 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
     });
     useLayoutEffect(() => {
       runGetDetail();
-      Helpers.Stock.AppendStockDetailPush(secid, (data) => {
+      const handlePushDetail = (data: any) => {
+        // 闭包不再捕获 detail，改读 ref，避免订阅随行情更新重建
+        const detail = detailRef.current;
         if (data) {
           let changed = false;
           if (!isNaN(data.zx) && detail.zx != data.zx) {
@@ -745,11 +751,12 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
             setDetail({ ...detail });
           }
         }
-      });
-      return () => {
-        Helpers.Stock.RemoveStockDetailPush(secid);
       };
-    }, [secid, detail]);
+      Helpers.Stock.AppendStockDetailPush(secid, handlePushDetail);
+      return () => {
+        Helpers.Stock.RemoveStockDetailPush(secid, handlePushDetail);
+      };
+    }, [secid]);
     const dispatch = useDispatch();
     const addStock = useCallback(() => {
       dispatch(addStockAction(detail, Helpers.Stock.GetStockType(secid)));

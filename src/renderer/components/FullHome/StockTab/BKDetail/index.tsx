@@ -44,12 +44,20 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
     onSuccess: (d) => (d ? setDetail(d) : undefined),
     cacheKey: `GetStockDetail/${secid}`,
   });
+  // 用布尔值做依赖：config 对象每次 store 更新都会换新引用，直接依赖会让 SSE 订阅反复重建
+  const hasConfig = !!config;
+  // 推送回调里读最新行情用 ref：detail 变化时不能重建订阅，否则会形成
+  // 「订阅 → 推送 → setDetail → effect 重跑 → 重订阅 → 又推送」的死循环（UI 卡死）
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
   useEffect(() => {
-    if (!detail || !detail.zx) {
+    if (!detailRef.current || !detailRef.current.zx) {
       runGetDetail();
     }
-    if (!config) {
-      Helpers.Stock.AppendStockDetailPush(secid, (data) => {
+    if (!hasConfig) {
+      const handlePushDetail = (data: any) => {
+        // 闭包不再捕获 detail，改读 ref，避免订阅随行情更新重建
+        const detail = detailRef.current;
         if (data) {
           let changed = false;
           if (!isNaN(data.zx) && detail.zx != data.zx) {
@@ -89,12 +97,13 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
           }
           onChangeUpdate(secid, detail.zdf);
         }
-      });
+      };
+      Helpers.Stock.AppendStockDetailPush(secid, handlePushDetail);
       return () => {
-        Helpers.Stock.RemoveStockDetailPush(secid);
+        Helpers.Stock.RemoveStockDetailPush(secid, handlePushDetail);
       };
     }
-  }, [secid, detail]);
+  }, [secid, hasConfig]);
 
   const [monitors, setMonitors] = useState([] as string[]);
   const onBKStocksUpdated = useCallback(
