@@ -1192,7 +1192,8 @@ function setupKlineChart(
   toDate?: string,
   bkks?: Stock.KLineItem[]
 ) {
-  const _klines = filterKlinesByToDate(klines, toDate);
+  // 取数失败时 klines 可能为 undefined，这里兜底成空数组，避免后续 .map / 取最后一条抛错
+  const _klines = filterKlinesByToDate(klines, toDate) || [];
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
   const dates = _klines.map(({ date }) => date);
   const values = _klines.map((_, i) => {
@@ -1215,7 +1216,8 @@ function setupKlineChart(
       },
     };
   });
-  const zx = values[values.length - 1].value[1] as number;
+  // K线可能为空（数据源取数失败、训练模式下该区间无数据等），此时不能取最后一条，否则会抛错导致白屏
+  const zx = values.length ? (values[values.length - 1].value[1] as number) : NaN;
   const vols = _klines.map(({ kp, sp, cjl }, i) => [i, cjl, i != 0 && sp <= _klines[i - 1].sp ? -1 : 1]);
   const options = baseKChartOptions(darkMode, range);
   options.maType = maType;
@@ -1230,8 +1232,11 @@ function setupKlineChart(
     const startI = Math.floor((_klines.length * range.start) / 100);
     const endI = Math.ceil((_klines.length * range.end) / 100);
     const showed = _klines.slice(startI, endI);
-    options.yAxis[0].min = Math.min(...showed.map((_) => _.zd));
-    options.yAxis[0].max = Math.max(...showed.map((_) => _.zg));
+    // 空数组会让 Math.min/max 得到 ±Infinity，这里仅在有空数据时设置
+    if (showed.length) {
+      options.yAxis[0].min = Math.min(...showed.map((_) => _.zd));
+      options.yAxis[0].max = Math.max(...showed.map((_) => _.zg));
+    }
   }
   
   options.series = [
@@ -1297,8 +1302,10 @@ function updateCKChart(
     const startI = Math.floor((opts.series[0].data.length * range.start) / 100);
     const endI = Math.ceil((opts.series[0].data.length * range.end) / 100);
     const showed = opts.series[0].data.slice(startI, endI);
-    opts.yAxis[0].min = Math.min(...showed.map((d: any) => d[2]));
-    opts.yAxis[0].max = Math.max(...showed.map((d: any) => d[3]));
+    if (showed.length) {
+      opts.yAxis[0].min = Math.min(...showed.map((d: any) => d[2]));
+      opts.yAxis[0].max = Math.max(...showed.map((d: any) => d[3]));
+    }
   } else if (chouma && opts.grid.length >= 4) {
     // 只有存在筹码 grid 时才处理筹码相关逻辑
     const cm = alignChouma(
@@ -1383,7 +1390,8 @@ function updateKChart(
   toDate?: string,
   bkks?: Stock.KLineItem[]
 ) {
-  const _klines = filterKlinesByToDate(klines, toDate);
+  // 取数失败时 klines 可能为 undefined，这里兜底成空数组，避免后续 .map / 取最后一条抛错
+  const _klines = filterKlinesByToDate(klines, toDate) || [];
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
   opts.visualMap[0].pieces[0].color = variableColors['--reduce-color'];
   opts.visualMap[0].pieces[1].color = variableColors['--increase-color'];

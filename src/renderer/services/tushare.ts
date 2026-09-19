@@ -283,11 +283,20 @@ function logError(error: any, method: string, extraInfo?: string) {
  * @param params 参数对象
  * @returns Promise<any>
  */
-async function callTushare(method: string, params: Record<string, any> = {}): Promise<any> {
+/**
+ * @param options.ignoreTrain 本次调用忽略训练过滤。
+ *   只用于训练会话自身需要的「日历类」数据（如训练窗口的交易日列表）。
+ *   注意：它必须「按调用」生效，不能用全局开关，否则并发的其它请求会被一起关掉过滤。
+ */
+async function callTushare(
+  method: string,
+  params: Record<string, any> = {},
+  options?: { ignoreTrain?: boolean }
+): Promise<any> {
   try {
     const token = store.getState().setting?.systemSetting?.tushareTokenSetting || '';
     // 训练模式：收敛日期入参，避免 python 使用训练日期之后的数据计算指标
-    const trainParams = capTrainParams(method, params);
+    const trainParams = options?.ignoreTrain ? params : capTrainParams(method, params);
     const args = [method, '--params', JSON.stringify(trainParams)];
     if (token) {
       args.push('--token', token);
@@ -298,7 +307,8 @@ async function callTushare(method: string, params: Record<string, any> = {}): Pr
     }
     // 训练模式：把当前训练日期作为全局数据截止日期传给 python 脚本，
     // 使所有「默认取当天」的接口以及 python 内部互相调用都以训练日期为终点
-    const asOfDate = TrainFilter.GetTrainToDate();
+    // ignoreTrain 时不传训练日期，python 才会返回完整区间（例如训练窗口的交易日历）
+    const asOfDate = options?.ignoreTrain ? undefined : TrainFilter.GetTrainToDate();
     if (asOfDate) {
       args.push('--as-of-date', asOfDate);
     }
@@ -309,8 +319,8 @@ async function callTushare(method: string, params: Record<string, any> = {}): Pr
       for (let i = result.length - 1; i >= 0; i--) {
         const line = (result[i] as string).trim();
         if (line.startsWith('{') || line.startsWith('[')) {
-          // 训练模式：裁剪返回的时间序列数据
-          const parsed = cutTrainResult(method, JSON.parse(line));
+          // 训练模式：裁剪返回的时间序列数据（ignoreTrain 时保持原样）
+          const parsed = options?.ignoreTrain ? JSON.parse(line) : cutTrainResult(method, JSON.parse(line));
           // 结果为空 / 报错时，把 python 打印的诊断信息带到渲染进程控制台，便于直接定位原因
           const isEmptyResult = Array.isArray(parsed)
             ? parsed.length === 0
@@ -576,7 +586,12 @@ export async function GetDetailsFromTushareBatch(secids: string[]): Promise<(Sto
  * 
  * 注意：缓存逻辑已迁移到 stock.ts 的 GetKFromDataSource
  */
-export async function GetKFromTushare(secid: string, code: number, limit?: number): Promise<{ ks: Stock.KLineItem[], kt: number, source?: string, error?: string }> {
+export async function GetKFromTushare(
+  secid: string,
+  code: number,
+  limit?: number,
+  options?: { ignoreTrain?: boolean }
+): Promise<{ ks: Stock.KLineItem[], kt: number, source?: string, error?: string }> {
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
     [KLineType.Week]: 'weekly',
@@ -587,7 +602,7 @@ export async function GetKFromTushare(secid: string, code: number, limit?: numbe
 
   try {
     let klines: any[] = [];
-    const result = await callTushare('get_kline_data', { secid, period, limit: limit || 0 });
+    const result = await callTushare('get_kline_data', { secid, period, limit: limit || 0 }, options);
 
     if (result.error || !Array.isArray(result) || result.length === 0) {
       const reason = result.error || 'Empty data';

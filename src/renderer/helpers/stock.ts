@@ -440,9 +440,11 @@ export function SingleStockDetailPush(secid: string, callback: (detail: Stock.De
 }
 
 let sPush: EastmoneyStockDetailsPush;
+// 同一标的允许多个订阅者：板块详情页里父组件（BKDetail）与子组件（BKStockBrief）会同时订阅同一 secid，
+// 旧的「一个 secid 只存一个 callback、后来者覆盖」会导致其中一个收不到推送
 let sAppendStocks: {
   secid: string;
-  callback: Function;
+  callbacks: ((detail: Stock.PartDetailItem) => void)[];
 }[] = [];
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
 let isPushing = false;
@@ -461,29 +463,36 @@ function debouncedRestart() {
 export function AppendStockDetailPush(secid: string, callback: (detail: Stock.PartDetailItem) => void) {
   const kv = sAppendStocks.find((o) => o.secid === secid);
   if (kv) {
-    kv.callback = callback;
+    // 同一 secid 追加订阅者（按引用去重）；重复调用同一引用不重启推送
+    if (kv.callbacks.indexOf(callback) === -1) {
+      kv.callbacks.push(callback);
+    }
     return;
   }
   sAppendStocks.push({
     secid,
-    callback
+    callbacks: [callback]
   });
 
   debouncedRestart();
 }
 
-export function RemoveStockDetailPush(secid: string) {
-  let found = false;
-  for (let i = 0; i < sAppendStocks.length; i++) {
-    if (sAppendStocks[i].secid === secid) {
-      found = true;
-      sAppendStocks.splice(i, 1);
-      break;
-    }
+export function RemoveStockDetailPush(secid: string, callback?: (detail: Stock.PartDetailItem) => void) {
+  const kv = sAppendStocks.find((o) => o.secid === secid);
+  if (!kv) {
+    return;
   }
-  if (found) {
+  if (!callback) {
+    // 兼容旧调用：移除该标的的全部订阅者
+    sAppendStocks = sAppendStocks.filter((o) => o.secid !== secid);
     debouncedRestart();
+    return;
   }
+  kv.callbacks = kv.callbacks.filter((cb) => cb !== callback);
+  if (kv.callbacks.length === 0) {
+    sAppendStocks = sAppendStocks.filter((o) => o.secid !== secid);
+  }
+  debouncedRestart();
 }
 export function MultiStockDetailPush(restart:boolean) {
   if (isPushing) {
@@ -605,7 +614,14 @@ export function MultiStockDetailPush(restart:boolean) {
           details.forEach((v) => {
             const kv = sAppendStocks.find((o) => o.secid === v.secid);
             if (kv) {
-              kv.callback(v);
+              // 该标的的所有订阅者都要收到（父/子组件可能同时订阅）
+              kv.callbacks.slice().forEach((cb) => {
+                try {
+                  cb(v);
+                } catch (e) {
+                  console.error('板块/个股详情推送回调异常:', e);
+                }
+              });
             }
           });
           
@@ -852,10 +868,10 @@ export async function GetTrainTradingDays(secid: string, startDate: string, endD
     return TRAIN_DAYS_CACHE[cacheKey];
   }
   try {
-    const ks = await TrainFilter.WithoutTrainFilter(async () => {
-      const r = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, 2000);
-      return (r && r.ks) || [];
-    });
+    // 需要整个训练窗口的交易日历（含训练日之后的交易日），所以本次取数要绕过训练过滤。
+    // 用「按调用」的 ignoreTrain：只影响这一次请求，不会像全局开关那样把并发请求的过滤一起关掉。
+    const r = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, 2000, { ignoreTrain: true });
+    const ks = (r && r.ks) || [];
     const days = ks.map((k) => k.date).filter((d) => d >= startDate && d <= endDate);
     if (days.length) {
       TRAIN_DAYS_CACHE[cacheKey] = days;
@@ -1448,18 +1464,27 @@ export async function GetKlinesAndFlows(secid: string, type: Enums.KLineType, co
   let count: number;
   let needMakeReq = true;
   const st = stocksMapping[secid];
-  if (!st || !st.klines[type] || !st.klines[type].length) {
+  // 训练模式：redux 里存的往往是「进训练之前（非训练模式）」取回的最新K线，最后日期＝今天。
+  // 这类数据一旦被复用，组件按训练日过滤后就会变成空数组，因此必须视为不可用、重新取数
+  //（取数层会按训练日期截止并裁剪，python 侧也以训练日期为终点）。
+  const trainOn = TrainFilter.IsTrainFilterOn();
+  const trainToDate = TrainFilter.GetTrainToDate();
+  const cachedKlines = st && st.klines[type] && st.klines[type].length ? st.klines[type] : undefined;
+  const cachedKlinesUsable =
+    !!cachedKlines && (!trainOn || (!!trainToDate && cachedKlines[cachedKlines.length - 1].date <= trainToDate));
+  if (!cachedKlinesUsable) {
     // 请求所有数据
     count = type >= Enums.KLineType.Day ? 350 : 100000;
   } else {
-    const lastTimeStr = st.klines[type].slice(-1)[0].date;
+    const lastTimeStr = cachedKlines![cachedKlines!.length - 1].date;
     let lastTime: moment.Moment;
     if (type >= Enums.KLineType.Day) {
       lastTime = moment(lastTimeStr, 'YYYY-MM-DD');
     } else {
       lastTime = moment(lastTimeStr, 'YYYY-MM-DD HH:MM');
     }
-    const now = moment(new Date());
+    // 训练模式下「今天」应取训练日期，否则训练日与真实今天相差上千天，会算出巨大的增量条数
+    const now = trainOn && trainToDate ? moment(trainToDate, 'YYYY-MM-DD') : moment(new Date());
     const days = now.diff(lastTime, 'days');
     if (days === 0) {
       // 当天，如果非交易时段，不需要重新请求
@@ -1489,7 +1514,8 @@ export async function GetKlinesAndFlows(secid: string, type: Enums.KLineType, co
     return undefined;
   }
   const collectors = [
-    needMakeReq ? () => getKlines(secid, type, count) : st.klines[type],
+    // 复用旧数据时也要按当前训练日期裁剪，避免把训练日之后的数据带进图表
+    needMakeReq ? () => getKlines(secid, type, count) : TrainFilter.CutKlines(st.klines[type]),
     needMakeReq ? () => getDFlows(secid) : st.dflows,
     context,
   ];

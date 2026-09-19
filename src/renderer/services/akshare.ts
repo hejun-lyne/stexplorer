@@ -159,17 +159,26 @@ function logError(error: any, method: string, extraInfo?: string) {
  * @param params 参数对象
  * @returns Promise<any>
  */
-async function callAkshare(method: string, params: Record<string, any> = {}): Promise<any> {
+/**
+ * @param options.ignoreTrain 本次调用忽略训练过滤（按调用生效，非全局开关），
+ *   只用于训练会话自身需要的「日历类」数据（如训练窗口的交易日列表）
+ */
+async function callAkshare(
+  method: string,
+  params: Record<string, any> = {},
+  options?: { ignoreTrain?: boolean }
+): Promise<any> {
   try {
     // 训练模式：收敛日期入参，避免 python 使用训练日期之后的数据
-    const trainParams = capTrainParams(method, params);
+    const trainParams = options?.ignoreTrain ? params : capTrainParams(method, params);
     const args = [method, '--params', JSON.stringify(trainParams)];
     const storagePath = await getStoragePath();
     if (storagePath) {
       args.push('--storage-path', storagePath);
     }
     // 训练模式：把当前训练日期作为全局数据截止日期传给 python 脚本
-    const asOfDate = TrainFilter.GetTrainToDate();
+    // ignoreTrain 时不传，python 才会返回完整区间（例如训练窗口的交易日历）
+    const asOfDate = options?.ignoreTrain ? undefined : TrainFilter.GetTrainToDate();
     if (asOfDate) {
       args.push('--as-of-date', asOfDate);
     }
@@ -177,8 +186,9 @@ async function callAkshare(method: string, params: Record<string, any> = {}): Pr
     // Python 脚本会输出 JSON 字符串
     if (Array.isArray(result) && result.length > 0) {
       const output = result[result.length - 1]; // 取最后一行输出
-      // 训练模式：裁剪返回的时间序列数据
-      return cutTrainResult(method, JSON.parse(output));
+      // 训练模式：裁剪返回的时间序列数据（ignoreTrain 时保持原样）
+      const parsed = JSON.parse(output);
+      return options?.ignoreTrain ? parsed : cutTrainResult(method, parsed);
     }
     return result;
   } catch (error) {
@@ -371,7 +381,12 @@ export async function GetDetailFromAkshare(secid: string): Promise<Stock.DetailI
  * 
  * 注意：缓存逻辑已迁移到 stock.ts 的 GetKFromDataSource
  */
-export async function GetKFromAkshare(secid: string, code: number, limit?: number): Promise<{ ks: Stock.KLineItem[], kt: number, source?: string, error?: string }> {
+export async function GetKFromAkshare(
+  secid: string,
+  code: number,
+  limit?: number,
+  options?: { ignoreTrain?: boolean }
+): Promise<{ ks: Stock.KLineItem[], kt: number, source?: string, error?: string }> {
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
     [KLineType.Week]: 'weekly',
@@ -382,7 +397,7 @@ export async function GetKFromAkshare(secid: string, code: number, limit?: numbe
 
   try {
     let klines: any[] = [];
-    const result = await callAkshare('get_kline_data', { secid, period });
+    const result = await callAkshare('get_kline_data', { secid, period }, options);
 
     if (result.error || !Array.isArray(result) || result.length === 0) {
       const reason = result.error || 'Empty data';

@@ -809,8 +809,11 @@ export async function GetKFromDataSource(
   secid: string,
   code: number,
   limit?: number,
-  options?: { allowSynthesis?: boolean }
+  options?: { allowSynthesis?: boolean; ignoreTrain?: boolean }
 ) {
+  // ignoreTrain：本次取数绕过训练过滤（按调用生效，非全局开关），
+  // 仅供训练会话自身的「日历类」数据使用（如训练窗口的交易日列表）
+  const ignoreTrain = !!options?.ignoreTrain;
   // 注：options.allowSynthesis 已废弃（成分股合成会并发拉几十只成分股K线、把 app 拖死，已彻底移除）。
   // 参数保留仅为兼容既有调用方；周/月线缺失时统一改用「日K合成」。
 
@@ -845,6 +848,7 @@ export async function GetKFromDataSource(
   if (
     (effectiveSource === Enums.FundApiType.Tushare || effectiveSource === Enums.FundApiType.Akshare) &&
     TrainFilter.IsTrainFilterOn() &&
+    !ignoreTrain &&
     code >= Enums.KLineType.Day
   ) {
     const trainStart = store.getState().setting?.systemSetting?.trainStartDate;
@@ -909,10 +913,12 @@ export async function GetKFromDataSource(
         if (limit && limit > 0 && ks.length < limit) {
           // 缓存数据量不足，需要重新请求
         } else {
-          if (limit && limit > 0 && ks.length > limit) {
-            return { ks: TrainFilter.CutKlines(ks.slice(-limit)), kt: code };
+          // 先按训练日期裁剪再取最后 N 条，保证取到的条数不被未来数据挤掉
+          const cuted = ignoreTrain ? ks : TrainFilter.CutKlines(ks);
+          if (limit && limit > 0 && cuted.length > limit) {
+            return { ks: cuted.slice(-limit), kt: code };
           }
-          return { ks: TrainFilter.CutKlines(ks), kt: code };
+          return { ks: cuted, kt: code };
         }
       }
     }
@@ -936,10 +942,15 @@ export async function GetKFromDataSource(
         } else if (effectiveSource === Enums.FundApiType.XTick) {
           r = await GetKFromXTick(secid, code);
         } else if (effectiveSource === Enums.FundApiType.Akshare) {
-          r = await AkshareAPI.GetKFromAkshare(secid, code, fetchLimit);
+          r = await AkshareAPI.GetKFromAkshare(secid, code, fetchLimit, { ignoreTrain });
         } else if (effectiveSource === Enums.FundApiType.Tushare) {
           // Tushare 侧缓存需要 limit 才能判断「缓存是否真的覆盖请求区间」，未传时给一个默认条数
-          r = await TushareAPI.GetKFromTushare(secid, code, fetchLimit && fetchLimit > 0 ? fetchLimit : 1000);
+          r = await TushareAPI.GetKFromTushare(
+            secid,
+            code,
+            fetchLimit && fetchLimit > 0 ? fetchLimit : 1000,
+            { ignoreTrain }
+          );
         }
 
         // 周/月线取不到时，直接用日K合成（不再用「成分股合成」：那是并发拉几十只成分股的K线，会把 app 拖死）。
@@ -1005,14 +1016,20 @@ export async function GetKFromDataSource(
     return { ks: [], kt: code };
   }
   // 训练模式：缓存与网络数据统一在出口处按当前训练日期截断（缓存本身仍保存全量数据）
-  return { ...finalResult, ks: TrainFilter.CutKlines(finalResult.ks) };
+  // ignoreTrain 的调用（如训练窗口交易日历）不做截断
+  return { ...finalResult, ks: ignoreTrain ? finalResult.ks : TrainFilter.CutKlines(finalResult.ks) };
 }
 
 /**
  * 统一的K线取数入口：始终按系统设置中的「数据源」获取K线
  * 所有取数（详情页、列表、量化、回测、训练模式）都应走这里，避免各自硬编码数据源
  */
-export async function GetKFromSetting(secid: string, code: number, limit?: number, options?: { allowSynthesis?: boolean }) {
+export async function GetKFromSetting(
+  secid: string,
+  code: number,
+  limit?: number,
+  options?: { allowSynthesis?: boolean; ignoreTrain?: boolean }
+) {
   const source = store.getState().setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney;
   return GetKFromDataSource(source, secid, code, limit, options);
 }
