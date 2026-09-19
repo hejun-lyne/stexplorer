@@ -123,9 +123,21 @@ def convert_secid_to_tx_symbol(secid: str) -> str:
 
 
 def convert_secid_to_pure_code(secid: str) -> str:
-    """将 secid 转换为纯数字代码"""
+    """将 secid 转换为纯代码
+
+    - '1.600000'    -> '600000'
+    - '90.BK1643'   -> 'BK1643'
+    - 'BK1643.DC'   -> 'BK1643'   （东财板块后缀）
+    - 'BK1643.THS'  -> 'BK1643'   （同花顺板块后缀）
+    """
+    if not secid:
+        return secid
     if "." in secid:
-        return secid.split(".")[-1]
+        parts = secid.split(".")
+        # 板块后缀：取前一段，避免把 'BK1643.DC' 解析成 'DC'
+        if len(parts) >= 2 and parts[-1].upper() in ("DC", "THS"):
+            return parts[-2]
+        return parts[-1]
     return secid
 
 
@@ -1007,9 +1019,10 @@ class TushareAPI:
             # dc_index 可能缺少最新价（如部分概念板块），用 dc_daily 补全
             if close_p == 0:
                 try:
+                    # 板块实时行情快照：训练模式下同样按最新数据补全，不做截止日期过滤
                     daily_df = safe_api_call(pro.dc_daily, ts_code=ts_code,
-                                             start_date=(_now_date() - timedelta(days=10)).strftime("%Y%m%d"),
-                                             end_date=_now())
+                                             start_date=(datetime.now() - timedelta(days=10)).strftime("%Y%m%d"),
+                                             end_date=datetime.now().strftime("%Y%m%d"))
                     if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
                         daily_df = daily_df.sort_values('trade_date', ascending=False)
                         latest = daily_df.iloc[0]
@@ -1077,6 +1090,13 @@ class TushareAPI:
         - 支持磁盘缓存：缓存 key 为 kline_{secid}_{period}_{adjust}，与 limit/end_date 无关
               缓存检查逻辑：看最后一条 K 线日期是否满足需求，命中后按 limit/end_date 裁剪
         """
+        # 训练模式：未显式给出截止日期时，以全局数据截止日期（训练日期）为终点。
+        # 否则会按真实“今天”取数，把训练日之后的行情返回给上层（上层再按训练日裁剪后就只剩空数组）
+        if not end_date:
+            as_of = get_as_of_date()
+            if as_of:
+                end_date = as_of
+
         end_date_std = _standardize_date(end_date) if end_date else ''
         end_date_fmt = end_date_std.replace('-', '') if end_date_std else _now()
 
@@ -1090,6 +1110,7 @@ class TushareAPI:
                 return False
             last_date_str = cached_data[-1].get('date', '')
             last_date = _parse_date_str(last_date_str)
+            first_date = _parse_date_str(cached_data[0].get('date', ''))
             if not last_date:
                 return False
             # 检查缓存数据总长度是否满足 limit 要求（避免缓存数据量太少的情况）
@@ -1106,6 +1127,10 @@ class TushareAPI:
                 # 指定了 end_date：检查缓存是否覆盖到 end_date
                 end_date_dt = _parse_date_str(end_date_std)
                 if end_date_dt is None or last_date < end_date_dt:
+                    return False
+                # 缓存起始日期晚于 end_date 时，缓存里根本没有这段历史（如训练模式回看更早的日期），
+                # 必须重新按 end_date 取数，否则会把「裁剪后的空数组」当成有效结果返回
+                if first_date and first_date > end_date_dt:
                     return False
             # 检查 limit 是否满足：按 end_date 裁剪后数据量需 >= limit
             if limit > 0:
@@ -1133,8 +1158,13 @@ class TushareAPI:
         # 尝试命中缓存
         if _is_cache_sufficient(cached):
             need_str = end_date_std or _get_expected_last_trade_date(period)
-            print(f"[K线缓存命中] {secid} {period} 缓存覆盖到 {cached[-1].get('date')} >= 需求={need_str}")
-            return _slice_from_cache(cached)
+            sliced = _slice_from_cache(cached)
+            if sliced:
+                print(f"[K线缓存命中] {secid} {period} 缓存覆盖到 {cached[-1].get('date')} >= 需求={need_str}")
+                return sliced
+            # 缓存判定命中但按 end_date 裁剪后为空：不能返回空数组（上层会误判成数据源无数据），
+            # 继续走下面的重新取数流程
+            print(f"[K线缓存裁剪后为空] {secid} {period} 需求={need_str} 缓存区间={cached[0].get('date')}~{cached[-1].get('date')}")
         elif isinstance(cached, list) and cached:
             print(f"[K线缓存过期/不足] {secid} {period} 缓存最后={cached[-1].get('date')} < 需求={end_date_std or _get_expected_last_trade_date(period)}")
 
@@ -1223,11 +1253,27 @@ class TushareAPI:
                     except Exception as e:
                         print(f"[手动复权失败] {ts_code}: {e}")
 
+            # 限流 / 网络抖动导致的空结果：稍等后重试一次（tushare 的每分钟配额窗口很短）
+            if df is None or df.empty:
+                try:
+                    import time as _time
+                    _time.sleep(1.5)
+                    print(f"[K线重试] {secid} {period} limit={limit} end_date={end_date_fmt}")
+                    df = ts.pro_bar(ts_code=ts_code, freq=freq, adj=adjust, start_date=start_date, end_date=end_date_fmt)
+                except Exception as e:
+                    print(f"[K线重试失败] {ts_code}: {e}")
+
             if df is None or df.empty:
                 # 请求无数据时，如果有缓存则返回过期缓存（降级）
                 if isinstance(cached, list) and cached:
-                    print(f"[K线请求无数据，返回过期缓存] {secid} {period}")
-                    return _slice_from_cache(cached)
+                    degraded = _slice_from_cache(cached)
+                    if degraded:
+                        print(f"[K线请求无数据，返回过期缓存] {secid} {period}")
+                        return degraded
+                    # 缓存里不含请求区间（例如训练模式回看的日期早于缓存范围）：
+                    # 不能返回空数组，否则上层会把「请求失败/无数据」误判成「数据源返回空」而丢失原因
+                    print(f"[K线请求无数据，且缓存不含 {end_date_fmt} 之前的区间] {secid} {period}")
+                    return {"error": f"No data available (本地缓存不含 {end_date_fmt} 之前的区间)"}
                 return {"error": "No data available"}
 
             # Tushare 默认返回降序（最新日期在前），需转为升序（最早日期在前）
@@ -1268,12 +1314,22 @@ class TushareAPI:
                 print(f"[K线缓存更新] {secid} {period} 合并后 {len(merged)} 条 ({merged[0].get('date')} ~ {merged[-1].get('date')})")
 
             # 从合并后的数据中按 limit/end_date 裁剪返回
-            return _slice_from_cache(merged if merged else klines)
+            sliced = _slice_from_cache(merged if merged else klines)
+            if sliced:
+                return sliced
+            # 裁剪后为空：把原因返回给上层，不能返回空数组
+            print(f"[K线裁剪后为空] {secid} {period} end_date={end_date_fmt} 合并后 {len(merged)} 条")
+            return {"error": f"No data available (接口返回区间内无 {end_date_fmt} 之前的数据)"}
         except Exception as e:
             # 请求失败时，如果有缓存则返回过期缓存（降级）
             if isinstance(cached, list) and cached:
-                print(f"[K线请求失败，返回过期缓存] {secid} {period}: {e}")
-                return _slice_from_cache(cached)
+                degraded = _slice_from_cache(cached)
+                if degraded:
+                    print(f"[K线请求失败，返回过期缓存] {secid} {period}: {e}")
+                    return degraded
+                # 过期缓存里没有请求区间时，必须把真实失败原因返回给上层，不能返回空数组
+                print(f"[K线请求失败，且缓存不含 {end_date_fmt} 之前的区间] {secid} {period}: {e}")
+                return {"error": f"{e} (本地缓存不含 {end_date_fmt} 之前的区间)"}
             return {"error": str(e)}
 
     @staticmethod
@@ -1448,24 +1504,30 @@ class TushareAPI:
             # dc_daily 需要 BKxxxx.DC 格式
             ts_code = f"{code}.DC" if not code.endswith(".DC") else code
 
-            # 缓存 key 与 trade_date 无关，参照 get_kline_data 的缓存策略
+            # 缓存 key 与 trade_date 无关，但有效性必须按区间校验：
+            # 训练模式会回看更早的日期，如果缓存里只有近期数据却判定为「命中」，
+            # 调用方按 end_date 截断后会得到空数组（表现为「板块K线数据不足」）。
             cache_key = f"board_kline_{ts_code}_{period}"
-            # 获取预期最新交易日
-            expected_last_str = _get_expected_last_trade_date(period)
+            expected_last_str = today.replace('-', '')
             expected_last = _parse_date_str(expected_last_str)
 
-            # 检查缓存是否有效
             cached_df = read_cache(cache_key, max_age_hours=168 * 4)  # 最长缓存 4 周
             cache_valid = False
             if cached_df is not None and isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
                 cache_max_date_str = str(cached_df['trade_date'].max())
+                cache_min_date_str = str(cached_df['trade_date'].min())
                 cache_max_date = _parse_date_str(cache_max_date_str)
+                cache_min_date = _parse_date_str(cache_min_date_str)
                 if cache_max_date is not None and expected_last is not None:
-                    if cache_max_date >= expected_last:
+                    covers_end = cache_max_date >= expected_last
+                    covers_start = cache_min_date is not None and cache_min_date <= expected_last
+                    if covers_end and covers_start:
                         cache_valid = True
-                        print(f"[板块K线缓存命中] {ts_code} 缓存最新={cache_max_date_str} >= 需求={expected_last_str}")
-                    else:
+                        print(f"[板块K线缓存命中] {ts_code} 缓存区间={cache_min_date_str}~{cache_max_date_str} 覆盖需求={expected_last_str}")
+                    elif not covers_end:
                         print(f"[板块K线缓存过期] {ts_code} 缓存最新={cache_max_date_str} < 需求={expected_last_str}，重新拉取")
+                    else:
+                        print(f"[板块K线缓存范围不足] {ts_code} 缓存最早={cache_min_date_str} 晚于需求={expected_last_str}，重新拉取")
 
             if cache_valid:
                 df = cached_df
@@ -1474,6 +1536,10 @@ class TushareAPI:
                 # 因为 dc_daily 接口本身支持未来日期查询，会返回截至最新数据
                 df = safe_api_call(pro.dc_daily, ts_code=ts_code, start_date=start_date, end_date=today)
                 if isinstance(df, pd.DataFrame) and not df.empty:
+                    # 与已有缓存合并（保留更长区间），避免训练模式回看时把近期缓存覆盖掉
+                    if isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+                        df = pd.concat([cached_df, df], ignore_index=True)
+                        df = df.drop_duplicates(subset=['trade_date'], keep='last').sort_values('trade_date', ascending=True).reset_index(drop=True)
                     write_cache(cache_key, df)
 
             debug_info = {
@@ -1774,10 +1840,13 @@ class TushareAPI:
         - 东财：moneyflow_ind_dc（行业）/ moneyflow_con_dc（概念）
         - 同花顺：moneyflow_ind_ths（行业）/ moneyflow_cnt_ths（概念）
         返回今日主力净流入(main_in) 和 最近5日主力净流入(main_in_5d)
+
+        注意：本接口返回的是「板块实时列表快照」，不属于时间序列数据，
+        训练模式下不做截止日期过滤（dc_index 按历史 trade_date 查询会返回空）。
         """
         try:
             pro = get_pro()
-            today = _now()
+            today = datetime.now().strftime('%Y%m%d')
 
             if data_source == "ths":
                 # ========== 同花顺数据源 ==========
@@ -1829,7 +1898,7 @@ class TushareAPI:
 
             # ========== 东财数据源（默认） ==========
             idx_type = "行业板块" if bk_type == "industry" else "概念板块"
-            df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type, trade_date=today)
+            df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
             if isinstance(df, dict) and df.get("error"):
                 return df
             if df is None or (isinstance(df, pd.DataFrame) and df.empty):
@@ -1838,8 +1907,8 @@ class TushareAPI:
             # 去重：同一板块可能在接口返回中重复出现
             df = df.drop_duplicates(subset=['ts_code'], keep='first')
 
-            # 获取资金流向数据
-            start_date = (_now_date() - timedelta(days=10)).strftime('%Y%m%d')
+            # 获取资金流向数据（与上面的实时板块快照保持一致，不使用训练截止日期）
+            start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
 
             # 行业板块用 moneyflow_ind_dc，概念板块用 moneyflow_con_dc
             if bk_type == "industry":
@@ -1920,7 +1989,8 @@ class TushareAPI:
                 "date": "20240101"
             }
         """
-        target_date = (date or _now()).replace("-", "")
+        # 板块日快照（dc_index 系）不属于时间序列，训练模式下不做截止日期过滤
+        target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
         cache_key = f"boards_by_date_{bk_type}_{target_date}"
         cached = read_cache(cache_key, max_age_hours=8760 * 10)  # 历史数据几乎不变，缓存10年
 
@@ -2026,7 +2096,8 @@ class TushareAPI:
             code = convert_secid_to_pure_code(secid)
             is_dc = code.startswith("BK")
             data_source = "dc" if is_dc else "ths"
-            target_date = (date or _now()).replace("-", "")
+            # 板块日快照（dc_index 系）不属于时间序列，训练模式下不做截止日期过滤
+            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
 
             pro = get_pro()
 
@@ -2224,7 +2295,8 @@ class TushareAPI:
         - 查询时检查目标日期是否已有缓存，有则命中；无则请求后合并
         """
         code = convert_secid_to_pure_code(secid)
-        target_date = (date or _now()).replace("-", "")
+        # 板块日快照（dc_index 系）不属于时间序列，训练模式下不做截止日期过滤
+        target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
 
         # 统一缓存 key，与 date 无关
         cache_key = f"board_stocks_{secid}"
@@ -2525,7 +2597,8 @@ class TushareAPI:
                 return {"error": f"Invalid SW industry code: {secid}"}
 
             ts_code = f"{code}.SI"
-            target_date = (date or _now()).replace("-", "")
+            # 板块日快照（dc_index 系）不属于时间序列，训练模式下不做截止日期过滤
+            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
 
             pro = get_pro()
 
@@ -2544,7 +2617,7 @@ class TushareAPI:
             # 2. 获取最近交易日
             trade_date = target_date
             try:
-                cal_df = pro.trade_cal(exchange='SSE', start_date=(_now_date() - timedelta(days=10)).strftime('%Y%m%d'), end_date=target_date, is_open='1')
+                cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.strptime(target_date, '%Y%m%d') - timedelta(days=10)).strftime('%Y%m%d'), end_date=target_date, is_open='1')
                 if cal_df is not None and not cal_df.empty:
                     trade_date = str(cal_df['cal_date'].iloc[0])
             except Exception:
@@ -2669,7 +2742,8 @@ class TushareAPI:
             if concept_source == "dc":
                 # 东财概念：使用 dc_member（按板块缓存，trade_date 为 key）
                 ts_code = f"{concept_code}.DC" if not concept_code.endswith(".DC") else concept_code
-                trade_date = _now()
+                # 概念成分股快照，训练模式下按原样返回
+                trade_date = datetime.now().strftime('%Y%m%d')
                 df = _cached_dc_member(pro, ts_code, trade_date)
                 if isinstance(df, dict) and df.get("error"):
                     return []
@@ -2988,6 +3062,7 @@ class TushareAPI:
         """
         try:
             pro = get_pro()
+            # 按日行情统计（涨跌比）属于日频数据，训练模式下仍按训练日期取数
             target_date = (date or _now()).replace("-", "")
             today_str = _now()
             cache_key = "up_down_ratio_map"
@@ -3146,6 +3221,7 @@ class TushareAPI:
         """
         try:
             pro = get_pro()
+            # 按日行情统计（市值档成交活跃度）属于日频数据，训练模式下仍按训练日期取数
             target_date = (date or _now()).replace("-", "")
             today_str = _now()
             cache_key = "market_activity_stats_map"
@@ -3580,6 +3656,43 @@ class TushareAPI:
         }
 
     @staticmethod
+    def _calc_money_flow_from_row_ts(row) -> Dict[str, Any]:
+        """从 tushare 经典 moneyflow 数据行计算资金流向（有历史数据，训练模式回看历史日期时使用）
+
+        moneyflow 返回的是「买入额 / 卖出额」（万元），需要买-卖得到净额，金额统一返回为元：
+        - 散户(小单) = buy_sm_amount - sell_sm_amount
+        - 中户(中单) = buy_md_amount - sell_md_amount
+        - 大单      = buy_lg_amount - sell_lg_amount
+        - 超大单    = buy_elg_amount - sell_elg_amount
+        - 主力      = 大单 + 超大单
+        """
+        multiplier = 10000  # moneyflow 金额单位为万元
+        buy_sm = _to_float(row.get("buy_sm_amount", 0))
+        sell_sm = _to_float(row.get("sell_sm_amount", 0))
+        buy_md = _to_float(row.get("buy_md_amount", 0))
+        sell_md = _to_float(row.get("sell_md_amount", 0))
+        buy_lg = _to_float(row.get("buy_lg_amount", 0))
+        sell_lg = _to_float(row.get("sell_lg_amount", 0))
+        buy_elg = _to_float(row.get("buy_elg_amount", 0))
+        sell_elg = _to_float(row.get("sell_elg_amount", 0))
+        small_in = (buy_sm - sell_sm) * multiplier
+        medium_in = (buy_md - sell_md) * multiplier
+        big_in = (buy_lg - sell_lg) * multiplier
+        super_big_in = (buy_elg - sell_elg) * multiplier
+        main_in = big_in + super_big_in
+        total_amount = (buy_sm + sell_sm + buy_md + sell_md + buy_lg + sell_lg + buy_elg + sell_elg) * multiplier
+        main_rate = round(main_in / total_amount * 100, 2) if total_amount > 0 else 0
+        return {
+            "main_in": round(main_in, 2),
+            "small_in": round(small_in, 2),
+            "medium_in": round(medium_in, 2),
+            "big_in": round(big_in, 2),
+            "super_big_in": round(super_big_in, 2),
+            "main_rate": main_rate,
+            "total_amount": round(total_amount, 2),
+        }
+
+    @staticmethod
     def _calc_money_flow_from_row_dc(row) -> Dict[str, Any]:
         """从 moneyflow_dc（东财个股）数据行计算资金流向，所有金额统一返回为元
 
@@ -3690,6 +3803,13 @@ class TushareAPI:
 
                 if isinstance(df, dict) and df.get("error"):
                     return df
+                # 东财资金流（moneyflow_dc）只覆盖近期数据；训练模式回看历史日期时改用经典 moneyflow（有历史数据）
+                if (df is None or (isinstance(df, pd.DataFrame) and df.empty)) and not is_board:
+                    mf = safe_api_call(pro.moneyflow, ts_code=ts_code, start_date=start_date, end_date=today)
+                    if isinstance(mf, pd.DataFrame) and not mf.empty:
+                        print(f"[资金流] moneyflow_dc 无数据，改用 moneyflow: {ts_code} {start_date}~{today}")
+                        df = mf
+                        source = "ts"
                 if df is None or df.empty:
                     return {"error": "No data"}
 
@@ -3698,13 +3818,15 @@ class TushareAPI:
                 if len(df) > days:
                     df = df.iloc[-days:]
 
-                # 计算每日数据：个股用 _calc_money_flow_from_row_dc，板块用 _calc_money_flow_from_row_dc_ind
+                # 计算每日数据：个股用 _calc_money_flow_from_row_dc（历史日期回退到 moneyflow 时用 _calc_money_flow_from_row_ts），板块用 _calc_money_flow_from_row_dc_ind
                 daily_data = []
                 for _, row in df.iterrows():
                     date_val = row.get('trade_date', '')
                     date_str = _standardize_date(date_val)
                     if is_board:
                         day_data = TushareAPI._calc_money_flow_from_row_dc_ind(row)
+                    elif source == "ts":
+                        day_data = TushareAPI._calc_money_flow_from_row_ts(row)
                     else:
                         day_data = TushareAPI._calc_money_flow_from_row_dc(row)
                     day_data["trade_date"] = date_str

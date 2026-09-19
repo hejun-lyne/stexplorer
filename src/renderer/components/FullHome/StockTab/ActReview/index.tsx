@@ -239,7 +239,7 @@ const ActReview: React.FC<ActReviewProps> = React.memo(({ onOpenStock }) => {
       wait: 500,
     }
   );
-  const { run: runGetKLines } = useRequest(Services.Stock.GetKFromEastmoney, {
+  const { run: runGetKLines } = useRequest(Services.Stock.GetKFromSetting, {
     throwOnError: true,
     manual: true,
     onSuccess: ({ ks }) => {

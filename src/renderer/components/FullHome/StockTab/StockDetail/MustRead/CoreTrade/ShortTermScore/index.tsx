@@ -3,11 +3,11 @@ import { Button, Col, Collapse, Row, Spin, Tooltip } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
 import { useSelector } from 'react-redux';
 import { useRequest } from 'ahooks';
+import dayjs from 'dayjs';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import { StoreState } from '@/reducers/types';
 import { Stock } from '@/types/stock';
-import * as Enums from '@/utils/enums';
 import { KLineType } from '@/utils/enums';
 import styles from '../../index.scss';
 import * as Score from '@/helpers/shortTermScore';
@@ -65,29 +65,25 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   // 用户在板块页手动设置的活跃板块（优先）
   const hybk = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]?.hybk);
   // K线数据源设置（与主图同源，走多源兜底 + sqlite 缓存）
-  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { kLineApiSourceSetting, ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
+  // 训练模式：按训练日期区分请求缓存，并在训练日期变化时重新取数（评分必须基于训练日期为止的数据）
+  const trainKey = ontrain && trainDate ? trainDate : 'live';
 
-  // ---- 个股日K（自取250日，保证RSI历史分位足够；数据源失败时回退东财直连） ----
+  // ---- 个股日K（自取250日，保证RSI历史分位足够；统一走数据源设置） ----
   const [dklines, setDklines] = useState<Stock.KLineItem[] | null>(null);
   const [dkError, setDkError] = useState<string | null>(null);
   const { run: runGetDK, loading: dkLoading } = useRequest(
     async () => {
-      const r = await Services.Stock.GetKFromDataSource(kLineApiSourceSetting, secid, KLineType.Day, 250);
+      const r = await Services.Stock.GetKFromSetting(secid, KLineType.Day, 250);
       if (r?.ks?.length) {
         return r.ks;
-      }
-      if (kLineApiSourceSetting !== Enums.FundApiType.Eastmoney) {
-        const fallback = await Services.Stock.GetKFromEastmoney(secid, KLineType.Day, 250);
-        if (fallback?.ks?.length) {
-          return fallback.ks;
-        }
       }
       // 抛错而不是返回空数组，避免空结果被 cacheKey 缓存导致重试失效
       throw new Error('未获取到日K数据');
     },
     {
       manual: true,
-      cacheKey: `ShortTermK/${secid}/${kLineApiSourceSetting}`,
+      cacheKey: `ShortTermK/${secid}/${kLineApiSourceSetting}/${trainKey}`,
       onSuccess: (ks) => {
         setDkError(null);
         setDklines(ks);
@@ -97,20 +93,16 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     },
   );
 
-  // ---- 所属指数日K（数据源失败时回退东财直连） ----
+  // ---- 所属指数日K（统一走数据源设置） ----
   const [indexKlines, setIndexKlines] = useState<Stock.KLineItem[] | null>(null);
   const { run: runGetIndexK } = useRequest(
     async () => {
-      const r = await Services.Stock.GetKFromDataSource(kLineApiSourceSetting, indexSecid, KLineType.Day, 60);
-      if (r?.ks?.length) {
-        return r.ks;
-      }
-      const fallback = await Services.Stock.GetKFromEastmoney(indexSecid, KLineType.Day, 60);
-      return fallback?.ks || [];
+      const r = await Services.Stock.GetKFromSetting(indexSecid, KLineType.Day, 60);
+      return r?.ks || [];
     },
     {
       manual: true,
-      cacheKey: `ShortTermIndex/${indexSecid}/${kLineApiSourceSetting}`,
+      cacheKey: `ShortTermIndex/${indexSecid}/${kLineApiSourceSetting}/${trainKey}`,
       onSuccess: setIndexKlines,
       throwOnError: false,
     },
@@ -122,33 +114,92 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   useEffect(() => {
     setBoard(null);
     setSizeBoard(null);
-    if (hybk) {
-      setBoard({ code: hybk.code, name: hybk.name });
+
+    // 板块 BK 代码在不同数据源命名空间并不一致（例：「轻工制造」在 tushare 是 BK1212，
+    // 而 BK1643 在 tushare 是「小盘股」）。统一按「名称」在当前数据源的板块列表里解析代码，
+    // 避免出现「名称与代码错配」而取不到数据。
+    const cleanBoardName = (name: string) => String(name || '').replace(/[，,]\s*BK\d+\s*$/i, '').trim();
+    const resolveBoardCode = (name: string): Promise<string> =>
+      Services.Stock.ResolveBoardCodeByName(name, kLineApiSourceSetting);
+    // 训练模式：探测板块在训练日期附近是否仍有真实行情（不使用成分股合成值）
+    const hasRealDataNear = async (code: string): Promise<boolean> => {
+      if (!code) {
+        return false;
+      }
+      try {
+        const r = await Services.Stock.GetKFromSetting(`90.${code}`, KLineType.Day, 30, { allowSynthesis: false });
+        const ks = r && r.ks ? r.ks : [];
+        const lastDate = ks.length ? String(ks[ks.length - 1].date).substring(0, 10) : '';
+        return !!lastDate && Math.abs(dayjs(trainDate).diff(dayjs(lastDate), 'day')) <= 15;
+      } catch (e) {
+        return false;
+      }
+    };
+
+    // 非训练模式：已配置板块优先（显示时去掉名字里附带的代码）
+    if (hybk && !(ontrain && trainDate)) {
+      setBoard({ code: hybk.code, name: cleanBoardName(hybk.name) });
     }
-    // 板块列表：未手动设置时取第一个作板块评分基准；同时识别市值风格板块（大盘/中盘/小盘/微盘）作大盘评分对比基准
+
     Services.Stock.GetStockBankuaisFromEastmoney(secid)
-      .then((list: any[]) => {
-        if (list && list.length) {
-          if (!hybk) {
-            setBoard({ code: list[0].code, name: list[0].name });
+      .then(async (list: any[]) => {
+        const boards: any[] = Array.isArray(list) ? list : [];
+
+        if (ontrain && trainDate) {
+          // 候选：已配置板块优先，其次所属板块；逐个按名称解析代码并探测训练日附近是否有真实数据
+          const candidates: { code: string; name: string }[] = [];
+          if (hybk) {
+            candidates.push({ code: hybk.code, name: hybk.name });
           }
-          const size = list.find((b: any) => SIZE_BOARD_NAMES.includes(b.name));
-          if (size) {
-            setSizeBoard({ code: size.code, name: size.name });
+          boards.forEach((b) => {
+            if (b && b.code && !candidates.some((c) => c.code === b.code)) {
+              candidates.push({ code: b.code, name: b.name });
+            }
+          });
+
+          let picked: { code: string; name: string } | null = null;
+          for (const c of candidates.slice(0, 10)) {
+            const resolved = (await resolveBoardCode(c.name)) || c.code;
+            if (await hasRealDataNear(resolved)) {
+              picked = { code: resolved, name: cleanBoardName(c.name) || c.name };
+              break;
+            }
           }
+
+          if (picked) {
+            const configuredCode = hybk ? (await resolveBoardCode(hybk.name)) || hybk.code : '';
+            if (configuredCode && picked.code !== configuredCode) {
+              console.warn(
+                `[短线评分] 已配置板块「${cleanBoardName(hybk?.name || '')}」(${configuredCode}) 在训练日 ${trainDate} 无数据，改用「${picked.name}」(${picked.code})`
+              );
+            }
+            setBoard(picked);
+          } else {
+            console.warn(`[短线评分] ${secid} 在训练日 ${trainDate} 附近没有可用历史的板块，板块相对强度不参与评分`);
+            if (hybk) {
+              setBoard({ code: hybk.code, name: cleanBoardName(hybk.name) });
+            } else if (boards.length) {
+              setBoard({ code: boards[0].code, name: boards[0].name });
+            }
+          }
+        } else if (!hybk && boards.length) {
+          setBoard({ code: boards[0].code, name: boards[0].name });
+        }
+
+        // 市值风格板块（大盘/中盘/小盘/微盘）：代码同样按名称解析，避免命名空间不一致
+        const size = boards.find((b: any) => SIZE_BOARD_NAMES.includes(b.name));
+        if (size) {
+          const sizeCode = (await resolveBoardCode(size.name)) || size.code;
+          setSizeBoard({ code: sizeCode, name: size.name });
         }
       })
       .catch(() => undefined);
-  }, [secid, hybk]);
+  }, [secid, hybk, trainKey, kLineApiSourceSetting]);
 
-  // ---- 板块日K（数据源失败时回退东财直连） ----
+  // ---- 板块日K（统一走数据源设置；评分基准只用真实板块数据，不用成分股合成的近似值） ----
   const fetchBoardKlines = async (boardCode: string): Promise<Stock.KLineItem[]> => {
-    const r = await Services.Stock.GetKFromDataSource(kLineApiSourceSetting, `90.${boardCode}`, KLineType.Day, 60);
-    if (r?.ks?.length) {
-      return r.ks;
-    }
-    const fallback = await Services.Stock.GetKFromEastmoney(`90.${boardCode}`, KLineType.Day, 60);
-    return fallback?.ks || [];
+    const r = await Services.Stock.GetKFromSetting(`90.${boardCode}`, KLineType.Day, 60, { allowSynthesis: false });
+    return r?.ks || [];
   };
   const [boardKlines, setBoardKlines] = useState<Stock.KLineItem[] | null>(null);
   useEffect(() => {
@@ -156,7 +207,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     if (board) {
       fetchBoardKlines(board.code).then(setBoardKlines).catch(() => setBoardKlines([]));
     }
-  }, [board, kLineApiSourceSetting]);
+  }, [board, kLineApiSourceSetting, trainKey]);
 
   // ---- 市值风格板块日K（大盘评分对比基准，失败时回退所属指数） ----
   const [sizeBoardKlines, setSizeBoardKlines] = useState<Stock.KLineItem[] | null>(null);
@@ -165,7 +216,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     if (sizeBoard) {
       fetchBoardKlines(sizeBoard.code).then(setSizeBoardKlines).catch(() => setSizeBoardKlines([]));
     }
-  }, [sizeBoard, kLineApiSourceSetting]);
+  }, [sizeBoard, kLineApiSourceSetting, trainKey]);
 
   // ---- 近10日涨跌比 ----
   const [upRatioMap, setUpRatioMap] = useState<Record<string, any> | null>(null);
@@ -199,7 +250,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     setIndexKlines(null);
     runGetDK();
     runGetIndexK();
-  }, [secid, kLineApiSourceSetting]);
+  }, [secid, kLineApiSourceSetting, trainKey]);
 
   // ---- 评分计算 ----
   // 大盘评分对比基准：优先市值风格板块（大盘/中盘/小盘/微盘股），无数据时回退所属指数
@@ -299,6 +350,16 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             <span style={{ fontSize: 12 }}>{overall.advice}</span>
           </Col>
         </Row>
+        {/* 评分数据截止：训练模式下即为训练日期，便于一眼核对评分是否使用了未来数据 */}
+        {dklines && dklines.length > 0 && (
+          <Row style={{ marginBottom: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+            <Col span={6}>数据截止</Col>
+            <Col span={18}>
+              {dklines[dklines.length - 1].date}
+              {ontrain && trainDate ? `（训练日 ${trainDate}）` : ''}
+            </Col>
+          </Row>
+        )}
         {[
           { label: '个股表现', weight: `权重${(Score.SHORT_TERM_SCORE_CONFIG.weights.stock * 100).toFixed(0)}%`, r: stock.score, available: stock.available, reason: stock.reason },
           { label: '板块表现', weight: `权重${(Score.SHORT_TERM_SCORE_CONFIG.weights.sector * 100).toFixed(0)}%`, r: sector.score, available: sector.available, reason: sector.reason },

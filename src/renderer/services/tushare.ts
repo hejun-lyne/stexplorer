@@ -23,11 +23,37 @@ const TUSHARE_SCRIPT = 'tushare_api.py';
 /**
  * 训练模式下的时间过滤说明
  *
- * 1. 入参：python 侧所有「以某个交易日为终点」的方法，其日期参数会被收敛到当前训练日期，
- *    未传日期的方法会补上训练日期（见 TRAIN_AS_OF_PARAM），
- *    保证 python 内部用于计算指标的时间序列不包含训练日期之后的数据。
+ * 只过滤「时间序列 / 日频行情」数据，快照类数据（板块列表、实时行情、财报、资讯等）保持原样返回：
+ * 1. 入参：以交易日为终点的时序接口，其日期参数收敛到当前训练日期，未传日期的补上训练日期
+ *    （见 TRAIN_AS_OF_PARAM），保证 python 内部用于计算指标的时间序列不含训练日期之后的数据。
  * 2. 出参：返回的时间序列（K线、分时、资金流明细、按日期分组的数据）统一按训练日期截断。
+ * 3. 快照类接口（TRAIN_SKIP_METHODS）不做任何日期处理 —— 东财板块 dc_index/dc_member 系接口
+ *    无法按历史交易日查询（传历史日期会返回空），按原样返回才不会「获取不到板块数据」。
  */
+
+/** 训练模式下不做任何日期处理的快照 / 非时序接口 */
+const TRAIN_SKIP_METHODS = [
+  // 东财板块快照（dc_index / dc_member 系，不支持按历史交易日查询）
+  'get_sector_boards',
+  'get_boards_by_date',
+  'get_board_detail',
+  'get_board_stocks',
+  'get_board_stocks_batch',
+  'get_boards_by_date_batch',
+  'get_industry_stocks',
+  // 实时行情快照
+  'get_stock_realtime',
+  'get_stocks_realtime_batch',
+  'get_stock_trend',
+  // 公司 / 资讯 / 财报（非行情时间序列）
+  'get_stock_company_info',
+  'get_stock_news',
+  'get_research_reports',
+  'get_stock_fundamental',
+  'get_stock_finance_data',
+  // 交易日历（需要完整日历，不能截断）
+  'get_trade_dates',
+];
 
 /** 需要收敛的标量日期参数 */
 const TRAIN_DATE_FIELDS = ['trade_date', 'date', 'end_date'];
@@ -37,11 +63,7 @@ const TRAIN_DATE_FIELDS = ['trade_date', 'date', 'end_date'];
  * 训练模式下若调用方未传该参数，则注入当前训练日期，避免 python 侧默认取「最新交易日」
  */
 const TRAIN_AS_OF_PARAM: Record<string, string> = {
-  // 单日快照类
-  get_boards_by_date: 'date',
-  get_board_detail: 'date',
-  get_board_stocks: 'date',
-  get_industry_stocks: 'date',
+  // 按日行情数据（历史交易日可查）
   get_up_down_ratio: 'date',
   get_market_activity_stats: 'date',
   get_limit_up_stocks: 'date',
@@ -55,14 +77,12 @@ const TRAIN_AS_OF_PARAM: Record<string, string> = {
   get_repurchase: 'date',
   get_stk_shock: 'date',
   get_hk_hold: 'date',
+  get_strong_stocks: 'date',
   // 时间序列类
   get_kline_data: 'end_date',
   get_kline_data_batch: 'end_date',
   get_money_flow: 'trade_date',
-  get_strong_stocks: 'date',
   get_strong_stocks_batch: 'end_date',
-  // 批量按日期
-  get_boards_by_date_batch: 'dates',
   get_up_down_ratio_batch: 'dates',
   // 指标 / 选股类
   filter_industries: 'trade_date',
@@ -98,6 +118,10 @@ function capDateValue(value: any, trainDate: string) {
 function capTrainParams(method: string, params: Record<string, any>): Record<string, any> {
   const trainDate = TrainFilter.GetTrainToDate();
   if (!trainDate) {
+    return params;
+  }
+  // 快照 / 非时序接口不做任何日期处理
+  if (TRAIN_SKIP_METHODS.indexOf(method) >= 0) {
     return params;
   }
   let next = params;
@@ -156,6 +180,10 @@ function cutKeyedByDate(obj: Record<string, any>, trainDate: string, getDay: (ke
 function cutTrainResult(method: string, result: any): any {
   const trainDate = TrainFilter.GetTrainToDate();
   if (!trainDate || !result || typeof result !== 'object') {
+    return result;
+  }
+  // 快照 / 非时序接口结果按原样返回
+  if (TRAIN_SKIP_METHODS.indexOf(method) >= 0) {
     return result;
   }
   switch (method) {
@@ -223,7 +251,9 @@ function cutTrainResult(method: string, result: any): any {
 let cachedStoragePath: string | null = null;
 
 async function getStoragePath(): Promise<string> {
-  if (cachedStoragePath !== null) return cachedStoragePath;
+  // 只缓存成功结果：失败时下次调用重新尝试，
+  // 否则首次启动那一次拿不到路径会把 python 缓存目录落到默认路径（~/.stexplorer），造成前后两次取数缓存不一致
+  if (cachedStoragePath) return cachedStoragePath;
   try {
     const result = await getLocalStoragePath();
     if (result?.success && result.path) {
@@ -233,7 +263,6 @@ async function getStoragePath(): Promise<string> {
   } catch (e) {
     console.error('[Tushare] 获取存储路径失败:', e);
   }
-  cachedStoragePath = '';
   return '';
 }
 
@@ -281,7 +310,37 @@ async function callTushare(method: string, params: Record<string, any> = {}): Pr
         const line = (result[i] as string).trim();
         if (line.startsWith('{') || line.startsWith('[')) {
           // 训练模式：裁剪返回的时间序列数据
-          return cutTrainResult(method, JSON.parse(line));
+          const parsed = cutTrainResult(method, JSON.parse(line));
+          // 结果为空 / 报错时，把 python 打印的诊断信息带到渲染进程控制台，便于直接定位原因
+          const isEmptyResult = Array.isArray(parsed)
+            ? parsed.length === 0
+            : !!(parsed && typeof parsed === 'object' && parsed.error);
+          if (isEmptyResult) {
+            const diagnosis = (result as string[])
+              .filter((l) => {
+                const s = String(l || '').trim();
+                if (!s) {
+                  return false;
+                }
+                if (s.startsWith('{')) {
+                  return false;
+                }
+                if (s.startsWith('[')) {
+                  // 只有真正的 JSON 数组才过滤掉；python 的日志行（如 "[K线缓存更新] ..."）要保留
+                  try {
+                    JSON.parse(s);
+                    return false;
+                  } catch (e) {
+                    return true;
+                  }
+                }
+                return true;
+              })
+              .join(' | ')
+              .slice(0, 600);
+            console.warn(`[${method}] 返回空/报错，python 诊断：${diagnosis || '（无）'}`, JSON.stringify(parsed).slice(0, 200));
+          }
+          return parsed;
         }
       }
     }
@@ -517,7 +576,7 @@ export async function GetDetailsFromTushareBatch(secids: string[]): Promise<(Sto
  * 
  * 注意：缓存逻辑已迁移到 stock.ts 的 GetKFromDataSource
  */
-export async function GetKFromTushare(secid: string, code: number, limit?: number): Promise<{ ks: Stock.KLineItem[], kt: number }> {
+export async function GetKFromTushare(secid: string, code: number, limit?: number): Promise<{ ks: Stock.KLineItem[], kt: number, source?: string, error?: string }> {
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
     [KLineType.Week]: 'weekly',
@@ -531,8 +590,9 @@ export async function GetKFromTushare(secid: string, code: number, limit?: numbe
     const result = await callTushare('get_kline_data', { secid, period, limit: limit || 0 });
 
     if (result.error || !Array.isArray(result) || result.length === 0) {
-      console.error('获取K线失败:', result.error || 'Empty data');
-      return { ks: [], kt: code };
+      const reason = result.error || 'Empty data';
+      console.error('获取K线失败:', reason, secid, period, limit);
+      return { ks: [], kt: code, source: 'Tushare', error: String(reason) };
     }
 
     klines = result;
@@ -561,7 +621,7 @@ export async function GetKFromTushare(secid: string, code: number, limit?: numbe
     return { ks, kt: code };
   } catch (error) {
     logError(error, 'GetKFromTushare', '获取K线数据失败');
-    return { ks: [], kt: code };
+    return { ks: [], kt: code, source: 'Tushare', error: String((error as any)?.message || error) };
   }
 }
 

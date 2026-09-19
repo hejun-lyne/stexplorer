@@ -495,7 +495,7 @@ const SimilarItem: React.FC<SimilarItemProps> = React.memo(
                             }, 100);
                         }
                     }
-                    const rangeStartIndex = Math.max(0, Math.ceil((endIndex - 250) / allDates.length * 100);
+                    const rangeStartIndex = Math.max(0, Math.ceil((endIndex - 250) / allDates.length * 100));
                     const rangeEnd = endIndex == -1 ? 100 : Math.ceil((endIndex / allDates.length * 100));
                     const newRange = range || {
                         start: rangeStartIndex,
@@ -524,11 +524,11 @@ const SimilarItem: React.FC<SimilarItemProps> = React.memo(
                 wait: 500,
             }
         );
-        const { run: runGetKline } = useRequest(Services.Stock.GetKFromEastmoney, {
+        const { run: runGetKline } = useRequest(Services.Stock.GetKFromSetting, {
             throwOnError: true,
             manual: true,
             onSuccess: handeKline,
-            cacheKey: `GetKFromEastmoney/${secid}`,
+            cacheKey: `GetKFromSetting/${secid}`,
         });
         
         const { ref: kchartRef, chartInstance: kchart } = useResizeEchart(-1);

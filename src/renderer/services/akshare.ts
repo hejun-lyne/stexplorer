@@ -18,9 +18,24 @@ const AKSHARE_SCRIPT = 'akshare_api.py';
 
 /**
  * 训练模式下的时间过滤
- * - 入参：已传的日期参数收敛到当前训练日期；部分方法未传日期时注入训练日期（避免 python 侧默认取最新交易日）
+ * - 入参：已传的日期参数收敛到当前训练日期；部分按日方法未传日期时注入训练日期（避免 python 侧默认取最新交易日）
  * - 出参：返回的时间序列按训练日期截断
+ * - 快照类接口（板块列表、实时行情、公司信息、资讯、财报等）不做任何处理，按原样返回
  */
+const TRAIN_SKIP_METHODS = [
+  'get_sector_boards',
+  'get_board_stocks',
+  'get_stock_realtime',
+  'get_stock_trend',
+  'get_stock_company_info',
+  'get_stock_news',
+  'get_research_reports',
+  'get_stock_fundamental',
+  'get_stock_finance_data',
+  'get_trade_dates',
+  'search_stock',
+];
+
 const TRAIN_DATE_FIELDS = ['trade_date', 'date', 'end_date'];
 
 /** 方法 → 需要在训练模式下注入的日期参数名 */
@@ -56,6 +71,10 @@ function capTrainParams(method: string, params: Record<string, any>): Record<str
   if (!trainDate) {
     return params;
   }
+  // 快照 / 非时序接口不做任何日期处理
+  if (TRAIN_SKIP_METHODS.indexOf(method) >= 0) {
+    return params;
+  }
   let next = params;
   const assign = (key: string, value: any) => {
     if (next === params) {
@@ -86,6 +105,10 @@ function capTrainParams(method: string, params: Record<string, any>): Record<str
 function cutTrainResult(method: string, result: any): any {
   const trainDate = TrainFilter.GetTrainToDate();
   if (!trainDate || !result || typeof result !== 'object') {
+    return result;
+  }
+  // 快照 / 非时序接口结果按原样返回
+  if (TRAIN_SKIP_METHODS.indexOf(method) >= 0) {
     return result;
   }
   if (method === 'get_kline_data') {
@@ -348,7 +371,7 @@ export async function GetDetailFromAkshare(secid: string): Promise<Stock.DetailI
  * 
  * 注意：缓存逻辑已迁移到 stock.ts 的 GetKFromDataSource
  */
-export async function GetKFromAkshare(secid: string, code: number, limit?: number): Promise<{ ks: Stock.KLineItem[], kt: number }> {
+export async function GetKFromAkshare(secid: string, code: number, limit?: number): Promise<{ ks: Stock.KLineItem[], kt: number, source?: string, error?: string }> {
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
     [KLineType.Week]: 'weekly',
@@ -362,8 +385,9 @@ export async function GetKFromAkshare(secid: string, code: number, limit?: numbe
     const result = await callAkshare('get_kline_data', { secid, period });
 
     if (result.error || !Array.isArray(result) || result.length === 0) {
-      console.error('获取K线失败:', result.error || 'Empty data');
-      return { ks: [], kt: code };
+      const reason = result.error || 'Empty data';
+      console.error('获取K线失败:', reason, secid, period, limit);
+      return { ks: [], kt: code, source: 'Akshare', error: String(reason) };
     }
 
     klines = result;
@@ -392,7 +416,7 @@ export async function GetKFromAkshare(secid: string, code: number, limit?: numbe
     return { ks, kt: code };
   } catch (error) {
     logError(error, 'GetKFromAkshare', '获取K线数据失败');
-    return { ks: [], kt: code };
+    return { ks: [], kt: code, source: 'Akshare', error: String((error as any)?.message || error) };
   }
 }
 // ==================== 分时走势 (腾讯财经数据源) ====================

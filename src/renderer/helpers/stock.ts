@@ -7,7 +7,6 @@ import * as Services from '@/services';
 import * as Helpers from '@/helpers';
 import * as Enums from '@/utils/enums';
 import * as Indicators from '@/helpers/tech';
-import * as AkshareAPI from '@/services/akshare';
 import * as TushareAPI from '@/services/tushare';
 import dayjs from 'dayjs';
 import {
@@ -854,7 +853,7 @@ export async function GetTrainTradingDays(secid: string, startDate: string, endD
   }
   try {
     const ks = await TrainFilter.WithoutTrainFilter(async () => {
-      const r = await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, 2000);
+      const r = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, 2000);
       return (r && r.ks) || [];
     });
     const days = ks.map((k) => k.date).filter((d) => d >= startDate && d <= endDate);
@@ -871,7 +870,7 @@ export async function GetTrainTradingDays(secid: string, startDate: string, endD
 /** 获取训练窗口内每个交易日的收盘价（日K，已按当前训练日期过滤，不含未来数据） */
 export async function GetTrainDayCloses(secid: string): Promise<Record<string, number>> {
   try {
-    const r = await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, 2000);
+    const r = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, 2000);
     const closes: Record<string, number> = {};
     ((r && r.ks) || []).forEach((k) => {
       closes[k.date] = k.sp;
@@ -1423,7 +1422,7 @@ export async function UpdateTrendsPic(secids: string[]) {
 
 export async function UpdateKlines(secid: string, type: Enums.KLineType) {
   try {
-    const { ks } = await Services.Stock.GetKFromEastmoney(secid, type);
+    const { ks } = await Services.Stock.GetKFromSetting(secid, type);
     let flines;
     if (type === Enums.KLineType.Day) {
       flines = await Services.Stock.GetFlowKFromEastmoney(secid);
@@ -1481,7 +1480,7 @@ export async function GetKlinesAndFlows(secid: string, type: Enums.KLineType, co
     count = quant * (days + 1);
   }
   async function getKlines(s: string, t: number, c: number) {
-    return Services.Stock.GetKFromEastmoney(s, t, c);
+    return Services.Stock.GetKFromSetting(s, t, c);
   }
   async function getDFlows(s: string) {
     if (type == Enums.KLineType.Day) {
@@ -1898,7 +1897,7 @@ export async function StatisticMultiKlines(secids: string[], klimit = 100) {
 }
 
 export async function StatisticiKline(secid: string, klimit: number, lines?: Stock.KLineItem[]) {
-  const ks = lines || ((await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, klimit)).ks as Stock.KLineItem[]);
+  const ks = lines || ((await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit)).ks as Stock.KLineItem[]);
   if (!ks.length) {
     return {
       secid,
@@ -2013,7 +2012,7 @@ export async function SortMultiKlines(secids: string[], type: Enums.KSortType, k
 }
 
 export async function AnalyzeKline(secid: string, type: Enums.KSortType, klimit: number) {
-  const { ks } = await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, klimit);
+  const { ks } = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit);
   if (!ks.length) {
     return Enums.KSortType.ZDSJ ? '1970-01-01' : -999;
   }
@@ -2059,7 +2058,7 @@ export async function FilterKline(secid: string, types: Enums.KFilterType[], day
       return null;
     }
   }
-  const { ks } = await Services.Stock.GetKFromDataSource(Enums.FundApiType.Tushare, secid, Enums.KLineType.Day, klimit);
+  const { ks } = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit);
   if (!ks.length) {
     return null;
   }
@@ -2300,7 +2299,7 @@ export async function QuantBKAnalyze(
   kCount = 350
 ) {
   onMessage('获取上证指数历史K线');
-  const indexKlines = QUANT_CACHE.indexKlines || (await Services.Stock.GetKFromEastmoney('1.000001', Enums.KLineType.Day, kCount)).ks;
+  const indexKlines = QUANT_CACHE.indexKlines || (await Services.Stock.GetKFromSetting('1.000001', Enums.KLineType.Day, kCount)).ks;
   const tradeDays = indexKlines.map((_) => moment(_.date, 'YYYY-MM-DD'));
   const indexMA5 = Utils.calculateMA(
     5,
@@ -2338,7 +2337,7 @@ export async function QuantBKAnalyze(
     QUANT_CACHE.bks ||
     (await Services.Stock.GetBanKuais(bkType, 500)).arr!.filter((_) => _.name.indexOf('连板') == -1 && _.name.indexOf('涨停') == -1);
   onMessage('获取所有板块历史k线');
-  const collectors = bks?.map((bk) => () => Services.Stock.GetKFromEastmoney(bk.secid, Enums.KLineType.Day, kCount));
+  const collectors = bks?.map((bk) => () => Services.Stock.GetKFromSetting(bk.secid, Enums.KLineType.Day, kCount));
   const bkKlines = QUANT_CACHE.bkKlines || (await Adapter.ConCurrencyAllAdapter(collectors)).map((_) => _?.ks);
   const allbkStats: Record<string, Stock.KLineStatisticItem[]> = {};
   for (let i = fromIndex; i <= endIndex; i++) {
@@ -2410,7 +2409,7 @@ export async function QuantAllStsAnalyze(tilDate: string, onMessage: (message: s
     onMessage('获取板块所有股票信息完毕 ' + bks[i].name);
     QUANT_CACHE.bkSts = bkSts;
     async function getKlines(s: string, t: number, c: number) {
-      return Services.Stock.GetKFromEastmoney(s, t, c);
+      return Services.Stock.GetKFromSetting(s, t, c);
     }
     onMessage('获取板块所有股票K线信息 ' + bks[i].name);
     const collectors = bkSts[bksecid].map((st) => () => getKlines(st.secid, Enums.KLineType.Day, kCount));
@@ -2499,7 +2498,7 @@ export async function QuantStsAnalyze(bksecid: string, tilDate: string, onMessag
     const ssecid = sts[k].secid;
     if (!stKlines[ssecid] || !stKlines[ssecid].length) {
       onMessage('获取股票历史k线: ' + ssecid);
-      stKlines[ssecid] = (await Services.Stock.GetKFromEastmoney(ssecid, Enums.KLineType.Day, kCount)).ks;
+      stKlines[ssecid] = (await Services.Stock.GetKFromSetting(ssecid, Enums.KLineType.Day, kCount)).ks;
     }
     const ks = stKlines[ssecid];
     if (!ks || ks.length == 0 || ks[0].date > tilDate) {
@@ -2724,7 +2723,7 @@ export async function TestQuantStrategy(
   kCount = 350
 ) {
   onMessage('获取上证指数历史K线');
-  const indexKlines = QUANT_CACHE.indexKlines || (await Services.Stock.GetKFromEastmoney('1.000001', Enums.KLineType.Day, kCount)).ks;
+  const indexKlines = QUANT_CACHE.indexKlines || (await Services.Stock.GetKFromSetting('1.000001', Enums.KLineType.Day, kCount)).ks;
   const tradeDays = indexKlines.map((_) => moment(_.date, 'YYYY-MM-DD'));
   const indexMA5 = Utils.calculateMA(
     5,
@@ -2762,7 +2761,7 @@ export async function TestQuantStrategy(
     QUANT_CACHE.bks ||
     (await Services.Stock.GetBanKuais(bkType, 100)).arr!.filter((_) => _.name.indexOf('连板') == -1 && _.name.indexOf('涨停') == -1);
   onMessage('获取所有板块历史k线');
-  const collectors = bks?.map((bk) => () => Services.Stock.GetKFromEastmoney(bk.secid, Enums.KLineType.Day, kCount));
+  const collectors = bks?.map((bk) => () => Services.Stock.GetKFromSetting(bk.secid, Enums.KLineType.Day, kCount));
   const bkKlines = QUANT_CACHE.bkKlines || (await Adapter.ConCurrencyAllAdapter(collectors)).map((_) => _?.ks);
   onMessage('开始执行策略');
   const tdays = [];
@@ -2868,7 +2867,7 @@ export async function TestQuantStrategy(
         const ssecid = sts[k].secid;
         if (!stKlines[ssecid] || !stKlines[ssecid].length) {
           onMessage('获取股票历史k线: ' + ssecid);
-          stKlines[ssecid] = (await Services.Stock.GetKFromEastmoney(ssecid, Enums.KLineType.Day, kCount)).ks;
+          stKlines[ssecid] = (await Services.Stock.GetKFromSetting(ssecid, Enums.KLineType.Day, kCount)).ks;
         }
         const ks = stKlines[ssecid];
         if (ks[0].date > daystr) {
@@ -3335,18 +3334,9 @@ export async function FilterStocksByMA(secids: string[], threshold = 0.05, klimi
   return results.filter((r): r is string => r !== null);
 }
 
-// 辅助函数：根据当前数据源设置获取K线数据
-async function GetKLineFromPythonSource(secid: string, ktype: Enums.KLineType, klimit?: number) {
-  const source = store.getState().setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney;
-  if (source === Enums.FundApiType.Tushare) {
-    return TushareAPI.GetKFromTushare(secid, ktype, klimit);
-  }
-  return AkshareAPI.GetKFromAkshare(secid, ktype, klimit);
-}
-
 export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80) {
   try {
-    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 60) {
       return null;
     }
@@ -3381,7 +3371,7 @@ export async function CheckStockMA(secid: string, threshold = 0.05, klimit = 80)
  */
 export async function CheckStockRecentTrend(secid: string, maThreshold = 0.03, flatThreshold = 0.02, klimit = 80) {
   try {
-    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 50) {
       return null;
     }
@@ -3433,7 +3423,7 @@ export async function CheckStockRecentTrend(secid: string, maThreshold = 0.03, f
  */
 export async function CheckStockRSI(secid: string, threshold = 30, klimit = 80) {
   try {
-    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 20) {
       return null;
     }
@@ -3611,7 +3601,7 @@ export async function CheckStockBacktestSignals(
   trailingStopLossPct: number = 0.05
 ): Promise<BacktestSignalResult | null> {
   try {
-    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 60) {
       return null;
     }
@@ -3770,7 +3760,7 @@ export async function CheckStockBacktestSignals(
 
 export async function CheckStockMAAndRSI(secid: string, maThreshold = 0.05, rsiThreshold = 30, klimit = 120) {
   try {
-    const { ks } = await GetKLineFromPythonSource(secid, Enums.KLineType.Day, klimit);
+    const { ks } = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit);
     if (!ks || ks.length < 60) {
       return null;
     }

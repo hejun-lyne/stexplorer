@@ -1,4 +1,5 @@
 import * as Services from '@/services';
+import * as TrainFilter from '@/utils/trainFilter';
 import { FundApiType, KLineType } from '@/utils/enums';
 import { Stock } from '@/types/stock';
 import * as Score from './shortTermScore';
@@ -38,14 +39,15 @@ interface ComputeOptions {
   onRow?: (row: ShortTermScoreRow, item: ShortTermScoreItem, done: number, total: number) => void;
 }
 
-/** 拉取日K：数据源失败时回退东财直连 */
-async function fetchDayKlines(source: FundApiType, secid: string, limit: number): Promise<Stock.KLineItem[]> {
-  const r = await Services.Stock.GetKFromDataSource(source, secid, KLineType.Day, limit);
-  if (r?.ks?.length) {
-    return r.ks as Stock.KLineItem[];
-  }
-  const fallback = await Services.Stock.GetKFromEastmoney(secid, KLineType.Day, limit);
-  return ((fallback?.ks as Stock.KLineItem[]) || []);
+/** 拉取日K：统一走数据源（探测板块真实历史时传 allowSynthesis:false，避免用成分股合成值参与评分） */
+async function fetchDayKlines(
+  source: FundApiType,
+  secid: string,
+  limit: number,
+  options?: { allowSynthesis?: boolean }
+): Promise<Stock.KLineItem[]> {
+  const r = await Services.Stock.GetKFromDataSource(source, secid, KLineType.Day, limit, options);
+  return ((r?.ks as Stock.KLineItem[]) || []);
 }
 
 /**
@@ -90,9 +92,11 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   }
 
   // ---- 公共上下文：市值档成交统计（量能横向对比）----
+  // 显式以数据中最后一个交易日为基准（训练模式下即训练日期），避免默认取到「最近交易日」
   let marketStats: any = null;
+  const anchorDate = [...allIndexDates].sort().pop();
   try {
-    marketStats = await Services.Tushare.GetMarketActivityStatsFromTushare();
+    marketStats = await Services.Tushare.GetMarketActivityStatsFromTushare(anchorDate);
   } catch {
     marketStats = null;
   }
@@ -127,14 +131,34 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
         return row;
       }
 
-      // 板块：手动设置优先，否则取东财所属板块第一个
+      // 板块：手动设置优先；否则按顺序探测所属板块，取"训练日期附近仍有行情"的一个
+      // （只用真实板块数据，不用成分股合成；避免选中训练日之后才成立或早已停更的板块）
+      // 板块 BK 代码在不同数据源命名空间不一致，统一按「名称」在当前数据源里解析代码
+      const cleanBoardName = (name: string) => String(name || '').replace(/[，,]\s*BK\d+\s*$/i, '').trim();
+      const resolveBoardCode = (name: string): Promise<string> =>
+        Services.Stock.ResolveBoardCodeByName(name, source);
       let boardKlines: Stock.KLineItem[] = [];
       let boardName = '';
       try {
-        const bk = item.hybk || (await Services.Stock.GetStockBankuaisFromEastmoney(secid))?.[0];
-        if (bk) {
-          boardName = bk.name;
-          boardKlines = await fetchDayKlines(source, `90.${bk.code}`, 60);
+        const trainDate = TrainFilter.GetTrainToDate();
+        const candidates: any[] = item.hybk
+          ? [item.hybk]
+          : (((await Services.Stock.GetStockBankuaisFromEastmoney(secid)) || []) as any[]).slice(0, 3);
+        for (const bk of candidates) {
+          if (!bk) {
+            continue;
+          }
+          const boardCode = (await resolveBoardCode(bk.name)) || bk.code;
+          const ks = await fetchDayKlines(source, `90.${boardCode}`, 60, { allowSynthesis: false });
+          const lastDate = ks.length ? String(ks[ks.length - 1].date).substring(0, 10) : '';
+          const nearTrainDate =
+            !trainDate ||
+            (!!lastDate && Math.abs(new Date(trainDate).getTime() - new Date(lastDate).getTime()) / 86400000 <= 15);
+          if (ks.length && nearTrainDate) {
+            boardName = cleanBoardName(bk.name) || bk.name;
+            boardKlines = ks;
+            break;
+          }
         }
       } catch {
         // 板块获取失败时按维度缺失处理

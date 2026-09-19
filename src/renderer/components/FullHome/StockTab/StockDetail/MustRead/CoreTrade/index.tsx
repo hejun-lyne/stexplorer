@@ -10,7 +10,8 @@ import { QuestionCircleOutlined } from '@ant-design/icons';
 import DeptTradeBack from './DeptTradeBack';
 import MoneyFlowChart from './MoneyFlowChart';
 import ShortTermScore from './ShortTermScore';
-import { batch } from 'react-redux';
+import { batch, useSelector } from 'react-redux';
+import { StoreState } from '@/reducers/types';
 
 export interface CoreTradeProps {
   code: string;
@@ -30,6 +31,9 @@ const formatMoneyFlow = (val: number) => {
 };
 
 const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
+  // 训练模式：时序类请求按训练日期区分缓存，并在训练日期变化时重新取数
+  const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const trainKey = ontrain && trainDate ? trainDate : 'live';
   const [lhbangs, setLHBangs] = useState<any[]>();
   const { run: runGetLongHuBang } = useRequest(Services.Stock.GetLongHuBang, {
     throwOnError: true,
@@ -90,7 +94,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
     throwOnError: true,
     manual: true,
     onSuccess: setMoneyFlow,
-    cacheKey: `GetMoneyFlowFromTushare/${code}`,
+    cacheKey: `GetMoneyFlowFromTushare/${code}/${trainKey}`,
   });
 
   // 主力建仓评分所需额外数据
@@ -197,7 +201,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
     runGetMoneyFlow(code, 60);
     runGetDetail(secid);
     runMainInFilter();
-  }, [code]);
+  }, [code, trainKey]);
 
   const [deptCodes, setDeptCodes] = useState([]);
   const [modelVisible, setModelVisible] = useState(false);
@@ -306,7 +310,7 @@ const CoreTrade: React.FC<CoreTradeProps> = React.memo(({ code, klines }) => {
                   <Col span={6}>散户</Col>
                 </Row>
                 {[
-                  { label: '今日', main: moneyFlow.main_1d, medium: moneyFlow.medium_1d, retail: moneyFlow.retail_1d, cost: moneyFlow.avg_cost_1d },
+                  { label: ontrain && trainDate ? '训练日' : '今日', main: moneyFlow.main_1d, medium: moneyFlow.medium_1d, retail: moneyFlow.retail_1d, cost: moneyFlow.avg_cost_1d },
                   { label: '3日', main: moneyFlow.main_3d, medium: moneyFlow.medium_3d, retail: moneyFlow.retail_3d, cost: moneyFlow.avg_cost_3d },
                   { label: '5日', main: moneyFlow.main_5d, medium: moneyFlow.medium_5d, retail: moneyFlow.retail_5d, cost: moneyFlow.avg_cost_5d },
                   { label: '10日', main: moneyFlow.main_10d, medium: moneyFlow.medium_10d, retail: moneyFlow.retail_10d, cost: moneyFlow.avg_cost_10d },

@@ -20,6 +20,7 @@ import CLList from './CLList';
 import ZZList from './ZZList';
 import KTrain from './KTrain';
 import Backtest from './Backtest';
+import * as Services from '@/services';
 
 export interface StockPoolProps {
   onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string) => void;
@@ -127,7 +128,25 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
               <Col span={3}>{!isNaN(d.cje) ? (d.cje / 100000000).toFixed(2) + '亿' : '--'}</Col>
               <Col span={3}>{!isNaN(d.lt) ? (d.lt / 100000000).toFixed(2) + '亿' : '--'}</Col>
               <Col span={4}>
-                <a onClick={() => onOpenStock('90.' + c.hybk?.code, c.hybk?.name || '')}>{c.hybk?.name}</a>
+                <a
+                  onClick={async () => {
+                    const hybk = c.hybk;
+                    if (!hybk) {
+                      return;
+                    }
+                    const name = String(hybk.name || '')
+                      .replace(/[，,]\s*BK\d+\s*$/i, '')
+                      .trim();
+                    // 配置里可能存有「名称与代码错配」的板块，跳转前按名称在当前数据源解析一次代码
+                    const resolved = await Services.Stock.ResolveBoardCodeByName(name);
+                    const code = resolved || hybk.code;
+                    if (code) {
+                      onOpenStock(`90.${code}`, name || hybk.name || '');
+                    }
+                  }}
+                >
+                  {String(c.hybk?.name || '').replace(/[，,]\s*BK\d+\s*$/i, '')}
+                </a>
               </Col>
               <Col span={3}>{StrategyTypeNames[c.strategy || 0]}</Col>
             </Row>

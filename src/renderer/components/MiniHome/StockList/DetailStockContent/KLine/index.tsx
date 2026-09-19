@@ -30,10 +30,10 @@ const KLine: React.FC<PerformanceProps> = ({ secid = '' }) => {
   const { ref: chartRef, chartInstance } = useResizeEchart(CONST.DEFAULT.ECHARTS_SCALE);
   const [kline, setKType] = useState(KLineTypeList[0]);
   const { variableColors, darkMode } = useHomeContext();
-  const { run: runGetKFromEastmoney } = useRequest(Services.Stock.GetKFromEastmoney, {
+  const { run: runGetKFromSetting } = useRequest(Services.Stock.GetKFromSetting, {
     manual: true,
     throwOnError: true,
-    cacheKey: `GetKFromEastmoney/${secid}/${kline.code}`,
+    cacheKey: `GetKFromSetting/${secid}/${kline.code}`,
     onSuccess: ({ ks }) => {
       const values = ks.map((_) => [_.kp, _.sp, _.zd, _.zg]);
       chartInstance?.setOption({
@@ -154,14 +154,14 @@ const KLine: React.FC<PerformanceProps> = ({ secid = '' }) => {
 
   useRenderEcharts(
     () => {
-      runGetKFromEastmoney(secid, kline.code);
+      runGetKFromSetting(secid, kline.code);
     },
     chartInstance,
     [darkMode, secid, kline.code]
   );
 
   const freshChart = useCallback(() => {
-    runGetKFromEastmoney(secid, kline.code);
+    runGetKFromSetting(secid, kline.code);
   }, [secid, kline.code]);
 
   return (

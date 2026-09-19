@@ -561,7 +561,8 @@ export async function executeTools(
       let klineData = klines;
       if (!klineData || klineData.length < 5) {
         try {
-          const res = await AkshareAPI.GetKFromAkshare(stock?.secid || args.secid, 101);
+          // 统一按数据源设置获取K线（缺失时由数据层兜底）
+          const res = await Services.Stock.GetKFromSetting(stock?.secid || args.secid, 101);
           if (res?.ks && res.ks.length > 0) klineData = res.ks;
         } catch (e) {
           console.error('Failed to fetch kline data:', e);

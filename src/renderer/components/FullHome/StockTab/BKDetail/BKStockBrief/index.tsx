@@ -867,11 +867,11 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
         wait: 500,
       }
     );
-    const { run: runGetKline } = useRequest(Services.Stock.GetKFromEastmoney, {
+    const { run: runGetKline } = useRequest(Services.Stock.GetKFromDataSource, {
       throwOnError: true,
       manual: true,
       onSuccess: handeKline,
-      cacheKey: `GetKFromEastmoney/${secid}`,
+      cacheKey: `GetKFromDataSource/${secid}${kLineApiSourceSetting}${ontrain && trainDate ? `/${trainDate}` : '/live'}`,
     });
     let areaStatic: Stock.KLineAreaItem | null = null;
     const kIndex = DefaultKTypes.indexOf(ktype);
@@ -913,7 +913,7 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
     );
     useLayoutEffect(() => {
       const kIndex = DefaultKTypes.indexOf(ktype);
-      runGetKline(secid, ktype, klineCount);
+      runGetKline(kLineApiSourceSetting, secid, ktype, klineCount);
       if (active) {
         const _mas =
           mtype === MAPeriodType.Short
@@ -945,7 +945,7 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
     }, [secid, active, mtype, ktype]);
     useWorkDayTimeToDo(
       () => {
-        runGetKline(secid, KLineType.Day, klineCount);
+        runGetKline(kLineApiSourceSetting, secid, KLineType.Day, klineCount);
       },
       active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
     );

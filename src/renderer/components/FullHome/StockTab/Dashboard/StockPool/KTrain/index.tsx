@@ -550,7 +550,7 @@ const KTrain: React.FC<KTrainProps> = ({ onOpenStock, active }) => {
         setLoading(false);
       });
     }, [krandIdx, krandDate]);
-    const { run: runGetKline } = useRequest(Services.Stock.GetKFromEastmoney, {
+    const { run: runGetKline } = useRequest(Services.Stock.GetKFromSetting, {
         throwOnError: true,
         manual: true,
         onSuccess: handleKline,

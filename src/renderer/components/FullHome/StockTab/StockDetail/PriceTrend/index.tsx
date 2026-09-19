@@ -8,6 +8,7 @@ import {
   DefaultKTypes,
   DefaultMATypes,
   DefaultTechIndicatorTypes,
+  FundApiType,
   KLineType,
   KlineTypeNames,
   KStateStrings,
@@ -536,25 +537,27 @@ function getTechSeries(techType: TechIndicatorType, ks: Stock.KLineItem[]) {
   const {names, values} = Tech.calculateIndicators(ks, techType);
   return getTechSeriesWithResult(techType, values, names);
 }
+/**
+ * 按截止日期截断K线（按天比较）
+ * 日线与30分钟线都适用：截止日期当天的数据全部保留
+ */
 function filterKlinesByToDate(klines: Stock.KLineItem[], toDate?: string) {
-  if (!toDate) {
+  if (!toDate || !klines?.length) {
     return klines;
   }
-  let idx = -1;
   const day = toDate.substring(0, 10);
-  klines.find((k, i) => {
-    if (k.date.length == toDate.length) {
-      if (k.date == toDate) {
-        idx = i;
-        return true;
-      }
-    } else if (k.date.startsWith(day)) {
+  let idx = -1;
+  for (let i = 0; i < klines.length; i++) {
+    if (klines[i].date.substring(0, 10) <= day) {
       idx = i;
-      return true;
+    } else {
+      break;
     }
-    return false;
-  });
-  return klines.slice(0, idx + 1);
+  }
+  if (idx < 0) {
+    return [];
+  }
+  return idx === klines.length - 1 ? klines : klines.slice(0, idx + 1);
 }
 function calcDisplayToDate(trainMode: boolean, toDate: string | undefined, backtestDate: string | undefined, dayKlines: Stock.KLineItem[]) {
   if (trainMode) return toDate;
@@ -1514,8 +1517,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const config = useSelector((state: StoreState) => state.stock.stockConfigsMapping[secid]);
     const backtestMarks = useSelector((state: StoreState) => state.stock.backtestMarks[secid]);
     const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
+    // 训练模式：时序类请求的缓存按训练日期区分（ahooks 的 cacheKey 缓存不含日期会返回旧数据）
+    const trainCacheSuffix = ontrain && trainDate ? `/${trainDate}` : '/live';
     const isStock = Helpers.Stock.GetStockType(secid) == StockMarketType.AB;
-    const [typeIndex, setTypeIndex] = useState(backtestDate ? DefaultKTypes.indexOf(KLineType.Day) : 0);
+    // 回测 / 训练模式下默认展示日K线（分时属于未来数据，训练模式下需要额外请求训练日历史分时）
+    const [typeIndex, setTypeIndex] = useState(backtestDate || (ontrain && trainDate) ? DefaultKTypes.indexOf(KLineType.Day) : 0);
     const { darkMode } = useHomeContext();
     const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
     const increaseColor = variableColors['--increase-color'];
@@ -1705,7 +1711,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         handleTrends(trends);
         setRequestTrends(false);
       },
-      cacheKey: `GetStockTrendsAndFlows/${secid}`,
+      cacheKey: `GetStockTrendsAndFlows/${secid}${trainCacheSuffix}`,
     });
     const [bankuais, setBankuais] = useState<Stock.BanKuai[]>([]);
     const [currentBK, setCurrentBK] = useState<string | null>(null);
@@ -1776,7 +1782,17 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     klineDataRef.current = klineData;
     // [新增] 根据回测日期计算应该展示到哪一个交易日（前一个交易日）
     const dayKlines = klineData.klines[DefaultKTypes.indexOf(KLineType.Day)];
-    const displayToDate = useMemo(() => calcDisplayToDate(trainMode, toDate, backtestDate, dayKlines), [trainMode, toDate, backtestDate, dayKlines]);
+    // 训练模式：显示层再兜底截断一次，避免上层缓存/已加载数据中残留训练日期之后的K线
+    const effectiveToDate = trainMode ? toDate || trainDate || undefined : toDate;
+    const displayToDate = useMemo(
+      () => calcDisplayToDate(trainMode, effectiveToDate, backtestDate, dayKlines),
+      [trainMode, effectiveToDate, backtestDate, dayKlines]
+    );
+    // 图表实际展示的K线（训练/回测模式下按截止日期截断），供图上的「最新」等信息使用
+    const displayKlines = useMemo(
+      () => filterKlinesByToDate(klineData.klines[typeIndex], displayToDate) || [],
+      [klineData.klines, typeIndex, displayToDate]
+    );
     const [linePoints, setLinePoints] = useState([] as { x: any; y: any }[]);
     const { run: runCalculateTech } = useRequest((ks: Stock.KLineItem[], kIndex:number, tt:TechIndicatorType) => makeWorkerExec('calculateIndicators', [ks, tt, kIndex,]), {
       throwOnError: true,
@@ -1925,7 +1941,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const { run: updateKLineOption } = useThrottleFn(
       (kIndex: number, data: any) => {
         const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
-        const _displayToDate = calcDisplayToDate(trainMode, toDate, backtestDate, data.klines[dayIndex]);
+        const _displayToDate = calcDisplayToDate(trainMode, effectiveToDate, backtestDate, data.klines[dayIndex]);
         let bkks = [];
         if (currentBK && data.bkklines[currentBK] && data.bkklines[currentBK][kIndex]) {
           bkks = data.bkklines[currentBK][kIndex];
@@ -1975,7 +1991,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       throwOnError: true,
       manual: true,
       onSuccess: handeKline,
-      cacheKey: `GetKFromEastmoney/${secid}`,
+      cacheKey: `GetKFromDataSource/${secid}${trainCacheSuffix}`,
     });
     const changeTypeIndex = useCallback(
       (i) => {
@@ -2003,7 +2019,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             if (klineData.bkklines[currentBK] && klineData.bkklines[currentBK][i]?.length) {
               // updateKLineOption(klineData);
             } else {
-              runGetBKKline(currentBK, DefaultKTypes[i], klineData.count[i]);
+              runGetBKKline(kLineApiSourceSetting, currentBK, DefaultKTypes[i], klineData.count[i]);
             }
           }
         }
@@ -2016,12 +2032,19 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
 
     useEffect(() => {
       if (trainMode) {
+        // 当前数据源不支持分钟K线时（Tushare/Akshare），不要请求 30 分钟数据
+        const minuteKlineSupported = kLineApiSourceSetting !== FundApiType.Tushare && kLineApiSourceSetting !== FundApiType.Akshare;
         const mint30Index = DefaultKTypes.indexOf(KLineType.Mint30);
-        if (!requestKLines[mint30Index]) {
+        if (minuteKlineSupported && !requestKLines[mint30Index]) {
           const newRequestKLines = [...requestKLines];
           newRequestKLines[mint30Index] = true;
           setRequestKLines(newRequestKLines);
           runGetKline(kLineApiSourceSetting, secid, KLineType.Mint30, 100000);
+        }
+        // 训练模式默认展示日K线（分时是训练日当天的数据，需额外请求历史分时且信息量不如日K）
+        const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
+        if (typeIndex === 0 && dayIndex > 0) {
+          changeTypeIndex(dayIndex);
         }
       }
     }, [trainMode]);
@@ -2055,7 +2078,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         });
         updateTrendsOption({ trends: processed });
       },
-      cacheKey: `requestDealDay/train/${secid}`,
+      cacheKey: `requestDealDay/train/${secid}/${trainDate || 'live'}`,
     });
 
     // 训练模式：进入训练 / 训练日期推进后重新取数
@@ -2073,7 +2096,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       if (!needRefresh) {
         return;
       }
-      const refreshTypes = [KLineType.Mint30, KLineType.Day, KLineType.Week, KLineType.Month];
+      const minuteKlineSupported = kLineApiSourceSetting !== FundApiType.Tushare && kLineApiSourceSetting !== FundApiType.Akshare;
+      const refreshTypes = [KLineType.Day, KLineType.Week, KLineType.Month];
+      if (minuteKlineSupported) {
+        refreshTypes.unshift(KLineType.Mint30);
+      }
       if (typeIndex > 0) {
         refreshTypes.push(DefaultKTypes[typeIndex]);
       }
@@ -2415,7 +2442,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       },
       [secid, trendDates]
     );
-    const { run: runGetBKKline } = useRequest(Services.Stock.GetKFromEastmoney, {
+    const { run: runGetBKKline } = useRequest(Services.Stock.GetKFromDataSource, {
       throwOnError: true,
       manual: true,
       onSuccess: ({ ks, kt }) => {
@@ -2513,7 +2540,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           });
         });
       },
-      cacheKey: `GetKlinesAndFlows/${secid}`,
+      cacheKey: `GetKlinesAndFlows/${secid}${trainCacheSuffix}`,
     });
     const onBKChange = useCallback(
       (bksecid: string) => {
@@ -2529,7 +2556,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             });
           } else {
             updateKLineOption(typeIndex, klineData);
-            runGetBKKline(bksecid, DefaultKTypes[typeIndex], klineData.count[typeIndex]);
+            runGetBKKline(kLineApiSourceSetting, bksecid, DefaultKTypes[typeIndex], klineData.count[typeIndex]);
           }
         });
       },
@@ -2572,7 +2599,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         } else {
           if (chartOptions[typeIndex]) {
             const optIndex = fractal ? 1 : 0;
-            const zx = klineData.klines[typeIndex].slice(-1)[0].sp;
+            // 以图表实际展示的最后一根K线为基准（训练模式下不会用未来价格）
+            const zx = (displayKlines.length ? displayKlines[displayKlines.length - 1] : klineData.klines[typeIndex].slice(-1)[0]).sp;
             const cms = klineData.choumas[typeIndex];
             chartOptions[typeIndex].forEach((opt: any, i: number) => updateCKChart(opt, darkMode, outRange || range, zx, false, cms[i]));
             const mData =
@@ -2769,7 +2797,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
 
     const exportDayKlineAsJson = useCallback(() => {
       const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
-      const dayKlines = klineData.klines[dayIndex];
+      // 训练/回测模式下导出展示范围内（不含未来）的日K
+      const dayKlines = filterKlinesByToDate(klineData.klines[dayIndex], displayToDate);
       if (!dayKlines || dayKlines.length === 0) {
         return;
       }
@@ -2785,7 +2814,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-    }, [klineData, secid, stock]);
+    }, [klineData, secid, stock, displayToDate]);
 
     const titleBar = (
       <>
@@ -2941,12 +2970,14 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                     导出日K
                   </Button>
                   &nbsp;
-                  <span
-                    className={Utils.GetValueColor(klineData.klines[typeIndex][klineData.klines[typeIndex].length - 1].sp - zs).textClass}
-                    style={{ marginRight: 10 }}
-                  >
-                    最新:{klineData.klines[typeIndex][klineData.klines[typeIndex].length - 1].sp}
-                  </span>
+                  {displayKlines.length > 0 && (
+                    <span
+                      className={Utils.GetValueColor(displayKlines[displayKlines.length - 1].sp - zs).textClass}
+                      style={{ marginRight: 10 }}
+                    >
+                      最新:{displayKlines[displayKlines.length - 1].sp}
+                    </span>
+                  )}
                   
                   {selectedArea && (
                     <>
@@ -3017,8 +3048,10 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                 <div>平均成本</div>
                 <div
                   className={
-                    Utils.GetValueColor(klineData.klines[typeIndex].slice(-1)[0].sp - klineData.choumas[typeIndex][0]?.avgCost || 0)
-                      .textClass
+                    Utils.GetValueColor(
+                      (displayKlines.length ? displayKlines[displayKlines.length - 1].sp : klineData.klines[typeIndex].slice(-1)[0].sp) -
+                        klineData.choumas[typeIndex][0]?.avgCost || 0
+                    ).textClass
                   }
                 >
                   {klineData.choumas[typeIndex][0]?.avgCost}

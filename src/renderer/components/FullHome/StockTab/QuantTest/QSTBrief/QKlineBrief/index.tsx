@@ -330,7 +330,7 @@ const QKlineBrief: React.FC<QKlineBriefProps> = React.memo(({ secid, tilDate, ne
     },
     [tilDate, onTilDate]
   );
-  const { run: runGetkLines } = useRequest(Services.Stock.GetKFromEastmoney, {
+  const { run: runGetkLines } = useRequest(Services.Stock.GetKFromSetting, {
     throwOnError: true,
     manual: true,
     onSuccess: (d) => {

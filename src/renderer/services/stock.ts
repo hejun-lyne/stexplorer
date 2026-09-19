@@ -609,29 +609,49 @@ export async function FromEastmoney(secid: string) {
 
 /**
  * 用成分股K线等权平均合成板块K线
- * 当板块K线接口失败时作为 fallback
+ *
+ * @deprecated 已废弃、请勿调用：它会并发拉取几十只成分股的K线，会让 app 卡死。
+ * 周/月线缺失时请使用 `AggregateKlinesFromDaily`（用日K聚合）。
  */
-async function synthesizeBoardKline(secid: string, code: number): Promise<Stock.KLineItem[] | null> {
+async function synthesizeBoardKline(secid: string, code: number, source?: Enums.FundApiType): Promise<Stock.KLineItem[] | null> {
+  const boardSource = source && source !== Enums.FundApiType.Eastmoney ? source : Enums.FundApiType.Akshare;
   try {
     // 获取板块成分股，最多取30只避免请求过多
-    const boardStocks = await GetBankuaiStocksFromDataSource(Enums.FundApiType.Akshare, secid, 30);
+    const boardStocks = await GetBankuaiStocksFromDataSource(boardSource, secid, 30);
     if (!boardStocks?.stocks || boardStocks.stocks.length === 0) {
       console.error('板块成分股为空，无法合成K线:', secid);
       return null;
     }
 
-    // 获取每只成分股的K线
+    // 获取成分股K线：均匀抽样最多 30 只（大板块可能有上千只，全量请求会卡死），分批并发
+    const allStocks: any[] = boardStocks.stocks || [];
+    const sampleSize = Math.min(30, allStocks.length);
+    const step = allStocks.length > sampleSize ? allStocks.length / sampleSize : 1;
+    const sampled: any[] = [];
+    for (let i = 0; i < allStocks.length && sampled.length < sampleSize; i += step) {
+      sampled.push(allStocks[Math.floor(i)]);
+    }
     const stockKlines: Stock.KLineItem[][] = [];
-    for (const stock of boardStocks.stocks) {
-      try {
-        const stockSecid = stock.code?.startsWith('6') ? `1.${stock.code}` : `0.${stock.code}`;
-        const kResult = await GetKFromDataSource(Enums.FundApiType.Akshare, stockSecid, code);
-        if (kResult.ks && kResult.ks.length > 0) {
-          stockKlines.push(kResult.ks);
+    const BATCH = 5;
+    for (let i = 0; i < sampled.length; i += BATCH) {
+      const batch = sampled.slice(i, i + BATCH);
+      const results = await Promise.all(
+        batch.map(async (stock) => {
+          try {
+            const stockSecid = stock.code?.startsWith('6') ? `1.${stock.code}` : `0.${stock.code}`;
+            const kResult = await GetKFromDataSource(boardSource, stockSecid, code);
+            return kResult.ks && kResult.ks.length > 0 ? kResult.ks : null;
+          } catch (e) {
+            // 单只股票获取失败，忽略
+            return null;
+          }
+        })
+      );
+      results.forEach((ks) => {
+        if (ks) {
+          stockKlines.push(ks);
         }
-      } catch (e) {
-        // 单只股票获取失败，忽略
-      }
+      });
     }
 
     if (stockKlines.length === 0) {
@@ -704,15 +724,145 @@ async function synthesizeBoardKline(secid: string, code: number): Promise<Stock.
 }
 
 let s_tradeDates: string[] = [];
-export async function GetKFromDataSource(source:Enums.FundApiType, secid: string, code: number, limit?: number) {
+
+/** 同一「标的+周期+数据源」的K线取数串行链（见 GetKFromDataSource 中的说明） */
+const klineFetchChains: Record<string, Promise<unknown>> = {};
+
+/**
+ * 板块代码判定：`90.BKxxxx` / `BKxxxx.DC` / `BKxxxx`
+ * 板块K线（tushare dc_daily）只有近期数据，历史日期（训练模式回看）需要用成分股等权合成
+ */
+function IsBoardSecid(secid: string) {
+  const s = String(secid || '').toUpperCase();
+  return s.startsWith('90.') || /^BK\d+/.test(s);
+}
+
+function runKlineFetchExclusive<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const prev = klineFetchChains[key] || Promise.resolve();
+  const next = prev.catch(() => undefined).then(task);
+  klineFetchChains[key] = next.catch(() => undefined);
+  return next;
+}
+
+/**
+ * 用日K合成周K/月K
+ *
+ * 部分数据源不提供周/月线（例如 tushare 的板块口径只有 dc_daily 日线），
+ * 此时直接用日K聚合：开=区间首日开、收=末日收、高=区间最高、低=区间最低、量/额=区间求和，
+ * 日期取区间内最后一个交易日；涨跌幅按区间首日昨收（首段用 `开-涨跌额` 反推）计算。
+ * 不使用成分股合成，避免大量请求导致卡死。
+ */
+export function AggregateKlinesFromDaily(ks: Stock.KLineItem[], periodCode: number): Stock.KLineItem[] {
+  if (!ks || ks.length === 0) {
+    return [];
+  }
+  const isMonth = periodCode === KLineType.Month;
+  const groupKeys: string[] = [];
+  const grouped: Record<string, Stock.KLineItem[]> = {};
+  ks.forEach((k) => {
+    if (!k || !k.date) {
+      return;
+    }
+    const d = dayjs(k.date);
+    // 周：按自然周（周一~周日）分组；月：按 YYYY-MM 分组
+    const key = isMonth ? d.format('YYYY-MM') : d.subtract((d.day() + 6) % 7, 'day').format('YYYY-MM-DD');
+    if (!grouped[key]) {
+      grouped[key] = [];
+      groupKeys.push(key);
+    }
+    grouped[key].push(k);
+  });
+
+  return groupKeys.map((key, index) => {
+    const rows = grouped[key];
+    const first = rows[0];
+    const last = rows[rows.length - 1];
+    const prevGroup = index > 0 ? grouped[groupKeys[index - 1]] : undefined;
+    const prevLast = prevGroup ? prevGroup[prevGroup.length - 1] : undefined;
+    const zg = Math.max(...rows.map((r) => (isNaN(r.zg) ? -Infinity : r.zg)));
+    const zd = Math.min(...rows.map((r) => (isNaN(r.zd) ? Infinity : r.zd)));
+    const cjl = rows.reduce((sum, r) => sum + (isNaN(r.cjl) ? 0 : r.cjl), 0);
+    const cje = rows.reduce((sum, r) => sum + (isNaN(r.cje) ? 0 : r.cje), 0);
+    const hsl = rows.reduce((sum, r) => sum + (isNaN(r.hsl) ? 0 : r.hsl), 0);
+    const sp = last.sp;
+    // 区间基准价：上一区间收盘；首段用「首日开盘 - 首日涨跌额」反推昨收
+    const base = prevLast && !isNaN(prevLast.sp) ? prevLast.sp : first.kp - (isNaN(first.zde) ? 0 : first.zde);
+    return {
+      ...first,
+      date: last.date,
+      kp: first.kp,
+      sp,
+      zg: NP.round(zg === -Infinity ? NaN : zg, 2),
+      zd: NP.round(zd === Infinity ? NaN : zd, 2),
+      cjl: Math.round(cjl),
+      cje: NP.round(cje, 2),
+      zdf: base ? NP.round(((sp - base) / base) * 100, 2) : NaN,
+      zde: base ? NP.round(sp - base, 2) : NaN,
+      hsl: NP.round(hsl, 2),
+      chan: 0,
+    } as Stock.KLineItem;
+  });
+}
+
+export async function GetKFromDataSource(
+  source: Enums.FundApiType,
+  secid: string,
+  code: number,
+  limit?: number,
+  options?: { allowSynthesis?: boolean }
+) {
+  // 注：options.allowSynthesis 已废弃（成分股合成会并发拉几十只成分股K线、把 app 拖死，已彻底移除）。
+  // 参数保留仅为兼容既有调用方；周/月线缺失时统一改用「日K合成」。
+
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
     [KLineType.Week]: 'weekly',
     [KLineType.Month]: 'monthly',
+    [KLineType.Mint1]: 'mint1',
+    [KLineType.Mint5]: 'mint5',
+    [KLineType.Mint15]: 'mint15',
+    [KLineType.Mint30]: 'mint30',
+    [KLineType.Mint60]: 'mint60',
   };
-  const period = periodMap[code] || 'daily';
-  const cacheKey = `${secid}_${period}`;
+  // 分钟级周期必须有独立的缓存键，否则会与日线缓存互相覆盖/串数据
+  const period = periodMap[code] || `k${code}`;
   const cacheTable = 'kline_cache';
+  // 港股（含港股指数）统一通过 akshare 后端获取
+  const stockType = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
+  const isHK = stockType === Enums.StockMarketType.HK;
+  // Tushare / Akshare 只提供日、周、月K线，分钟周期它们不支持
+  const onlyDailySource = source === Enums.FundApiType.Tushare || source === Enums.FundApiType.Akshare;
+  // 所选数据源不支持的分钟周期：直接返回空并说明原因，不再偷偷切到东财（东财网页接口易限流）
+  const minuteUnsupported = onlyDailySource && !periodMap[code];
+  const effectiveSource: Enums.FundApiType = isHK ? Enums.FundApiType.Akshare : source;
+  // 缓存按「数据源 + 周期」区分，避免不同数据源的K线互相覆盖
+  const cacheKey = `${secid}_${period}_${effectiveSource}`;
+  // 训练模式：把「训练窗口（trainStartDate ~ 当前训练日）」一次性取全。
+  // 详情页会同时发起多路日K请求（短线评分 250、实时卡片 350、训练日历 2000…），
+  // 若每路都用各自的 limit 冷启动，就会连续真实打数据源接口（既慢又容易触发限流）；
+  // 统一按训练窗口放大 limit，第一路取全后其余请求全部命中 python 侧缓存。
+  let fetchLimit = limit;
+  if (
+    (effectiveSource === Enums.FundApiType.Tushare || effectiveSource === Enums.FundApiType.Akshare) &&
+    TrainFilter.IsTrainFilterOn() &&
+    code >= Enums.KLineType.Day
+  ) {
+    const trainStart = store.getState().setting?.systemSetting?.trainStartDate;
+    const trainTo = TrainFilter.GetTrainToDate();
+    if (trainStart && trainTo) {
+      // 交易日 ≈ 日历日 / 2，再加一段缓冲
+      const days = Math.max(0, dayjs(trainTo).diff(dayjs(trainStart), 'day'));
+      fetchLimit = Math.max(limit || 0, Math.ceil(days / 2) + 40);
+    }
+  }
+
+  // 所选数据源不支持分钟周期：直接返回空并说明原因（不回退东财）
+  if (minuteUnsupported) {
+    console.warn(
+      `[K线] 数据源 ${Enums.FundApiType[effectiveSource] || effectiveSource} 不提供 ${period} 周期（分钟级K线），已跳过取数`
+    );
+    return { ks: [], kt: code };
+  }
 
   // 辅助：计算当前K线数据应有的最新日期
   async function getExpectedLatestDate(): Promise<string> {
@@ -721,7 +871,7 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
     const year = now.format('YYYY');
 
     if (s_tradeDates.length === 0) {
-      if (source === Enums.FundApiType.Tushare) {
+      if (effectiveSource === Enums.FundApiType.Tushare) {
         s_tradeDates = await TushareAPI.GetTradeDatesFromTushare(year);
         if (s_tradeDates.length === 0) {
           const prevYear = (parseInt(year) - 1).toString();
@@ -770,52 +920,78 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
     // 缓存读取异常，忽略并继续请求
   }
 
-  // 2. 缓存未命中或已过期，请求新数据
-  // 港股（含港股指数）通过 akshare 后端调用东财接口
-  const stockType = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
-  const isHK = stockType === Enums.StockMarketType.HK;
+  // 2. 缓存未命中或已过期，请求新数据（按生效数据源分发）
+  //    同一「标的+周期+数据源」的取数串行执行：训练模式下详情页会同时发起多路取数（短线评分 250、
+  //    实时卡片 350、训练日历 2000 …），并发打同一直连接口容易被数据源限流而偶发失败；
+  //    串行后后续请求会命中前一个请求刚写入的 python 侧缓存，不再发起真实请求。
+  const result = await runKlineFetchExclusive(
+    `${secid}_${period}_${effectiveSource}`,
+    async (): Promise<{ ks: Stock.KLineItem[], kt: number, error?: string } | undefined> => {
+      const fetchOnce = async (): Promise<{ ks: Stock.KLineItem[], kt: number, error?: string } | undefined> => {
+        let r: { ks: Stock.KLineItem[], kt: number, error?: string } | undefined;
+        if (effectiveSource === Enums.FundApiType.Eastmoney) {
+          r = await GetKFromEastmoney(secid, code, limit);
+        } else if (effectiveSource === Enums.FundApiType.ZiZai) {
+          r = await GetKFromZizai(secid, code);
+        } else if (effectiveSource === Enums.FundApiType.XTick) {
+          r = await GetKFromXTick(secid, code);
+        } else if (effectiveSource === Enums.FundApiType.Akshare) {
+          r = await AkshareAPI.GetKFromAkshare(secid, code, fetchLimit);
+        } else if (effectiveSource === Enums.FundApiType.Tushare) {
+          // Tushare 侧缓存需要 limit 才能判断「缓存是否真的覆盖请求区间」，未传时给一个默认条数
+          r = await TushareAPI.GetKFromTushare(secid, code, fetchLimit && fetchLimit > 0 ? fetchLimit : 1000);
+        }
 
-  let result: { ks: Stock.KLineItem[], kt: number } | undefined;
-  if (isHK) {
-    result = await AkshareAPI.GetKFromAkshare(secid, code, limit);
-  } else if (source == Enums.FundApiType.Eastmoney) {
-    result = await GetKFromEastmoney(secid, code, limit);
-  } else if (source == Enums.FundApiType.ZiZai) {
-    result = await GetKFromZizai(secid, code);
-  } else if (source == Enums.FundApiType.XTick) {
-    result = await GetKFromXTick(secid, code);
-  } else if (source == Enums.FundApiType.Akshare) {
-    result = await AkshareAPI.GetKFromAkshare(secid, code, limit);
-    // 板块代码获取失败时，尝试用成分股合成
-    if ((!result || result.ks.length === 0) && secid.startsWith('90.BK')) {
-      console.log('板块K线接口失败，尝试用成分股合成:', secid);
-      const synthesized = await synthesizeBoardKline(secid, code);
-      if (synthesized && synthesized.length > 0) {
-        result = { ks: synthesized, kt: code };
-      } else {
-        console.error('板块K线合成失败:', secid);
+        // 周/月线取不到时，直接用日K合成（不再用「成分股合成」：那是并发拉几十只成分股的K线，会把 app 拖死）。
+        // 若连日K也取不到，则返回明确错误，由上层展示失败状态。
+        if ((!r || !r.ks || r.ks.length === 0) && (code === Enums.KLineType.Week || code === Enums.KLineType.Month)) {
+          console.warn(`[K线] ${secid} ${period} 数据源无数据，改用日K合成`);
+          const daily = await GetKFromDataSource(effectiveSource, secid, Enums.KLineType.Day, fetchLimit, options);
+          if (daily && daily.ks && daily.ks.length > 0) {
+            r = { ks: AggregateKlinesFromDaily(daily.ks, code), kt: code };
+          } else {
+            r = { ks: [], kt: code, error: `日K数据也无法获取（${(daily && daily.error) || '数据源返回空'}）` };
+          }
+        }
+        return r;
+      };
+
+      let r = await fetchOnce();
+      // 「静默空结果」（既没有数据、也没有错误说明）时重试一次：
+      // 应用首次打开详情页时，训练过滤状态 / 本地缓存目录可能尚未就绪，
+      // 会出现「请求按最新数据发出、随后又被训练日期截断」而得到空数组的情况，重试即可拿到正确数据。
+      if ((!r || !r.ks || r.ks.length === 0) && !(r && r.error)) {
+        console.warn(`[K线] ${secid} ${period} 首次取数返回空（无错误信息），300ms 后重试一次`);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const retry = await fetchOnce();
+        if (retry && retry.ks && retry.ks.length > 0) {
+          r = retry;
+        }
       }
+      return r;
     }
-  } else if (source == Enums.FundApiType.Tushare) {
-    result = await TushareAPI.GetKFromTushare(secid, code, limit);
-    // 板块代码获取失败时，尝试用成分股合成
-    if ((!result || result.ks.length === 0) && secid.startsWith('90.BK')) {
-      console.log('板块K线接口失败，尝试用成分股合成:', secid);
-      const synthesized = await synthesizeBoardKline(secid, code);
-      if (synthesized && synthesized.length > 0) {
-        result = { ks: synthesized, kt: code };
-      } else {
-        console.error('板块K线合成失败:', secid);
-      }
-    }
+  );
+
+  // 2.1 数据源取不到数据时不再回退东财（东财网页接口易限流且与「数据源设置」相悖），
+  //     只如实记录原因，由上层展示失败状态
+  const finalResult = result;
+  if ((!finalResult || !finalResult.ks || finalResult.ks.length === 0) && effectiveSource !== Enums.FundApiType.Eastmoney) {
+    const sourceName = Enums.FundApiType[effectiveSource] || effectiveSource;
+    const trainToDate = TrainFilter.GetTrainToDate();
+    const reason = (finalResult && finalResult.error) || '数据源返回空';
+    console.warn(
+      `[K线] 数据源 ${sourceName} 未返回 ${secid} 的 ${period} 数据（截止 ${trainToDate || '最新交易日'}，请求 ${
+        limit && limit > 0 ? limit + ' 条' : '不限条数'
+      }${trainToDate ? '，训练模式' : ''}）→ 原因：${reason}`
+    );
   }
 
   // 3. 写入磁盘缓存
   // 训练模式下返回的数据已被截止到训练日期，写入缓存会污染完整数据，因此跳过
-  if (result && result.ks && result.ks.length > 0 && !TrainFilter.IsTrainFilterOn()) {
+  if (finalResult && finalResult.ks && finalResult.ks.length > 0 && !TrainFilter.IsTrainFilterOn()) {
     try {
       await window.contextModules.electron.sqliteWrite(cacheTable, {
-        ks: result.ks,
+        ks: finalResult.ks,
         secid,
         period,
         cachedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
@@ -825,11 +1001,20 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
     }
   }
 
-  if (!result) {
+  if (!finalResult) {
     return { ks: [], kt: code };
   }
   // 训练模式：缓存与网络数据统一在出口处按当前训练日期截断（缓存本身仍保存全量数据）
-  return { ...result, ks: TrainFilter.CutKlines(result.ks) };
+  return { ...finalResult, ks: TrainFilter.CutKlines(finalResult.ks) };
+}
+
+/**
+ * 统一的K线取数入口：始终按系统设置中的「数据源」获取K线
+ * 所有取数（详情页、列表、量化、回测、训练模式）都应走这里，避免各自硬编码数据源
+ */
+export async function GetKFromSetting(secid: string, code: number, limit?: number, options?: { allowSynthesis?: boolean }) {
+  const source = store.getState().setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney;
+  return GetKFromDataSource(source, secid, code, limit, options);
 }
 
 export async function GetKFromXTick(secid: string, code: number) {
@@ -1000,6 +1185,11 @@ export async function GetKFromZizai(secid: string, code: number) {
 
 export async function GetKFromEastmoney(secid: string, code: number, limit?: number) {
   try {
+    // 训练模式：请求必须以训练日期为终点。
+    // 否则接口只返回「最新 N 根」（end=20500101），出来后再按训练日期截断就会变成空数组
+    //（板块/指数/分钟K线在训练模式下走东财时都会踩到，表现为「K线数据不足」）。
+    const trainToDate = TrainFilter.GetTrainToDate();
+    const endParam: number | string = trainToDate ? trainToDate.replace(/-/g, '') : 20500101;
     const isUnlimited = limit == -1;
     const searchParams = isUnlimited
       ? {
@@ -1009,18 +1199,18 @@ export async function GetKFromEastmoney(secid: string, code: number, limit?: num
         klt: code,
         fqt: 1,
         beg: 0,
-        end: 20500101,
+        end: endParam,
         _: new Date().getTime(),
       }
       : {
         cb: 'jQuery35109995919145397818_1763449851442',
         secid,
-        ut: 'fa5fd1943c7b386f172d6893dbfba10b', 
+        ut: 'fa5fd1943c7b386f172d6893dbfba10b',
         fields1: 'f1,f2,f3,f4,f5,f6',
         fields2: 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
         klt: code,
         fqt: 1,
-        end: 20500101,
+        end: endParam,
         lmt: limit || 120,
         _: new Date().getTime(),
       };
@@ -3514,6 +3704,38 @@ export async function GetBankuaiCodeByName(name: string, fuzzy = true): Promise<
   } catch (error) {
     console.error('根据板块名字反查板块代码失败:', name, error);
     return null;
+  }
+}
+
+/**
+ * 按「板块名称」解析当前数据源下的板块代码
+ *
+ * 历史配置里可能存在「名称与代码错配」的记录（例如名称是「轻工制造」而代码是 `BK1643`，
+ * 而 `BK1643` 实际是「小盘股」），凡是拿到板块名称的场景都应先按名称解析一次，
+ * 避免请求到错误板块导致取不到数据。
+ * @param name 板块名称，可带「， BKxxxx」后缀
+ * @param source 数据源，缺省取系统设置中的K线数据源
+ * @returns 板块代码（如 BK1212），解析失败返回空串
+ */
+export async function ResolveBoardCodeByName(name: string, source?: Enums.FundApiType): Promise<string> {
+  const clean = String(name || '')
+    .replace(/[，,]\s*BK\d+\s*$/i, '')
+    .trim();
+  if (!clean) {
+    return '';
+  }
+  const effectiveSource =
+    source || store.getState().setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney;
+  try {
+    if (effectiveSource === Enums.FundApiType.Tushare) {
+      const r = await TushareAPI.GetBankuaiCodeByNameFromTushare(clean);
+      return String(r?.secid || '').replace(/^90\./, '');
+    }
+    const secid = await GetBankuaiCodeByName(clean);
+    return String(secid || '').replace(/^90\./, '');
+  } catch (error) {
+    console.error('按名称解析板块代码失败:', clean, error);
+    return '';
   }
 }
 

@@ -464,9 +464,6 @@ export function DescribeKlines(klines: Stock.KLineItem[]) {
       top: data[i].topHatch / avgHatch,
       down: data[i].downHatch / avgHatch,
     };
-    if (klines[i].date == '2022-07-13') {
-      console.log('debug');
-    }
     // 实体大小
     let sizeType = Enums.KLineEntitySize.Unknow;
     if (shape.size < 0.5) {
@@ -689,9 +686,6 @@ export function DetermineKlines(klines: Stock.KLineItem[]) {
       k.buyorsell.buyReason = 'dgwy.lowers not match';
       continue;
     }
-    if (k.date == '2022-06-06') {
-      console.log('debug');
-    }
     const des = k.describe;
     if (!des) {
       continue;
@@ -724,9 +718,6 @@ export function DetermineKlines(klines: Stock.KLineItem[]) {
       continue;
     }
 
-    if (k.date == '2022-06-07') {
-      console.log('debug');
-    }
     if (!lastBos.canBuy) {
       continue;
     }

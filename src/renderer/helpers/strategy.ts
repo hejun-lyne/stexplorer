@@ -751,7 +751,7 @@ export async function runMatching(
   templateEndDate: string,
   onProgressLog: (text: string) => void
 ) {
-  const templateKlines = (await Services.Stock.GetKFromEastmoney(templateSecid, Enums.KLineType.Day, 350)).ks;
+  const templateKlines = (await Services.Stock.GetKFromSetting(templateSecid, Enums.KLineType.Day, 350)).ks;
   let startIndex = -1;
   let endIndex = -1;
   for (let i = templateKlines.length - 1; i >= 0; i--) {

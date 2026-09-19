@@ -182,7 +182,7 @@ export function getAllStKlines(secids: string[], count = 350) {
     if (prev && prev.length) {
       return prev;
     }
-    const res = await Services.Stock.GetKFromEastmoney(secid, KLineType.Day, count);
+    const res = await Services.Stock.GetKFromSetting(secid, KLineType.Day, count);
     if (res.ks && res.ks.length > 0) {
       MemoryCache.set(key, res.ks, MemoryCache.kDefaultCacheExpireTime);
     }
