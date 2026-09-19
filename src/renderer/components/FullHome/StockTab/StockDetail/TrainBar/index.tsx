@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './index.scss';
 import { Button, Input, Modal, Select, Tag, message } from 'antd';
 import { ColumnWidthOutlined, HeartFilled, HeartOutlined, PlusOutlined } from '@ant-design/icons';
@@ -74,9 +74,13 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
   const capital = initialCapital > 0 ? initialCapital : DEFAULT_CAPITAL;
   const commission = commissionRate >= 0 ? commissionRate : DEFAULT_COMMISSION;
   /** 训练窗口内的交易日（跳过非交易日），放在 redux 中以便设置页保存进度时共用 */
-  const { days, daysKey } = useSelector((state: StoreState) => state.train);
+  // 只订阅需要的字段：订阅整个 train slice 会在任何训练相关 dispatch 后触发重渲染
+  const days = useSelector((state: StoreState) => state.train.days);
+  const daysKey = useSelector((state: StoreState) => state.train.daysKey);
   const stockName = stock?.detail?.name || secid;
   const currentDaysKey = `${secid}_${startDate}_${endDate}`;
+  /** 已写入过交易日的窗口：同窗口只写一次，避免「取数 → dispatch → 重渲染 → 再取数」的循环 */
+  const dispatchedDaysKeyRef = useRef<string>('');
 
   // 载入训练窗口内的交易日，用于按天推进（自动跳过非交易日）
   // 若已存在同窗口的交易日列表（含「继续上一次训练」恢复的进度）则直接复用
@@ -87,9 +91,15 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
     if (daysKey === currentDaysKey && days.length) {
       return;
     }
+    // 同一个窗口只允许写一次：store 里的 daysKey/days 若被其它 dispatch 重置，
+    // 只靠上面的守卫会再次取数并 dispatch，形成「取数 → dispatch → 重渲染 → 再取数」的死循环
+    if (dispatchedDaysKeyRef.current === currentDaysKey) {
+      return;
+    }
     let mounted = true;
     Helpers.Stock.GetTrainTradingDays(secid, startDate, endDate).then((ds) => {
       if (mounted && ds.length) {
+        dispatchedDaysKeyRef.current = currentDaysKey;
         dispatch(setTrainDaysAction(currentDaysKey, secid, stockName, ds));
       }
     });
