@@ -1,13 +1,37 @@
 .container {
-  
-  padding: 5px;
+  padding: 4px 5px;
 }
 .row {
-display: flex;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
   width: 100%;
+  min-height: 26px;
 }
 .item {
+  display: flex;
+  align-items: center;
   margin-right: 15px;
+  white-space: nowrap;
+}
+.label {
+  margin-right: 4px;
+  color: var(--secondary-text-color);
+  font-size: 12px;
+}
+.value {
+  margin-right: 4px;
+}
+.strong {
+  font-weight: bold;
+}
+.sub {
+  color: var(--secondary-text-color);
+  font-size: 12px;
+}
+.hint {
+  color: var(--secondary-text-color);
+  font-size: 12px;
 }
 .net {
   font-weight: bold;

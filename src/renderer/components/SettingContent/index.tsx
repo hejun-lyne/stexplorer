@@ -29,6 +29,7 @@ const { electron, version } = window.contextModules.process;
 
 const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) => {
   const dispatch = useDispatch();
+  const systemSetting = useSelector((state: StoreState) => state.setting.systemSetting);
   const {
     fundApiTypeSetting,
     conciseSetting,
@@ -42,17 +43,22 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     autoFreshSetting,
     freshDelaySetting,
     ontrain,
-    trainDate,
+    trainStartDate,
+    trainEndDate,
     kLineApiSourceSetting,
     kimiApiKeySetting,
     tushareTokenSetting,
     initialCapital,
+    commissionRate,
   } = useSelector((state: StoreState) => state.setting.systemSetting);
   // 数据来源
   const [fundApiType, setFundApiType] = useState(fundApiTypeSetting);
   // 训练模式
   const [istrain, setIstrain] = useState(ontrain);
-  const [ontrainDate, setontrainDate] = useState(trainDate);
+  const [trainStart, setTrainStart] = useState(trainStartDate);
+  const [trainEnd, setTrainEnd] = useState(trainEndDate);
+  const [capital, setCapital] = useState(initialCapital);
+  const [commission, setCommission] = useState(commissionRate || defaultSystemSetting.commissionRate);
   // 外观设置
   const [concise, setConcise] = useState(conciseSetting);
   const [lowKey, setLowKey] = useState(lowKeySetting);
@@ -85,11 +91,14 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
         autoFreshSetting: autoFresh,
         freshDelaySetting: freshDelay || defaultSystemSetting.freshDelaySetting,
         ontrain: istrain,
-        trainDate: ontrainDate,
+        trainDate: istrain ? trainStart : '',
+        trainStartDate: trainStart,
+        trainEndDate: trainEnd,
         kLineApiSourceSetting: kLineApiSource,
         tushareTokenSetting: tushareToken,
         kimiApiKeySetting: kimiApiKey,
-        initialCapital,
+        initialCapital: capital,
+        commissionRate: commission,
       })
     );
   }
@@ -128,12 +137,45 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     dispatch(clearBaiduTokensAction());
     message.success('Access Token 已清除');
   }, [dispatch]);
-  const onChangeTrainDate = useCallback((d: moment.Moment | null) => {
-    if (d) {
-      const nd = d.format('YYYY-MM-DD');
-      setontrainDate(nd);
-    }
-  }, []);
+  // 训练配置改动后立即生效（详情页的训练工具栏依赖该配置），无需等待“保存”
+  const applyTrainSetting = useCallback(
+    (patch: Partial<System.Setting>) => {
+      dispatch(setSystemSettingAction({ ...systemSetting, ...patch }));
+    },
+    [systemSetting]
+  );
+
+  // 开始 / 结束训练
+  const onToggleTrain = useCallback(
+    (checked: boolean) => {
+      if (checked) {
+        if (!trainStart || !trainEnd) {
+          message.warning('请先设置训练的开始日期与结束日期');
+          return;
+        }
+        if (moment(trainEnd).isBefore(moment(trainStart))) {
+          message.warning('训练结束日期不能早于开始日期');
+          return;
+        }
+        if (!capital || capital <= 0) {
+          message.warning('请设置有效的初始资金');
+          return;
+        }
+      }
+      setIstrain(checked);
+      applyTrainSetting({
+        ontrain: checked,
+        // 开始时从配置的开始日期起算，具体首个交易日由详情页工具栏校正
+        trainDate: checked ? trainStart : systemSetting.trainDate,
+        trainStartDate: trainStart,
+        trainEndDate: trainEnd,
+        initialCapital: capital,
+        commissionRate: commission,
+      });
+      message.success(checked ? '训练已开始，请在详情页使用训练工具栏' : '训练已结束');
+    },
+    [applyTrainSetting, trainStart, trainEnd, capital, commission, systemSetting.trainDate]
+  );
   return (
     <CustomDrawerContent title="设置" enterText="保存" onClose={onClose} onEnter={onSave}>
       <style>{` html { font-size: ${baseFontSize}px }`}</style>
@@ -184,11 +226,77 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
           <div className={classnames(styles.setting, 'card-body')}>
             <section>
               <label>训练开关：</label>
-              <Switch size="small" checked={istrain} onChange={setIstrain} />
+              <Switch size="small" checked={istrain} onChange={onToggleTrain} />
+              <span style={{ marginLeft: 10, fontSize: 12, color: istrain ? '#fa541c' : '#999' }}>
+                {istrain ? '训练进行中' : '未开始'}
+              </span>
             </section>
             <section>
-              <label>训练日期：</label>
-              <DatePicker onChange={onChangeTrainDate} value={moment(ontrainDate)} style={{ marginRight: 10 }} />
+              <label>开始日期：</label>
+              <DatePicker
+                size="small"
+                value={trainStart ? moment(trainStart) : undefined}
+                disabledDate={(c) => !!c && c > moment()}
+                onChange={(d) => {
+                  const nd = d ? d.format('YYYY-MM-DD') : '';
+                  setTrainStart(nd);
+                  applyTrainSetting({ trainStartDate: nd });
+                }}
+                style={{ marginRight: 10 }}
+              />
+            </section>
+            <section>
+              <label>结束日期：</label>
+              <DatePicker
+                size="small"
+                value={trainEnd ? moment(trainEnd) : undefined}
+                disabledDate={(c) => !!c && c > moment()}
+                onChange={(d) => {
+                  const nd = d ? d.format('YYYY-MM-DD') : '';
+                  setTrainEnd(nd);
+                  applyTrainSetting({ trainEndDate: nd });
+                }}
+                style={{ marginRight: 10 }}
+              />
+            </section>
+            <section>
+              <label>初始资金：</label>
+              <InputNumber
+                size="small"
+                min={1000}
+                step={10000}
+                value={capital}
+                onChange={(v) => {
+                  const nv = Number(v) || defaultSystemSetting.initialCapital;
+                  setCapital(nv);
+                  applyTrainSetting({ initialCapital: nv });
+                }}
+                style={{ width: 140, marginRight: 10 }}
+              />
+            </section>
+            <section>
+              <label>交易佣金：</label>
+              <InputNumber
+                size="small"
+                min={0}
+                max={5}
+                step={0.001}
+                precision={4}
+                value={Number((commission * 100).toFixed(4))}
+                onChange={(v) => {
+                  const r = (Number(v) || 0) / 100;
+                  setCommission(r);
+                  applyTrainSetting({ commissionRate: r });
+                }}
+                style={{ width: 120 }}
+              />
+              <span style={{ marginLeft: 6 }}>%（单边，按成交金额收取）</span>
+            </section>
+            <section>
+              <label></label>
+              <span style={{ fontSize: 12, color: '#999' }}>
+                开启训练后，所有时间序列数据（K线、分时、资金流）都会在数据层按「当前训练日期」截断，网络数据、缓存数据与实时推送都不会出现未来数据；明细页顶部工具栏可按交易日推进（自动跳过非交易日）并模拟买卖。推进到结束日期后提示训练结束，结算并归档后可在左侧栏「训练归档」中查看。以上配置修改即时生效。
+              </span>
             </section>
           </div>
         </StandCard>

@@ -3,6 +3,10 @@ declare namespace IndexScssNamespace {
     act: string;
     actBar: string;
     added: string;
+    archiveEmpty: string;
+    archiveItem: string;
+    archiveSub: string;
+    archiveTitle: string;
     category: string;
     categoryHeader: string;
     code: string;

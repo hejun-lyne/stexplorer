@@ -11,6 +11,7 @@ import * as Enums from '@/utils/enums';
 import * as AkshareAPI from './akshare';
 import * as TushareAPI from './tushare';
 import store from '@/store/configureStore';
+import * as TrainFilter from '@/utils/trainFilter';
 
 const { got } = window.contextModules;
 // Helper to log request errors with URL
@@ -169,10 +170,13 @@ export async function SearchFromEastmoney(keyword: string) {
 export async function GetTrendFromEastmoney(secid: string, zs?: number) {
   if (usePythonDataSource()) {
     const source = getCurrentDataSource();
+    // 训练模式：python 数据源的分时同样按当前训练日期截断
     if (source === Enums.FundApiType.Tushare) {
-      return TushareAPI.GetTrendFromTushare(secid);
+      const r = await TushareAPI.GetTrendFromTushare(secid);
+      return { ...r, trends: TrainFilter.CutTrends(r.trends) };
     }
-    return AkshareAPI.GetTrendFromAkshare(secid);
+    const r = await AkshareAPI.GetTrendFromAkshare(secid);
+    return { ...r, trends: TrainFilter.CutTrends(r.trends) };
   }
   
   try {
@@ -227,7 +231,7 @@ export async function GetTrendFromEastmoney(secid: string, zs?: number) {
       .filter((t) => t.current > 0);
     return {
       secid,
-      trends: trends,
+      trends: TrainFilter.CutTrends(trends),
     };
   } catch (error) {
     logRequestError(error, 'http://push2his.eastmoney.com/api/qt/stock/trends2/get');
@@ -302,7 +306,7 @@ export async function GetFlowTrendFromEastmoney(secid: string) {
     });
     return {
       secid,
-      ffTrends: trends,
+      ffTrends: TrainFilter.CutFlowTrends(trends),
     };
   } catch (error) {
     logRequestError(error, 'https://push2.eastmoney.com/api/qt/stock/fflow/kline/get');
@@ -756,9 +760,9 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
           // 缓存数据量不足，需要重新请求
         } else {
           if (limit && limit > 0 && ks.length > limit) {
-            return { ks: ks.slice(-limit), kt: code };
+            return { ks: TrainFilter.CutKlines(ks.slice(-limit)), kt: code };
           }
-          return { ks, kt: code };
+          return { ks: TrainFilter.CutKlines(ks), kt: code };
         }
       }
     }
@@ -807,7 +811,8 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
   }
 
   // 3. 写入磁盘缓存
-  if (result && result.ks && result.ks.length > 0) {
+  // 训练模式下返回的数据已被截止到训练日期，写入缓存会污染完整数据，因此跳过
+  if (result && result.ks && result.ks.length > 0 && !TrainFilter.IsTrainFilterOn()) {
     try {
       await window.contextModules.electron.sqliteWrite(cacheTable, {
         ks: result.ks,
@@ -820,7 +825,11 @@ export async function GetKFromDataSource(source:Enums.FundApiType, secid: string
     }
   }
 
-  return result || { ks: [], kt: code };
+  if (!result) {
+    return { ks: [], kt: code };
+  }
+  // 训练模式：缓存与网络数据统一在出口处按当前训练日期截断（缓存本身仍保存全量数据）
+  return { ...result, ks: TrainFilter.CutKlines(result.ks) };
 }
 
 export async function GetKFromXTick(secid: string, code: number) {
@@ -1092,7 +1101,7 @@ export async function GetKFromEastmoney(secid: string, code: number, limit?: num
       };
     });
     return {
-      ks,
+      ks: TrainFilter.CutKlines(ks),
       kt: code,
     };
   } catch (error) {
@@ -1156,7 +1165,7 @@ export async function GetFlowKFromEastmoney(secid: string, limit?: number) {
       klines.push(cur);
       prev = cur;
     });
-    return klines;
+    return TrainFilter.CutFlowDlines(klines);
   } catch (error) {
     logRequestError(error, 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get');
     return [];
@@ -4475,7 +4484,8 @@ export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: s
   // 港股（含港股指数）通过 akshare 后端获取
   const stockType = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
   if (stockType === Enums.StockMarketType.HK) {
-    return AkshareAPI.GetTrendFromAkshare(secid);
+    const r = await AkshareAPI.GetTrendFromAkshare(secid);
+    return { ...r, trends: TrainFilter.CutTrends(r.trends) };
   }
   if (source === Enums.FundApiType.Eastmoney) {
     return GetTrendFromEastmoney(secid);
@@ -4484,7 +4494,8 @@ export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: s
   //   return TushareAPI.GetTrendFromTushare(secid);
   // }
   // 默认使用 Akshare
-  return AkshareAPI.GetTrendFromAkshare(secid);
+  const r = await AkshareAPI.GetTrendFromAkshare(secid);
+  return { ...r, trends: TrainFilter.CutTrends(r.trends) };
 }
 
 export async function FromDataSource(source: Enums.FundApiType, secid: string) {

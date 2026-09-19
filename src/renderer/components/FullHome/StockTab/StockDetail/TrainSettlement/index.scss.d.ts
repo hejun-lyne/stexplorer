@@ -1,15 +1,18 @@
 declare namespace IndexScssNamespace {
   export interface IIndexScss {
-    btn: string;
+    buy: string;
+    chart: string;
+    chartTitle: string;
     container: string;
-    hint: string;
+    header: string;
     item: string;
-    label: string;
-    net: string;
-    row: string;
-    strong: string;
+    itemLabel: string;
+    itemValue: string;
+    items: string;
+    sell: string;
+    stock: string;
     sub: string;
-    value: string;
+    table: string;
   }
 }
 

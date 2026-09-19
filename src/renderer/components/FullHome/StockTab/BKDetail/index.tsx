@@ -20,7 +20,7 @@ import MoneyFlowChart from '../StockDetail/MustRead/CoreTrade/MoneyFlowChart';
 import { KLineType, MAPeriodType, StockMarketType } from '@/utils/enums';
 import AllBankuaisWrapper from './AllBankuais';
 import BStrategy from './BStrategy';
-import TrainBar from '../StockDetail/TrainBar';
+import TrainBar, { TRAIN_BAR_HEIGHT, TRAIN_BAR_HEIGHT_BASE } from '../StockDetail/TrainBar';
 import BKRanking from './BKRanking';
 import STRanking from '../StockDetail/STRanking';
 
@@ -35,7 +35,7 @@ export interface BKDetailProps {
 
 const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate, onOpenStock, onOpenUrl }) => {
   const config = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]);
-  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { kLineApiSourceSetting, ontrain } = useSelector((state: StoreState) => state.setting.systemSetting);
   const [detail, setDetail] = useState<Stock.DetailItem>({ secid });
 
   const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid), {
@@ -431,29 +431,20 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
     }
   }, [secid, moneyFlow]);
 
-  const [trainMode, setTrainMode] = useState(false);
   const [all30Mints, setAll30Mints] = useState([]);
-  const [toDate, setToDate] = useState<string | undefined>();
-  const updateKlines = useCallback(
-    (ks) => {
-      if (ks[0].type == KLineType.Mint30) {
-        setAll30Mints(ks);
-        setToDate(ks[0].date);
-      }
-    },
-    [trainMode]
-  );
+  const updateKlines = useCallback((ks) => {
+    if (ks[0].type == KLineType.Mint30) {
+      setAll30Mints(ks);
+    }
+  }, []);
   return (
     <>
-      <TrainBar
-        secid={secid}
-        all30Mints={all30Mints}
-        onToggleTrainMode={setTrainMode}
-        onTrainDateChanged={setToDate}
-        removeStock={removeBK}
-        addStock={addBK}
-      />
-      <Row className={styles.container} ref={contentRef}>
+      <TrainBar secid={secid} all30Mints={all30Mints} removeStock={removeBK} addStock={addBK} />
+      <Row
+        className={styles.container}
+        ref={contentRef}
+        style={{ height: `calc(100% - ${ontrain ? TRAIN_BAR_HEIGHT : TRAIN_BAR_HEIGHT_BASE}px)` }}
+      >
         {detail && (
           <SplitPane
             split="vertical"
@@ -501,6 +492,7 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
                   secid={secid}
                   active={active}
                   zs={detail.zs}
+                  trainMode={ontrain}
                   addStock={addBK}
                   removeStock={removeBK}
                   updateKLineData={updateKlines}
@@ -508,7 +500,6 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
                   updateMType={setMtype}
                   onRangeUpdated={setRange}
                   onSelectedAreaUpdated={setSelectedArea}
-                  toDate={trainMode ? toDate : undefined}
                 />
                 <Tabs defaultActiveKey={'review'} className={styles.rightTab} style={{ width: '100%' }}>
                   <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>复盘策略</span>} key={'review'}>

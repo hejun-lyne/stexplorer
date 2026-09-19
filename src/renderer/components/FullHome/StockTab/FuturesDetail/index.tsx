@@ -12,7 +12,7 @@ import { useInterval, useRequest } from 'ahooks';
 import * as Services from '@/services';
 import { addStockAction, deleteStockAction, updateStockAction, updateStockPriceAction } from '@/actions/stock';
 import { KLineType, StockMarketType } from '@/utils/enums';
-import TrainBar from '../StockDetail/TrainBar';
+import TrainBar, { TRAIN_BAR_HEIGHT, TRAIN_BAR_HEIGHT_BASE } from '../StockDetail/TrainBar';
 import TrackingNote from '../StockDetail/MustRead/TrackingNote';
 
 export interface FuturesDetailProps {
@@ -24,6 +24,7 @@ export interface FuturesDetailProps {
 
 const FuturesDetail: React.FC<FuturesDetailProps> = ({ secid, active, onChangeUpdate, onOpenUrl }) => {
   const config = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]);
+  const { ontrain } = useSelector((state: StoreState) => state.setting.systemSetting);
   const [detail, setDetails] = useState<Stock.DetailItem>({ secid });
 
   const { run: runGetDetail } = useRequest(Services.Stock.GetFutureDetailFromSina, {
@@ -67,18 +68,12 @@ const FuturesDetail: React.FC<FuturesDetailProps> = ({ secid, active, onChangeUp
   const [chartHeight, setChartHeight] = useState<number>(0);
   const rightRef = useRef<HTMLDivElement>(null);
 
-  const [trainMode, setTrainMode] = useState(false);
   const [all30Mints, setAll30Mints] = useState([]);
-  const [toDate, setToDate] = useState<string | undefined>();
-  const updateKlines = useCallback(
-    (ks) => {
-      if (ks[0].type == KLineType.Mint30) {
-        setAll30Mints(ks);
-        setToDate(ks[0].date);
-      }
-    },
-    [trainMode]
-  );
+  const updateKlines = useCallback((ks) => {
+    if (ks[0].type == KLineType.Mint30) {
+      setAll30Mints(ks);
+    }
+  }, []);
   const [timelineDate, setTimelineDate] = useState<string | undefined>();
   const [initWidth, setInitWidth] = useState(500);
   if (initWidth == 500 && rightRef.current) {
@@ -87,15 +82,12 @@ const FuturesDetail: React.FC<FuturesDetailProps> = ({ secid, active, onChangeUp
   const [noteChanged, setNoteChanged] = useState(false);
   return (
     <>
-      <TrainBar
-        secid={secid}
-        all30Mints={all30Mints}
-        onToggleTrainMode={setTrainMode}
-        onTrainDateChanged={setToDate}
-        removeStock={removeStock}
-        addStock={addStock}
-      />
-      <Row className={styles.container} ref={contentRef}>
+      <TrainBar secid={secid} all30Mints={all30Mints} removeStock={removeStock} addStock={addStock} />
+      <Row
+        className={styles.container}
+        ref={contentRef}
+        style={{ height: `calc(100% - ${ontrain ? TRAIN_BAR_HEIGHT : TRAIN_BAR_HEIGHT_BASE}px)` }}
+      >
         {detail && (
           <SplitPane
             split="vertical"
@@ -133,8 +125,7 @@ const FuturesDetail: React.FC<FuturesDetailProps> = ({ secid, active, onChangeUp
                   active={active}
                   zs={detail.zs}
                   useZizai={true}
-                  trainMode={trainMode}
-                  toDate={trainMode ? toDate : undefined}
+                  trainMode={ontrain}
                   onTimelineDate={timelineDate}
                   updateKLineData={updateKlines}
                 />

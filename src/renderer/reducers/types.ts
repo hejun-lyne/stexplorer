@@ -11,6 +11,7 @@ import { StorageState } from './storage';
 import { BaiduState } from './baidu';
 import { StrategyState } from './strategy';
 import { TrainingState } from './training';
+import { TrainState } from './train';
 import { DownloadState } from './download';
 
 export type StoreState = {
@@ -24,6 +25,7 @@ export type StoreState = {
   setting: SettingState;
   strategy: StrategyState;
   training: TrainingState;
+  train: TrainState;
   download: DownloadState;
 };
 

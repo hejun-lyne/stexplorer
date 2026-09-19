@@ -21,7 +21,6 @@ import BigEvent from './MustRead/BigEvent';
 import { addStockAction, deleteStockAction, syncStockStrategyAction } from '@/actions/stock';
 import SStrategy from './SStrategy';
 import { KLineType, StrategyType } from '@/utils/enums';
-import TrainBar from './TrainBar';
 import BriefStatics from './MustRead/BriefStatics';
 import StockOverview from './MustRead/Overview';
 import StockResearches from './MustRead/Researches';
@@ -34,6 +33,7 @@ import KimiAnalysis from './KimiAnalysis';
 import Holdings from './Holdings';
 import * as Utils from '@/utils';
 import BacktestAnalysis from './BacktestAnalysis';
+import TrainBar, { TRAIN_BAR_HEIGHT, TRAIN_BAR_HEIGHT_BASE } from './TrainBar';
 
 export interface StockDetailProps {
   secid: string;
@@ -53,7 +53,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
   const [stype, setSType] = useState<StrategyType>(config ? config.strategy || StrategyType.None : StrategyType.None);
   const [klines, setKLines] = useState<Stock.KLineItem[] | null>(null);
   const [trends, setTrends] = useState<Stock.TrendItem[]>([]);
-  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+  const { kLineApiSourceSetting, ontrain } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid), {
     throwOnError: true,
     manual: true,
@@ -139,19 +139,13 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
   const [chartHeight, setChartHeight] = useState<number>(0);
   const rightRef = useRef<HTMLDivElement>(null);
 
-  const [trainMode, setTrainMode] = useState(false);
   const [all30Mints, setAll30Mints] = useState([]);
-  const [toDate, setToDate] = useState<string | undefined>();
-  const updateKlines = useCallback(
-    (ks) => {
-      setKLines(ks);
-      if (ks[0].type == KLineType.Mint30) {
-        setAll30Mints(ks);
-        setToDate(ks[0].date);
-      }
-    },
-    [trainMode]
-  );
+  const updateKlines = useCallback((ks) => {
+    setKLines(ks);
+    if (ks[0].type == KLineType.Mint30) {
+      setAll30Mints(ks);
+    }
+  }, []);
   const [timelineDate, setTimelineDate] = useState<string | undefined>();
   const [initWidth, setInitWidth] = useState(500);
   useEffect(() => {
@@ -164,15 +158,12 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
   const [activePeriod, setActivePeriond] = useState<Stock.PeriodMarkItem | null>(null);
   return (
     <>
-      <TrainBar
-        secid={secid}
-        all30Mints={all30Mints}
-        onToggleTrainMode={setTrainMode}
-        onTrainDateChanged={setToDate}
-        removeStock={removeStock}
-        addStock={addStock}
-      />
-      <Row className={styles.container} ref={contentRef}>
+      <TrainBar secid={secid} all30Mints={all30Mints} removeStock={removeStock} addStock={addStock} showTrade={true} />
+      <Row
+        className={styles.container}
+        ref={contentRef}
+        style={{ height: `calc(100% - ${ontrain ? TRAIN_BAR_HEIGHT : TRAIN_BAR_HEIGHT_BASE}px)` }}
+      >
         {nDetails && (
           <SplitPane
             split="vertical"
@@ -211,9 +202,8 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
                   secid={secid}
                   active={active}
                   zs={nDetails.zs}
-                  trainMode={trainMode}
+                  trainMode={ontrain}
                   activePeriod={activePeriod}
-                  toDate={trainMode ? toDate : undefined}
                   backtestDate={backtestDate}
                   firstQSAppear={firstQSAppear}
                   onTimelineDate={timelineDate}

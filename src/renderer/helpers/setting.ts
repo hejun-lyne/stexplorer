@@ -19,6 +19,11 @@ export const defaultSystemSetting: System.Setting = {
   kimiApiKeySetting: '',
   tushareTokenSetting: '',
   initialCapital: 100000,
+  ontrain: false,
+  trainDate: '',
+  trainStartDate: '',
+  trainEndDate: '',
+  commissionRate: 0.0003,
 };
 
 export function GetSystemSetting() {

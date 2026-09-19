@@ -1031,8 +1031,9 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
       cacheKey: `requestDealDay/${secid}`,
     });
     useLayoutEffect(() => {
-      if (ontrain) {
-        runGetHistTrends(secid, trainDate);
+      if (ontrain && trainDate) {
+        // 训练模式：展示训练日期当天的历史分时
+        runGetHistTrends(secid, trainDate.replace(/-/g, ''));
       } else {
         runGetTrends(kLineApiSourceSetting, secid);
         if (active) {
@@ -1054,7 +1055,7 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
           };
         }
       }
-    }, [secid, active]);
+    }, [secid, active, ontrain, trainDate]);
     const { ref: tchartRef, chartInstance: tchart } = useResizeEchart(-1);
     useRenderEcharts(
       () => {

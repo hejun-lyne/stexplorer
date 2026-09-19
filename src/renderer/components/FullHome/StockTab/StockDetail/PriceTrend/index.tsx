@@ -2026,6 +2026,84 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       }
     }, [trainMode]);
 
+    // 训练模式：分时图展示训练日期的历史分时（当日分时属于未来数据，已被数据层过滤掉）
+    const { run: runGetTrainTrends } = useRequest(Services.Stock.requestDealDay, {
+      manual: true,
+      onSuccess: (data: Stock.TrendItem[]) => {
+        if (!data || !data.length) {
+          return;
+        }
+        // 与历史分时保持一致：按分钟合并
+        const processed = [] as Stock.TrendItem[];
+        let item = data[0];
+        for (let i = 1; i < data.length; i++) {
+          const pMin = item.datetime.substring(3, 5);
+          const nMin = data[i].datetime.substring(3, 5);
+          if (pMin == nMin) {
+            data[i].vol += item.vol;
+            data[i].last = item.last;
+          } else {
+            processed.push(item);
+          }
+          item = data[i];
+          if (i == data.length - 1) {
+            processed.push(data[i]);
+          }
+        }
+        processed.forEach((_) => {
+          _.datetime = `${trainDate} ${_.datetime.substring(0, 5)}`;
+        });
+        updateTrendsOption({ trends: processed });
+      },
+      cacheKey: `requestDealDay/train/${secid}`,
+    });
+
+    // 训练模式：进入训练 / 训练日期推进后重新取数
+    // 数据层已按当前训练日期截断，只有重新请求才能用「训练窗口内」的数据替换掉本地已加载的数据
+    const trainRefreshRef = useRef({ mode: false, date: '' });
+    useEffect(() => {
+      if (!ontrain || !trainDate) {
+        trainRefreshRef.current = { mode: false, date: '' };
+        return;
+      }
+      const prev = trainRefreshRef.current;
+      const justEnabled = !prev.mode;
+      const needRefresh = justEnabled || prev.date !== trainDate;
+      trainRefreshRef.current = { mode: true, date: trainDate };
+      if (!needRefresh) {
+        return;
+      }
+      const refreshTypes = [KLineType.Mint30, KLineType.Day, KLineType.Week, KLineType.Month];
+      if (typeIndex > 0) {
+        refreshTypes.push(DefaultKTypes[typeIndex]);
+      }
+      Array.from(new Set(refreshTypes)).forEach((t) => {
+        const i = DefaultKTypes.indexOf(t);
+        if (i < 0) {
+          return;
+        }
+        if (t === KLineType.Mint30) {
+          // 首次进入训练模式时由 trainMode 的 effect 负责取数
+          if (justEnabled) {
+            return;
+          }
+          runGetKline(kLineApiSourceSetting, secid, t, 100000);
+          return;
+        }
+        runGetKline(kLineApiSourceSetting, secid, t, klineData.count[i]);
+      });
+      if (typeIndex === 0) {
+        runGetTrainTrends(secid, trainDate.replace(/-/g, ''));
+      }
+    }, [ontrain, trainDate]);
+
+    // 训练模式下切到分时图时，加载训练日期的历史分时
+    useEffect(() => {
+      if (ontrain && trainDate && typeIndex === 0) {
+        runGetTrainTrends(secid, trainDate.replace(/-/g, ''));
+      }
+    }, [typeIndex]);
+
     useEffect(() => {
       // [回测] 需要日线数据来计算 displayToDate（回测日期的前一个交易日）
       if (backtestDate) {

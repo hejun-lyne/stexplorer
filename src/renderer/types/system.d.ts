@@ -16,13 +16,16 @@ declare namespace System {
     freshDelaySetting: number; // 刷新时间间隔
 
     ontrain: boolean; // 训练模式
-    trainDate: string; // 训练日期
+    trainDate: string; // 当前训练日期（训练进行中每天推进）
+    trainStartDate: string; // 训练开始日期
+    trainEndDate: string; // 训练结束日期
 
     kLineApiSourceSetting: number; // K线加载的数据源
 
     kimiApiKeySetting: string; // Kimi API Key
     tushareTokenSetting: string; // Tushare Pro Token
     initialCapital: number; // 初始本金
+    commissionRate: number; // 交易佣金比例
   }
 
   export interface GridSetting {

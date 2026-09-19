@@ -32,6 +32,46 @@ except ImportError:
 
 _CACHE_DIR = os.path.join(os.path.expanduser("~"), ".stexplorer", "akshare_cache")
 
+# ============ 训练模式：全局数据截止日期（as-of date）============
+# 训练模式下，所有「以当天为默认终点」的取数都以该日期为终点，
+# 保证不返回训练日期之后的数据。未设置（None）时等同于真实当前时间。
+_AS_OF_DATE: Optional[str] = None  # YYYYMMDD
+
+
+def set_as_of_date(value: Any = None):
+    """设置全局数据截止日期（训练日期），传空表示恢复真实当前时间"""
+    global _AS_OF_DATE
+    if value is None or value == "":
+        _AS_OF_DATE = None
+        return
+    text = str(value).replace('-', '').replace('/', '').strip()
+    _AS_OF_DATE = text[:8] if len(text) >= 8 and text[:8].isdigit() else None
+
+
+def get_as_of_date() -> Optional[str]:
+    """当前数据截止日期（YYYYMMDD），未设置返回 None"""
+    return _AS_OF_DATE
+
+
+def _now(fmt: str = '%Y%m%d') -> str:
+    """当前数据截止时间（训练模式下为训练日期），按指定格式返回字符串"""
+    if _AS_OF_DATE:
+        try:
+            return datetime.strptime(_AS_OF_DATE, '%Y%m%d').strftime(fmt)
+        except ValueError:
+            pass
+    return datetime.now().strftime(fmt)
+
+
+def _now_date() -> date:
+    """当前数据截止日期（date 对象）"""
+    if _AS_OF_DATE:
+        try:
+            return datetime.strptime(_AS_OF_DATE, '%Y%m%d').date()
+        except ValueError:
+            pass
+    return datetime.now().date()
+
 
 def _log(msg: str):
     """输出日志到 stderr 和日志文件，避免污染 stdout 中的 JSON 输出"""
@@ -368,6 +408,28 @@ def _get_board_kline_from_eastmoney(secid: str, period: str = "daily") -> List[D
         return {"error": str(e)}
 
 
+def _cut_klines_by_end_date(klines: Any, end_date: Any) -> Any:
+    """按截止日期裁剪 K 线序列
+
+    训练模式（或调用方指定了 end_date）时，数据层不允许出现截止日期之后的数据。
+    klines 元素需包含 date 字段；end_date 支持 YYYYMMDD / YYYY-MM-DD，为空表示不过滤。
+    """
+    if not isinstance(klines, list) or not klines or not end_date:
+        return klines
+    end_day = str(end_date).replace('-', '')[:8]
+    if len(end_day) != 8 or not end_day.isdigit():
+        return klines
+    result = []
+    for k in klines:
+        if not isinstance(k, dict):
+            result.append(k)
+            continue
+        day = str(k.get('date', '')).replace('-', '')[:8]
+        if len(day) != 8 or not day.isdigit() or day <= end_day:
+            result.append(k)
+    return result
+
+
 class AkshareAPI:
     """akshare 接口封装类"""
     
@@ -388,7 +450,7 @@ class AkshareAPI:
                 return {"error": "No trade date data available"}
             
             df["trade_date"] = pd.to_datetime(df["trade_date"])
-            target_year = year if year is not None else datetime.now().year
+            target_year = year if year is not None else _now_date().year
             
             mask = df["trade_date"].dt.year == target_year
             filtered = df.loc[mask].copy().sort_values("trade_date")
@@ -503,32 +565,35 @@ class AkshareAPI:
             return {"error": str(e)}
     
     @staticmethod
-    def get_kline_data(secid: str, period: str = "daily", adjust: str = "qfq") -> List[Dict[str, Any]]:
+    def get_kline_data(secid: str, period: str = "daily", adjust: str = "qfq", end_date: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         获取K线数据 - 使用腾讯财经数据源
         
         period: daily, weekly, monthly
         adjust: qfq-前复权, hfq-后复权, 空字符串-不复权
+        end_date: 截止日期（YYYYMMDD / YYYY-MM-DD），训练模式下用它避免出现未来数据
         """
         try:
+            # 截止日期（默认取当天）
+            end_date_fmt = (end_date or _now()).replace('-', '')
+
             # 板块代码使用 Eastmoney 数据源（akshare 个股接口不支持板块）
             if is_board_code(secid):
-                return _get_board_kline_from_eastmoney(secid, period)
+                return _cut_klines_by_end_date(_get_board_kline_from_eastmoney(secid, period), end_date_fmt)
             
             # 港股（含港股指数）腾讯接口不支持，走东方财富 K 线接口
             if is_hk_code(secid):
-                return _get_board_kline_from_eastmoney(secid, period)
+                return _cut_klines_by_end_date(_get_board_kline_from_eastmoney(secid, period), end_date_fmt)
             
             # 转换为腾讯 symbol 格式
             symbol = convert_secid_to_tx_symbol(secid)
             
             # 计算日期范围（默认获取1年数据）
-            end_date = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
+            start_date = (datetime.strptime(end_date_fmt, "%Y%m%d") - timedelta(days=365)).strftime("%Y%m%d")
             
             # 腾讯财经数据接口
             # 注意：腾讯接口日K线数据较完整，周/月线需要通过日K线聚合
-            df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start_date, end_date=end_date, adjust=adjust)
+            df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start_date, end_date=end_date_fmt, adjust=adjust)
             
             if df.empty:
                 return {"error": "No data available"}
@@ -935,7 +1000,7 @@ class AkshareAPI:
         """获取涨停股票列表"""
         try:
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             df = ak.stock_zt_pool_em(date=date)
             
             stocks = []
@@ -960,7 +1025,7 @@ class AkshareAPI:
         """获取跌停股票列表"""
         try:
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             df = ak.stock_zt_pool_dtgc_em(date=date)
             
             stocks = []
@@ -1065,7 +1130,7 @@ class AkshareAPI:
         """获取龙虎榜数据"""
         try:
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             df = ak.stock_lhb_detail_daily_sina(start_date=date, end_date=date)
             
             stocks = []
@@ -1217,19 +1282,24 @@ def main():
     parser.add_argument("method", help="方法名")
     parser.add_argument("--params", "-p", help="JSON格式的参数", default="{}")
     parser.add_argument("--storage-path", "-s", help="本地存储根目录路径（用于缓存）", default=None)
-    
-    args = parser.parse_args()
-    
+    parser.add_argument("--as-of-date", "-d", dest="as_of_date", help="数据截止日期（训练模式），YYYY-MM-DD 或 YYYYMMDD", default=None)
+
+    # 使用 parse_known_args：调用方可能传入新版本参数，旧脚本不应直接报错退出
+    args, _unknown_args = parser.parse_known_args()
+
     # 解析参数
     try:
         params = json.loads(args.params)
     except json.JSONDecodeError:
         print(json.dumps({"error": "Invalid JSON params"}, ensure_ascii=False))
         sys.exit(1)
-    
+
     # 设置缓存目录
     if args.storage_path:
         set_cache_dir(args.storage_path)
+
+    # 训练模式：设置全局数据截止日期
+    set_as_of_date(args.as_of_date)
 
     # 调用对应方法
     api = AkshareAPI()

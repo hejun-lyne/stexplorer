@@ -14,6 +14,7 @@ import { syncRemoteBooksAction } from './note';
 import { syncRemoteSettingAction } from './setting';
 import { syncRemoteStrategyGroupsAction } from './strategy';
 import { syncRemoteTrainingAction } from './training';
+import { syncRemoteTrainArchivesAction } from './train';
 
 export const SYNC_LOGIN_INFO = 'SYNC_LOGIN_INFO';
 export const SYNC_PROFILE = 'SYNC_PROFILE';
@@ -54,6 +55,7 @@ export function switchStorageTypeAction(type: 'github' | 'sqlite' | 'local'): Th
             dispatch(syncRemoteStocksAction());
             dispatch(syncRemoteTradingsAction());
             dispatch(syncRemoteTrainingsAction());
+            dispatch(syncRemoteTrainArchivesAction());
             dispatch(syncRemoteBooksAction());
             dispatch(syncRemoteStrategyGroupsAction());
             dispatch(syncRemoteSettingAction());
@@ -68,6 +70,7 @@ export function switchStorageTypeAction(type: 'github' | 'sqlite' | 'local'): Th
             dispatch(syncRemoteTrainingAction());
             dispatch(syncRemoteTradingsAction());
             dispatch(syncRemoteTrainingsAction());
+            dispatch(syncRemoteTrainArchivesAction());
             dispatch(syncRemoteBooksAction());
             dispatch(syncRemoteStrategyGroupsAction());
             dispatch(syncRemoteSettingAction());
@@ -167,6 +170,7 @@ export function renewStorageAction(): ThunkAction {
         dispatch(syncRemoteStocksAction());
         dispatch(syncRemoteTradingsAction());
         dispatch(syncRemoteTrainingsAction());
+        dispatch(syncRemoteTrainArchivesAction());
         dispatch(syncRemoteBooksAction());
         dispatch(syncRemoteStrategyGroupsAction());
         dispatch(syncRemoteSettingAction());

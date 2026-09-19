@@ -1,6 +1,7 @@
 import { SYNC_SYSTEM_SETTING, SYNC_MONITOR_SETTING, SET_SETTING_SYNING, APPEND_SYSTEM_LOG } from '@/actions/setting';
 import { Reducer } from '@/reducers/types';
 import * as Enums from '@/utils/enums';
+import * as TrainFilter from '@/utils/trainFilter';
 import dayjs from 'dayjs';
 
 export type SettingState = {
@@ -25,11 +26,14 @@ export const defaultSystemSetting: System.Setting = {
   freshDelaySetting: 3,
   ontrain: false,
   trainDate: '',
+  trainStartDate: '',
+  trainEndDate: '',
   kLineApiSourceSetting: Enums.FundApiType.Eastmoney,
   useZizaiDayK: false,
   kimiApiKeySetting: '',
   tushareTokenSetting: '',
   initialCapital: 100000,
+  commissionRate: 0.0003,
 };
 
 export const defaultMonitorSetting: System.MonitorSetting = {
@@ -76,13 +80,18 @@ const setting: Reducer<SettingState> = (
   action
 ) => {
   switch (action.type) {
-    case SYNC_SYSTEM_SETTING:
+    case SYNC_SYSTEM_SETTING: {
       const [systemSetting, smodified] = action.payload;
+      const nextSetting = systemSetting || state.systemSetting;
+      // 训练模式：系统设置的任何变化（本地修改 / 远端同步 / 按天推进）都同步到数据层过滤器，
+      // 保证所有时序数据出口都按当前训练日期截断
+      TrainFilter.SetTrainToDate(nextSetting.ontrain ? nextSetting.trainDate : undefined);
       return {
         ...state,
-        systemSetting: systemSetting || state.systemSetting,
+        systemSetting: nextSetting,
         settingModified: smodified,
       };
+    }
     case SYNC_MONITOR_SETTING:
       const [monitorSetting, mmodified] = action.payload;
       return {

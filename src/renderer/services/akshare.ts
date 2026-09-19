@@ -6,6 +6,7 @@
 import dayjs from 'dayjs';
 import NP from 'number-precision';
 import * as Utils from '@/utils';
+import * as TrainFilter from '@/utils/trainFilter';
 import { KLineType, StockMarketType } from '@/utils/enums';
 import { Stock } from '@/types/stock';
 import * as Helpers from '../helpers';
@@ -14,6 +15,91 @@ const { execPyScript, getLocalStoragePath } = window.contextModules.electron;
 
 // Python 脚本路径
 const AKSHARE_SCRIPT = 'akshare_api.py';
+
+/**
+ * 训练模式下的时间过滤
+ * - 入参：已传的日期参数收敛到当前训练日期；部分方法未传日期时注入训练日期（避免 python 侧默认取最新交易日）
+ * - 出参：返回的时间序列按训练日期截断
+ */
+const TRAIN_DATE_FIELDS = ['trade_date', 'date', 'end_date'];
+
+/** 方法 → 需要在训练模式下注入的日期参数名 */
+const TRAIN_AS_OF_PARAM: Record<string, string> = {
+  get_kline_data: 'end_date',
+  get_limit_up_stocks: 'date',
+  get_limit_down_stocks: 'date',
+  get_billboard_data: 'date',
+};
+
+/** 日期统一成 YYYY-MM-DD，便于比较 */
+function normalizeToDay(value: any): string {
+  const v = String(value || '').trim();
+  if (/^\d{8}$/.test(v)) {
+    return `${v.substring(0, 4)}-${v.substring(4, 6)}-${v.substring(6, 8)}`;
+  }
+  return v.substring(0, 10).replace(/\//g, '-');
+}
+
+function capDateValue(value: any, trainDate: string) {
+  if (typeof value !== 'string' || !value) {
+    return value;
+  }
+  if (normalizeToDay(value) > trainDate) {
+    return value.includes('-') ? trainDate : trainDate.replace(/-/g, '');
+  }
+  return value;
+}
+
+/** 训练模式下收敛请求参数 */
+function capTrainParams(method: string, params: Record<string, any>): Record<string, any> {
+  const trainDate = TrainFilter.GetTrainToDate();
+  if (!trainDate) {
+    return params;
+  }
+  let next = params;
+  const assign = (key: string, value: any) => {
+    if (next === params) {
+      next = { ...params };
+    }
+    next[key] = value;
+  };
+  TRAIN_DATE_FIELDS.forEach((key) => {
+    const capped = capDateValue(next[key], trainDate);
+    if (capped !== next[key]) {
+      assign(key, capped);
+    }
+  });
+  if (Array.isArray(next.dates)) {
+    const filtered = next.dates.filter((d: string) => !d || normalizeToDay(d) <= trainDate);
+    if (filtered.length !== next.dates.length) {
+      assign('dates', filtered);
+    }
+  }
+  const asOfKey = TRAIN_AS_OF_PARAM[method];
+  if (asOfKey && !next[asOfKey]) {
+    assign(asOfKey, trainDate.replace(/-/g, ''));
+  }
+  return next;
+}
+
+/** 训练模式下裁剪返回的时间序列数据 */
+function cutTrainResult(method: string, result: any): any {
+  const trainDate = TrainFilter.GetTrainToDate();
+  if (!trainDate || !result || typeof result !== 'object') {
+    return result;
+  }
+  if (method === 'get_kline_data') {
+    return TrainFilter.CutKlines(result as Stock.KLineItem[]);
+  }
+  if (method === 'get_stock_trend') {
+    return TrainFilter.CutTrends(result as Stock.TrendItem[]);
+  }
+  if (Array.isArray(result)) {
+    // 单日快照列表：按元素内的日期字段兜底裁剪
+    return TrainFilter.CutTimeSeries(result, (item: any) => item && (item.datetime || item.trade_date || item.date));
+  }
+  return result;
+}
 
 // 缓存本地存储路径，避免每次 IPC 调用
 let cachedStoragePath: string | null = null;
@@ -52,16 +138,24 @@ function logError(error: any, method: string, extraInfo?: string) {
  */
 async function callAkshare(method: string, params: Record<string, any> = {}): Promise<any> {
   try {
-    const args = [method, '--params', JSON.stringify(params)];
+    // 训练模式：收敛日期入参，避免 python 使用训练日期之后的数据
+    const trainParams = capTrainParams(method, params);
+    const args = [method, '--params', JSON.stringify(trainParams)];
     const storagePath = await getStoragePath();
     if (storagePath) {
       args.push('--storage-path', storagePath);
+    }
+    // 训练模式：把当前训练日期作为全局数据截止日期传给 python 脚本
+    const asOfDate = TrainFilter.GetTrainToDate();
+    if (asOfDate) {
+      args.push('--as-of-date', asOfDate);
     }
     const result = await execPyScript(AKSHARE_SCRIPT, args);
     // Python 脚本会输出 JSON 字符串
     if (Array.isArray(result) && result.length > 0) {
       const output = result[result.length - 1]; // 取最后一行输出
-      return JSON.parse(output);
+      // 训练模式：裁剪返回的时间序列数据
+      return cutTrainResult(method, JSON.parse(output));
     }
     return result;
   } catch (error) {

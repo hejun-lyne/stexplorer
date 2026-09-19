@@ -9,6 +9,7 @@
 import dayjs from 'dayjs';
 import NP from 'number-precision';
 import * as Utils from '@/utils';
+import * as TrainFilter from '@/utils/trainFilter';
 import { KLineType, StockMarketType } from '@/utils/enums';
 import { Stock } from '@/types/stock';
 import * as Helpers from '../helpers';
@@ -18,6 +19,205 @@ const { execPyScript, getLocalStoragePath } = window.contextModules.electron;
 
 // Python 脚本路径
 const TUSHARE_SCRIPT = 'tushare_api.py';
+
+/**
+ * 训练模式下的时间过滤说明
+ *
+ * 1. 入参：python 侧所有「以某个交易日为终点」的方法，其日期参数会被收敛到当前训练日期，
+ *    未传日期的方法会补上训练日期（见 TRAIN_AS_OF_PARAM），
+ *    保证 python 内部用于计算指标的时间序列不包含训练日期之后的数据。
+ * 2. 出参：返回的时间序列（K线、分时、资金流明细、按日期分组的数据）统一按训练日期截断。
+ */
+
+/** 需要收敛的标量日期参数 */
+const TRAIN_DATE_FIELDS = ['trade_date', 'date', 'end_date'];
+
+/**
+ * 方法 → 日期参数名映射
+ * 训练模式下若调用方未传该参数，则注入当前训练日期，避免 python 侧默认取「最新交易日」
+ */
+const TRAIN_AS_OF_PARAM: Record<string, string> = {
+  // 单日快照类
+  get_boards_by_date: 'date',
+  get_board_detail: 'date',
+  get_board_stocks: 'date',
+  get_industry_stocks: 'date',
+  get_up_down_ratio: 'date',
+  get_market_activity_stats: 'date',
+  get_limit_up_stocks: 'date',
+  get_limit_down_stocks: 'date',
+  get_daily_basic: 'date',
+  get_top_list: 'date',
+  get_top_inst: 'date',
+  get_margin: 'date',
+  get_margin_detail: 'date',
+  get_block_trade: 'date',
+  get_repurchase: 'date',
+  get_stk_shock: 'date',
+  get_hk_hold: 'date',
+  // 时间序列类
+  get_kline_data: 'end_date',
+  get_kline_data_batch: 'end_date',
+  get_money_flow: 'trade_date',
+  get_strong_stocks: 'date',
+  get_strong_stocks_batch: 'end_date',
+  // 批量按日期
+  get_boards_by_date_batch: 'dates',
+  get_up_down_ratio_batch: 'dates',
+  // 指标 / 选股类
+  filter_industries: 'trade_date',
+  get_industry_leaders: 'trade_date',
+  risk_filter_stocks: 'trade_date',
+  check_buy_signals: 'trade_date',
+  select_stocks: 'trade_date',
+  main_in_filter: 'trade_date',
+  score_limit_up_stock: 'trade_date',
+};
+
+/** 日期统一成 YYYY-MM-DD，便于比较 */
+function normalizeToDay(value: any): string {
+  const v = String(value || '').trim();
+  if (/^\d{8}$/.test(v)) {
+    return `${v.substring(0, 4)}-${v.substring(4, 6)}-${v.substring(6, 8)}`;
+  }
+  return v.substring(0, 10).replace(/\//g, '-');
+}
+
+/** 收敛单个日期参数：晚于训练日期的截断为训练日期，并保持原有格式风格 */
+function capDateValue(value: any, trainDate: string) {
+  if (typeof value !== 'string' || !value) {
+    return value;
+  }
+  if (normalizeToDay(value) > trainDate) {
+    return value.includes('-') ? trainDate : trainDate.replace(/-/g, '');
+  }
+  return value;
+}
+
+/** 训练模式下收敛请求参数 */
+function capTrainParams(method: string, params: Record<string, any>): Record<string, any> {
+  const trainDate = TrainFilter.GetTrainToDate();
+  if (!trainDate) {
+    return params;
+  }
+  let next = params;
+  const assign = (key: string, value: any) => {
+    if (next === params) {
+      next = { ...params };
+    }
+    next[key] = value;
+  };
+  TRAIN_DATE_FIELDS.forEach((key) => {
+    const capped = capDateValue(next[key], trainDate);
+    if (capped !== next[key]) {
+      assign(key, capped);
+    }
+  });
+  if (Array.isArray(next.dates)) {
+    const filtered = next.dates.filter((d: string) => !d || normalizeToDay(d) <= trainDate);
+    if (filtered.length !== next.dates.length) {
+      assign('dates', filtered);
+    }
+  }
+  if (Array.isArray(next.requests)) {
+    assign(
+      'requests',
+      next.requests.map((r: any) => (r && r.date ? { ...r, date: capDateValue(r.date, trainDate) } : r))
+    );
+  }
+  // 未传日期的方法注入训练日期
+  const asOfKey = TRAIN_AS_OF_PARAM[method];
+  if (asOfKey && !next[asOfKey]) {
+    if (asOfKey === 'dates') {
+      assign('dates', [trainDate.replace(/-/g, '')]);
+    } else if (asOfKey !== 'requests') {
+      assign(asOfKey, trainDate.replace(/-/g, ''));
+    }
+  }
+  return next;
+}
+
+/** 按日期键裁剪对象（键可能形如 20240506 或 20240506_BK0428） */
+function cutKeyedByDate(obj: Record<string, any>, trainDate: string, getDay: (key: string) => string) {
+  let removed = false;
+  const next: Record<string, any> = {};
+  Object.keys(obj).forEach((key) => {
+    const day = normalizeToDay(getDay(key));
+    if (!day || day <= trainDate) {
+      next[key] = obj[key];
+    } else {
+      removed = true;
+    }
+  });
+  return removed ? next : obj;
+}
+
+/** 训练模式下裁剪返回的时间序列数据 */
+function cutTrainResult(method: string, result: any): any {
+  const trainDate = TrainFilter.GetTrainToDate();
+  if (!trainDate || !result || typeof result !== 'object') {
+    return result;
+  }
+  switch (method) {
+    case 'get_kline_data':
+      return TrainFilter.CutKlines(result as Stock.KLineItem[]);
+    case 'get_kline_data_batch': {
+      if (Array.isArray(result)) {
+        return result;
+      }
+      let changed = false;
+      const next: Record<string, any> = {};
+      Object.keys(result).forEach((secid) => {
+        const cuted = TrainFilter.CutKlines(result[secid]);
+        if (cuted !== result[secid]) {
+          changed = true;
+        }
+        next[secid] = cuted;
+      });
+      return changed ? next : result;
+    }
+    case 'get_stock_trend':
+      return TrainFilter.CutTrends(result as Stock.TrendItem[]);
+    case 'get_boards_by_date_batch':
+    case 'get_up_down_ratio_batch':
+      return cutKeyedByDate(result, trainDate, (key) => key);
+    case 'get_board_stocks_batch':
+      return cutKeyedByDate(result, trainDate, (key) => key.substring(0, 8));
+    case 'get_strong_stocks_batch': {
+      if (!result.dates) {
+        return result;
+      }
+      const dates = cutKeyedByDate(result.dates, trainDate, (key) => key);
+      return dates === result.dates ? result : { ...result, dates };
+    }
+    case 'get_money_flow': {
+      const dates: string[] = result.detail_dates || [];
+      if (!dates.length) {
+        return result;
+      }
+      const keep: number[] = [];
+      dates.forEach((d, i) => {
+        if (normalizeToDay(d) <= trainDate) {
+          keep.push(i);
+        }
+      });
+      if (keep.length === dates.length) {
+        return result;
+      }
+      const pick = (arr: any) => (Array.isArray(arr) ? keep.map((i) => arr[i]) : arr);
+      return {
+        ...result,
+        detail_dates: pick(dates),
+        detail_main: pick(result.detail_main),
+        detail_retail: pick(result.detail_retail),
+        detail_medium: pick(result.detail_medium),
+        detail_amount: pick(result.detail_amount),
+      };
+    }
+    default:
+      return result;
+  }
+}
 
 // 缓存本地存储路径，避免每次 IPC 调用
 let cachedStoragePath: string | null = null;
@@ -57,13 +257,21 @@ function logError(error: any, method: string, extraInfo?: string) {
 async function callTushare(method: string, params: Record<string, any> = {}): Promise<any> {
   try {
     const token = store.getState().setting?.systemSetting?.tushareTokenSetting || '';
-    const args = [method, '--params', JSON.stringify(params)];
+    // 训练模式：收敛日期入参，避免 python 使用训练日期之后的数据计算指标
+    const trainParams = capTrainParams(method, params);
+    const args = [method, '--params', JSON.stringify(trainParams)];
     if (token) {
       args.push('--token', token);
     }
     const storagePath = await getStoragePath();
     if (storagePath) {
       args.push('--storage-path', storagePath);
+    }
+    // 训练模式：把当前训练日期作为全局数据截止日期传给 python 脚本，
+    // 使所有「默认取当天」的接口以及 python 内部互相调用都以训练日期为终点
+    const asOfDate = TrainFilter.GetTrainToDate();
+    if (asOfDate) {
+      args.push('--as-of-date', asOfDate);
     }
     const result = await execPyScript(TUSHARE_SCRIPT, args);
     // Python 脚本输出 JSON 字符串，每行可能包含 JSON 或 debug 信息
@@ -72,7 +280,8 @@ async function callTushare(method: string, params: Record<string, any> = {}): Pr
       for (let i = result.length - 1; i >= 0; i--) {
         const line = (result[i] as string).trim();
         if (line.startsWith('{') || line.startsWith('[')) {
-          return JSON.parse(line);
+          // 训练模式：裁剪返回的时间序列数据
+          return cutTrainResult(method, JSON.parse(line));
         }
       }
     }

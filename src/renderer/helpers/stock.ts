@@ -1,6 +1,7 @@
 import { batch } from 'react-redux';
 import store from '@/store/configureStore';
 import * as Utils from '@/utils';
+import * as TrainFilter from '@/utils/trainFilter';
 import * as Adapter from '@/utils/adapters';
 import * as Services from '@/services';
 import * as Helpers from '@/helpers';
@@ -840,6 +841,48 @@ function UpdateTradings(secids: string[], stocksMapping: Record<string, Stock.Al
   store.dispatch({ type: SYNC_STOCK_TRADING, payload: [tradings] });
 }
 
+const TRAIN_DAYS_CACHE: Record<string, string[]> = {};
+
+/**
+ * 获取训练窗口内的交易日列表（只返回日期，用于按交易日步进、跳过非交易日）
+ * 需要完整交易日历，因此临时关闭数据层过滤（结果按标的+窗口缓存，一次训练只取一次）
+ */
+export async function GetTrainTradingDays(secid: string, startDate: string, endDate: string): Promise<string[]> {
+  const cacheKey = `${secid}_${startDate}_${endDate}`;
+  if (TRAIN_DAYS_CACHE[cacheKey]) {
+    return TRAIN_DAYS_CACHE[cacheKey];
+  }
+  try {
+    const ks = await TrainFilter.WithoutTrainFilter(async () => {
+      const r = await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, 2000);
+      return (r && r.ks) || [];
+    });
+    const days = ks.map((k) => k.date).filter((d) => d >= startDate && d <= endDate);
+    if (days.length) {
+      TRAIN_DAYS_CACHE[cacheKey] = days;
+    }
+    return days;
+  } catch (error) {
+    console.log('获取训练交易日列表失败', error);
+    return [];
+  }
+}
+
+/** 获取训练窗口内每个交易日的收盘价（日K，已按当前训练日期过滤，不含未来数据） */
+export async function GetTrainDayCloses(secid: string): Promise<Record<string, number>> {
+  try {
+    const r = await Services.Stock.GetKFromEastmoney(secid, Enums.KLineType.Day, 2000);
+    const closes: Record<string, number> = {};
+    ((r && r.ks) || []).forEach((k) => {
+      closes[k.date] = k.sp;
+    });
+    return closes;
+  } catch (error) {
+    console.log('获取训练日收盘价失败', error);
+    return {};
+  }
+}
+
 export function UpdateStockData(
   prev: Stock.AllData | undefined,
   secid: string,
@@ -873,6 +916,14 @@ export function UpdateStockData(
         position: 0,
       },
     };
+  }
+  // 训练模式：写入 store 之前统一按当前训练日期截断
+  // 该出口是 redux 中所有时序数据的唯一入口（含实时推送），保证任何面板都不会出现未来数据
+  if (TrainFilter.IsTrainFilterOn()) {
+    trends = TrainFilter.CutTrends(trends);
+    tflows = TrainFilter.CutFlowTrends(tflows);
+    klines = TrainFilter.CutKlines(klines);
+    dflows = TrainFilter.CutFlowDlines(dflows);
   }
   if (detail) {
     data.detail = detail;
@@ -908,10 +959,16 @@ export function UpdateStockData(
   if (dflows) {
     data.dflows = dflows;
   }
+  if (TrainFilter.IsTrainFilterOn()) {
+    // prev 中可能残留训练开始前写入的未来数据，统一再截断一次
+    data.trends = TrainFilter.CutTrends(data.trends);
+    data.tflows = TrainFilter.CutFlowTrends(data.tflows);
+    data.dflows = TrainFilter.CutFlowDlines(data.dflows);
+  }
   if (klines) {
     // 合并数据
     const ktype = klines[0].type;
-    data.klines[ktype] = MergeKlines(data.klines[ktype], klines);
+    data.klines[ktype] = TrainFilter.CutKlines(MergeKlines(data.klines[ktype], klines));
     // 更新其他数据
     // 计算k线状态
     const kstates = ComputeKState(klines);

@@ -200,6 +200,25 @@ def _parse_date_str(date_str: str) -> Optional[date]:
         return None
 
 
+def _cut_klines_by_end_date(klines: Any, end_date: Any) -> Any:
+    """按截止日期裁剪 K 线序列
+
+    训练模式（或调用方指定了 end_date）时，数据层不允许出现截止日期之后的数据。
+    klines 元素需包含 date 字段；end_date 支持 YYYYMMDD / YYYY-MM-DD，为空表示不过滤。
+    """
+    if not isinstance(klines, list) or not klines or not end_date:
+        return klines
+    end_dt = _parse_date_str(end_date)
+    if end_dt is None:
+        return klines
+    result = []
+    for k in klines:
+        d = _parse_date_str(k.get('date', '')) if isinstance(k, dict) else None
+        if d is None or d <= end_dt:
+            result.append(k)
+    return result
+
+
 def _to_float(val) -> float:
     try:
         if val is None:
@@ -309,7 +328,7 @@ def _get_expected_last_trade_date(period: str = "daily") -> str:
     月线：最近一个交易月的起始（最近22个交易日中的第一个）
     """
     try:
-        today = datetime.now()
+        today = _now_date()
         cal_start = (today - timedelta(days=90)).strftime('%Y%m%d')
         cal_end = today.strftime('%Y%m%d')
         pro = get_pro()
@@ -335,7 +354,54 @@ def _get_expected_last_trade_date(period: str = "daily") -> str:
             return _standardize_date(trade_dates[-1])
     except Exception as e:
         print(f"[_get_expected_last_trade_date 失败] {period}: {e}")
-        return datetime.now().strftime('%Y-%m-%d')
+        return _now('%Y-%m-%d')
+
+
+# ============ 训练模式：全局数据截止日期（as-of date）============
+# 训练模式下，所有「以当天为默认终点」的取数与指标计算都以该日期为终点，
+# 保证无论外部是否传日期参数、内部如何互相调用，都不会使用训练日期之后的数据。
+# 未设置（None）时等同于真实当前时间。
+_AS_OF_DATE: Optional[str] = None  # YYYYMMDD
+
+
+def set_as_of_date(value: Any = None):
+    """设置全局数据截止日期（训练日期），传空表示恢复真实当前时间"""
+    global _AS_OF_DATE
+    if value is None or value == "":
+        _AS_OF_DATE = None
+        return
+    text = str(value).replace('-', '').replace('/', '').strip()
+    _AS_OF_DATE = text[:8] if len(text) >= 8 and text[:8].isdigit() else None
+
+
+def get_as_of_date() -> Optional[str]:
+    """当前数据截止日期（YYYYMMDD），未设置返回 None"""
+    return _AS_OF_DATE
+
+
+def _now(fmt: str = '%Y%m%d') -> str:
+    """当前数据截止时间（训练模式下为训练日期），按指定格式返回字符串"""
+    if _AS_OF_DATE:
+        try:
+            return datetime.strptime(_AS_OF_DATE, '%Y%m%d').strftime(fmt)
+        except ValueError:
+            pass
+    return datetime.now().strftime(fmt)
+
+
+def _now_date() -> date:
+    """当前数据截止日期（date 对象）"""
+    if _AS_OF_DATE:
+        try:
+            return datetime.strptime(_AS_OF_DATE, '%Y%m%d').date()
+        except ValueError:
+            pass
+    return datetime.now().date()
+
+
+def _now_timestamp() -> float:
+    """真实当前时间戳（仅用于防缓存参数等与数据窗口无关的场景）"""
+    return datetime.now().timestamp()
 
 
 def cached_api_call(func_name: str, max_age_hours: int, api_func, **kwargs):
@@ -525,10 +591,10 @@ class TushareAPI:
     @staticmethod
     def get_trade_dates(year: Optional[int] = None) -> List[str]:
         try:
-            target_year = year if year is not None else datetime.now().year
+            target_year = year if year is not None else _now_date().year
             cache_key = _cache_key("trade_dates", year=target_year)
             # 历史年份缓存 1 年，当前年份缓存 7 天
-            max_age = 8760 if target_year < datetime.now().year else 168
+            max_age = 8760 if target_year < _now_date().year else 168
             cached = read_cache(cache_key, max_age_hours=max_age)
             if cached is not None:
                 return cached
@@ -942,8 +1008,8 @@ class TushareAPI:
             if close_p == 0:
                 try:
                     daily_df = safe_api_call(pro.dc_daily, ts_code=ts_code,
-                                             start_date=(datetime.now() - timedelta(days=10)).strftime("%Y%m%d"),
-                                             end_date=datetime.now().strftime("%Y%m%d"))
+                                             start_date=(_now_date() - timedelta(days=10)).strftime("%Y%m%d"),
+                                             end_date=_now())
                     if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
                         daily_df = daily_df.sort_values('trade_date', ascending=False)
                         latest = daily_df.iloc[0]
@@ -1012,7 +1078,7 @@ class TushareAPI:
               缓存检查逻辑：看最后一条 K 线日期是否满足需求，命中后按 limit/end_date 裁剪
         """
         end_date_std = _standardize_date(end_date) if end_date else ''
-        end_date_fmt = end_date_std.replace('-', '') if end_date_std else datetime.now().strftime("%Y%m%d")
+        end_date_fmt = end_date_std.replace('-', '') if end_date_std else _now()
 
         # 统一缓存 key，与 limit/end_date 无关
         cache_key = f"kline_{secid}_{period}_{adjust}"
@@ -1090,12 +1156,12 @@ class TushareAPI:
                 elif isinstance(result, list) and len(result) == 0:
                     print(f"[market2 fallback] index_daily 返回空，尝试 dc_daily")
                 result = TushareAPI._get_board_kline(secid, period)
-                return result
+                return _cut_klines_by_end_date(result, end_date_fmt)
 
             if is_board_code(secid):
                 result = TushareAPI._get_board_kline(secid, period)
-                # 板块 K 线不走统一缓存
-                return result
+                # 板块 K 线不走统一缓存；按 end_date 裁剪，避免训练模式下出现未来数据
+                return _cut_klines_by_end_date(result, end_date_fmt)
 
             if is_index_code(secid):
                 result = TushareAPI._get_index_kline(secid, period, limit, end_date_fmt)
@@ -1280,7 +1346,7 @@ class TushareAPI:
         try:
             ts_code = convert_secid_to_ts_code(secid)
             end_date_std = _standardize_date(end_date) if end_date else ''
-            end_date_fmt = end_date_std.replace('-', '') if end_date_std else datetime.now().strftime("%Y%m%d")
+            end_date_fmt = end_date_std.replace('-', '') if end_date_std else _now()
 
             end_dt = datetime.strptime(end_date_fmt, "%Y%m%d")
             if limit > 0:
@@ -1367,17 +1433,17 @@ class TushareAPI:
         try:
             code = convert_secid_to_pure_code(secid)
             pro = get_pro()
-            today = datetime.now().strftime("%Y%m%d")
+            today = _now()
             # 用 trade_cal 获取最近交易日，避免非交易日导致 dc_daily 返回空
             trade_date = today
             try:
-                cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=30)).strftime('%Y%m%d'), end_date=today, is_open='1')
+                cal_df = pro.trade_cal(exchange='SSE', start_date=(_now_date() - timedelta(days=30)).strftime('%Y%m%d'), end_date=today, is_open='1')
                 if cal_df is not None and not cal_df.empty:
                     # trade_cal 默认返回降序，iloc[0] 才是最近交易日
                     trade_date = str(cal_df['cal_date'].iloc[0])
             except Exception:
                 pass
-            start_date = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+            start_date = (_now_date() - timedelta(days=730)).strftime("%Y%m%d")
 
             # dc_daily 需要 BKxxxx.DC 格式
             ts_code = f"{code}.DC" if not code.endswith(".DC") else code
@@ -1429,7 +1495,7 @@ class TushareAPI:
                 debug_info["range_empty"] = True
                 range_dfs = []
                 try:
-                    cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=10)).strftime('%Y%m%d'), end_date=today, is_open='1')
+                    cal_df = pro.trade_cal(exchange='SSE', start_date=(_now_date() - timedelta(days=10)).strftime('%Y%m%d'), end_date=today, is_open='1')
                     if cal_df is not None and not cal_df.empty:
                         # trade_cal 默认返回降序，sorted 升序后取 [-5:] 才是最近5天
                         recent_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
@@ -1711,7 +1777,7 @@ class TushareAPI:
         """
         try:
             pro = get_pro()
-            today = datetime.now().strftime('%Y%m%d')
+            today = _now()
 
             if data_source == "ths":
                 # ========== 同花顺数据源 ==========
@@ -1763,7 +1829,7 @@ class TushareAPI:
 
             # ========== 东财数据源（默认） ==========
             idx_type = "行业板块" if bk_type == "industry" else "概念板块"
-            df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
+            df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type, trade_date=today)
             if isinstance(df, dict) and df.get("error"):
                 return df
             if df is None or (isinstance(df, pd.DataFrame) and df.empty):
@@ -1773,7 +1839,7 @@ class TushareAPI:
             df = df.drop_duplicates(subset=['ts_code'], keep='first')
 
             # 获取资金流向数据
-            start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+            start_date = (_now_date() - timedelta(days=10)).strftime('%Y%m%d')
 
             # 行业板块用 moneyflow_ind_dc，概念板块用 moneyflow_con_dc
             if bk_type == "industry":
@@ -1854,7 +1920,7 @@ class TushareAPI:
                 "date": "20240101"
             }
         """
-        target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+        target_date = (date or _now()).replace("-", "")
         cache_key = f"boards_by_date_{bk_type}_{target_date}"
         cached = read_cache(cache_key, max_age_hours=8760 * 10)  # 历史数据几乎不变，缓存10年
 
@@ -1960,7 +2026,7 @@ class TushareAPI:
             code = convert_secid_to_pure_code(secid)
             is_dc = code.startswith("BK")
             data_source = "dc" if is_dc else "ths"
-            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+            target_date = (date or _now()).replace("-", "")
 
             pro = get_pro()
 
@@ -2158,7 +2224,7 @@ class TushareAPI:
         - 查询时检查目标日期是否已有缓存，有则命中；无则请求后合并
         """
         code = convert_secid_to_pure_code(secid)
-        target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+        target_date = (date or _now()).replace("-", "")
 
         # 统一缓存 key，与 date 无关
         cache_key = f"board_stocks_{secid}"
@@ -2459,7 +2525,7 @@ class TushareAPI:
                 return {"error": f"Invalid SW industry code: {secid}"}
 
             ts_code = f"{code}.SI"
-            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+            target_date = (date or _now()).replace("-", "")
 
             pro = get_pro()
 
@@ -2478,7 +2544,7 @@ class TushareAPI:
             # 2. 获取最近交易日
             trade_date = target_date
             try:
-                cal_df = pro.trade_cal(exchange='SSE', start_date=(datetime.now() - timedelta(days=10)).strftime('%Y%m%d'), end_date=target_date, is_open='1')
+                cal_df = pro.trade_cal(exchange='SSE', start_date=(_now_date() - timedelta(days=10)).strftime('%Y%m%d'), end_date=target_date, is_open='1')
                 if cal_df is not None and not cal_df.empty:
                     trade_date = str(cal_df['cal_date'].iloc[0])
             except Exception:
@@ -2603,7 +2669,7 @@ class TushareAPI:
             if concept_source == "dc":
                 # 东财概念：使用 dc_member（按板块缓存，trade_date 为 key）
                 ts_code = f"{concept_code}.DC" if not concept_code.endswith(".DC") else concept_code
-                trade_date = datetime.now().strftime('%Y%m%d')
+                trade_date = _now()
                 df = _cached_dc_member(pro, ts_code, trade_date)
                 if isinstance(df, dict) and df.get("error"):
                     return []
@@ -2922,8 +2988,8 @@ class TushareAPI:
         """
         try:
             pro = get_pro()
-            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
-            today_str = datetime.now().strftime('%Y%m%d')
+            target_date = (date or _now()).replace("-", "")
+            today_str = _now()
             cache_key = "up_down_ratio_map"
 
             # 读取统一缓存文件（历史日期长期有效，用大 max_age）
@@ -3080,8 +3146,8 @@ class TushareAPI:
         """
         try:
             pro = get_pro()
-            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
-            today_str = datetime.now().strftime('%Y%m%d')
+            target_date = (date or _now()).replace("-", "")
+            today_str = _now()
             cache_key = "market_activity_stats_map"
 
             # 读取统一缓存文件（历史日期长期有效）
@@ -3327,7 +3393,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             else:
                 date = date.replace("-", "")
             df = safe_api_call(pro.limit_list, trade_date=date)
@@ -3365,7 +3431,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             else:
                 date = date.replace("-", "")
             df = safe_api_call(pro.limit_list, trade_date=date)
@@ -3434,7 +3500,7 @@ class TushareAPI:
             ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
             # 使用 major_news 接口（需要单独权限，fallback 到空列表）
             try:
-                df = safe_api_call(pro.major_news, ts_code=ts_code, start_date=(datetime.now() - timedelta(days=30)).strftime('%Y%m%d'), end_date=datetime.now().strftime('%Y%m%d'))
+                df = safe_api_call(pro.major_news, ts_code=ts_code, start_date=(_now_date() - timedelta(days=30)).strftime('%Y%m%d'), end_date=_now())
                 if isinstance(df, pd.DataFrame) and not df.empty:
                     records = df_to_records(df)
                     start = (page - 1) * page_size
@@ -3579,7 +3645,7 @@ class TushareAPI:
             return TushareAPI._calc_money_flow_from_row_dc(row)
 
     @staticmethod
-    def get_money_flow(code: str, days: Optional[int] = None) -> Dict[str, Any]:
+    def get_money_flow(code: str, days: Optional[int] = None, trade_date: Optional[str] = None) -> Dict[str, Any]:
         """获取资金流向：
         - 个股用 moneyflow_dc（东财个股），字段为净额（万元），数据与东方财富APP一致
         - 板块用 moneyflow_ind_dc（东财板块），字段为买入/卖出金额（元）
@@ -3598,10 +3664,14 @@ class TushareAPI:
         - detail_dates: 每日明细的日期列表
         - detail_main: 每日主力净流入列表
         - detail_retail: 每日散户净流入列表
+
+        trade_date 指定时（如训练模式），所有时间窗口以该交易日为终点，
+        不会使用该日期之后的行情数据，保证指标不包含未来数据。
         """
         try:
             pro = get_pro()
-            today = datetime.now().strftime('%Y%m%d')
+            # 训练模式：以指定交易日为终点（支持 YYYYMMDD / YYYY-MM-DD）
+            today = (trade_date or _now()).replace('-', '').replace('/', '')
 
             # 判断板块/个股
             is_board = code.startswith("BK") or code.startswith("90.")
@@ -3609,7 +3679,7 @@ class TushareAPI:
             source = "dc"
 
             if days:
-                start_date = (datetime.now() - timedelta(days=days + 45)).strftime('%Y%m%d')
+                start_date = (datetime.strptime(today, '%Y%m%d') - timedelta(days=days + 45)).strftime('%Y%m%d')
 
                 if is_board:
                     ts_code = f"{code}.DC" if not code.endswith(".DC") else code
@@ -5377,7 +5447,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             else:
                 date = date.replace("-", "")
             df = safe_api_call(pro.top_list, trade_date=date)
@@ -5395,7 +5465,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             else:
                 date = date.replace("-", "")
             df = safe_api_call(pro.top_inst, trade_date=date)
@@ -5415,7 +5485,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             else:
                 date = date.replace("-", "")
             df = safe_api_call(pro.margin, trade_date=date)
@@ -5433,7 +5503,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             else:
                 date = date.replace("-", "")
             df = safe_api_call(pro.margin_detail, ts_code=ts_code, trade_date=date)
@@ -5483,7 +5553,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             else:
                 date = date.replace("-", "")
             df = safe_api_call(pro.block_trade, trade_date=date)
@@ -5515,7 +5585,7 @@ class TushareAPI:
         try:
             pro = get_pro()
             if date is None:
-                date = datetime.now().strftime("%Y%m%d")
+                date = _now()
             else:
                 date = date.replace("-", "")
             df = safe_api_call(pro.repurchase, ann_date=date)
@@ -6825,8 +6895,11 @@ def main():
     parser.add_argument("--params", "-p", help="JSON格式的参数", default="{}")
     parser.add_argument("--token", "-t", help="Tushare Pro Token", default=None)
     parser.add_argument("--storage-path", "-s", help="本地存储根目录路径（用于缓存）", default=None)
+    parser.add_argument("--as-of-date", "-d", dest="as_of_date", help="数据截止日期（训练模式），YYYY-MM-DD 或 YYYYMMDD", default=None)
 
-    args = parser.parse_args()
+    # 使用 parse_known_args：调用方（渲染进程）可能传入新版本参数，
+    # 旧脚本不应因此直接报错退出
+    args, _unknown_args = parser.parse_known_args()
 
     try:
         params = json.loads(args.params)
@@ -6838,15 +6911,23 @@ def main():
     if args.storage_path:
         set_cache_dir(args.storage_path)
 
-    # 初始化
-    if args.token:
-        _mod.init_pro(args.token)
-    else:
-        _mod.init_pro()
+    # 训练模式：设置全局数据截止日期
+    # 注意：脚本以 __main__ 运行时，__main__ 与 tushare_api 是两个独立命名空间，
+    # 类方法内部读取的是 __main__ 的全局变量，因此两个命名空间都要设置。
+    set_as_of_date(args.as_of_date)
+    try:
+        _mod.set_as_of_date(args.as_of_date)
+    except Exception:
+        pass
 
-    if _mod._pro_api is None:
-        print(json.dumps({"error": "Tushare Pro Token 未设置，请在设置中配置 token"}, ensure_ascii=False))
-        sys.exit(1)
+    # 初始化（同上，两个命名空间都要初始化）
+    init_pro(args.token)
+    try:
+        _mod.init_pro(args.token)
+    except Exception:
+        pass
+
+    if _pro_api is None:
         print(json.dumps({"error": "Tushare Pro Token 未设置，请在设置中配置 token"}, ensure_ascii=False))
         sys.exit(1)
 
@@ -6960,7 +7041,7 @@ class LimitUpScorer:
 
     def _get_kline_cached(self, secid: str, days: int = 120, end_date: Optional[str] = None) -> pd.DataFrame:
         """获取个股K线（带缓存，复用 tushare_api 的 get_kline_data）"""
-        end_date_std = _standardize_date(end_date) if end_date else datetime.now().strftime('%Y-%m-%d')
+        end_date_std = _standardize_date(end_date) if end_date else _now('%Y-%m-%d')
         cache_key = f"scorer_kline_{secid}_{days}_{end_date_std}"
         cached = read_cache(cache_key, max_age_hours=24)
         if cached is not None and isinstance(cached, pd.DataFrame):
