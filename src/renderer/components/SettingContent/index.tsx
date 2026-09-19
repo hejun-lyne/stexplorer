@@ -1,7 +1,7 @@
 import React, { useCallback, useState, useEffect } from 'react';
 import classnames from 'classnames';
 import { useSelector, useDispatch } from 'react-redux';
-import { InputNumber, Radio, Badge, Switch, Slider, TimePicker, Input, Button, DatePicker, Alert, message } from 'antd';
+import { InputNumber, Radio, Badge, Switch, Slider, TimePicker, Input, Button, DatePicker, Alert, Modal, message } from 'antd';
 import moment from 'moment';
 import dayjs from 'dayjs';
 
@@ -13,6 +13,7 @@ import { ReactComponent as ThemeIcon } from '@/assets/icons/t-shirt.svg';
 import { ReactComponent as HintIcon } from '@/assets/icons/notification.svg';
 import { defaultSystemSetting } from '@/helpers/setting';
 import { setSystemSettingAction } from '@/actions/setting';
+import { clearTrainProgressAction, restartTrainAction, resumeTrainAction, saveTrainProgressAction } from '@/actions/train';
 import { StoreState } from '@/reducers/types';
 import * as Enums from '@/utils/enums';
 import styles from './index.scss';
@@ -51,6 +52,8 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     initialCapital,
     commissionRate,
   } = useSelector((state: StoreState) => state.setting.systemSetting);
+  // 当前训练会话（交易日列表 / 未完成进度）
+  const { days, daysSecid, daysName, progress } = useSelector((state: StoreState) => state.train);
   // 数据来源
   const [fundApiType, setFundApiType] = useState(fundApiTypeSetting);
   // 训练模式
@@ -59,6 +62,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
   const [trainEnd, setTrainEnd] = useState(trainEndDate);
   const [capital, setCapital] = useState(initialCapital);
   const [commission, setCommission] = useState(commissionRate || defaultSystemSetting.commissionRate);
+  const [showResumeModal, setShowResumeModal] = useState(false);
   // 外观设置
   const [concise, setConcise] = useState(conciseSetting);
   const [lowKey, setLowKey] = useState(lowKeySetting);
@@ -145,40 +149,152 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     [systemSetting]
   );
 
-  // 开始 / 结束训练
-  const onToggleTrain = useCallback(
-    (checked: boolean) => {
-      if (checked) {
-        if (!trainStart || !trainEnd) {
-          message.warning('请先设置训练的开始日期与结束日期');
-          return;
-        }
-        if (moment(trainEnd).isBefore(moment(trainStart))) {
-          message.warning('训练结束日期不能早于开始日期');
-          return;
-        }
-        if (!capital || capital <= 0) {
-          message.warning('请设置有效的初始资金');
-          return;
-        }
-      }
-      setIstrain(checked);
-      applyTrainSetting({
-        ontrain: checked,
-        // 开始时从配置的开始日期起算，具体首个交易日由详情页工具栏校正
-        trainDate: checked ? trainStart : systemSetting.trainDate,
-        trainStartDate: trainStart,
-        trainEndDate: trainEnd,
+  // 开始训练
+  const startTrain = useCallback(() => {
+    setIstrain(true);
+    applyTrainSetting({
+      ontrain: true,
+      // 开始时从配置的开始日期起算，具体首个交易日由详情页工具栏校正
+      trainDate: trainStart,
+      trainStartDate: trainStart,
+      trainEndDate: trainEnd,
+      initialCapital: capital,
+      commissionRate: commission,
+    });
+    message.success('训练已开始，请在详情页使用训练工具栏');
+  }, [applyTrainSetting, trainStart, trainEnd, capital, commission]);
+
+  // 结束训练：未完成则保存进度，下次开启训练时可选择继续
+  const stopTrain = useCallback(() => {
+    const currentDate = systemSetting.trainDate;
+    const lastDay = days.length ? days[days.length - 1] : '';
+    const finished = !!lastDay && !!currentDate && currentDate >= lastDay;
+    setIstrain(false);
+    applyTrainSetting({ ontrain: false });
+    if (finished) {
+      dispatch(clearTrainProgressAction());
+      message.success('训练已结束');
+      return;
+    }
+    dispatch(
+      saveTrainProgressAction({
+        secid: daysSecid,
+        name: daysName,
+        startDate: trainStart || systemSetting.trainStartDate,
+        endDate: trainEnd || systemSetting.trainEndDate,
+        currentDate,
+        total: days.length,
+        days,
         initialCapital: capital,
         commissionRate: commission,
-      });
-      message.success(checked ? '训练已开始，请在详情页使用训练工具栏' : '训练已结束');
+        savedAt: moment().format('YYYY-MM-DD HH:mm:ss'),
+      })
+    );
+    message.success('训练已暂停并保存进度，下次开启训练时可继续');
+  }, [
+    applyTrainSetting,
+    clearTrainProgressAction,
+    saveTrainProgressAction,
+    systemSetting.trainDate,
+    systemSetting.trainStartDate,
+    systemSetting.trainEndDate,
+    trainStart,
+    trainEnd,
+    capital,
+    commission,
+    days,
+    daysSecid,
+    daysName,
+  ]);
+
+  const onToggleTrain = useCallback(
+    (checked: boolean) => {
+      if (!checked) {
+        stopTrain();
+        return;
+      }
+      if (!trainStart || !trainEnd) {
+        message.warning('请先设置训练的开始日期与结束日期');
+        return;
+      }
+      if (moment(trainEnd).isBefore(moment(trainStart))) {
+        message.warning('训练结束日期不能早于开始日期');
+        return;
+      }
+      if (!capital || capital <= 0) {
+        message.warning('请设置有效的初始资金');
+        return;
+      }
+      // 存在未完成的训练 → 询问继续还是重新开始
+      if (progress) {
+        setShowResumeModal(true);
+        return;
+      }
+      startTrain();
     },
-    [applyTrainSetting, trainStart, trainEnd, capital, commission, systemSetting.trainDate]
+    [progress, startTrain, stopTrain, trainStart, trainEnd, capital]
   );
+
+  // 继续上一次训练
+  const handleResumeTrain = useCallback(() => {
+    setShowResumeModal(false);
+    setIstrain(true);
+    if (progress) {
+      setTrainStart(progress.startDate);
+      setTrainEnd(progress.endDate);
+      setCapital(progress.initialCapital || capital);
+      setCommission(progress.commissionRate >= 0 ? progress.commissionRate : commission);
+    }
+    dispatch(resumeTrainAction());
+    message.success('已继续上一次训练');
+  }, [progress, capital, commission, dispatch]);
+
+  // 重新开始训练（清除上次进度与模拟买卖记录）
+  const handleRestartTrain = useCallback(() => {
+    setShowResumeModal(false);
+    setIstrain(true);
+    dispatch(restartTrainAction());
+    message.success('已重新开始训练，上一次训练的模拟买卖记录已清除');
+  }, [dispatch]);
   return (
     <CustomDrawerContent title="设置" enterText="保存" onClose={onClose} onEnter={onSave}>
       <style>{` html { font-size: ${baseFontSize}px }`}</style>
+      <Modal
+        title="发现未完成的训练"
+        visible={showResumeModal}
+        closable={false}
+        maskClosable={false}
+        footer={[
+          <Button key="cancel" onClick={() => setShowResumeModal(false)}>
+            取消
+          </Button>,
+          <Button key="restart" danger onClick={handleRestartTrain}>
+            重新开始
+          </Button>,
+          <Button key="resume" type="primary" onClick={handleResumeTrain}>
+            继续上一次训练
+          </Button>,
+        ]}
+      >
+        {progress && (
+          <div style={{ lineHeight: 1.9 }}>
+            <div>
+              训练标的：{progress.name || progress.secid}（{progress.secid}）
+            </div>
+            <div>
+              训练区间：{progress.startDate} ~ {progress.endDate}
+            </div>
+            <div>
+              上次进度：{progress.currentDate}（
+              {Math.max(1, progress.days.indexOf(progress.currentDate) + 1)}/{progress.total || progress.days.length} 个交易日）
+            </div>
+            <div>初始资金：{progress.initialCapital} ｜ 佣金：{(progress.commissionRate * 100).toFixed(4)}%</div>
+            <div style={{ marginTop: 8, color: '#999', fontSize: 12 }}>
+              「继续上一次训练」保留上次的模拟持仓与买卖记录；「重新开始」将清除该标的上一次训练的模拟买卖记录，并从当前配置的开始日期重新训练。
+            </div>
+          </div>
+        )}
+      </Modal>
       <div className={styles.content}>
         <StandCard icon={<DataSourceIcon />} title="百度云盘">
           <div className={classnames(styles.setting, 'card-body')}>
@@ -298,6 +414,15 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
                 开启训练后，所有时间序列数据（K线、分时、资金流）都会在数据层按「当前训练日期」截断，网络数据、缓存数据与实时推送都不会出现未来数据；明细页顶部工具栏可按交易日推进（自动跳过非交易日）并模拟买卖。推进到结束日期后提示训练结束，结算并归档后可在左侧栏「训练归档」中查看。以上配置修改即时生效。
               </span>
             </section>
+            {progress && !istrain && (
+              <section>
+                <label></label>
+                <span style={{ fontSize: 12, color: '#fa541c' }}>
+                  有未完成的训练：{progress.name || progress.secid}，上次进行到 {progress.currentDate}（
+                  {Math.max(1, progress.days.indexOf(progress.currentDate) + 1)}/{progress.total || progress.days.length}）—— 再次开启训练时可选择「继续上一次训练」或「重新开始」。
+                </span>
+              </section>
+            )}
           </div>
         </StandCard>
         <StandCard icon={<ThemeIcon />} title="外观设置">

@@ -114,11 +114,35 @@ export function syncRemoteTrainProgressAction(): ThunkAction {
   };
 }
 
-/** 保存未完成训练的进度 */
+/** 保存未完成训练的进度（读取远端后再写入，用于关闭训练等低频场景） */
 export function saveTrainProgressAction(progress: Train.Progress): ThunkAction {
   return (dispatch) => {
     dispatch({ type: SYNC_TRAIN_PROGRESS, payload: [progress, moment(new Date()).format('YYYY-MM-DD HH:mm:ss')] });
     dispatch(syncRemoteTrainProgressAction());
+  };
+}
+
+/**
+ * 直接写入训练进度（不读取远端）
+ * 训练每推进一个交易日都会调用，走轻量路径避免高频读写
+ */
+export function writeTrainProgressAction(progress: Train.Progress): ThunkAction {
+  return (dispatch, getState) => {
+    const modified = moment(new Date()).format('YYYY-MM-DD HH:mm:ss');
+    dispatch({ type: SYNC_TRAIN_PROGRESS, payload: [progress, modified] });
+    try {
+      const {
+        storage: { storage },
+      } = getState();
+      if (storage) {
+        // eslint-disable-next-line promise/no-nesting
+        storage.WriteRemoteTrainProgress(progress, modified).catch(() => {
+          // 单次写入失败不阻塞训练
+        });
+      }
+    } catch (error) {
+      console.log('写入训练进度出错', error);
+    }
   };
 }
 
@@ -140,6 +164,10 @@ export function resumeTrainAction(): ThunkAction {
     if (!progress) {
       dispatch(startTrainAction());
       return;
+    }
+    // 恢复交易日列表，使训练工具栏无需重新请求即可继续按天推进
+    if (progress.days && progress.days.length) {
+      dispatch(setTrainDaysAction(`${progress.secid}_${progress.startDate}_${progress.endDate}`, progress.secid, progress.name, progress.days));
     }
     dispatch(
       setSystemSettingAction({

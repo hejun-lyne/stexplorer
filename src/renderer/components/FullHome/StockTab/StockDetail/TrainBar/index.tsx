@@ -16,14 +16,20 @@ import {
   deleteStockTagAction,
   syncStockMarktypeAction,
 } from '@/actions/stock';
-import { addTrainArchiveAction, setTrainCurrentDateAction, stopTrainAction } from '@/actions/train';
+import {
+  addTrainArchiveAction,
+  clearTrainProgressAction,
+  setTrainCurrentDateAction,
+  setTrainDaysAction,
+  stopTrainAction,
+  TRAIN_TYPE,
+  writeTrainProgressAction,
+} from '@/actions/train';
 import { Stock } from '@/types/stock';
 import { MarkType } from '@/utils/enums';
 import * as Utils from '@/utils';
 import TrainSettlement from '../TrainSettlement';
 
-/** 训练模式买卖点的类型标记，用于和手动标记点区分 */
-export const TRAIN_TYPE = 'train';
 /** 工具栏高度：开启训练模式（两行）/ 关闭训练模式（仅标签行），详情区据此撑满剩余高度 */
 export const TRAIN_BAR_HEIGHT = 60;
 export const TRAIN_BAR_HEIGHT_BASE = 34;
@@ -58,8 +64,6 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
     (state: StoreState) => state.setting.systemSetting
   );
   const [marktype, setMarktype] = useState(config?.marktype || 0);
-  /** 训练窗口内的交易日（跳过非交易日） */
-  const [days, setDays] = useState<string[]>([]);
   /** 结算结果（弹窗展示） */
   const [settlement, setSettlement] = useState<Train.ArchiveRecord | null>(null);
   const [settling, setSettling] = useState(false);
@@ -69,25 +73,54 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
   const currentDay = trainDate || '';
   const capital = initialCapital > 0 ? initialCapital : DEFAULT_CAPITAL;
   const commission = commissionRate >= 0 ? commissionRate : DEFAULT_COMMISSION;
+  /** 训练窗口内的交易日（跳过非交易日），放在 redux 中以便设置页保存进度时共用 */
+  const { days, daysKey } = useSelector((state: StoreState) => state.train);
+  const stockName = stock?.detail?.name || secid;
+  const currentDaysKey = `${secid}_${startDate}_${endDate}`;
 
   // 载入训练窗口内的交易日，用于按天推进（自动跳过非交易日）
+  // 若已存在同窗口的交易日列表（含「继续上一次训练」恢复的进度）则直接复用
   useEffect(() => {
-    let mounted = true;
     if (!ontrain || !startDate || !endDate) {
-      setDays([]);
-      return () => {
-        mounted = false;
-      };
+      return;
     }
+    if (daysKey === currentDaysKey && days.length) {
+      return;
+    }
+    let mounted = true;
     Helpers.Stock.GetTrainTradingDays(secid, startDate, endDate).then((ds) => {
-      if (mounted) {
-        setDays(ds);
+      if (mounted && ds.length) {
+        dispatch(setTrainDaysAction(currentDaysKey, secid, stockName, ds));
       }
     });
     return () => {
       mounted = false;
     };
-  }, [ontrain, secid, startDate, endDate]);
+  }, [ontrain, secid, startDate, endDate, currentDaysKey, daysKey, days.length, stockName]);
+
+  /** 每次推进（或校正）训练日期后写入进度，避免中途退出丢失进度 */
+  const saveProgress = useCallback(
+    (date: string) => {
+      if (!date) {
+        return;
+      }
+      dispatch(
+        writeTrainProgressAction({
+          secid,
+          name: stockName,
+          startDate: startDate || (days.length ? days[0] : ''),
+          endDate,
+          currentDate: date,
+          total: days.length,
+          days,
+          initialCapital: capital,
+          commissionRate: commission,
+          savedAt: moment().format('YYYY-MM-DD HH:mm:ss'),
+        })
+      );
+    },
+    [secid, stockName, startDate, endDate, days, capital, commission]
+  );
 
   // 校正训练日期：保证当前日期落在交易日上
   useEffect(() => {
@@ -99,7 +132,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
     }
     const first = days.find((d) => d >= currentDay) || days[days.length - 1];
     dispatch(setTrainCurrentDateAction(first));
-  }, [ontrain, days, currentDay]);
+    saveProgress(first);
+  }, [ontrain, days, currentDay, saveProgress]);
 
   const currentIdx = days.indexOf(currentDay);
   const nextDay = currentIdx >= 0 && currentIdx < days.length - 1 ? days[currentIdx + 1] : '';
@@ -170,10 +204,12 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
     }
     // 按交易日推进（days 已跳过非交易日）
     dispatch(setTrainCurrentDateAction(nextDay));
+    // 每推进一天落盘一次进度
+    saveProgress(nextDay);
     if (days[days.length - 1] === nextDay) {
       message.info('已推进到训练结束日期，请进行结算归档');
     }
-  }, [nextDay, days]);
+  }, [nextDay, days, saveProgress]);
 
   const trade = useCallback(
     (isBuy: boolean) => {
@@ -221,6 +257,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
       dispatch(addTrainArchiveAction(record));
       // 归档后清理本次训练的买卖标记，避免影响下一次训练
       dispatch(clearStockTradePointAction(secid, true, TRAIN_TYPE));
+      // 训练已结算归档，清除未完成进度
+      dispatch(clearTrainProgressAction());
       setSettlement(record);
       dispatch(stopTrainAction());
       message.success('训练已结束，结算结果已归档到左侧“训练归档”');
