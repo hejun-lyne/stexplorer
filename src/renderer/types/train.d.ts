@@ -54,4 +54,20 @@ declare namespace Train {
     name: string;
     createdAt: string;
   }
+
+  /**
+   * 未完成训练的进度（关闭训练模式时保存，下次开启训练时可选择继续）
+   */
+  export interface Progress {
+    secid: string; // 训练标的
+    name: string; // 标的名称
+    startDate: string; // 训练开始日期
+    endDate: string; // 配置的训练结束日期
+    currentDate: string; // 上次进行到的交易日
+    total: number; // 训练窗口内交易日总数
+    days: string[]; // 训练窗口内交易日列表
+    initialCapital: number; // 初始资金
+    commissionRate: number; // 佣金比例
+    savedAt: string; // 保存时间
+  }
 }

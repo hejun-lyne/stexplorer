@@ -2,9 +2,22 @@ import { ThunkAction } from '@/reducers/types';
 import { batch } from 'react-redux';
 import moment from 'moment';
 import { setSystemSettingAction, SYNC_SYSTEM_SETTING } from './setting';
+import { clearStockTradePointAction } from './stock';
 
+/** 训练模式买卖点的类型标记，用于和手动标记点区分 */
+export const TRAIN_TYPE = 'train';
+
+export const SYNC_TRAIN_DAYS = 'SYNC_TRAIN_DAYS';
+export const SYNC_TRAIN_PROGRESS = 'SYNC_TRAIN_PROGRESS';
 export const SYNC_TRAIN_ARCHIVES = 'SYNC_TRAIN_ARCHIVES';
 export const SET_TRAIN_SYNING = 'SET_TRAIN_SYNING';
+
+/** 记录当前训练会话的交易日列表（训练工具栏与设置页共用） */
+export function setTrainDaysAction(daysKey: string, secid: string, name: string, days: string[]): ThunkAction {
+  return (dispatch) => {
+    dispatch({ type: SYNC_TRAIN_DAYS, payload: [daysKey, secid, name, days] });
+  };
+}
 
 /**
  * 仅更新系统设置中的当前训练日期（不触发远端同步，训练按天推进时频繁调用）
@@ -49,6 +62,124 @@ export function stopTrainAction(): ThunkAction {
     dispatch(setSystemSettingAction({ ...systemSetting, ontrain: false }));
   };
 }
+
+// ==================== 未完成训练进度 ====================
+
+export function syncRemoteTrainProgressAction(): ThunkAction {
+  return (dispatch, getState) => {
+    try {
+      const {
+        train: { progress, progressModified },
+        storage: { storage },
+      } = getState();
+      if (!storage) {
+        throw new Error('storage未初始化');
+      }
+      storage
+        .ReadRemoteTrainProgress()
+        .then((content) => {
+          if (content && content.lastModified >= progressModified) {
+            const data = content.data as Train.Progress | null;
+            if (data && data.currentDate) {
+              batch(() => {
+                dispatch({ type: SYNC_TRAIN_PROGRESS, payload: [data, content.lastModified] });
+                dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '读取训练进度完成' } });
+              });
+              return false;
+            }
+          }
+          return true;
+        })
+        .then((content) => {
+          if (content) {
+            // 本地有进度（或刚被清除）时写回存储，保证「继续/重新开始」的选择被持久化
+            // eslint-disable-next-line promise/no-nesting
+            storage
+              .WriteRemoteTrainProgress(progress, progressModified)
+              .then((success) => {
+                if (!success) {
+                  dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '写入训练进度失败' } });
+                }
+                return success;
+              })
+              .catch(() => {
+                dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '写入训练进度失败' } });
+              });
+          }
+          return content;
+        });
+    } catch (error) {
+      console.log('同步训练进度出错', error);
+    }
+  };
+}
+
+/** 保存未完成训练的进度 */
+export function saveTrainProgressAction(progress: Train.Progress): ThunkAction {
+  return (dispatch) => {
+    dispatch({ type: SYNC_TRAIN_PROGRESS, payload: [progress, moment(new Date()).format('YYYY-MM-DD HH:mm:ss')] });
+    dispatch(syncRemoteTrainProgressAction());
+  };
+}
+
+/** 清除未完成训练进度 */
+export function clearTrainProgressAction(): ThunkAction {
+  return (dispatch) => {
+    dispatch({ type: SYNC_TRAIN_PROGRESS, payload: [null, moment(new Date()).format('YYYY-MM-DD HH:mm:ss')] });
+    dispatch(syncRemoteTrainProgressAction());
+  };
+}
+
+/** 继续上一次未完成的训练 */
+export function resumeTrainAction(): ThunkAction {
+  return (dispatch, getState) => {
+    const {
+      train: { progress },
+      setting: { systemSetting },
+    } = getState();
+    if (!progress) {
+      dispatch(startTrainAction());
+      return;
+    }
+    dispatch(
+      setSystemSettingAction({
+        ...systemSetting,
+        ontrain: true,
+        trainStartDate: progress.startDate || systemSetting.trainStartDate,
+        trainEndDate: progress.endDate || systemSetting.trainEndDate,
+        initialCapital: progress.initialCapital || systemSetting.initialCapital,
+        commissionRate: progress.commissionRate >= 0 ? progress.commissionRate : systemSetting.commissionRate,
+        trainDate: progress.currentDate,
+      })
+    );
+  };
+}
+
+/** 重新开始训练（丢弃上次进度，并清除该标的上一次训练的模拟买卖记录） */
+export function restartTrainAction(): ThunkAction {
+  return (dispatch, getState) => {
+    const {
+      train: { progress },
+      setting: { systemSetting },
+    } = getState();
+    if (progress && progress.secid) {
+      dispatch(clearStockTradePointAction(progress.secid, true, TRAIN_TYPE));
+    }
+    batch(() => {
+      dispatch({ type: SYNC_TRAIN_PROGRESS, payload: [null, moment(new Date()).format('YYYY-MM-DD HH:mm:ss')] });
+      dispatch(
+        setSystemSettingAction({
+          ...systemSetting,
+          ontrain: true,
+          trainDate: systemSetting.trainStartDate || (progress ? progress.startDate : systemSetting.trainDate),
+        })
+      );
+    });
+    dispatch(syncRemoteTrainProgressAction());
+  };
+}
+
+// ==================== 训练归档 ====================
 
 export function syncRemoteTrainArchivesAction(): ThunkAction {
   return (dispatch, getState) => {

@@ -1227,11 +1227,17 @@ async function init() {
       child.on('close', (code: number | null) => {
         if (code !== 0) {
           const stderr = stderrLines.join('');
+          const stdout = stdoutLines.join('');
           console.error('Python script error: exit code', code);
           if (stderr) {
             console.error('Python stderr output:', stderr);
           }
-          reject(new Error(`process exited with code ${code}${stderr ? ': ' + stderr : ''}`));
+          if (stdout) {
+            console.error('Python stdout output:', stdout);
+          }
+          // stderr 可能只有第三方库警告，补充 stdout（脚本的错误信息通常打印在 stdout 的 JSON 里）
+          const detail = `${stderr ? ': ' + stderr.trim() : ''}${stdout.trim() ? '\n' + stdout.trim() : ''}`;
+          reject(new Error(`process exited with code ${code}${detail}`));
           return;
         }
         console.log(`${config.fileName} finished.`);

@@ -6907,9 +6907,13 @@ def main():
         print(json.dumps({"error": "Invalid JSON params"}, ensure_ascii=False))
         sys.exit(1)
 
-    # 设置缓存目录
+    # 设置缓存目录（同样要覆盖方法实际使用的命名空间）
     if args.storage_path:
         set_cache_dir(args.storage_path)
+        try:
+            _mod.set_cache_dir(args.storage_path)
+        except Exception:
+            pass
 
     # 训练模式：设置全局数据截止日期
     # 注意：脚本以 __main__ 运行时，__main__ 与 tushare_api 是两个独立命名空间，
@@ -6920,15 +6924,22 @@ def main():
     except Exception:
         pass
 
-    # 初始化（同上，两个命名空间都要初始化）
+    # 初始化：脚本以 __main__ 运行时，本文件中后段的 LimitUpScorer 代码会执行
+    # `from tushare_api import (... TushareAPI, init_pro, get_pro, _pro_api ...)`，
+    # 使 __main__ 下的 TushareAPI / init_pro / _pro_api 实际都指向 tushare_api 模块命名空间，
+    # 方法内部读取的也是该命名空间的全局变量，因此 token 校验必须以 _mod 为准。
     init_pro(args.token)
     try:
         _mod.init_pro(args.token)
     except Exception:
         pass
 
-    if _pro_api is None:
-        print(json.dumps({"error": "Tushare Pro Token 未设置，请在设置中配置 token"}, ensure_ascii=False))
+    effective_pro = _mod._pro_api if _mod._pro_api is not None else _pro_api
+    if effective_pro is None:
+        message = json.dumps({"error": "Tushare Pro Token 未设置，请在设置中配置 token"}, ensure_ascii=False)
+        # 同时写到 stderr，便于渲染进程把失败原因展示出来
+        sys.stderr.write(message + "\n")
+        print(message)
         sys.exit(1)
 
     api = TushareAPI()
