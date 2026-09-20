@@ -145,10 +145,27 @@
   background-color: var(--nav-background-color);
 }
 .archiveItem {
-  padding: 4px 10px;
+  position: relative;
+  // 右侧留出删除图标的位置，避免标题/副标题文字压到图标上
+  padding: 4px 18px 4px 10px;
   cursor: pointer;
   &:hover {
     background-color: var(--top-background-color);
+    .archiveDel {
+      opacity: 1;
+    }
+  }
+}
+.archiveDel {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 12px;
+  color: var(--hint-color);
+  opacity: 0;
+  transition: opacity 0.2s;
+  &:hover {
+    color: var(--reduce-color);
   }
 }
 .archiveTitle {

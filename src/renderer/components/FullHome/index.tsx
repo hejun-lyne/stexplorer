@@ -5,7 +5,7 @@ import * as CONST from '@/constants';
 import * as Utils from '@/utils';
 import LeftSider from './LeftSider';
 import RightSider from './RightSider';
-import StockTab, { StockTabId, SiteTabId, NoteTabId, StrategyTabId, TagTabId } from './StockTab';
+import StockTab, { StockTabId, SiteTabId, NoteTabId, StrategyTabId, TagTabId, TrainTabId } from './StockTab';
 import SplitPane from 'react-split-pane';
 import styles from './index.scss';
 import { batch, useDispatch } from 'react-redux';
@@ -38,10 +38,12 @@ const homeCaches = {
   siteTabs: [] as SiteTabId[],
   strategyTabs: [] as StrategyTabId[],
   noteTabs: [] as NoteTabId[],
+  trainTabs: [] as TrainTabId[],
   activeTab: { hists: [] as string[], lastSecid: '', current: 'home' },
 };
 const strategyTid = (s: Strategy.BriefItem) => 'strategy_' + s.groupId + '_' + s.id;
 const noteTid = (note: Note.NoteBriefItem) => 'note_' + note.bookId + '_' + note.id;
+const trainTid = (archive: Train.ArchiveRecord) => 'train_' + archive.id;
 const FullHome: React.FC<FullHomeProps> = () => {
   const { colors: variableColors, darkMode, lowKey } = useNativeThemeColor(CONST.VARIABLES);
   const [stockTabs, setStockTabs] = useState<StockTabId[]>([]);
@@ -49,6 +51,7 @@ const FullHome: React.FC<FullHomeProps> = () => {
   const [siteTabs, setSiteTabs] = useState<SiteTabId[]>([]);
   const [noteTabs, setNoteTabs] = useState<NoteTabId[]>([]);
   const [strategyTabs, setStrategyTabs] = useState<StrategyTabId[]>([]);
+  const [trainTabs, setTrainTabs] = useState<TrainTabId[]>([]);
   const [activeTabid, setActiveTabid] = useState<{ hists: string[]; lastSecid: string; current: string | undefined }>({
     hists: [],
     lastSecid: '',
@@ -188,6 +191,26 @@ const FullHome: React.FC<FullHomeProps> = () => {
     setActiveTabid(homeCaches.activeTab);
   }, []);
 
+  /** 打开训练归档详情：在 StockTab 中新增（或激活）一个归档详情页，而不是在左侧栏就地展开 */
+  const openTrainArchive = useCallback((archive: Train.ArchiveRecord) => {
+    const tid = trainTid(archive);
+    const tab = homeCaches.trainTabs.find((n) => n.tid === tid);
+    if (!tab) {
+      homeCaches.trainTabs.push({
+        tid,
+        archiveId: archive.id,
+        title: `${archive.name || archive.secid} 训练结算`,
+      });
+    }
+    setTrainTabs(Utils.DeepCopy(homeCaches.trainTabs));
+    homeCaches.activeTab = {
+      hists: homeCaches.activeTab.hists.concat([homeCaches.activeTab.current]),
+      lastSecid: homeCaches.activeTab.lastSecid,
+      current: tid,
+    };
+    setActiveTabid(homeCaches.activeTab);
+  }, []);
+
   const openReview = useCallback(() => {
     homeCaches.activeTab = {
       hists: homeCaches.activeTab.hists.concat([homeCaches.activeTab.current]),
@@ -225,6 +248,10 @@ const FullHome: React.FC<FullHomeProps> = () => {
     if (homeCaches.strategyTabs.some((s) => s.tid === tid)) {
       homeCaches.strategyTabs = homeCaches.strategyTabs.filter((s) => s.tid !== tid);
       setStrategyTabs(homeCaches.strategyTabs);
+    }
+    if (homeCaches.trainTabs.some((s) => s.tid === tid)) {
+      homeCaches.trainTabs = homeCaches.trainTabs.filter((s) => s.tid !== tid);
+      setTrainTabs(homeCaches.trainTabs);
     }
     homeCaches.activeTab.hists = homeCaches.activeTab.hists.filter((t) => t !== tid);
     homeCaches.activeTab.current = homeCaches.activeTab.hists.pop()!;
@@ -300,6 +327,7 @@ const FullHome: React.FC<FullHomeProps> = () => {
           openStock={openStock}
           openTag={openTag}
           openSite={openFavorSite}
+          openTrainArchive={openTrainArchive}
           barHidden={leftbarHidden}
           toggleBarHidden={() => {
             setSiderWidth(leftbarHidden ? 240 : 0);
@@ -344,6 +372,7 @@ const FullHome: React.FC<FullHomeProps> = () => {
                   siteTabs={siteTabs}
                   noteTabs={noteTabs}
                   strategyTabs={strategyTabs}
+                  trainTabs={trainTabs}
                   onTabClose={closeDetail}
                   onActiveChange={tabChanged}
                   onStockChange={updateStock}

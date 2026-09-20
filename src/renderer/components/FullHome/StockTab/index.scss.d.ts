@@ -7,6 +7,7 @@ declare namespace IndexScssNamespace {
     mainTab: string;
     noteBtn: string;
     on: string;
+    trainArchivePane: string;
   }
 }
 

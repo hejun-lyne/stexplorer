@@ -1,23 +1,21 @@
 import React, { useCallback, useState } from 'react';
-import { Layout, Input, Collapse, Button } from 'antd';
+import { Layout, Input, Collapse, Button, Popconfirm } from 'antd';
 import { useDispatch, useSelector } from 'react-redux';
 import LoadingScreen from '@/components/LoadingScreen';
 import StockList from '@/components/FullHome/StockList';
 import CustomDrawer from '@/components/CustomDrawer';
-import CustomDrawerContent from '@/components/CustomDrawer/Content';
 import AddStock from '@/components/FullHome/AddStock';
 import SettingContent from '@/components/SettingContent';
 import ReferSites from '@/components/FullHome/ReferSites';
 import SiteTagDetail from '../ReferSites/SiteTagDetail';
 import StockTagDetail from '../StockList/StockTagDetail';
-import TrainSettlement from '../StockTab/StockDetail/TrainSettlement';
 import { removeTrainArchiveAction } from '@/actions/train';
 import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
 import { useContextMenu } from '@/utils/hooks';
 import * as Utils from '@/utils';
 import * as Enums from '@/utils/enums';
-import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
+import { DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 
 export const stockTypesConfig = [
   { name: '指数', code: Enums.StockMarketType.Zindex },
@@ -35,17 +33,16 @@ export interface LeftSiderProps {
   openStock: (secid: string, name: string, firstQSAppear?: string, change?: number, type?: Enums.StockMarketType) => void;
   openTag:(name: string, markettype: Enums.StockMarketType) => void;
   openSite: (site: Site.FavorItem) => void;
+  /** 打开训练归档详情（在 StockTab 中新增一个 tab 页） */
+  openTrainArchive: (archive: Train.ArchiveRecord) => void;
   barHidden: boolean;
   toggleBarHidden: () => void;
 }
 
-const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, openStock, openSite, barHidden, toggleBarHidden, openTag }) => {
+const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, openStock, openSite, openTrainArchive, barHidden, toggleBarHidden, openTag }) => {
   const dispatch = useDispatch();
   /** 训练归档 */
   const archives = useSelector((state: StoreState) => state.train.archives);
-  const [archiveId, setArchiveId] = useState('');
-  const [showArchiveDrawer, setShowArchiveDrawer] = useState(false);
-  const activeArchive = archives.find((_) => _.id === archiveId);
   const [searchText, setSearchText] = useState('');
   const [showSearchDrawer, setShowSearchDrawer] = useState(false);
   const [showSettingDrawer, setShowSettingDrawer] = useState(false);
@@ -119,10 +116,7 @@ const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, op
               key={archive.id}
               className={styles.archiveItem}
               title={`${archive.startDate} ~ ${archive.endDate}`}
-              onClick={() => {
-                setArchiveId(archive.id);
-                setShowArchiveDrawer(true);
-              }}
+              onClick={() => openTrainArchive(archive)}
             >
               <div className={styles.archiveTitle}>
                 {archive.name || archive.secid}
@@ -136,6 +130,18 @@ const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, op
                 {archive.startDate} ~ {archive.endDate} ｜ 夏普 {(Number(archive.sharpeRatio) || 0).toFixed(2)} ｜ 回撤{' '}
                 {((Number(archive.maxDrawdown) || 0) * 100).toFixed(2)}%
               </div>
+              <Popconfirm
+                title="删除该训练归档？"
+                okText="删除"
+                cancelText="取消"
+                onConfirm={() => dispatch(removeTrainArchiveAction(archive.id))}
+              >
+                <DeleteOutlined
+                  className={styles.archiveDel}
+                  title="删除归档"
+                  onClick={(e) => e.stopPropagation()}
+                />
+              </Popconfirm>
             </div>
           ))}
         </div>
@@ -178,24 +184,6 @@ const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, op
               setShowStockTagDrawer(false);
             }}
           />
-        </CustomDrawer>
-        <CustomDrawer show={showArchiveDrawer} width={leftWidth * 3 + 'px'}>
-          <CustomDrawerContent
-            title={activeArchive ? `训练结算 - ${activeArchive.name || activeArchive.secid}` : '训练结算'}
-            closeText="关闭"
-            enterText="删除归档"
-            onClose={() => setShowArchiveDrawer(false)}
-            onEnter={
-              activeArchive
-                ? () => {
-                    dispatch(removeTrainArchiveAction(activeArchive.id));
-                    setShowArchiveDrawer(false);
-                  }
-                : undefined
-            }
-          >
-            {activeArchive && <TrainSettlement record={activeArchive} />}
-          </CustomDrawerContent>
         </CustomDrawer>
       </Layout.Sider>
       {/* <ToolBar

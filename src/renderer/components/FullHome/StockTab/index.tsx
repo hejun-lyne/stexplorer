@@ -14,6 +14,7 @@ import {
   UnorderedListOutlined,
   HeatMapOutlined,
   CompassOutlined,
+  BarChartOutlined,
 } from '@ant-design/icons';
 import Url from 'url-parse';
 import classnames from 'classnames';
@@ -35,6 +36,7 @@ import QuantTest from './QuantTest';
 import StrategyDetail from './StrategyDetail';
 import FuturesDetail from './FuturesDetail';
 import TagContentView from './TagContentView';
+import TrainSettlement from './StockDetail/TrainSettlement';
 
 export interface StockTabId {
   tid: string; // secid
@@ -69,6 +71,11 @@ export interface NoteTabId {
   title: string;
   changed: boolean; // need save
 }
+export interface TrainTabId {
+  tid: string;
+  archiveId: string; // 训练归档 id
+  title: string;
+}
 export interface StockTabProps {
   rightHidden: boolean;
   toggleRightHidden: () => void;
@@ -79,6 +86,7 @@ export interface StockTabProps {
   siteTabs: SiteTabId[];
   noteTabs: NoteTabId[];
   strategyTabs: StrategyTabId[];
+  trainTabs: TrainTabId[];
   onTabClose: (tid: string) => void;
   onActiveChange: (tid: string) => void;
   onStockChange: (tid: string, change: number) => void;
@@ -107,6 +115,7 @@ const StockTab: React.FC<StockTabProps> = React.memo(
     siteTabs,
     noteTabs,
     strategyTabs,
+    trainTabs,
     onTabClose,
     onActiveChange,
     onStockChange,
@@ -158,6 +167,8 @@ const StockTab: React.FC<StockTabProps> = React.memo(
       setActReviewHidden(false);
     }
     const { stocksMapping } = useSelector((state: StoreState) => state.stock);
+    /** 训练归档详情：tab 只存归档 id，内容按 id 从 store 实时取（删除/同步后自动反映） */
+    const trainArchives = useSelector((state: StoreState) => state.train.archives);
     const { monitorSetting } = useSelector((state: StoreState) => state.setting);
 
     const [kview, setKView] = useState(false);
@@ -386,6 +397,26 @@ const StockTab: React.FC<StockTabProps> = React.memo(
                 <NoteDetail tab={tab} active={activeTabid === tab.tid} onNoteUpdated={onNoteChange} />
               </Tabs.TabPane>
             ))}
+            {trainTabs.map((tab) => {
+              const record = trainArchives.find((a) => a.id === tab.archiveId);
+              return (
+                <Tabs.TabPane
+                  tab={
+                    <>
+                      <BarChartOutlined />
+                      <Tooltip title={tab.title}>
+                        <span>{tab.title.length > 10 ? tab.title.substr(0, 9) + '...' : tab.title}</span>
+                      </Tooltip>
+                    </>
+                  }
+                  key={tab.tid}
+                >
+                  <div className={styles.trainArchivePane}>
+                    {record ? <TrainSettlement record={record} /> : <Empty text="该训练归档已不存在" />}
+                  </div>
+                </Tabs.TabPane>
+              );
+            })}
           </Tabs>
         ) : (
           <Empty text="通过左侧打开股票详情~" />
