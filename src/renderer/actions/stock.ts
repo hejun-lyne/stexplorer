@@ -980,7 +980,8 @@ export function deleteStockMarkLineAction(value: number, sid: string): ThunkActi
   };
 }
 
-export function addStockTradePointAction(secid: string, date: string, value: number, isBuy: boolean, type:string): ThunkAction {
+/** amount：买入金额（模拟训练用），不传表示用全部可用资金；卖出一律清仓，不需要金额 */
+export function addStockTradePointAction(secid: string, date: string, value: number, isBuy: boolean, type:string, amount?: number): ThunkAction {
   return (dispatch, getState) => {
     try {
       const {
@@ -989,10 +990,12 @@ export function addStockTradePointAction(secid: string, date: string, value: num
       const ss = stockConfigs.find((s) => s.secid === secid);
       if (ss) {
         if (isBuy) {
+          // 同一天只允许一个买入点：金额以最新一次委托为准
+          const point = { x: date, y: value, t: type, a: amount && amount > 0 ? amount : undefined };
           if (ss.buyPoints) {
             ss.buyPoints = ss.buyPoints.filter((p) => p.x != date);
-            ss.buyPoints.push({ x: date, y: value, t: type });
-          } else ss.buyPoints = [{ x: date, y: value, t: type }];
+            ss.buyPoints.push(point);
+          } else ss.buyPoints = [point];
         } else {
           if (ss.sellPoints) {
             ss.sellPoints = ss.sellPoints.filter((p) => p.x != date);

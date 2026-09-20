@@ -20,7 +20,7 @@ import HolderNum from './MustRead/HolderNum';
 import BigEvent from './MustRead/BigEvent';
 import { addStockAction, deleteStockAction, syncStockStrategyAction } from '@/actions/stock';
 import SStrategy from './SStrategy';
-import { KLineType, StrategyType } from '@/utils/enums';
+import { StrategyType } from '@/utils/enums';
 import BriefStatics from './MustRead/BriefStatics';
 import StockOverview from './MustRead/Overview';
 import StockResearches from './MustRead/Researches';
@@ -149,12 +149,8 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
   const [chartHeight, setChartHeight] = useState<number>(0);
   const rightRef = useRef<HTMLDivElement>(null);
 
-  const [all30Mints, setAll30Mints] = useState([]);
   const updateKlines = useCallback((ks) => {
     setKLines(ks);
-    if (ks[0].type == KLineType.Mint30) {
-      setAll30Mints(ks);
-    }
   }, []);
   const [timelineDate, setTimelineDate] = useState<string | undefined>();
   const [initWidth, setInitWidth] = useState(500);
@@ -168,7 +164,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
   const [activePeriod, setActivePeriond] = useState<Stock.PeriodMarkItem | null>(null);
   return (
     <>
-      <TrainBar secid={secid} all30Mints={all30Mints} removeStock={removeStock} addStock={addStock} showTrade={true} />
+      <TrainBar secid={secid} removeStock={removeStock} addStock={addStock} showTrade={true} />
       <Row
         className={styles.container}
         ref={contentRef}

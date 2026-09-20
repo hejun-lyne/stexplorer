@@ -63,7 +63,7 @@ export interface PriceTrendProps {
   onTimelineDate?: string;
   firstQSAppear?: string;
   backtestDate?: string;
-  updateKLineData: (ks: Stock.KLineItem[]) => void;
+  updateKLineData?: (ks: Stock.KLineItem[]) => void;
   updateTrendData?: (trends: Stock.TrendItem[]) => void;
   updateKType?: (ktype: KLineType) => void;
   updateMType?: (mtype: MAPeriodType) => void;
@@ -1816,7 +1816,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         });
       },
     });
-    const { run: handeKline } = useThrottleFn(
+    const { run: handeKline, flush: flushHandeKline } = useThrottleFn(
       ({ ks, kt }) => {
         if (!ks?.length) {
           console.error('handeKline, ks is undefined');
@@ -1933,8 +1933,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             if (kt == KLineType.Day) {
               setTrendDates(ks.map((_: { date: any; }) => _.date));
             }
-            updateKLineData(ks);
+            updateKLineData?.(ks);
             updateKLineOption(kIndex, newKlineData);
+            // 立即执行被节流窗口挂起的图表更新：多周期同时返回时，
+            // 否则只有最后一次会落到图表上（训练模式下表现为「推进一天后日K不刷新」）
+            flushKLineOption();
           });
         });
         const resetRequestKLines = [...requestKLines];
@@ -1946,7 +1949,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       }
     );
 
-    const { run: updateKLineOption } = useThrottleFn(
+    const { run: updateKLineOption, flush: flushKLineOption } = useThrottleFn(
       (kIndex: number, data: any) => {
         const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
         const _displayToDate = calcDisplayToDate(trainMode, effectiveToDate, backtestDate, data.klines[dayIndex]);
@@ -1995,12 +1998,38 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         wait: 500,
       }
     );
-    const { run: runGetKline } = useRequest(Services.Stock.GetKFromDataSource, {
-      throwOnError: true,
-      manual: true,
-      onSuccess: handeKline,
-      cacheKey: `GetKFromDataSource/${secid}${trainCacheSuffix}`,
-    });
+    // K线取数：每次调用都是独立请求，不用 useRequest 的共享实例——
+    // ahooks v2 的 useRequest 在同一实例上用自增 count 做时序保护，并发取多个周期时
+    // 只有「最后发起」的那次会回调 onSuccess，先返回的周期数据会被静默丢弃
+    // （训练模式推进一天会同时刷新日/周/月，日K因此永远刷不出来）
+    const fetchKline = useCallback(
+      async (source: FundApiType, sid: string, kt: KLineType, count?: number) => {
+        const kIndex = DefaultKTypes.indexOf(kt);
+        try {
+          const r = await Services.Stock.GetKFromDataSource(source, sid, kt, count);
+          if (r && r.ks && r.ks.length) {
+            handeKline(r);
+            // 立即执行被节流窗口挂起的调用，保证每个周期的返回都写进 klineData
+            flushHandeKline();
+          }
+        } catch (error) {
+          console.error('获取K线失败', error);
+        } finally {
+          if (kIndex >= 0) {
+            // 无论成功失败都要复位，否则该周期后续再也不会重新取数
+            setRequestKLines((prev) => {
+              if (!prev[kIndex]) {
+                return prev;
+              }
+              const next = [...prev];
+              next[kIndex] = false;
+              return next;
+            });
+          }
+        }
+      },
+      [handeKline, flushHandeKline]
+    );
     const changeTypeIndex = useCallback(
       (i) => {
         setTypeIndex(i);
@@ -2020,7 +2049,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
               const newRequestKLines = [...requestKLines];
               newRequestKLines[i] = true;
               setRequestKLines(newRequestKLines);
-              runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[i], klineData.count[i]);
+              fetchKline(kLineApiSourceSetting, secid, DefaultKTypes[i], klineData.count[i]);
             }
           }
           if (currentBK) {
@@ -2040,16 +2069,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
 
     useEffect(() => {
       if (trainMode) {
-        // 当前数据源不支持分钟K线时（Tushare/Akshare），不要请求 30 分钟数据
-        const minuteKlineSupported = kLineApiSourceSetting !== FundApiType.Tushare && kLineApiSourceSetting !== FundApiType.Akshare;
-        const mint30Index = DefaultKTypes.indexOf(KLineType.Mint30);
-        if (minuteKlineSupported && !requestKLines[mint30Index]) {
-          const newRequestKLines = [...requestKLines];
-          newRequestKLines[mint30Index] = true;
-          setRequestKLines(newRequestKLines);
-          runGetKline(kLineApiSourceSetting, secid, KLineType.Mint30, 100000);
-        }
         // 训练模式默认展示日K线（分时是训练日当天的数据，需额外请求历史分时且信息量不如日K）
+        // 注：这里不再预取 30 分钟K线——分钟级数据源已不可用，且它只服务于旧版模拟盘取价
         const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
         if (typeIndex === 0 && dayIndex > 0) {
           changeTypeIndex(dayIndex);
@@ -2104,11 +2125,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       if (!needRefresh) {
         return;
       }
-      const minuteKlineSupported = kLineApiSourceSetting !== FundApiType.Tushare && kLineApiSourceSetting !== FundApiType.Akshare;
+      // 不再刷新 30 分钟K线：分钟级数据源已不可用，且旧版模拟盘取价已改为日收盘价
       const refreshTypes = [KLineType.Day, KLineType.Week, KLineType.Month];
-      if (minuteKlineSupported) {
-        refreshTypes.unshift(KLineType.Mint30);
-      }
       if (typeIndex > 0) {
         refreshTypes.push(DefaultKTypes[typeIndex]);
       }
@@ -2117,15 +2135,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         if (i < 0) {
           return;
         }
-        if (t === KLineType.Mint30) {
-          // 首次进入训练模式时由 trainMode 的 effect 负责取数
-          if (justEnabled) {
-            return;
-          }
-          runGetKline(kLineApiSourceSetting, secid, t, 100000);
-          return;
-        }
-        runGetKline(kLineApiSourceSetting, secid, t, klineData.count[i]);
+        fetchKline(kLineApiSourceSetting, secid, t, klineData.count[i]);
       });
       if (typeIndex === 0) {
         runGetTrainTrends(secid, trainDate.replace(/-/g, ''));
@@ -2147,7 +2157,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           const newRequestKLines = [...requestKLines];
           newRequestKLines[dayIndex] = true;
           setRequestKLines(newRequestKLines);
-          runGetKline(kLineApiSourceSetting, secid, KLineType.Day, klineData.count[dayIndex]);
+          fetchKline(kLineApiSourceSetting, secid, KLineType.Day, klineData.count[dayIndex]);
         }
       }
     }, [backtestDate]);
@@ -2852,7 +2862,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             [typeIndex]: newCount,
           },
         });
-        runGetKline(kLineApiSourceSetting, secid, DefaultKTypes[typeIndex], newCount);
+        fetchKline(kLineApiSourceSetting, secid, DefaultKTypes[typeIndex], newCount);
       }
       setRange({
         ...range,

@@ -14,6 +14,8 @@ export interface SettleTrade {
   date: string;
   price: number;
   isBuy: boolean;
+  /** 买入金额上限（模拟训练指定金额/资金比例买入）；不传表示全部可用资金 */
+  amount?: number;
 }
 
 export interface SettleParams {
@@ -68,7 +70,9 @@ export function SettleTrain({ startDate, endDate, initialCapital, commissionRate
         continue;
       }
       if (trade.isBuy) {
-        const lots = Math.floor(cash / (price * MIN_LOT * (1 + rate)));
+        // 指定金额买入：预算取「指定金额」与「可用资金」的较小值
+        const budget = trade.amount && trade.amount > 0 ? Math.min(cash, trade.amount) : cash;
+        const lots = Math.floor(budget / (price * MIN_LOT * (1 + rate)));
         if (lots < 1) {
           continue;
         }

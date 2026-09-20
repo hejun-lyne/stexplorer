@@ -440,15 +440,9 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
     }
   }, [secid, moneyFlow]);
 
-  const [all30Mints, setAll30Mints] = useState([]);
-  const updateKlines = useCallback((ks) => {
-    if (ks[0].type == KLineType.Mint30) {
-      setAll30Mints(ks);
-    }
-  }, []);
   return (
     <>
-      <TrainBar secid={secid} all30Mints={all30Mints} removeStock={removeBK} addStock={addBK} />
+      <TrainBar secid={secid} removeStock={removeBK} addStock={addBK} />
       <Row
         className={styles.container}
         ref={contentRef}
@@ -504,7 +498,6 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
                   trainMode={ontrain}
                   addStock={addBK}
                   removeStock={removeBK}
-                  updateKLineData={updateKlines}
                   updateKType={setKtype}
                   updateMType={setMtype}
                   onRangeUpdated={setRange}

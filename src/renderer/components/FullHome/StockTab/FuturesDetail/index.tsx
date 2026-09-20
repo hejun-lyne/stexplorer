@@ -11,7 +11,7 @@ import { Stock } from '@/types/stock';
 import { useInterval, useRequest } from 'ahooks';
 import * as Services from '@/services';
 import { addStockAction, deleteStockAction, updateStockAction, updateStockPriceAction } from '@/actions/stock';
-import { KLineType, StockMarketType } from '@/utils/enums';
+import { StockMarketType } from '@/utils/enums';
 import TrainBar, { TRAIN_BAR_HEIGHT, TRAIN_BAR_HEIGHT_BASE } from '../StockDetail/TrainBar';
 import TrackingNote from '../StockDetail/MustRead/TrackingNote';
 
@@ -68,12 +68,6 @@ const FuturesDetail: React.FC<FuturesDetailProps> = ({ secid, active, onChangeUp
   const [chartHeight, setChartHeight] = useState<number>(0);
   const rightRef = useRef<HTMLDivElement>(null);
 
-  const [all30Mints, setAll30Mints] = useState([]);
-  const updateKlines = useCallback((ks) => {
-    if (ks[0].type == KLineType.Mint30) {
-      setAll30Mints(ks);
-    }
-  }, []);
   const [timelineDate, setTimelineDate] = useState<string | undefined>();
   const [initWidth, setInitWidth] = useState(500);
   if (initWidth == 500 && rightRef.current) {
@@ -82,7 +76,7 @@ const FuturesDetail: React.FC<FuturesDetailProps> = ({ secid, active, onChangeUp
   const [noteChanged, setNoteChanged] = useState(false);
   return (
     <>
-      <TrainBar secid={secid} all30Mints={all30Mints} removeStock={removeStock} addStock={addStock} />
+      <TrainBar secid={secid} removeStock={removeStock} addStock={addStock} />
       <Row
         className={styles.container}
         ref={contentRef}
@@ -127,7 +121,6 @@ const FuturesDetail: React.FC<FuturesDetailProps> = ({ secid, active, onChangeUp
                   useZizai={true}
                   trainMode={ontrain}
                   onTimelineDate={timelineDate}
-                  updateKLineData={updateKlines}
                 />
                 <Tabs defaultActiveKey={'news'} className={styles.rightTab} style={{ width: initWidth }}>
                   {/* <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>交易策略</span>} key={'strategy'}>

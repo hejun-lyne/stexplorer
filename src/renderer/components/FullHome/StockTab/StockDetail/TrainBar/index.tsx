@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './index.scss';
-import { Button, Input, Modal, Select, Tag, message } from 'antd';
+import { Button, Input, InputNumber, Modal, Select, Tag, message } from 'antd';
 import { ColumnWidthOutlined, HeartFilled, HeartOutlined, PlusOutlined } from '@ant-design/icons';
 import { batch, useDispatch, useSelector } from 'react-redux';
 import moment from 'moment';
@@ -25,7 +25,6 @@ import {
   TRAIN_TYPE,
   writeTrainProgressAction,
 } from '@/actions/train';
-import { Stock } from '@/types/stock';
 import { MarkType } from '@/utils/enums';
 import * as Utils from '@/utils';
 import TrainSettlement from '../TrainSettlement';
@@ -38,6 +37,14 @@ const DEFAULT_CAPITAL = 100000;
 const DEFAULT_COMMISSION = 0.0003;
 const MIN_LOT = 100;
 
+/** 买入资金比例：全仓 / 可用资金的 1/2、1/3、1/4 */
+const BUY_RATIOS = [
+  { value: 1, label: '全仓' },
+  { value: 2, label: '1/2' },
+  { value: 3, label: '1/3' },
+  { value: 4, label: '1/4' },
+];
+
 const isTrainMark = (t: any) => t === TRAIN_TYPE || t === true;
 
 function formatNumber(v: number) {
@@ -49,14 +56,13 @@ function formatSigned(v: number) {
 
 export interface TrainBarProps {
   secid: string;
-  all30Mints: Stock.KLineItem[];
   addStock: () => void;
   removeStock: () => void;
   /** 是否显示模拟持仓、成本、盈亏与买卖操作（个股训练） */
   showTrade?: boolean;
 }
 
-const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addStock, removeStock, showTrade = false }) => {
+const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeStock, showTrade = false }) => {
   const dispatch = useDispatch();
   const config = useSelector((state: StoreState) => state.stock.stockConfigsMapping[secid]);
   const stock = useSelector((state: StoreState) => state.stock.stocksMapping[secid]);
@@ -67,6 +73,10 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
   /** 结算结果（弹窗展示） */
   const [settlement, setSettlement] = useState<Train.ArchiveRecord | null>(null);
   const [settling, setSettling] = useState(false);
+  /** 买入金额（元）：留空表示使用全部可用资金 */
+  const [buyAmount, setBuyAmount] = useState<number | undefined>(undefined);
+  /** 买入资金比例：1=全仓，2/3/4=可用资金的 1/2、1/3、1/4 */
+  const [buyRatio, setBuyRatio] = useState<number>(BUY_RATIOS[0].value);
 
   const startDate = trainStartDate || '';
   const endDate = trainEndDate || '';
@@ -145,25 +155,60 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
     saveProgress(first);
   }, [ontrain, days, currentDay, saveProgress]);
 
+  /** 训练窗口内的日收盘价（交易日 -> 收盘价），买卖与浮盈都按训练日收盘价计价 */
+  const [dayClosesMap, setDayClosesMap] = useState<Record<string, number>>({});
+  /** 已取过收盘价的训练日期：数据层按训练日期截断，训练日期推进后必须重新取数 */
+  const dayClosesKeyRef = useRef('');
+  useEffect(() => {
+    if (!ontrain) {
+      // 退出训练模式后清空标记，再次进入时重新取数（训练数据是按训练日期截断的）
+      dayClosesKeyRef.current = '';
+      return;
+    }
+    const key = `${secid}_${currentDay}`;
+    if (dayClosesKeyRef.current === key) {
+      return;
+    }
+    let mounted = true;
+    Helpers.Stock.GetTrainDayCloses(secid).then((closes) => {
+      if (mounted) {
+        dayClosesKeyRef.current = key;
+        setDayClosesMap(closes);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [ontrain, secid, currentDay]);
+
   const currentIdx = days.indexOf(currentDay);
   const nextDay = currentIdx >= 0 && currentIdx < days.length - 1 ? days[currentIdx + 1] : '';
   // 推进到窗口内最后一个交易日即视为训练结束
   const finished = days.length > 0 && currentIdx >= days.length - 1;
 
-  // 当前训练日期对应的最新行情（数据层已按当前训练日期过滤，不会出现未来数据）
-  const currentKline = useMemo(() => {
-    const bars = all30Mints.filter((k) => !currentDay || k.date.substring(0, 10) <= currentDay);
-    return bars.length ? bars[bars.length - 1] : undefined;
-  }, [all30Mints, currentDay]);
+  // 当前训练日的收盘价：没有分钟级数据源，买卖一律以当日收盘价成交
+  const currentClose = useMemo(() => {
+    const dates = Object.keys(dayClosesMap);
+    if (!dates.length) {
+      return 0;
+    }
+    if (currentDay && dayClosesMap[currentDay]) {
+      return dayClosesMap[currentDay];
+    }
+    // 训练日期当天没有行情（非交易日/停牌）时，退回最近一个不晚于训练日的收盘价
+    const latest = dates.filter((d) => !currentDay || d <= currentDay).sort().pop();
+    return latest ? dayClosesMap[latest] : 0;
+  }, [dayClosesMap, currentDay]);
 
   // 训练窗口内的买卖记录（按时间正序，日期统一按天比较）
-  const trainTrades = useMemo(() => {
+  // amount：买入时指定的金额，卖出为清仓、无金额
+  const trainTrades = useMemo<{ date: string; price: number; isBuy: boolean; amount?: number }[]>(() => {
     const buys = (config?.buyPoints || [])
       .filter((t) => isTrainMark(t.t))
-      .map((t) => ({ date: String(t.x).substring(0, 10), price: t.y, isBuy: true }));
+      .map((t) => ({ date: String(t.x).substring(0, 10), price: t.y, isBuy: true, amount: t.a }));
     const sells = (config?.sellPoints || [])
       .filter((t) => isTrainMark(t.t))
-      .map((t) => ({ date: String(t.x).substring(0, 10), price: t.y, isBuy: false }));
+      .map((t) => ({ date: String(t.x).substring(0, 10), price: t.y, isBuy: false, amount: undefined }));
     return buys
       .concat(sells)
       .filter((t) => (!startDate || t.date >= startDate) && (!currentDay || t.date <= currentDay))
@@ -182,7 +227,9 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
         return;
       }
       if (t.isBuy) {
-        const lots = Math.floor(cash / (price * MIN_LOT * (1 + commission)));
+        // 指定金额买入：预算取「指定金额」与「可用资金」的较小值，未指定则用全部可用资金
+        const budget = t.amount && t.amount > 0 ? Math.min(cash, t.amount) : cash;
+        const lots = Math.floor(budget / (price * MIN_LOT * (1 + commission)));
         if (lots < 1) {
           return;
         }
@@ -202,11 +249,11 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
       }
     });
     const costPrice = shares > 0 ? costAmount / shares : 0;
-    const lastPrice = Number(currentKline?.sp) || 0;
+    const lastPrice = currentClose;
     const profit = shares > 0 ? (lastPrice - costPrice) * shares : 0;
     const profitRatio = costPrice > 0 ? ((lastPrice - costPrice) / costPrice) * 100 : 0;
     return { cash, shares, costPrice, lastPrice, profit, profitRatio, realized };
-  }, [trainTrades, capital, commission, currentKline]);
+  }, [trainTrades, capital, commission, currentClose]);
 
   const nextDayAction = useCallback(() => {
     if (!nextDay) {
@@ -221,15 +268,44 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
     }
   }, [nextDay, days, saveProgress]);
 
+  // 选择资金比例：按当前可用资金换算出买入金额
+  const onBuyRatioChange = useCallback(
+    (r: number) => {
+      setBuyRatio(r);
+      setBuyAmount(Math.floor(account.cash / r));
+    },
+    [account.cash]
+  );
+
   const trade = useCallback(
     (isBuy: boolean) => {
-      if (!currentKline) {
-        message.warning('当前训练日期的行情数据还在加载中');
+      if (!currentDay || !currentClose) {
+        message.warning('当前训练日期的收盘价还在加载中');
         return;
       }
-      dispatch(addStockTradePointAction(secid, currentKline.date, currentKline.sp, isBuy, TRAIN_TYPE));
+      let amount: number | undefined;
+      if (isBuy) {
+        // 买入校验：金额为空按全部可用资金处理，否则必须 > 0、不超过可用资金、且至少能买一手
+        const input = buyAmount == null || isNaN(Number(buyAmount)) ? account.cash : Number(buyAmount);
+        const perLotCost = currentClose * MIN_LOT * (1 + commission);
+        if (!input || input <= 0) {
+          message.warning('请输入买入金额');
+          return;
+        }
+        if (input > account.cash + 1e-6) {
+          message.warning(`买入金额 ${formatNumber(input)} 超出可用资金 ${formatNumber(account.cash)}`);
+          return;
+        }
+        if (input < perLotCost) {
+          message.warning(`买入金额不足一手，至少需要 ${perLotCost.toFixed(2)} 元（含佣金）`);
+          return;
+        }
+        amount = input;
+      }
+      // 按训练日收盘价成交，日期直接记交易日（数据层已保证不含未来数据）
+      dispatch(addStockTradePointAction(secid, currentDay, currentClose, isBuy, TRAIN_TYPE, amount));
     },
-    [currentKline, secid]
+    [currentDay, currentClose, secid, buyAmount, account.cash, commission]
   );
 
   const clearBS = useCallback(() => {
@@ -310,8 +386,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
     dispatch(syncStockMarktypeAction(secid, t));
   }, []);
 
-  const canBuy = !!config && !!currentKline && Math.floor(account.cash / ((currentKline.sp || 0) * MIN_LOT * (1 + commission))) >= 1;
-  const canSell = !!config && account.shares > 0;
+  const canBuy = !!config && currentClose > 0 && Math.floor(account.cash / (currentClose * MIN_LOT * (1 + commission))) >= 1;
+  const canSell = !!config && account.shares > 0 && currentClose > 0;
   const profitClass = Utils.GetValueColor(account.profit).textClass;
   const realizedClass = Utils.GetValueColor(account.realized).textClass;
 
@@ -354,6 +430,10 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
           {showTrade && (
             <>
               <div className={styles.item}>
+                <span className={styles.label}>收盘价</span>
+                <span className={styles.strong}>{currentClose > 0 ? currentClose.toFixed(2) : '加载中'}</span>
+              </div>
+              <div className={styles.item}>
                 <span className={styles.label}>持仓</span>
                 <span className={styles.strong}>{account.shares > 0 ? `${account.shares} 股` : '空仓'}</span>
               </div>
@@ -361,12 +441,6 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
                 <span className={styles.label}>成本</span>
                 <span className={styles.strong}>{account.shares > 0 ? account.costPrice.toFixed(2) : '--'}</span>
               </div>
-              {account.shares > 0 && (
-                <div className={styles.item}>
-                  <span className={styles.label}>现价</span>
-                  <span className={styles.strong}>{account.lastPrice.toFixed(2)}</span>
-                </div>
-              )}
               <div className={styles.item}>
                 <span className={styles.label}>浮动盈亏</span>
                 <span className={account.shares > 0 ? profitClass : undefined}>
@@ -384,6 +458,25 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, all30Mints, addSt
               <div className={styles.item}>
                 <span className={styles.label}>可用</span>
                 <span className={styles.strong}>{formatNumber(account.cash)}</span>
+              </div>
+              <div className={styles.item}>
+                <span className={styles.label}>买入金额</span>
+                <InputNumber
+                  size="small"
+                  min={0}
+                  step={1000}
+                  value={buyAmount}
+                  onChange={(v) => setBuyAmount(v == null ? undefined : Number(v))}
+                  placeholder="全部可用"
+                  style={{ width: 96 }}
+                />
+                <Select size="small" value={buyRatio} onChange={onBuyRatioChange} style={{ width: 76, marginLeft: 4 }}>
+                  {BUY_RATIOS.map((r) => (
+                    <Select.Option key={r.value} value={r.value}>
+                      {r.label}
+                    </Select.Option>
+                  ))}
+                </Select>
               </div>
               <div className={styles.item}>
                 <Button type="primary" size="small" disabled={!canBuy || finished} onClick={() => trade(true)}>
