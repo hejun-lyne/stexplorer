@@ -462,7 +462,9 @@ export interface VolumeScoreResult {
   max: number;
   available: boolean;
   note: string;
-  ratio?: number; // 5日均成交额 / 同类市值平均
+  ratio?: number; // 活跃度横向倍数（默认换手率口径：5日均换手率 / 同类市值平均换手率）
+  ratioBasis?: 'turnover' | 'amount' | null; // 横向对比口径（换手率 / 回退成交额 / 无）
+  turnover5?: number; // 个股5日平均换手率(%)
   volTrend?: number; // 5日均量 / 20日均量
   zdf5?: number; // 近5日累计涨幅
   degraded?: string; // 降级说明（无同类数据时）
@@ -480,7 +482,8 @@ export function pickMarketTier(circMv: number | null | undefined, cfg: ScoreConf
 }
 
 /**
- * 量能活跃度：横向（相比同类市值股票平均成交额）+ 纵向（自身量能趋势，量价配合），
+ * 量能活跃度：横向（相比同类市值股票的活跃度，默认用换手率——成交额受股价与流通盘大小干扰，
+ * 同市值档内换手率才可比；换手率缺失时回退成交额）+ 纵向（自身量能趋势，量价配合），
  * 再按"离放量启动点的位置"做择时修正（与板块同逻辑，目标是找短线买点）：
  * 量能刚从萎缩转为温和放量时分最高；若已放量过热（成交额倍数过高）、
  * 伴随涨幅过大（近5日涨幅高）或距放量启动日已久，则下调评分（避免追高）。
@@ -505,7 +508,14 @@ export function scoreStockVolume(
 
   const tier = pickMarketTier(circMv, cfg);
   const tierStat = stats?.tiers?.[tier];
-  const ratio = tierStat && tierStat.avg_amount > 0 ? avgAmount5 / tierStat.avg_amount : null;
+  // 横向对比口径：优先换手率（成交额会被股价/流通盘大小干扰，换手率才是同市值档内可比的活跃度），
+  // 换手率数据缺失时回退成交额口径
+  const turnover5 = mean(stockKlines.slice(-5).map((k) => k.hsl || 0));
+  const turnoverRatio = tierStat && tierStat.avg_turnover > 0 && turnover5 > 0 ? turnover5 / tierStat.avg_turnover : null;
+  const amountRatio = tierStat && tierStat.avg_amount > 0 ? avgAmount5 / tierStat.avg_amount : null;
+  const ratio = turnoverRatio ?? amountRatio;
+  const ratioBasis: 'turnover' | 'amount' | null = ratio === null ? null : turnoverRatio !== null ? 'turnover' : 'amount';
+  const ratioLabel = ratioBasis === 'turnover' ? '换手率' : '成交额';
 
   // ---- 放量启动日：回看窗口内首个"5日均量 / 20日均量 ≥ volStartRatio"的交易日 ----
   let volStartIdx = -1;
@@ -526,7 +536,7 @@ export function scoreStockVolume(
   const volStartClose = volStartIdx >= 0 ? stockKlines[volStartIdx].sp : 0;
   const riseSinceVolStart = volStartClose > 0 ? (stockKlines[stockKlines.length - 1].sp / volStartClose - 1) * 100 : null;
   const riseForChase = riseSinceVolStart !== null ? riseSinceVolStart : zdf5;
-  const hotRatio = ratio !== null && ratio > cfg.volRatioAllow ? (ratio - cfg.volRatioAllow) * 6 : 0; // 成交额过热
+  const hotRatio = ratio !== null && ratio > cfg.volRatioAllow ? (ratio - cfg.volRatioAllow) * 6 : 0; // 换手率/成交额过热
   const chasingRise = Math.max(0, riseForChase - cfg.volRiseAllow) * 1.5; // 启动以来涨幅过大
   // 距启动点已远：仅在放量仍在持续（当前量能仍处启动水平）时才惩罚；
   // 若量能已消退（回到萎缩/持平），说明这波放量结束，不应再按"已走远"扣分
@@ -539,11 +549,14 @@ export function scoreStockVolume(
     riseSinceVolStart !== null
       ? `自启动${riseSinceVolStart >= 0 ? '+' : ''}${riseSinceVolStart.toFixed(1)}%`
       : `近5日涨幅${zdf5 >= 0 ? '+' : ''}${zdf5.toFixed(1)}%`,
-    ratio !== null ? `成交额为同类${ratio.toFixed(2)}倍` : '',
   ]
     .filter(Boolean)
     .join('｜');
-  const timingNote = extensionPenalty > 0 ? `；${timingDesc}，已过热/走远（下调${extensionPenalty.toFixed(0)}分）` : `；${timingDesc}`;
+  const penaltyShown = Math.round(extensionPenalty);
+  const timingNote =
+    extensionPenalty > 0
+      ? `；${timingDesc}${penaltyShown > 0 ? `，已过热/走远（下调${penaltyShown}分）` : ''}`
+      : `；${timingDesc}`;
   const ratioDesc = ratio === null ? '未知' : ratio >= 2 ? '显著活跃' : ratio >= 1.2 ? '较为活跃' : ratio >= 0.7 ? '中等' : '清淡';
 
   // 纵向：自身量能趋势 + 量价配合（最多 40% 权重 + 奖惩）
@@ -554,15 +567,17 @@ export function scoreStockVolume(
   const volTurnDesc = `量能${volTrend >= 1.2 ? '放大' : volTrend >= 0.9 ? '持平' : '萎缩'}（${volTrend.toFixed(2)}倍）`;
 
   if (ratio !== null) {
-    // 横向：相比同类市值股票平均成交额
+    // 横向：相比同类市值股票的活跃度（默认换手率口径，缺失时回退成交额）
     const hScore = max * 0.6 * clamp((ratio - 0.5) / 1.5, 0, 1);
     const base = clamp(hScore + vScore, 0, max);
     return {
       score: applyTiming(base),
       max,
       available: true,
-      note: `同类市值成交${ratioDesc}（5日均额为同类${ratio.toFixed(2)}倍），${volTurnDesc}${timingNote}`,
+      note: `同类市值${ratioDesc}（5日${ratioLabel}为同类${ratio.toFixed(2)}倍${ratioBasis === 'amount' ? '，换手率缺失回退成交额' : ''}），${volTurnDesc}${timingNote}`,
       ratio,
+      ratioBasis,
+      turnover5,
       volTrend,
       zdf5,
       volPenalty: base - applyTiming(base),
@@ -579,6 +594,8 @@ export function scoreStockVolume(
     available: true,
     degraded: '无同类市值统计数据，仅按自身量能趋势评分',
     note: `${volTurnDesc}${timingNote}`,
+    ratioBasis: null,
+    turnover5,
     volTrend,
     zdf5,
     volPenalty: base - applyTiming(base),
