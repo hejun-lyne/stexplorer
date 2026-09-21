@@ -92,8 +92,9 @@ export const SHORT_TERM_SCORE_CONFIG = {
   rsiBreakSpread: 3, // 判定"贴近24日线"的容差（RSI6 - RSI24）
   rsiPullbackBreakSpread: 8, // 回踩过程中允许的最大跌破幅度：超过则认为已破位，不算回踩
   // 超买追高衰减：偏多形态（金叉/上穿/接近金叉/回踩/修复/多头排列）成立，但 RSI6 已偏高时下调，避免买在高点
-  rsiOverboughtPenaltyStart: 72, // RSI6 高于该值开始按"超买追高"下调
-  rsiOverboughtPenaltyPerPoint: 1, // RSI6 每高出 1 点扣 1 分
+  rsiOverboughtPenaltyStart: 68, // RSI6 高于该值开始按"超买追高"下调（偏高区）
+  rsiOverboughtPenaltyPerPoint: 1.5, // 偏高区每高 1 点扣 1.5 分（最多扣到 rsiOverbought 处，即 18 分）
+  rsiOverboughtSteepPerPoint: 2.5, // 进入超买区（RSI6 ≥ rsiOverbought）后每高 1 点扣的分数（陡增）
   rsiOverboughtFloor: 10, // 超买追高下调后的最低分
   // ---- 个股-资金 ----
   moneyWindow: 20, // 主力/散户累计净流入窗口（日）
@@ -773,10 +774,13 @@ export function scoreStockRsi(
   // 交叉的时效描述：金叉/死叉只在其时效窗口内作为形态依据
   const crossAgo = freshCrossDaysAgo === 0 ? '当日' : `${freshCrossDaysAgo}日前`;
 
-  // ---- 超买追高衰减 ----
-  // 金叉/多头排列等偏多形态即便成立，若 RSI6 已偏高或进入超买区，说明当下位置已高，
-  // 买入容易站在高点，因此按"超出起始阈值的点数"下调评分（死叉/空头等本就低分的形态不再叠加）。
-  const overboughtPenalty = Math.max(0, rsi6 - cfg.rsiOverboughtPenaltyStart) * cfg.rsiOverboughtPenaltyPerPoint;
+  // ---- 超买追高衰减（两段式）----
+  // 金叉/多头排列等偏多形态即便成立，只要 RSI6 已偏高（>rsiOverboughtPenaltyStart）就下调；
+  // 进入超买区（≥ rsiOverbought）后惩罚陡增，确保"高分"不会落在超买区（避免追高买在高点）。
+  const startAt = cfg.rsiOverboughtPenaltyStart;
+  const mildExcess = clamp(rsi6 - startAt, 0, Math.max(0, cfg.rsiOverbought - startAt)); // 偏高区部分（最多到超买临界）
+  const steepExcess = Math.max(0, rsi6 - cfg.rsiOverbought); // 超买区部分
+  const overboughtPenalty = mildExcess * cfg.rsiOverboughtPenaltyPerPoint + steepExcess * cfg.rsiOverboughtSteepPerPoint;
   let overboughtCut = 0;
   const applyOverbought = (v: number) => {
     const after = clamp(v - overboughtPenalty, Math.min(cfg.rsiOverboughtFloor, v), v);

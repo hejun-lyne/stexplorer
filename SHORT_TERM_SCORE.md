@@ -117,15 +117,21 @@ stockDims = { volume: 30, rsi: 40, money: 30 }
 
 **第三步：超买追高衰减**（避免买在高点）
 
-偏多形态（金叉 / 上穿 / 接近金叉 / 回踩 / 修复中 / 多头排列）即便成立，只要 **RSI6 偏高或已进入超买区**，就按超出点数下调：
+偏多形态（金叉 / 上穿 / 接近金叉 / 回踩 / 修复中 / 多头排列）即便成立，只要 **RSI6 偏高或已进入超买区**，就按超出点数下调（两段式）：
 
 ```
-下调分 = (RSI6 − rsiOverboughtPenaltyStart(72)) × rsiOverboughtPenaltyPerPoint(1)
+偏高区（RSI6 > 68）：每高 1 点扣 rsiOverboughtPenaltyPerPoint(1.5) 分，最多扣 (80−68)×1.5 = 18 分
+超买区（RSI6 ≥ 80）：每高 1 点再扣 rsiOverboughtSteepPerPoint(2.5) 分
 得分 = clamp(形态分 − 下调分, rsiOverboughtFloor(10), 形态分)
 ```
 
-举例：金叉且 `RSI6=78` → 35 − 6 = **28.7**；`RSI6=82`（超买）→ 35 − 10 = 25；`RSI6=90` → 触及下限 10。
-形态文案会附上原因，如「…（金叉）｜RSI6=78 偏高，下调6分」「…｜RSI6=85 已进入超买区，追高下调13分」。
+以金叉（形态分 35）为例：
+
+| RSI6 | 72 | 75 | 78 | 80 | 82 | ≥85 |
+|---|---|---|---|---|---|---|
+| 得分 | 29 | 24.5 | 20 | 17 | 12 | 10（下限） |
+
+因此 **25 分以上的评分不会再出现在超买区**。形态文案会附上原因，如「…（金叉）｜RSI6=78 偏高，下调15分」、「…｜RSI6=85 已进入超买区，追高下调30分」。
 死叉 / 空头排列 / 持续超买钝化本就是低分形态，不再叠加这项衰减。
 
 ### 3.3 资金指标（30 分）
@@ -288,8 +294,9 @@ stockDims = { volume: 30, rsi: 40, money: 30 }
 | RSI | `rsiCrossFreshDays` | 3 | 金叉/死叉时效 |
 | RSI | `rsiOversoldCrossDays` | 5 | 上穿前回看超卖的窗口 |
 | RSI | `rsiBreakSpread` / `rsiPullbackBreakSpread` | 3 / 8 | 贴近 24 线容差 / 回踩破位阈值 |
-| RSI | `rsiOverboughtPenaltyStart` | 72 | 偏多形态下 RSI6 高于该值开始按超买追高下调 |
-| RSI | `rsiOverboughtPenaltyPerPoint` | 1 | RSI6 每高出 1 点扣 1 分 |
+| RSI | `rsiOverboughtPenaltyStart` | 68 | 偏多形态下 RSI6 高于该值开始按超买追高下调（偏高区） |
+| RSI | `rsiOverboughtPenaltyPerPoint` | 1.5 | 偏高区每高 1 点扣分（最多扣 18 分） |
+| RSI | `rsiOverboughtSteepPerPoint` | 2.5 | 进入超买区（≥80）后每高 1 点再扣的分数 |
 | RSI | `rsiOverboughtFloor` | 10 | 超买追高下调后的最低分 |
 | 资金 | `moneyWindow` | 20 | 主力/散户累计窗口 |
 | 资金 | `moneyShapeDays` | 30 | 形态识别窗口 |
@@ -310,7 +317,7 @@ stockDims = { volume: 30, rsi: 40, money: 30 }
 | 诉求 | 调整 |
 |---|---|
 | 想让 RSI 影响更大 | 提高 `stockDims.rsi`（如 45），其余子项自动按新满分缩放 |
-| 超买追高惩罚太轻/太重 | 调 `rsiOverboughtPenaltyStart`（起始点，越小越早扣）与 `rsiOverboughtPenaltyPerPoint`（斜率） |
+| 超买追高惩罚太轻/太重 | 调 `rsiOverboughtPenaltyStart`（起始点，越小越早扣）、`rsiOverboughtPenaltyPerPoint`（偏高区斜率）、`rsiOverboughtSteepPerPoint`（超买区斜率）、`rsiOverboughtFloor`（下限） |
 | 想让板块影响更小 | 降低 `weights.sector`，或提高 `sectorRelWeight`（更看重个股相对强度） |
 | 板块"追高"惩罚太狠 | 放宽 `sectorRiseAllow` / `sectorBiasAllow` / `sectorFreshDays`，或下调对应扣分系数 |
 | 金叉信号太稀有/太频繁 | 调 `rsiCrossFreshDays`（交叉时效）与 `rsiOversoldCrossDays`（超卖回看窗口） |
