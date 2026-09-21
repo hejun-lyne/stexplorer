@@ -41,6 +41,16 @@
 - 在使用中遇到 bug 欢迎[issues](https://github.com/1zilc/fishing-funds/issues)
 - 如果有好的建议或改进欢迎 [PR](https://github.com/1zilc/fishing-funds/pulls)
 
+## 功能文档
+
+- [短线评分说明](./SHORT_TERM_SCORE.md)：个股(量能/RSI/资金) + 板块 + 大盘 三维度评分规则、权重、配置参数与调参指南
+- [本地文件存储方案](./LOCAL_STORAGE.md)：作为 GitHub 存储替代的本地文件存储功能
+- [SQLite 本地存储方案](./SQLITE_STORAGE.md)（已弃用，见上方本地文件存储）
+- [Akshare 集成指南](./AKSHARE_INTEGRATION.md)：将东财接口替换为 Akshare Python 库调用
+- [Android 配置指南](./README-ANDROID.md)：在 Android 系统上运行的技术方案与配置
+- [APK 构建指南](./APK-BUILD-GUIDE.md)：分方案的 APK 打包步骤（含 Android Studio）
+- [Android 构建环境](./android-build.md)：Android 构建的环境要求与步骤
+
 ## 数据源
 
 > 注意 ⚠️：不同的数据源可能会有反爬机制，刷新时的请求速度会有所差异  

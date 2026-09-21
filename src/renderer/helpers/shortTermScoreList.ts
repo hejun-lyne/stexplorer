@@ -52,7 +52,7 @@ async function fetchDayKlines(
 
 /**
  * 批量计算股票短线评分（与个股详情页"短线评分"同源逻辑）：
- * 个股(量能+RSI+资金) 50% + 板块 30% + 大盘 20%，缺失维度按剩余权重归一化。
+ * 个股(量能30+RSI40+资金30) 60% + 板块 20% + 大盘 20%，缺失维度按剩余权重归一化。
  * 公共数据（指数K线/涨跌比/市值档统计）只拉取一次，个股数据并发拉取并逐只回调，支持中途暂停。
  */
 export async function computeShortTermScoreRows(items: ShortTermScoreItem[], options: ComputeOptions): Promise<ShortTermScoreRow[]> {
