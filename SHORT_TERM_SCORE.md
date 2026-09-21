@@ -115,6 +115,19 @@ stockDims = { volume: 30, rsi: 40, money: 30 }
 
 「超买后回踩」额外条件：距最近一次真实超买 ≤ `rsiPullbackMaxDays(25)` 日、当前贴近 24 日线（差值 ∈ [−3, 5]）、已从峰值回落 ≥5、且回落过程中从未跌破超过 8（`rsiPullbackBreakSpread`，超过视为破位）。
 
+**第三步：超买追高衰减**（避免买在高点）
+
+偏多形态（金叉 / 上穿 / 接近金叉 / 回踩 / 修复中 / 多头排列）即便成立，只要 **RSI6 偏高或已进入超买区**，就按超出点数下调：
+
+```
+下调分 = (RSI6 − rsiOverboughtPenaltyStart(72)) × rsiOverboughtPenaltyPerPoint(1)
+得分 = clamp(形态分 − 下调分, rsiOverboughtFloor(10), 形态分)
+```
+
+举例：金叉且 `RSI6=78` → 35 − 6 = **28.7**；`RSI6=82`（超买）→ 35 − 10 = 25；`RSI6=90` → 触及下限 10。
+形态文案会附上原因，如「…（金叉）｜RSI6=78 偏高，下调6分」「…｜RSI6=85 已进入超买区，追高下调13分」。
+死叉 / 空头排列 / 持续超买钝化本就是低分形态，不再叠加这项衰减。
+
 ### 3.3 资金指标（30 分）
 
 数据：`GetMoneyFlowFromTushare(code, 60)` 的 60 日主力/散户逐日净流入 → 20 日滚动累计曲线（`moneyWindow`）。
@@ -275,6 +288,9 @@ stockDims = { volume: 30, rsi: 40, money: 30 }
 | RSI | `rsiCrossFreshDays` | 3 | 金叉/死叉时效 |
 | RSI | `rsiOversoldCrossDays` | 5 | 上穿前回看超卖的窗口 |
 | RSI | `rsiBreakSpread` / `rsiPullbackBreakSpread` | 3 / 8 | 贴近 24 线容差 / 回踩破位阈值 |
+| RSI | `rsiOverboughtPenaltyStart` | 72 | 偏多形态下 RSI6 高于该值开始按超买追高下调 |
+| RSI | `rsiOverboughtPenaltyPerPoint` | 1 | RSI6 每高出 1 点扣 1 分 |
+| RSI | `rsiOverboughtFloor` | 10 | 超买追高下调后的最低分 |
 | 资金 | `moneyWindow` | 20 | 主力/散户累计窗口 |
 | 资金 | `moneyShapeDays` | 30 | 形态识别窗口 |
 | 资金 | `moneyCrossRecentDays` / `moneyCrossDecay` | 5 / 0.8 | 交叉检测窗口 / 时效衰减 |
@@ -294,6 +310,7 @@ stockDims = { volume: 30, rsi: 40, money: 30 }
 | 诉求 | 调整 |
 |---|---|
 | 想让 RSI 影响更大 | 提高 `stockDims.rsi`（如 45），其余子项自动按新满分缩放 |
+| 超买追高惩罚太轻/太重 | 调 `rsiOverboughtPenaltyStart`（起始点，越小越早扣）与 `rsiOverboughtPenaltyPerPoint`（斜率） |
 | 想让板块影响更小 | 降低 `weights.sector`，或提高 `sectorRelWeight`（更看重个股相对强度） |
 | 板块"追高"惩罚太狠 | 放宽 `sectorRiseAllow` / `sectorBiasAllow` / `sectorFreshDays`，或下调对应扣分系数 |
 | 金叉信号太稀有/太频繁 | 调 `rsiCrossFreshDays`（交叉时效）与 `rsiOversoldCrossDays`（超卖回看窗口） |

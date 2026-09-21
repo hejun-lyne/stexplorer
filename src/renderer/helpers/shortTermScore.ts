@@ -91,6 +91,10 @@ export const SHORT_TERM_SCORE_CONFIG = {
   rsiOversoldCrossDays: 5, // "超卖后金叉"额外要求：从上穿日往回倒推该天数内须出现过真实超卖状态（否则只是普通交叉）
   rsiBreakSpread: 3, // 判定"贴近24日线"的容差（RSI6 - RSI24）
   rsiPullbackBreakSpread: 8, // 回踩过程中允许的最大跌破幅度：超过则认为已破位，不算回踩
+  // 超买追高衰减：偏多形态（金叉/上穿/接近金叉/回踩/修复/多头排列）成立，但 RSI6 已偏高时下调，避免买在高点
+  rsiOverboughtPenaltyStart: 72, // RSI6 高于该值开始按"超买追高"下调
+  rsiOverboughtPenaltyPerPoint: 1, // RSI6 每高出 1 点扣 1 分
+  rsiOverboughtFloor: 10, // 超买追高下调后的最低分
   // ---- 个股-资金 ----
   moneyWindow: 20, // 主力/散户累计净流入窗口（日）
   moneyShapeDays: 30, // 微笑/悲伤曲线形态识别窗口（日）
@@ -633,6 +637,10 @@ export interface RsiScoreResult {
  * 过期后一律改按当前均线排列判定（多头/空头排列），避免 6日线与24日线反复缠绕时长期挂着"金叉"高分。
  * 并且"超卖后金叉"还要求：从上穿日往回倒推 cfg.rsiOversoldCrossDays（默认5日）内出现过真实超卖状态，
  * 超卖早已过去（区间内 6/24 线反复缠绕）时的上穿只是普通交叉，不予加分。
+ *
+ * 超买追高衰减：偏多形态（金叉/上穿/接近金叉/回踩/修复/多头排列）即便成立，只要 RSI6 高于
+ * cfg.rsiOverboughtPenaltyStart（默认72），就按超出点数下调评分（下限 cfg.rsiOverboughtFloor），
+ * 因为此时位置已高，追进去容易买在高点；死叉/空头/超买钝化等本就低分的形态不再叠加。
  */
 export function scoreStockRsi(
   stockKlines: Stock.KLineItem[],
@@ -765,34 +773,45 @@ export function scoreStockRsi(
   // 交叉的时效描述：金叉/死叉只在其时效窗口内作为形态依据
   const crossAgo = freshCrossDaysAgo === 0 ? '当日' : `${freshCrossDaysAgo}日前`;
 
+  // ---- 超买追高衰减 ----
+  // 金叉/多头排列等偏多形态即便成立，若 RSI6 已偏高或进入超买区，说明当下位置已高，
+  // 买入容易站在高点，因此按"超出起始阈值的点数"下调评分（死叉/空头等本就低分的形态不再叠加）。
+  const overboughtPenalty = Math.max(0, rsi6 - cfg.rsiOverboughtPenaltyStart) * cfg.rsiOverboughtPenaltyPerPoint;
+  let overboughtCut = 0;
+  const applyOverbought = (v: number) => {
+    const after = clamp(v - overboughtPenalty, Math.min(cfg.rsiOverboughtFloor, v), v);
+    overboughtCut = Math.max(overboughtCut, v - after);
+    return after;
+  };
+
   if (pullback) {
     const stabilized = rsi6s[n - 1] >= rsi6s[n - 2];
-    score = stabilized ? s(30) : s(26);
+    score = applyOverbought(stabilized ? s(30) : s(26));
     pattern = stabilized ? '超买后回踩24日线企稳（最佳买点）' : '超买后回落，6日线临近24日线（回踩中）';
   } else if (hasFreshCross && freshCrossIsUp && crossFromOversold) {
     // 超卖后金叉：上穿紧跟在最近一次真实超卖之后（时效窗口内），才是超卖反转买点
     if (spread >= 0) {
-      score = s(26);
+      score = applyOverbought(s(26));
       pattern = `超卖后${crossAgo}6日线上穿24日线（金叉）`;
     } else if (spread >= -cfg.rsiBreakSpread) {
-      score = s(22);
+      score = applyOverbought(s(22));
       pattern = '超卖后上穿24日线后回落至线附近整理（金叉待确认）';
     } else {
-      score = s(16);
+      score = applyOverbought(s(16));
       pattern = '超卖后上穿24日线后已跌回24日线下方（金叉失效）';
     }
   } else if (hasFreshCross && freshCrossIsUp) {
     // 近3日内上穿，但距最近一次真实超卖已超过时效窗口（区间反复缠绕）→ 不按超卖后金叉加分
     if (spread >= -cfg.rsiBreakSpread) {
-      score = s(20);
+      score = applyOverbought(s(20));
       pattern = '近3日内6日线上穿24日线（非超卖反转，不加分）';
     } else {
-      score = s(12);
+      score = applyOverbought(s(12));
       pattern = '近3日内6日线上穿24日线后跌回24日线下方（上穿失效）';
     }
   } else if (reboundRegime && approachingCross) {
     // 时效内无新交叉，但6日线在24日线下方向上收敛 → 等待金叉
-    score = s(20);
+    score = applyOverbought(s(20));
     pattern = '超卖反弹后6日线回抽24日线（接近金叉）';
   } else if (hasFreshCross && !freshCrossIsUp) {
     // 时效窗口内的死叉：金叉结构已被破坏
@@ -812,18 +831,26 @@ export function scoreStockRsi(
     }
   } else if (reboundRegime && rsi6 < rsi24 && rsi6 >= rsi6s[n - 2] && rsi6 - troughAfterOversold > 5) {
     // 超卖后反弹修复中：RSI6 已显著脱离超卖谷底且当日回升，但尚未上穿24日线
-    score = s(18);
+    score = applyOverbought(s(18));
     pattern = '超卖后反弹修复中（尚未金叉）';
   } else if (persistentOverbought) {
     score = s(8);
     pattern = '持续超买钝化，追高风险大';
   } else if (rsi6 > rsi24) {
     // 交叉已过时效（或从未出现）：按当前均线排列判定，不再算作金叉
-    score = s(20);
+    score = applyOverbought(s(20));
     pattern = lastCrossUpIdx >= 0 ? 'RSI多头排列，处于强势区（金叉时效已过）' : 'RSI多头排列，处于强势区';
   } else {
     score = s(10);
     pattern = 'RSI空头排列，处于弱势区';
+  }
+
+  // 偏多形态但位置偏高（超买追高）时，在形态后补充下调说明
+  if (overboughtCut >= 1) {
+    pattern +=
+      rsi6 >= cfg.rsiOverbought
+        ? `｜RSI6=${rsi6.toFixed(0)} 已进入超买区，追高下调${overboughtCut.toFixed(0)}分`
+        : `｜RSI6=${rsi6.toFixed(0)} 偏高，下调${overboughtCut.toFixed(0)}分`;
   }
 
   return { score, max, available: true, pattern, rsi6, rsi24, rsi6Percentile };
