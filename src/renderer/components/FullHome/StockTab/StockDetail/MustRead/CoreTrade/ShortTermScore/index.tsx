@@ -547,7 +547,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         }}
       >
         <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
-          <Col span={20}>个股表现评分（量能30 + 资金30；RSI 仅计算与展示，不计入加权）</Col>
+          <Col span={20}>个股表现评分（量能20 + 资金60；RSI 仅计算与展示，不计入加权）</Col>
           <Col span={4} style={{ textAlign: 'right' }}>
             <span style={{ fontSize: 16, fontWeight: 'bold', color: Score.scoreColor(stock.score) }}>
               {stock.available ? stock.score.toFixed(1) : '--'}
@@ -660,13 +660,14 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             <Tooltip
               title={
                 <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
-                  {`基于主力/散户20日累计净流入曲线（与资金流向图同源），满分30：
-微笑曲线(U型)上穿散户线且0轴上方 → 最高25分（最佳）
-主力20日净流入为正且强于散户 → 21~24分
-微笑曲线尚未上穿 → 15分
-方向不明 → 10~15分
-悲伤曲线(倒U型) → 7分
-悲伤曲线下穿散户线且0轴下方 → 3分（最差）`}
+                  {`基于主力/散户20日累计净流入曲线（与资金流向图同源），满分30；按「是否处在趋势转折点」排队：
+完美微笑曲线(U型)上穿散户线且站上0轴 → 20~30分 ★（当日金叉最高，随天数衰减）
+近期上穿散户线（形态未识别为U型）→ 12~22分（站上0轴更高）
+微笑曲线（资金回流）但尚未上穿 → 15分（转折前夜，等待确认）
+主力净流入为正且强于散户、但近期无金叉 → 13分；若资金已在区间高位(≥72%) → 7分（已过转折点，谨防追高）
+主力净流入为正但弱于散户（资金分歧）→ 9分
+方向不明 → 11分
+倒U型 → 6分；倒U型下穿散户线且在0轴下方 → 最低分（最差）`}
                 </div>
               }
               placement="right"

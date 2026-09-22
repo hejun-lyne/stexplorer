@@ -910,7 +910,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             <Button size="small" type="text" icon={sortTypes.total == 1 ? <CaretUpOutlined /> : sortTypes.total == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('total')} />
           </Col>
           <Col span={1}>评级</Col>
-          <Col span={2} title="个股 = 量能30 + 资金30（RSI 仅计算与展示，不计入加权）">
+          <Col span={2} title="个股 = 资金60 + 量能20（以资金为重，抓微笑曲线金叉；RSI 仅计算与展示，不计入加权）">
             个股
             <Button size="small" type="text" icon={sortTypes.stockScore == 1 ? <CaretUpOutlined /> : sortTypes.stockScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('stockScore')} />
           </Col>
@@ -1150,7 +1150,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 <Col span={4} style={{ fontSize: 12 }} title={s.sectorTrend}>
                   {s.sectorTrend || '--'}
                 </Col>
-                <Col span={2} title={s.moneyNote} className={s.moneyScore == null ? '' : Utils.GetValueColor(s.moneyScore - 15).textClass}>
+                <Col span={2} title={s.moneyNote} className={s.moneyScore == null ? '' : Utils.GetValueColor(s.moneyScore - 20).textClass}>
                   {s.moneyScore == null ? '--' : s.moneyScore.toFixed(0)}
                 </Col>
                 <Col span={3} style={{ fontSize: 12 }}>

@@ -64,9 +64,9 @@ export const SHORT_TERM_SCORE_CONFIG = {
   // ---- 个股子项权重（合计 100，仅用于个股维度加权）----
   // 注：权重为 0 的子项仍然照常计算与展示，只是不参与个股综合分。
   stockDims: {
-    volume: 30, // 量能活跃度
+    volume: 20, // 量能活跃度（辅助项）
     rsi: 0, // RSI(6/24)：短线评分定位是选股而非择时，故不计入加权，仅保留计算与展示
-    money: 30, // 资金指标（主力/散户20日曲线形态）
+    money: 60, // 资金指标：目标是筛出「微笑曲线 + 金叉」的趋势转折点，故权重最高
   },
   /** 子项满分（分值刻度，与权重解耦：权重为 0 时满分仍用于子项计算与展示） */
   stockSubMax: {
@@ -108,6 +108,7 @@ export const SHORT_TERM_SCORE_CONFIG = {
   moneyShapeDays: 30, // 微笑/悲伤曲线形态识别窗口（日）
   moneyCrossRecentDays: 5, // 交叉检测窗口（日）
   moneyCrossDecay: 0.8, // 交叉时效衰减系数：刚交叉 1.0，每过一日乘一次（3日后约 0.5）
+  moneyHighPosThreshold: 0.72, // 主力资金「位置已高」阈值：区间相对位置 ≥ 该值 视为已持续流入（非转折点）
   // ---- 综合权重 ----
   // 板块权重从 0.3 下调到 0.2：板块强弱是环境因素，若权重过高会导致高评分股票过度集中在当前强势板块
   weights: { stock: 0.6, sector: 0.2, market: 0.2 },
@@ -893,8 +894,17 @@ const SHAPE_DESC: Record<MoneyShape, string> = {
 };
 
 /**
- * 资金指标（20日）：基于主力/散户 N 日累计净流入曲线识别形态。
- * 最佳：主力微笑曲线上穿散户线且在0轴上方；最差：悲伤曲线向下穿越散户线且在0轴下方。
+ * 资金指标（20日）：基于主力/散户 N 日累计净流入曲线识别形态，目标是筛出**趋势转折点**。
+ *
+ * 评分取向（短线以资金为重）：
+ * 1) 最高分给「完美微笑曲线金叉」：主力线走出 U 型（先流出后回流）**且** 近期上穿散户线，
+ *    站上 0 轴更优；越新鲜越接近满分（衰减后回落到该档下限）。
+ * 2) 次高给「近期上穿散户线」（形态未被判定为 U 型，但同样是资金转折信号）。
+ * 3) U 型但还没上穿 → 转折前夜，等待确认。
+ * 4) 已在 0 轴上方且强于散户、但近期**没有**金叉 → 资金已持续流入（趋势中后段），
+ *    按主力线在近窗口内的**相对位置**降分：位置越高越接近区间顶部，越要避免追高
+ *    （这样高分不会再集中落在"已经处于趋势高位"的股票上）。
+ * 5) 倒 U 型 / 下穿散户线 / 0 轴下方 → 低位分。
  */
 export function scoreStockMoney(
   detailMain: number[] | null | undefined,
@@ -902,8 +912,8 @@ export function scoreStockMoney(
   cfg: ScoreConfig = SHORT_TERM_SCORE_CONFIG,
 ): MoneyScoreResult {
   const max = cfg.stockSubMax.money;
-  // 形态基础分（原 35 分制 × max/35 取整，保持各形态相对高低不变）
-  const s = (v: number) => Math.round((v * max) / 35);
+  // 分值刻度：以 30 分制为基准 × max/30 取整
+  const s = (v: number) => Math.round((v * max) / 30);
   const empty: MoneyScoreResult = {
     score: 0,
     max,
@@ -981,35 +991,53 @@ export function scoreStockMoney(
   const downFresh = cross === 'down' && crossDaysAgo !== null ? Math.pow(cfg.moneyCrossDecay, crossDaysAgo) : 0;
   const ageDesc = cross ? (crossDaysAgo === 0 ? '当日' : `${crossDaysAgo}日前`) : '';
 
+  // ---- 位置分：主力线在近 moneyShapeDays 日区间中的相对位置（0~1）----
+  // 位置越高 = 资金已持续流入越久（趋势中后段），越不应当作"转折点"买入
+  const winMin = Math.min(...shapeWin);
+  const winMax = Math.max(...shapeWin);
+  const posInRange = winMax > winMin ? clamp((mainLast - winMin) / (winMax - winMin), 0, 1) : 0.5;
+  const highPos = posInRange >= cfg.moneyHighPosThreshold;
+
   let score: number;
   let note: string;
   if (shape === 'smile' && cross === 'up') {
-    // 微笑曲线金叉：越新鲜越强，随时间衰减回落到形态分（s(18)）
-    score = s(18) + (aboveZero ? s(12) : s(4)) * upFresh;
-    note = `微笑曲线${ageDesc}上穿散户线${aboveZero ? '且在0轴上方' : '，尚未站上0轴'}`;
-  } else if (aboveZero && mainLast > retailLast) {
-    score = s(24) + s(4) * upFresh;
-    note = `主力20日净流入为正且强于散户${cross === 'up' ? `（${ageDesc}上穿）` : ''}`;
+    // 完美微笑曲线金叉：U型（先流出后回流）+ 上穿散户线，站上0轴最优；越新鲜越高（衰减到该档下限）
+    score = (aboveZero ? s(20) : s(15)) + (aboveZero ? s(10) : s(7)) * upFresh;
+    note = `${aboveZero ? '完美' : ''}微笑曲线${ageDesc}上穿散户线${
+      aboveZero ? '且站上0轴' : '（尚未站上0轴）'
+    }｜趋势转折买点`;
+  } else if (cross === 'up') {
+    // 近期上穿散户线（形态未被判定为U型）：同为资金转折信号，略低于完美微笑金叉
+    score = (aboveZero ? s(16) : s(12)) + s(6) * upFresh;
+    note = `主力线${ageDesc}上穿散户线${aboveZero ? '且站上0轴' : ''}（资金转折信号）`;
   } else if (shape === 'smile') {
-    score = s(18);
-    note = '主力线呈U型，等待上穿确认';
+    // U型但还没上穿：转折前夜，等待确认
+    score = s(15);
+    note = '主力线走出微笑曲线（资金回流），等待上穿散户线确认';
+  } else if (aboveZero && mainLast > retailLast) {
+    // 已站上0轴且强于散户，但近期没有金叉：资金已持续流入（趋势中后段），位置越高越要避免追高
+    score = highPos ? s(7) : s(13);
+    note = highPos
+      ? `主力资金已持续流入（区间位置${(posInRange * 100).toFixed(0)}%），非转折点，谨防追高`
+      : '主力20日净流入为正且强于散户（已过转折点，无新金叉）';
+  } else if (aboveZero) {
+    score = s(9);
+    note = '主力20日净流入为正，但弱于散户（资金分歧）';
   } else if (shape === 'sad' && cross === 'down') {
-    // 悲伤曲线死叉：越新鲜惩罚越重，随时间衰减回升到形态分（s(8)）
-    score = s(8) - (aboveZero ? s(2) : s(5)) * downFresh;
+    // 悲伤曲线死叉：越新鲜惩罚越重，随时间衰减回升到形态分
+    score = s(6) - (aboveZero ? s(2) : s(4)) * downFresh;
     note = `悲伤曲线${ageDesc}下穿散户线${aboveZero ? '' : '且在0轴下方'}`;
   } else if (shape === 'sad') {
-    score = s(8);
+    score = s(6);
     note = '主力线呈倒U型，资金撤离迹象';
-  } else if (aboveZero) {
-    score = s(18) - s(3) * downFresh;
-    note = `主力20日净流入为正${cross === 'down' ? `（${ageDesc}被下穿，注意风险）` : ''}`;
   } else if (cross === 'down') {
-    score = s(12) - s(4) * downFresh;
+    score = s(9) - s(4) * downFresh;
     note = `主力线${ageDesc}下穿散户线且在0轴下方`;
   } else {
-    score = s(12);
+    score = s(11);
     note = '主力资金观望，方向不明';
   }
+  score = clamp(Math.round(score), 0, max);
 
   return {
     score,
