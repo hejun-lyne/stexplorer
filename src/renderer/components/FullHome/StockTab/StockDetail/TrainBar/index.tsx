@@ -155,9 +155,10 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     saveProgress(first);
   }, [ontrain, days, currentDay, saveProgress]);
 
-  /** 训练窗口内的日收盘价（交易日 -> 收盘价），买卖与浮盈都按训练日收盘价计价 */
+  /** 训练窗口内的日成交价（交易日 -> 收盘价 / 开盘价）：浮盈与卖出按收盘价，买入按次日开盘价 */
   const [dayClosesMap, setDayClosesMap] = useState<Record<string, number>>({});
-  /** 已取过收盘价的训练日期：数据层按训练日期截断，训练日期推进后必须重新取数 */
+  const [dayOpensMap, setDayOpensMap] = useState<Record<string, number>>({});
+  /** 已取过行情的训练日期：数据层按训练日期截断，训练日期推进后必须重新取数 */
   const dayClosesKeyRef = useRef('');
   useEffect(() => {
     if (!ontrain) {
@@ -170,10 +171,11 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       return;
     }
     let mounted = true;
-    Helpers.Stock.GetTrainDayCloses(secid).then((closes) => {
+    Helpers.Stock.GetTrainDayPrices(secid).then(({ closes, opens }) => {
       if (mounted) {
         dayClosesKeyRef.current = key;
         setDayClosesMap(closes);
+        setDayOpensMap(opens);
       }
     });
     return () => {
@@ -181,12 +183,34 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     };
   }, [ontrain, secid, currentDay]);
 
+  // 成交处理：买入委托的成交日到达时，按当日开盘价成交
+  // 委托在下一交易日的开盘价只有「训练日推进到那一天」后才取得到（数据层按训练日期截断），
+  // 因此委托先以 y=0 记在成交日上，这里补上真实成交价。
+  useEffect(() => {
+    if (!ontrain || !currentDay) {
+      return;
+    }
+    const open = dayOpensMap[currentDay];
+    if (!open) {
+      return;
+    }
+    const pending = (config?.buyPoints || []).filter(
+      (p) => isTrainMark(p.t) && String(p.x).substring(0, 10) === currentDay && !(Number(p.y) > 0)
+    );
+    if (!pending.length) {
+      return;
+    }
+    pending.forEach((p) => {
+      dispatch(addStockTradePointAction(secid, currentDay, open, true, TRAIN_TYPE, p.a));
+    });
+  }, [ontrain, currentDay, dayOpensMap, config, secid]);
+
   const currentIdx = days.indexOf(currentDay);
   const nextDay = currentIdx >= 0 && currentIdx < days.length - 1 ? days[currentIdx + 1] : '';
   // 推进到窗口内最后一个交易日即视为训练结束
   const finished = days.length > 0 && currentIdx >= days.length - 1;
 
-  // 当前训练日的收盘价：没有分钟级数据源，买卖一律以当日收盘价成交
+  // 当前训练日的收盘价：卖出按当日收盘价成交，浮盈按当日收盘价计价
   const currentClose = useMemo(() => {
     const dates = Object.keys(dayClosesMap);
     if (!dates.length) {
@@ -201,7 +225,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
   }, [dayClosesMap, currentDay]);
 
   // 训练窗口内的买卖记录（按时间正序，日期统一按天比较）
-  // amount：买入时指定的金额，卖出为清仓、无金额
+  // 买入：date 为成交日（点买入的下一个交易日）、price 为当日开盘价、amount 为委托金额；
+  // 卖出：date 为卖出当日（按当日收盘价成交）、一次清仓无金额
   const trainTrades = useMemo<{ date: string; price: number; isBuy: boolean; amount?: number }[]>(() => {
     const buys = (config?.buyPoints || [])
       .filter((t) => isTrainMark(t.t))
@@ -214,6 +239,21 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       .filter((t) => (!startDate || t.date >= startDate) && (!currentDay || t.date <= currentDay))
       .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0));
   }, [config, startDate, currentDay]);
+
+  /** 已委托未成交的买入（成交价待成交日开盘价补上，y 为 0 表示还没成交） */
+  const pendingBuy = useMemo(() => {
+    const list = (config?.buyPoints || [])
+      .filter((p) => isTrainMark(p.t) && !(Number(p.y) > 0))
+      .map((p) => ({ date: String(p.x).substring(0, 10), price: 0 }))
+      .sort((a, b) => (a.date > b.date ? 1 : -1));
+    return list.length ? list[0] : null;
+  }, [config]);
+
+  /** T+1：买入成交当日不可卖出 */
+  const boughtToday = useMemo(() => {
+    const last = trainTrades[trainTrades.length - 1];
+    return !!last && last.isBuy && last.date === currentDay;
+  }, [trainTrades, currentDay]);
 
   // 模拟账户：以初始资金起算，按整百股买入/加仓，卖出一次性清仓，买卖均按比例收佣金
   const account = useMemo(() => {
@@ -283,9 +323,14 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         message.warning('当前训练日期的收盘价还在加载中');
         return;
       }
-      let amount: number | undefined;
       if (isBuy) {
+        // 买入：信号在当日收盘后确认 → 下一个交易日开盘价成交（与回测口径一致）
+        if (!nextDay) {
+          message.warning('已是训练窗口最后一个交易日，没有次日行情，无法买入');
+          return;
+        }
         // 买入校验：金额为空按全部可用资金处理，否则必须 > 0、不超过可用资金、且至少能买一手
+        // 次日开盘价属于未来数据（训练模式取不到），这里用当日收盘价估算能否买到一手
         const input = buyAmount == null || isNaN(Number(buyAmount)) ? account.cash : Number(buyAmount);
         const perLotCost = currentClose * MIN_LOT * (1 + commission);
         if (!input || input <= 0) {
@@ -297,15 +342,22 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
           return;
         }
         if (input < perLotCost) {
-          message.warning(`买入金额不足一手，至少需要 ${perLotCost.toFixed(2)} 元（含佣金）`);
+          message.warning(`买入金额不足一手（按当前收盘价估算至少需要 ${perLotCost.toFixed(2)} 元，含佣金）`);
           return;
         }
-        amount = input;
+        // 成交日记为下一个交易日，成交价（y=0）等推进到该交易日时按当日开盘价补上
+        dispatch(addStockTradePointAction(secid, nextDay, 0, true, TRAIN_TYPE, input));
+        message.success(`已委托：${nextDay} 按开盘价成交（T+1，推进到该交易日后成交）`);
+        return;
       }
-      // 按训练日收盘价成交，日期直接记交易日（数据层已保证不含未来数据）
-      dispatch(addStockTradePointAction(secid, currentDay, currentClose, isBuy, TRAIN_TYPE, amount));
+      // 卖出：按当前训练日收盘价成交
+      if (boughtToday) {
+        message.warning('T+1：买入成交当日不可卖出，请推进到下一个交易日');
+        return;
+      }
+      dispatch(addStockTradePointAction(secid, currentDay, currentClose, false, TRAIN_TYPE));
     },
-    [currentDay, currentClose, secid, buyAmount, account.cash, commission]
+    [currentDay, currentClose, secid, buyAmount, account.cash, commission, nextDay, boughtToday]
   );
 
   const clearBS = useCallback(() => {
@@ -386,8 +438,11 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     dispatch(syncStockMarktypeAction(secid, t));
   }, []);
 
-  const canBuy = !!config && currentClose > 0 && Math.floor(account.cash / (currentClose * MIN_LOT * (1 + commission))) >= 1;
-  const canSell = !!config && account.shares > 0 && currentClose > 0;
+  // 买入为次日委托（按次日开盘价成交）：需要有下一个交易日，且资金够买一手（按当前收盘价估算）
+  const canBuy =
+    !!config && currentClose > 0 && !!nextDay && Math.floor(account.cash / (currentClose * MIN_LOT * (1 + commission))) >= 1;
+  // T+1：买入成交当日不可卖出
+  const canSell = !!config && account.shares > 0 && currentClose > 0 && !boughtToday;
   const profitClass = Utils.GetValueColor(account.profit).textClass;
   const realizedClass = Utils.GetValueColor(account.realized).textClass;
 
@@ -487,11 +542,19 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
                   卖出
                 </Button>
                 &nbsp;
-                <Button size="small" danger disabled={!trainTrades.length} onClick={clearBS}>
+                <Button size="small" danger disabled={!trainTrades.length && !pendingBuy} onClick={clearBS}>
                   清空
                 </Button>
               </div>
               {!config && <span className={styles.hint}>先收藏该标的后才可以进行模拟买卖</span>}
+              {config && (
+                <span className={styles.hint}>
+                  {finished
+                    ? '已到训练最后一天：买入按次日开盘价成交，无次日行情，不能买入'
+                    : `买入：次日(${nextDay || '--'})开盘价成交（T+1，推进后按开盘价成交）；卖出：当日收盘价成交`}
+                  {pendingBuy ? ` ｜ 已委托 ${pendingBuy.date} 开盘价成交（待成交）` : ''}
+                </span>
+              )}
             </>
           )}
         </div>

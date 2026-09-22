@@ -2636,14 +2636,15 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                 yAxis: selectedArea.avgcost,
               });
             }
+            // 买入委托未成交前（模拟训练：y=0 的次日委托）不画到图上
             const allBuyPoints = [
               ...(config?.buyPoints || []),
               ...(backtestMarks?.buyPoints || []),
-            ];
+            ].filter((p) => Number(p.y) > 0);
             const allSellPoints = [
               ...(config?.sellPoints || []),
               ...(backtestMarks?.sellPoints || []),
-            ];
+            ].filter((p) => Number(p.y) > 0);
             let pData = allBuyPoints.map((p) => {
               const x = typeIndex == 1 ? p.x : p.x.substring(0, 10);
               return {

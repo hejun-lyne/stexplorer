@@ -885,16 +885,30 @@ export async function GetTrainTradingDays(secid: string, startDate: string, endD
 
 /** 获取训练窗口内每个交易日的收盘价（日K，已按当前训练日期过滤，不含未来数据） */
 export async function GetTrainDayCloses(secid: string): Promise<Record<string, number>> {
+  const { closes } = await GetTrainDayPrices(secid);
+  return closes;
+}
+
+/**
+ * 训练窗口内的每日成交价（交易日 -> 收盘价 / 开盘价）
+ * 数据层已按训练日期截断，不含未来数据。
+ * 开盘价用于模拟训练的「买入按次日开盘价成交」（与回测口径一致）。
+ */
+export async function GetTrainDayPrices(
+  secid: string
+): Promise<{ closes: Record<string, number>; opens: Record<string, number> }> {
   try {
     const r = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, 2000);
     const closes: Record<string, number> = {};
+    const opens: Record<string, number> = {};
     ((r && r.ks) || []).forEach((k) => {
       closes[k.date] = k.sp;
+      opens[k.date] = k.kp;
     });
-    return closes;
+    return { closes, opens };
   } catch (error) {
-    console.log('获取训练日收盘价失败', error);
-    return {};
+    console.log('获取训练日行情失败', error);
+    return { closes: {}, opens: {} };
   }
 }
 
