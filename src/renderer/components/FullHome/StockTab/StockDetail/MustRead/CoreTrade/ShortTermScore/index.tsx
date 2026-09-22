@@ -547,7 +547,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         }}
       >
         <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
-          <Col span={20}>个股表现评分（量能30 + RSI40 + 资金30）</Col>
+          <Col span={20}>个股表现评分（量能30 + 资金30；RSI 仅计算与展示，不计入加权）</Col>
           <Col span={4} style={{ textAlign: 'right' }}>
             <span style={{ fontSize: 16, fontWeight: 'bold', color: Score.scoreColor(stock.score) }}>
               {stock.available ? stock.score.toFixed(1) : '--'}
@@ -601,7 +601,9 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             <Tooltip
               title={
                 <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
-                  {`先判定“格局”，再识别形态：
+                  {`权重 0：短线评分定位是「选股」而非「择时」，RSI 仍照常计算与展示，但不参与个股综合分。
+
+先判定“格局”，再识别形态：
 格局 = 回看60日内，最近一次【真实超买】(RSI6≥80，或≥72且处95%以上历史分位，且与24日线差值≥10) 与最近一次【真实超卖】(RSI6≤30且差值≤-10) 谁更靠后。
 · 最近一次是超买 → 才可能判定“超买后回踩”
 · 最近一次是超卖 → 之后的走势一律归为“超卖后反抽”（即使中途冲高再回落），不会被误判成超买回踩
@@ -611,7 +613,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
 ② “超卖后金叉”还要求：从上穿日往回倒推 5 个交易日内出现过真实超卖状态——超卖早已过去（区间内 6/24 线
    反复缠绕）的上穿只是普通交叉，不加分（形态标注“非超卖反转，不加分”）。
 
-评分（高→低，满分40，为个股权重最高的择时项）：
+评分（高→低，满分40，仅作参考展示，不计入个股综合分）：
 1. 超买后回踩24日线企稳 → 40分（最佳）
 2. 超买后回落、临近24日线（回踩中）→ 35分
 3. 超卖后3日内6日线上穿24日线（金叉）→ 35分
@@ -649,6 +651,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         {rsi.available && (
           <div style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginBottom: 6 }}>
             RSI6: {rsi.rsi6.toFixed(1)}（历史分位{(rsi.rsi6Percentile * 100).toFixed(0)}%），RSI24: {rsi.rsi24.toFixed(1)}；{rsi.pattern}
+            <span style={{ marginLeft: 6 }}>（该分值仅展示，不计入个股综合分）</span>
           </div>
         )}
         {/* 资金 */}

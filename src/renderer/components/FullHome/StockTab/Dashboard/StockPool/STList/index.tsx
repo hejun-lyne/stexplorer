@@ -910,7 +910,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             <Button size="small" type="text" icon={sortTypes.total == 1 ? <CaretUpOutlined /> : sortTypes.total == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('total')} />
           </Col>
           <Col span={1}>评级</Col>
-          <Col span={2}>
+          <Col span={2} title="个股 = 量能30 + 资金30（RSI 仅计算与展示，不计入加权）">
             个股
             <Button size="small" type="text" icon={sortTypes.stockScore == 1 ? <CaretUpOutlined /> : sortTypes.stockScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('stockScore')} />
           </Col>
@@ -922,7 +922,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             大盘
             <Button size="small" type="text" icon={sortTypes.marketScore == 1 ? <CaretUpOutlined /> : sortTypes.marketScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('marketScore')} />
           </Col>
-          <Col span={4}>
+          <Col span={4} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>

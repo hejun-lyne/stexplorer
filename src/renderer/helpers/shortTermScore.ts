@@ -61,11 +61,18 @@ export const SHORT_TERM_SCORE_CONFIG = {
   sectorStockAboveBonus: 8, // 个股站上自己的20日均线加/减分
   sectorEnvBase: 45, // 板块环境分下限（板块趋势分为 down 档时）
   sectorEnvSpan: 30, // 板块环境分跨度（趋势分为 up 档时 env = base + span）
-  // ---- 个股子项权重（满分即权重，合计 100）----
+  // ---- 个股子项权重（合计 100，仅用于个股维度加权）----
+  // 注：权重为 0 的子项仍然照常计算与展示，只是不参与个股综合分。
   stockDims: {
     volume: 30, // 量能活跃度
-    rsi: 40, // RSI(6/24) 择时指标：短线择时核心，权重最高
+    rsi: 0, // RSI(6/24)：短线评分定位是选股而非择时，故不计入加权，仅保留计算与展示
     money: 30, // 资金指标（主力/散户20日曲线形态）
+  },
+  /** 子项满分（分值刻度，与权重解耦：权重为 0 时满分仍用于子项计算与展示） */
+  stockSubMax: {
+    volume: 30,
+    rsi: 40,
+    money: 30,
   },
   // ---- 个股-量能 ----
   mvSmallBound: 50e8, // 小盘上限（元）
@@ -463,7 +470,7 @@ export function scoreSector(
 // ==================== 个股-量能活跃度 ====================
 
 export interface VolumeScoreResult {
-  score: number; // 0~30（= stockDims.volume）
+  score: number; // 0~30（= stockSubMax.volume）
   max: number;
   available: boolean;
   note: string;
@@ -499,7 +506,7 @@ export function scoreStockVolume(
   circMv: number | null | undefined,
   cfg: ScoreConfig = SHORT_TERM_SCORE_CONFIG,
 ): VolumeScoreResult {
-  const max = cfg.stockDims.volume;
+  const max = cfg.stockSubMax.volume;
   if (!stockKlines || stockKlines.length < 25) {
     return { score: 0, max, available: false, note: 'K线数据不足' };
   }
@@ -612,7 +619,7 @@ export function scoreStockVolume(
 // ==================== 个股-RSI 指标 ====================
 
 export interface RsiScoreResult {
-  score: number; // 0~40（= stockDims.rsi）
+  score: number; // 0~40（= stockSubMax.rsi）；权重为 0，仅计算与展示，不参与个股综合分
   max: number;
   available: boolean;
   pattern: string; // 命中情形
@@ -647,7 +654,7 @@ export function scoreStockRsi(
   stockKlines: Stock.KLineItem[],
   cfg: ScoreConfig = SHORT_TERM_SCORE_CONFIG,
 ): RsiScoreResult {
-  const max = cfg.stockDims.rsi;
+  const max = cfg.stockSubMax.rsi;
   // 形态基础分（原 30 分制 × max/30 取整，保持各形态相对高低不变）
   const s = (v: number) => Math.round((v * max) / 30);
   const empty: RsiScoreResult = { score: 0, max, available: false, pattern: '', rsi6: 0, rsi24: 0, rsi6Percentile: 0 };
@@ -865,7 +872,7 @@ export function scoreStockRsi(
 export type MoneyShape = 'smile' | 'sad' | 'flat' | 'unknown';
 
 export interface MoneyScoreResult {
-  score: number; // 0~30（= stockDims.money）
+  score: number; // 0~30（= stockSubMax.money）
   max: number;
   available: boolean;
   shape: MoneyShape;
@@ -894,7 +901,7 @@ export function scoreStockMoney(
   detailRetail: number[] | null | undefined,
   cfg: ScoreConfig = SHORT_TERM_SCORE_CONFIG,
 ): MoneyScoreResult {
-  const max = cfg.stockDims.money;
+  const max = cfg.stockSubMax.money;
   // 形态基础分（原 35 分制 × max/35 取整，保持各形态相对高低不变）
   const s = (v: number) => Math.round((v * max) / 35);
   const empty: MoneyScoreResult = {
@@ -1031,27 +1038,33 @@ export interface StockScoreResult {
   degraded: string[];
 }
 
-/** 个股表现评分 = 量能活跃度 + RSI择时 + 资金（分值即权重，见 stockDims），子项缺失时按剩余权重归一化 */
+/**
+ * 个股表现评分 = 量能活跃度 + 资金（权重见 stockDims）
+ * RSI 权重为 0：只计算与展示，不参与个股综合分（短线评分定位是选股，不做择时）。
+ * 各子项先归一到 0~1 再乘权重，再按「参与加权的权重之和」折算到 100；子项缺失时按剩余权重归一化。
+ */
 export function scoreStock(
   volume: VolumeScoreResult,
   rsi: RsiScoreResult,
   money: MoneyScoreResult,
 ): StockScoreResult {
+  const dims = SHORT_TERM_SCORE_CONFIG.stockDims;
   const subs = [
-    { name: '量能活跃度', r: volume },
-    { name: 'RSI指标', r: rsi },
-    { name: '资金指标', r: money },
+    { name: '量能活跃度', r: volume, w: dims.volume },
+    { name: 'RSI指标', r: rsi, w: dims.rsi },
+    { name: '资金指标', r: money, w: dims.money },
   ];
-  const available = subs.filter((s) => s.r.available);
-  const degraded = subs.filter((s) => !s.r.available).map((s) => `${s.name}数据不足`);
-  if (!available.length) {
+  // 只有「参与加权」的子项缺失才算影响评分（RSI 权重为 0，不缺数据也不影响分）
+  const degraded = subs.filter((s) => s.w > 0 && !s.r.available).map((s) => `${s.name}数据不足`);
+  const weighted = subs.filter((s) => s.r.available && s.w > 0);
+  if (!weighted.length) {
     return { available: false, reason: '个股份项数据均不足', score: 0, volume, rsi, money, degraded };
   }
-  const sum = available.reduce((a, s) => a + s.r.score, 0);
-  const sumMax = available.reduce((a, s) => a + s.r.max, 0);
+  const sumW = weighted.reduce((a, s) => a + s.w, 0);
+  const sum = weighted.reduce((a, s) => a + (s.r.max > 0 ? (s.r.score / s.r.max) * s.w : 0), 0);
   return {
     available: true,
-    score: sumMax > 0 ? (sum / sumMax) * 100 : 0,
+    score: sumW > 0 ? (sum / sumW) * 100 : 0,
     volume,
     rsi,
     money,
