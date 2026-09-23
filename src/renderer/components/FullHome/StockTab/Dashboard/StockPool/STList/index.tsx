@@ -798,10 +798,10 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           <Button
             size="small"
             onClick={handleShortScore}
-            loading={shortScoreLoading && shortScoreProgress === 0}
+            loading={shortScoreLoading}
             style={{ marginLeft: 4 }}
           >
-            短线评分
+            {shortScoreLoading ? `评分中 ${shortScoreProgress}%` : '短线评分'}
           </Button>
           {displayMode !== 'stocks' && (
             <Button

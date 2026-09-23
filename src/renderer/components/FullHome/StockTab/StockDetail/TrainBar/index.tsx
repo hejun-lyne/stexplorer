@@ -29,7 +29,11 @@ import { MarkType } from '@/utils/enums';
 import * as Utils from '@/utils';
 import TrainSettlement from '../TrainSettlement';
 
-/** 工具栏高度：开启训练模式（两行）/ 关闭训练模式（仅标签行），详情区据此撑满剩余高度 */
+/**
+ * 工具栏高度的兼容常量：
+ * 训练条内容会换行、高度自适应（详情页改为「纵向 flex + 内容区撑满剩余高度」），
+ * 这两个值不再用于计算布局，仅保留给可能存在的旧引用。
+ */
 export const TRAIN_BAR_HEIGHT = 60;
 export const TRAIN_BAR_HEIGHT_BASE = 34;
 
@@ -551,7 +555,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
                 <span className={styles.hint}>
                   {finished
                     ? '已到训练最后一天：买入按次日开盘价成交，无次日行情，不能买入'
-                    : `买入：次日(${nextDay || '--'})开盘价成交（T+1，推进后按开盘价成交）；卖出：当日收盘价成交`}
+                    : `买入按次日(${nextDay || '--'})开盘价成交（T+1）；卖出按当日收盘价`}
                   {pendingBuy ? ` ｜ 已委托 ${pendingBuy.date} 开盘价成交（待成交）` : ''}
                 </span>
               )}

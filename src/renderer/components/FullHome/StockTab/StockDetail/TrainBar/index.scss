@@ -4,7 +4,10 @@
 .row {
   display: flex;
   align-items: center;
-  flex-wrap: nowrap;
+  // 训练模式项目多（交易日/持仓/盈亏/买卖操作…），窄窗口下必须换行，
+  // 否则会横向溢出把整页布局挤坏
+  flex-wrap: wrap;
+  row-gap: 4px;
   width: 100%;
   min-height: 26px;
 }
@@ -32,6 +35,10 @@
 .hint {
   color: var(--secondary-text-color);
   font-size: 12px;
+  // 提示文字较长：占满剩余宽度并允许折行，避免把训练条撑得很宽
+  flex: 1 1 160px;
+  min-width: 0;
+  white-space: normal;
 }
 .net {
   font-weight: bold;

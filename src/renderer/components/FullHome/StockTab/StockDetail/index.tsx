@@ -33,7 +33,7 @@ import KimiAnalysis from './KimiAnalysis';
 import Holdings from './Holdings';
 import * as Utils from '@/utils';
 import BacktestAnalysis from './BacktestAnalysis';
-import TrainBar, { TRAIN_BAR_HEIGHT, TRAIN_BAR_HEIGHT_BASE } from './TrainBar';
+import TrainBar from './TrainBar';
 
 export interface StockDetailProps {
   secid: string;
@@ -163,12 +163,15 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
   const [noteChanged, setNoteChanged] = useState<boolean|undefined>(false);
   const [activePeriod, setActivePeriond] = useState<Stock.PeriodMarkItem | null>(null);
   return (
-    <>
-      <TrainBar secid={secid} removeStock={removeStock} addStock={addStock} showTrade={true} />
+    // 训练条会换行、高度自适应：外层纵向 flex，内容区撑满剩余高度（不再按固定条高算高度）
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ flex: '0 0 auto' }}>
+        <TrainBar secid={secid} removeStock={removeStock} addStock={addStock} showTrade={true} />
+      </div>
       <Row
         className={styles.container}
         ref={contentRef}
-        style={{ height: `calc(100% - ${ontrain ? TRAIN_BAR_HEIGHT : TRAIN_BAR_HEIGHT_BASE}px)` }}
+        style={{ flex: '1 1 auto', minHeight: 0, height: 'auto' }}
       >
         {nDetails && (
           <SplitPane
@@ -278,7 +281,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
           </SplitPane>
         )}
       </Row>
-    </>
+    </div>
   );
 };
 

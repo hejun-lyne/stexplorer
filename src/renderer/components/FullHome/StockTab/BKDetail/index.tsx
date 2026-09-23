@@ -20,7 +20,7 @@ import MoneyFlowChart from '../StockDetail/MustRead/CoreTrade/MoneyFlowChart';
 import { KLineType, MAPeriodType, StockMarketType } from '@/utils/enums';
 import AllBankuaisWrapper from './AllBankuais';
 import BStrategy from './BStrategy';
-import TrainBar, { TRAIN_BAR_HEIGHT, TRAIN_BAR_HEIGHT_BASE } from '../StockDetail/TrainBar';
+import TrainBar from '../StockDetail/TrainBar';
 import BKRanking from './BKRanking';
 import STRanking from '../StockDetail/STRanking';
 
@@ -441,12 +441,15 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
   }, [secid, moneyFlow]);
 
   return (
-    <>
-      <TrainBar secid={secid} removeStock={removeBK} addStock={addBK} />
+    // 训练条会换行、高度自适应：外层纵向 flex，内容区撑满剩余高度（不再按固定条高算高度）
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ flex: '0 0 auto' }}>
+        <TrainBar secid={secid} removeStock={removeBK} addStock={addBK} />
+      </div>
       <Row
         className={styles.container}
         ref={contentRef}
-        style={{ height: `calc(100% - ${ontrain ? TRAIN_BAR_HEIGHT : TRAIN_BAR_HEIGHT_BASE}px)` }}
+        style={{ flex: '1 1 auto', minHeight: 0, height: 'auto' }}
       >
         {detail && (
           <SplitPane
@@ -776,7 +779,7 @@ const BKDetail: React.FC<BKDetailProps> = ({ secid, name, active, onChangeUpdate
           </SplitPane>
         )}
       </Row>
-    </>
+    </div>
   );
 };
 
