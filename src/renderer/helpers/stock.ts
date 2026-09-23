@@ -892,7 +892,7 @@ export async function GetTrainDayCloses(secid: string): Promise<Record<string, n
 /**
  * 训练窗口内的每日成交价（交易日 -> 收盘价 / 开盘价）
  * 数据层已按训练日期截断，不含未来数据。
- * 开盘价用于模拟训练的「买入按次日开盘价成交」（与回测口径一致）。
+ * 模拟训练的买入与卖出均按「当日收盘价」成交，收盘价同时用于逐日估值；开盘价保留备用。
  */
 export async function GetTrainDayPrices(
   secid: string

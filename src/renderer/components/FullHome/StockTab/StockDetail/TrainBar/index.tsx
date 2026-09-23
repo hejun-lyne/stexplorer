@@ -159,9 +159,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     saveProgress(first);
   }, [ontrain, days, currentDay, saveProgress]);
 
-  /** 训练窗口内的日成交价（交易日 -> 收盘价 / 开盘价）：浮盈与卖出按收盘价，买入按次日开盘价 */
+  /** 训练窗口内的每日收盘价（交易日 -> 收盘价）：买入、卖出、浮盈统一按当日收盘价 */
   const [dayClosesMap, setDayClosesMap] = useState<Record<string, number>>({});
-  const [dayOpensMap, setDayOpensMap] = useState<Record<string, number>>({});
   /** 已取过行情的训练日期：数据层按训练日期截断，训练日期推进后必须重新取数 */
   const dayClosesKeyRef = useRef('');
   useEffect(() => {
@@ -175,11 +174,10 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       return;
     }
     let mounted = true;
-    Helpers.Stock.GetTrainDayPrices(secid).then(({ closes, opens }) => {
+    Helpers.Stock.GetTrainDayPrices(secid).then(({ closes }) => {
       if (mounted) {
         dayClosesKeyRef.current = key;
         setDayClosesMap(closes);
-        setDayOpensMap(opens);
       }
     });
     return () => {
@@ -187,15 +185,15 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     };
   }, [ontrain, secid, currentDay]);
 
-  // 成交处理：买入委托的成交日到达时，按当日开盘价成交
-  // 委托在下一交易日的开盘价只有「训练日推进到那一天」后才取得到（数据层按训练日期截断），
-  // 因此委托先以 y=0 记在成交日上，这里补上真实成交价。
+  // 兼容历史委托：旧版本买入会先以 y=0 记在「次日」，等推进到该日再用开盘价补成交价。
+  // 现在买入当日即以收盘价成交，不再产生待补委托；这里仅在训练日到达该委托日时用当日收盘价补上，
+  // 避免历史遗留的 y=0 委托一直无法成交。
   useEffect(() => {
     if (!ontrain || !currentDay) {
       return;
     }
-    const open = dayOpensMap[currentDay];
-    if (!open) {
+    const close = dayClosesMap[currentDay];
+    if (!close) {
       return;
     }
     const pending = (config?.buyPoints || []).filter(
@@ -205,9 +203,9 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       return;
     }
     pending.forEach((p) => {
-      dispatch(addStockTradePointAction(secid, currentDay, open, true, TRAIN_TYPE, p.a));
+      dispatch(addStockTradePointAction(secid, currentDay, close, true, TRAIN_TYPE, p.a));
     });
-  }, [ontrain, currentDay, dayOpensMap, config, secid]);
+  }, [ontrain, currentDay, dayClosesMap, config, secid]);
 
   const currentIdx = days.indexOf(currentDay);
   const nextDay = currentIdx >= 0 && currentIdx < days.length - 1 ? days[currentIdx + 1] : '';
@@ -229,8 +227,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
   }, [dayClosesMap, currentDay]);
 
   // 训练窗口内的买卖记录（按时间正序，日期统一按天比较）
-  // 买入：date 为成交日（点买入的下一个交易日）、price 为当日开盘价、amount 为委托金额；
-  // 卖出：date 为卖出当日（按当日收盘价成交）、一次清仓无金额
+  // 买入：date 为买入当日、price 为当日收盘价、amount 为委托金额；
+  // 卖出：date 为卖出当日、price 为当日收盘价、一次清仓无金额
   const trainTrades = useMemo<{ date: string; price: number; isBuy: boolean; amount?: number }[]>(() => {
     const buys = (config?.buyPoints || [])
       .filter((t) => isTrainMark(t.t))
@@ -244,7 +242,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0));
   }, [config, startDate, currentDay]);
 
-  /** 已委托未成交的买入（成交价待成交日开盘价补上，y 为 0 表示还没成交） */
+  /** 历史遗留的待补成交价买入委托（y 为 0 表示还没成交，仅旧数据会出现） */
   const pendingBuy = useMemo(() => {
     const list = (config?.buyPoints || [])
       .filter((p) => isTrainMark(p.t) && !(Number(p.y) > 0))
@@ -328,13 +326,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         return;
       }
       if (isBuy) {
-        // 买入：信号在当日收盘后确认 → 下一个交易日开盘价成交（与回测口径一致）
-        if (!nextDay) {
-          message.warning('已是训练窗口最后一个交易日，没有次日行情，无法买入');
-          return;
-        }
+        // 买入：按当前训练日收盘价成交（T+1，成交当日不可卖出）
         // 买入校验：金额为空按全部可用资金处理，否则必须 > 0、不超过可用资金、且至少能买一手
-        // 次日开盘价属于未来数据（训练模式取不到），这里用当日收盘价估算能否买到一手
         const input = buyAmount == null || isNaN(Number(buyAmount)) ? account.cash : Number(buyAmount);
         const perLotCost = currentClose * MIN_LOT * (1 + commission);
         if (!input || input <= 0) {
@@ -349,9 +342,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
           message.warning(`买入金额不足一手（按当前收盘价估算至少需要 ${perLotCost.toFixed(2)} 元，含佣金）`);
           return;
         }
-        // 成交日记为下一个交易日，成交价（y=0）等推进到该交易日时按当日开盘价补上
-        dispatch(addStockTradePointAction(secid, nextDay, 0, true, TRAIN_TYPE, input));
-        message.success(`已委托：${nextDay} 按开盘价成交（T+1，推进到该交易日后成交）`);
+        dispatch(addStockTradePointAction(secid, currentDay, currentClose, true, TRAIN_TYPE, input));
+        message.success(`已买入：${currentDay} 按收盘价 ${currentClose.toFixed(2)} 成交（T+1，当日不可卖出）`);
         return;
       }
       // 卖出：按当前训练日收盘价成交
@@ -361,7 +353,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       }
       dispatch(addStockTradePointAction(secid, currentDay, currentClose, false, TRAIN_TYPE));
     },
-    [currentDay, currentClose, secid, buyAmount, account.cash, commission, nextDay, boughtToday]
+    [currentDay, currentClose, secid, buyAmount, account.cash, commission, boughtToday]
   );
 
   const clearBS = useCallback(() => {
@@ -442,9 +434,9 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     dispatch(syncStockMarktypeAction(secid, t));
   }, []);
 
-  // 买入为次日委托（按次日开盘价成交）：需要有下一个交易日，且资金够买一手（按当前收盘价估算）
+  // 买入按当前训练日收盘价成交：需要当日有收盘价，且资金够买一手
   const canBuy =
-    !!config && currentClose > 0 && !!nextDay && Math.floor(account.cash / (currentClose * MIN_LOT * (1 + commission))) >= 1;
+    !!config && currentClose > 0 && Math.floor(account.cash / (currentClose * MIN_LOT * (1 + commission))) >= 1;
   // T+1：买入成交当日不可卖出
   const canSell = !!config && account.shares > 0 && currentClose > 0 && !boughtToday;
   const profitClass = Utils.GetValueColor(account.profit).textClass;
@@ -554,9 +546,9 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
               {config && (
                 <span className={styles.hint}>
                   {finished
-                    ? '已到训练最后一天：买入按次日开盘价成交，无次日行情，不能买入'
-                    : `买入按次日(${nextDay || '--'})开盘价成交（T+1）；卖出按当日收盘价`}
-                  {pendingBuy ? ` ｜ 已委托 ${pendingBuy.date} 开盘价成交（待成交）` : ''}
+                    ? '已到训练最后一天：不再进行买卖，可直接结算归档'
+                    : `买入按当日(${currentDay || '--'})收盘价成交（T+1：买入当日不可卖出）；卖出按当日收盘价`}
+                  {pendingBuy ? ` ｜ 历史委托 ${pendingBuy.date} 待按收盘价补成交` : ''}
                 </span>
               )}
             </>
