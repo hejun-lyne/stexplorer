@@ -149,8 +149,13 @@ def _conn(db_name: str) -> sqlite3.Connection:
     path = os.path.join(_db_root, db_name)
     conn = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # 存储目录若位于云同步盘，WAL 产生的 -wal/-shm 易与同步工具冲突，
+    # 可通过环境变量 STOCK_DB_JOURNAL=DELETE 切换为回滚日志模式（并发写入性能略降）。
+    journal = (os.environ.get("STOCK_DB_JOURNAL") or "WAL").strip().upper()
+    if journal not in ("WAL", "DELETE", "TRUNCATE", "PERSIST"):
+        journal = "WAL"
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(f"PRAGMA journal_mode={journal}")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA temp_store=MEMORY")
@@ -581,14 +586,18 @@ def _minute_archive_path(code: str, trade_date: str) -> str:
 # 通用 KV 缓存（承接旧的 read_cache / write_cache）
 # ============================================================
 
-def write_cache(cache_key: str, data: Any) -> None:
-    """写入通用缓存。DataFrame 会自动打标记，读取时还原为 DataFrame。"""
+def write_cache(cache_key: str, data: Any, updated_at: Optional[float] = None) -> None:
+    """写入通用缓存。DataFrame 会自动打标记，读取时还原为 DataFrame。
+
+    ``updated_at`` 可显式指定写入时间（epoch 秒），用于历史数据迁移时保留原始时间戳，
+    使 max_age_hours 的 TTL 语义与迁移前一致。为 None 时取当前时间。
+    """
     try:
         payload, data_type = _dumps(data)
     except Exception as e:
         _warn_once(f"缓存序列化失败 {cache_key}: {e}")
         return
-    now = time.time()
+    now = time.time() if updated_at is None else float(updated_at)
 
     def _run():
         conn = _conn(_META_DB)
@@ -692,11 +701,14 @@ def flush_hit_stats() -> None:
 # 股票基础信息
 # ============================================================
 
-def upsert_stock_basic(records: List[Dict[str, Any]]) -> int:
-    """写入/更新股票列表。records 需含 ts_code，可选 symbol/name/area/industry/market/list_date。"""
+def upsert_stock_basic(records: List[Dict[str, Any]], updated_at: Optional[float] = None) -> int:
+    """写入/更新股票列表。records 需含 ts_code，可选 symbol/name/area/industry/market/list_date。
+
+    ``updated_at`` 可显式指定更新时间（epoch 秒），用于数据迁移。
+    """
     if not records:
         return 0
-    now = time.time()
+    now = time.time() if updated_at is None else float(updated_at)
     rows = []
     for rec in records:
         ts_code = str(rec.get("ts_code", "")).strip()
@@ -755,9 +767,10 @@ def get_stock_basic_maps() -> Tuple[Dict[str, str], Dict[str, str]]:
 # 交易日历
 # ============================================================
 
-def upsert_trade_cal(dates: Iterable[Any], exchange: str = "SSE", is_open: int = 1) -> int:
+def upsert_trade_cal(dates: Iterable[Any], exchange: str = "SSE", is_open: int = 1,
+                     updated_at: Optional[float] = None) -> int:
     """写入交易日历。dates 元素可为 YYYYMMDD / YYYY-MM-DD / date / datetime。"""
-    now = time.time()
+    now = time.time() if updated_at is None else float(updated_at)
     rows = []
     for d in dates:
         norm = _norm_date(d)
