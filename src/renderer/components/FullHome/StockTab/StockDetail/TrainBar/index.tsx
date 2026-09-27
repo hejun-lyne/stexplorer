@@ -70,6 +70,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
   const dispatch = useDispatch();
   const config = useSelector((state: StoreState) => state.stock.stockConfigsMapping[secid]);
   const stock = useSelector((state: StoreState) => state.stock.stocksMapping[secid]);
+  // 训练资金是「所有标的共享」的一个账户，需要读取全部股票的训练买卖记录
+  const stockConfigsMapping = useSelector((state: StoreState) => state.stock.stockConfigsMapping);
   const { ontrain, trainDate, trainStartDate, trainEndDate, initialCapital, commissionRate } = useSelector(
     (state: StoreState) => state.setting.systemSetting
   );
@@ -257,19 +259,45 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     return !!last && last.isBuy && last.date === currentDay;
   }, [trainTrades, currentDay]);
 
-  // 模拟账户：以初始资金起算，按整百股买入/加仓，卖出一次性清仓，买卖均按比例收佣金
-  const account = useMemo(() => {
+  // 训练资金是「所有标的共享」的一个账户：把各标的的训练买卖记录按日期合并后统一回放，
+  // 得到共享的可用资金 + 各标的持仓。之前只回放当前标的，导致每个详情页各有一份独立的资金。
+  const sharedAccount = useMemo(() => {
+    const all: { secid: string; date: string; price: number; isBuy: boolean; amount?: number }[] = [];
+    const pushTrades = (c: any) => {
+      if (!c || !c.secid) {
+        return;
+      }
+      ((c.buyPoints || []) as any[])
+        .filter((t) => isTrainMark(t.t))
+        .forEach((t) =>
+          all.push({ secid: c.secid, date: String(t.x).substring(0, 10), price: t.y, isBuy: true, amount: t.a })
+        );
+      ((c.sellPoints || []) as any[])
+        .filter((t) => isTrainMark(t.t))
+        .forEach((t) =>
+          all.push({ secid: c.secid, date: String(t.x).substring(0, 10), price: t.y, isBuy: false, amount: undefined })
+        );
+    };
+    Object.values(stockConfigsMapping || {}).forEach(pushTrades);
+    // 兜底：当前标的配置若尚未进入 stockConfigsMapping，补一次（同 secid 不重复计入）
+    if (config && !all.some((t) => t.secid === config.secid)) {
+      pushTrades(config);
+    }
+    const trades = all
+      .filter((t) => (!startDate || t.date >= startDate) && (!currentDay || t.date <= currentDay))
+      .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : a.isBuy === b.isBuy ? 0 : a.isBuy ? -1 : 1));
+
     let cash = capital;
-    let shares = 0;
-    let costAmount = 0;
     let realized = 0;
-    trainTrades.forEach((t) => {
+    const holdings: Record<string, { shares: number; costAmount: number }> = {};
+    trades.forEach((t) => {
       const price = Number(t.price);
       if (!price) {
         return;
       }
+      const h = holdings[t.secid] || { shares: 0, costAmount: 0 };
       if (t.isBuy) {
-        // 指定金额买入：预算取「指定金额」与「可用资金」的较小值，未指定则用全部可用资金
+        // 指定金额买入：预算取「指定金额」与「共享可用资金」的较小值，未指定则用全部可用资金
         const budget = t.amount && t.amount > 0 ? Math.min(cash, t.amount) : cash;
         const lots = Math.floor(budget / (price * MIN_LOT * (1 + commission)));
         if (lots < 1) {
@@ -279,23 +307,35 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         const amount = price * count;
         const fee = amount * commission;
         cash -= amount + fee;
-        shares += count;
-        costAmount += amount + fee;
-      } else if (shares > 0) {
-        const amount = price * shares;
+        holdings[t.secid] = { shares: h.shares + count, costAmount: h.costAmount + amount + fee };
+      } else if (h.shares > 0) {
+        const amount = price * h.shares;
         const fee = amount * commission;
         cash += amount - fee;
-        realized += amount - fee - costAmount;
-        shares = 0;
-        costAmount = 0;
+        realized += amount - fee - h.costAmount;
+        holdings[t.secid] = { shares: 0, costAmount: 0 };
       }
     });
-    const costPrice = shares > 0 ? costAmount / shares : 0;
+    return { cash, realized, holdings };
+  }, [stockConfigsMapping, config, startDate, currentDay, capital, commission]);
+
+  // 当前标的的展示：可用资金取共享账户现金，持仓/成本/盈亏取共享账户里本标的的持仓
+  const account = useMemo(() => {
+    const h = sharedAccount.holdings[secid] || { shares: 0, costAmount: 0 };
+    const costPrice = h.shares > 0 ? h.costAmount / h.shares : 0;
     const lastPrice = currentClose;
-    const profit = shares > 0 ? (lastPrice - costPrice) * shares : 0;
+    const profit = h.shares > 0 ? (lastPrice - costPrice) * h.shares : 0;
     const profitRatio = costPrice > 0 ? ((lastPrice - costPrice) / costPrice) * 100 : 0;
-    return { cash, shares, costPrice, lastPrice, profit, profitRatio, realized };
-  }, [trainTrades, capital, commission, currentClose]);
+    return {
+      cash: sharedAccount.cash,
+      shares: h.shares,
+      costPrice,
+      lastPrice,
+      profit,
+      profitRatio,
+      realized: sharedAccount.realized,
+    };
+  }, [sharedAccount, secid, currentClose]);
 
   const nextDayAction = useCallback(() => {
     if (!nextDay) {
@@ -507,7 +547,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
                 </span>
               </div>
               <div className={styles.item}>
-                <span className={styles.label}>可用</span>
+                <span className={styles.label}>可用(共享)</span>
                 <span className={styles.strong}>{formatNumber(account.cash)}</span>
               </div>
               <div className={styles.item}>

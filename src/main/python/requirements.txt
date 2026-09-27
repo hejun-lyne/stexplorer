@@ -1,0 +1,26 @@
+# STExplorer Python 运行时依赖
+#
+# 安装：python3 -m pip install -r src/main/python/requirements.txt
+#
+# 说明：
+#   - 数据存储层 stock_db.py 使用标准库 sqlite3（无需额外依赖）
+#   - PyArrow 用于 Parquet 归档（daily_parquet / minute_parquet）；
+#     未安装时自动降级为「仅 SQLite」，功能不受影响但归档不可用。
+
+tushare>=1.2.89
+pandas>=1.1.5
+numpy>=1.19.5
+requests>=2.25.1
+
+# 分时走势 / 板块成分股（akshare 及其解析依赖）
+akshare>=1.10.0
+beautifulsoup4>=4.9.3
+lxml>=4.6.3
+py-mini-racer>=0.6.0
+
+# Parquet 归档（二选一，推荐 pyarrow）
+pyarrow>=8.0.0
+# fastparquet>=0.8.0
+
+# 注意：main.py / quant.py / qlib/ 为独立的 ML 实验脚本，额外依赖
+# torch、torchvision、scikit-learn、qlib，不属于应用运行时依赖。

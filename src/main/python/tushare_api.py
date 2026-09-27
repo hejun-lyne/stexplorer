@@ -11,6 +11,7 @@ import sys
 import json
 import argparse
 import os
+import time
 import math
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
@@ -268,16 +269,48 @@ def df_to_records(df) -> List[Dict[str, Any]]:
     return records
 
 
-# ============ 本地缓存机制 ============
+# ============ 本地存储层（stock_db：SQLite 热数据/元数据 + Parquet 归档）============
+# 缓存已从「一 key 一个 JSON 文件」升级为数据库存储，统一由 stock_db 模块承载：
+#   meta.db            SQLite：股票列表 / 交易日历 / 通用缓存(api_cache) / 更新日志 / K线元数据
+#   daily.db           SQLite：日线、分钟线热数据
+#   daily_parquet/     日线归档，按标的代码一文件（如 SH600519.parquet）
+#   minute_parquet/    分钟线归档，按日期分区（date=YYYY-MM-DD/600519.parquet）
+# 所有数据域统一为「缓存未命中 → 请求上游 → 落库」的流程。
+from stock_db import (  # noqa: E402
+    set_db_root as _db_set_root,
+    read_cache as _db_read_cache,
+    write_cache as _db_write_cache,
+    delete_cache as _db_delete_cache,
+    cache_updated_at as _db_cache_updated_at,
+    log_update as _db_log_update,
+    init_db as _db_init,
+    read_kline as _db_read_kline,
+    write_kline as _db_write_kline,
+    kline_coverage as _db_kline_coverage,
+    read_minute as _db_read_minute,
+    write_minute as _db_write_minute,
+    upsert_stock_basic as _db_upsert_stock_basic,
+    get_stock_basic_maps as _db_stock_basic_maps,
+    stock_basic_count as _db_stock_basic_count,
+    stock_basic_updated_at as _db_stock_basic_updated_at,
+    upsert_trade_cal as _db_upsert_trade_cal,
+    load_trade_cal as _db_load_trade_cal,
+    load_trade_cal_range as _db_load_trade_cal_range,
+    trade_cal_updated_at as _db_trade_cal_updated_at,
+)
 
-_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".stexplorer", "tushare_cache")
+# 兼容旧变量：仅用于日志展示，实际数据目录为 <storage_path>/stock_db
+_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".stexplorer", "stock_db")
+
 
 def set_cache_dir(storage_path: str):
-    """设置缓存根目录，使用应用本地存储路径下的 tushare_cache 子目录"""
+    """设置本地数据根目录（数据统一落在 <storage_path>/stock_db 下，见目录结构约定）"""
     global _CACHE_DIR
     if storage_path:
-        _CACHE_DIR = os.path.join(storage_path, "tushare_cache")
-    os.makedirs(_CACHE_DIR, exist_ok=True)
+        _CACHE_DIR = os.path.join(storage_path, "stock_db")
+    _db_set_root(storage_path)
+    _db_init()
+
 
 def _cache_key(func_name: str, **kwargs) -> str:
     """生成缓存 key"""
@@ -285,51 +318,29 @@ def _cache_key(func_name: str, **kwargs) -> str:
     return f"{func_name}_{param_str}" if param_str else func_name
 
 
-def _cache_path(cache_key: str) -> str:
-    """获取缓存文件路径"""
-    os.makedirs(_CACHE_DIR, exist_ok=True)
-    return os.path.join(_CACHE_DIR, f"{cache_key}.json")
-
-
 def read_cache(cache_key: str, max_age_hours: int = 168) -> Optional[Any]:
-    """读取缓存，max_age_hours 默认 7 天"""
-    path = _cache_path(cache_key)
-    if not os.path.exists(path):
-        return None
-    try:
-        mtime = os.path.getmtime(path)
-        age_hours = (datetime.now().timestamp() - mtime) / 3600
-        if age_hours > max_age_hours:
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # 自动还原 DataFrame
-        if isinstance(data, dict) and data.get("__type__") == "dataframe":
-            records = data.get("records", [])
-            if records:
-                return pd.DataFrame(records)
-            return pd.DataFrame()
-        return data
-    except Exception:
-        return None
+    """读取缓存（meta.db/api_cache），max_age_hours 默认 7 天。
+
+    未命中或超过 max_age_hours 返回 None，调用方据此请求上游并调用 write_cache 落库。
+    返回 DataFrame 的语义与旧文件缓存完全一致。
+    """
+    return _db_read_cache(cache_key, max_age_hours)
 
 
 def write_cache(cache_key: str, data: Any):
-    """写入缓存"""
-    try:
-        path = _cache_path(cache_key)
-        os.makedirs(_CACHE_DIR, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            # 自动序列化 DataFrame
-            if isinstance(data, pd.DataFrame):
-                json.dump(
-                    {"__type__": "dataframe", "records": df_to_records(data)},
-                    f, ensure_ascii=False, cls=DateTimeEncoder
-                )
-            else:
-                json.dump(data, f, ensure_ascii=False, cls=DateTimeEncoder)
-    except Exception:
-        pass
+    """写入缓存（meta.db/api_cache）；DataFrame 自动打标记，读取时还原"""
+    _db_write_cache(cache_key, data)
+
+
+# ============ K 线存储（daily.db 热数据 + daily_parquet 归档）============
+
+def _kline_kind(secid: str) -> str:
+    """判断 K 线所属类别：stock / index / board"""
+    if is_board_code(secid):
+        return "board"
+    if is_index_code(secid):
+        return "index"
+    return "stock"
 
 
 def _get_expected_last_trade_date(period: str = "daily") -> str:
@@ -338,32 +349,44 @@ def _get_expected_last_trade_date(period: str = "daily") -> str:
     日线：最近一个交易日
     周线：最近一个交易周的起始（最近5个交易日中的第一个）
     月线：最近一个交易月的起始（最近22个交易日中的第一个）
+
+    交易日历统一存放于 meta.db/trade_cal：本地已覆盖近期则直接使用，
+    否则请求 Tushare trade_cal 并落库，后续调用即可命中，避免每次打接口。
     """
     try:
         today = _now_date()
-        cal_start = (today - timedelta(days=90)).strftime('%Y%m%d')
-        cal_end = today.strftime('%Y%m%d')
-        pro = get_pro()
-        cal_df = pro.trade_cal(exchange='SSE', start_date=cal_start, end_date=cal_end, is_open='1')
-        if cal_df is None or cal_df.empty:
+        cal_start = (today - timedelta(days=90)).strftime('%Y-%m-%d')
+        cal_end = today.strftime('%Y-%m-%d')
+
+        # 1. 先查本地交易日历
+        try:
+            trade_dates = _db_load_trade_cal_range(cal_start, cal_end)
+        except Exception:
+            trade_dates = []
+
+        # 2. 本地未覆盖到近期（最新交易日早于 10 天前）时，请求上游并落库
+        stale_before = (today - timedelta(days=10)).strftime('%Y-%m-%d')
+        if not trade_dates or trade_dates[-1] < stale_before:
+            pro = get_pro()
+            cal_df = pro.trade_cal(exchange='SSE', start_date=cal_start.replace('-', ''),
+                                   end_date=cal_end.replace('-', ''), is_open='1')
+            if cal_df is not None and not cal_df.empty:
+                _db_upsert_trade_cal(cal_df['cal_date'].tolist(), 'SSE')
+                trade_dates = _db_load_trade_cal_range(cal_start, cal_end)
+                _db_log_update("trade_cal", f"{cal_start}~{cal_end}", "fetch_ok", len(trade_dates))
+
+        if not trade_dates:
             return today.strftime('%Y-%m-%d')
 
-        trade_dates = sorted([_standardize_date(d) for d in cal_df['cal_date']])
-
+        trade_dates = sorted(trade_dates)
         if period == 'daily':
-            return _standardize_date(trade_dates[-1])
+            return trade_dates[-1]
         elif period == 'weekly':
-            if len(trade_dates) >= 5:
-                return _standardize_date(trade_dates[-5])
-            else:
-                return _standardize_date(trade_dates[0])
+            return trade_dates[-5] if len(trade_dates) >= 5 else trade_dates[0]
         elif period == 'monthly':
-            if len(trade_dates) >= 22:
-                return _standardize_date(trade_dates[-22])
-            else:
-                return _standardize_date(trade_dates[0])
+            return trade_dates[-22] if len(trade_dates) >= 22 else trade_dates[0]
         else:
-            return _standardize_date(trade_dates[-1])
+            return trade_dates[-1]
     except Exception as e:
         print(f"[_get_expected_last_trade_date 失败] {period}: {e}")
         return _now('%Y-%m-%d')
@@ -442,26 +465,42 @@ def safe_api_call(func, *args, **kwargs):
 
 
 def _get_stock_basic_maps() -> tuple[Dict[str, str], Dict[str, str]]:
-    """获取股票基本信息映射（名称 + 行业），带本地缓存（7天）"""
-    cache_key = "stock_basic_all"
-    cached = read_cache(cache_key, max_age_hours=168)
-    if cached and isinstance(cached, dict):
-        return cached.get("name_map", {}), cached.get("industry_map", {})
+    """获取股票基本信息映射（名称 + 行业）
 
-    name_map: Dict[str, str] = {}
-    industry_map: Dict[str, str] = {}
+    存储：meta.db/stock_basic（结构化元数据表）。
+    流程：库存数据 7 天内视为新鲜直接返回；否则请求 Tushare stock_basic 并落库；
+    请求失败时降级使用库内旧数据。
+    """
+    # 1. 命中本地元数据表（7 天内新鲜）
     try:
-        pro = get_pro()
-        basic_df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
-        if basic_df is not None and not basic_df.empty:
-            for _, row in basic_df.iterrows():
-                tc = str(row['ts_code'])
-                name_map[tc] = str(row['name'])
-                industry_map[tc] = str(row.get('industry', ''))
-            write_cache(cache_key, {"name_map": name_map, "industry_map": industry_map})
+        if _db_stock_basic_count() > 0 and (time.time() - _db_stock_basic_updated_at()) <= 168 * 3600:
+            name_map, industry_map = _db_stock_basic_maps()
+            if name_map:
+                return name_map, industry_map
     except Exception:
         pass
-    return name_map, industry_map
+
+    # 2. 未命中/过期 → 请求上游并落库
+    try:
+        pro = get_pro()
+        basic_df = pro.stock_basic(
+            exchange='', list_status='L',
+            fields='ts_code,symbol,name,area,industry,market,list_date',
+        )
+        if basic_df is not None and not basic_df.empty:
+            records = df_to_records(basic_df)
+            _db_upsert_stock_basic(records)
+            _db_log_update("stock_basic", "all", "fetch_ok", len(records))
+            name_map, industry_map = _db_stock_basic_maps()
+            return name_map, industry_map
+    except Exception as e:
+        _db_log_update("stock_basic", "all", "error", 0, str(e))
+
+    # 3. 降级：返回库内已有数据（可能为空）
+    try:
+        return _db_stock_basic_maps()
+    except Exception:
+        return {}, {}
 
 
 # ============ 同花顺板块成分股辅助函数 ============
@@ -604,23 +643,31 @@ class TushareAPI:
     def get_trade_dates(year: Optional[int] = None) -> List[str]:
         try:
             target_year = year if year is not None else _now_date().year
-            cache_key = _cache_key("trade_dates", year=target_year)
-            # 历史年份缓存 1 年，当前年份缓存 7 天
+            # 历史年份视为永久有效，当前年份 7 天内视为新鲜
             max_age = 8760 if target_year < _now_date().year else 168
-            cached = read_cache(cache_key, max_age_hours=max_age)
-            if cached is not None:
-                return cached
 
+            # 1. 命中 meta.db/trade_cal（交易日历结构化表）
+            dates: List[str] = []
+            try:
+                dates = _db_load_trade_cal(target_year)
+                if dates and (target_year < _now_date().year
+                              or (time.time() - _db_trade_cal_updated_at(target_year)) <= max_age * 3600):
+                    return {"dates": dates}
+            except Exception:
+                dates = []
+
+            # 2. 未命中/过期 → 请求上游并落库
             pro = get_pro()
             start_date = f"{target_year}0101"
             end_date = f"{target_year}1231"
             df = pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date, is_open='1')
             if df is None or df.empty:
-                return []
-            df['cal_date'] = pd.to_datetime(df['cal_date'])
-            result = {"dates": df['cal_date'].dt.strftime('%Y-%m-%d').tolist()}
-            write_cache(cache_key, result)
-            return result
+                _db_log_update("trade_cal", str(target_year), "fetch_empty", 0)
+                return {"dates": dates} if dates else []
+            cal_dates = pd.to_datetime(df['cal_date']).dt.strftime('%Y-%m-%d').tolist()
+            _db_upsert_trade_cal(cal_dates, 'SSE')
+            _db_log_update("trade_cal", str(target_year), "fetch_ok", len(cal_dates))
+            return {"dates": cal_dates}
         except Exception as e:
             return {"error": str(e)}
 
@@ -1087,8 +1134,9 @@ class TushareAPI:
         - Tushare daily/weekly/monthly 接口的 amount 单位是"千元"，需×1000 转为元
         - 返回数据按日期升序排列（最早日期在前），与东财接口保持一致
         - pro_bar 优先调用，失败则 fallback 到 daily + adj_factor 手动复权
-        - 支持磁盘缓存：缓存 key 为 kline_{secid}_{period}_{adjust}，与 limit/end_date 无关
-              缓存检查逻辑：看最后一条 K 线日期是否满足需求，命中后按 limit/end_date 裁剪
+        - 本地存储：个股 K 线落在 daily.db/daily_kline（热数据）+ daily_parquet/{代码}.parquet（归档），
+              以 (kind, ts_code, period, adjust) 为维度，与 limit/end_date 无关；
+              缓存有效性以「已覆盖的日期区间」判定，命中后按 limit/end_date 裁剪。
         """
         # 训练模式：未显式给出截止日期时，以全局数据截止日期（训练日期）为终点。
         # 否则会按真实“今天”取数，把训练日之后的行情返回给上层（上层再按训练日裁剪后就只剩空数组）
@@ -1100,9 +1148,18 @@ class TushareAPI:
         end_date_std = _standardize_date(end_date) if end_date else ''
         end_date_fmt = end_date_std.replace('-', '') if end_date_std else _now()
 
-        # 统一缓存 key，与 limit/end_date 无关
+        # 统一缓存维度，与 limit/end_date 无关
         cache_key = f"kline_{secid}_{period}_{adjust}"
-        cached = read_cache(cache_key, max_age_hours=168 * 4)  # 缓存最长4周
+        kind = _kline_kind(secid)
+        ts_code = convert_secid_to_ts_code(secid)
+        cached: Optional[List[Dict[str, Any]]] = None
+        if kind == 'stock':
+            # 个股走结构化存储（daily.db 热数据 + daily_parquet 归档）
+            cached = _db_read_kline('stock', ts_code, period, adjust) or None
+        else:
+            # 指数/板块沿用通用缓存（同样落在 meta.db/api_cache）
+            legacy = read_cache(cache_key, max_age_hours=168 * 4)
+            cached = legacy if isinstance(legacy, list) else None
 
         def _is_cache_sufficient(cached_data: List[Dict]) -> bool:
             """检查缓存数据是否满足当前查询需求"""
@@ -1307,10 +1364,15 @@ class TushareAPI:
                     "hsl": _to_float(row.get("turnover_rate", 0)),
                 })
 
-            # 合并新旧缓存（扩大缓存范围）
+            # 合并新旧数据（扩大本地覆盖范围）
             merged = TushareAPI._merge_klines(cached if isinstance(cached, list) else [], klines)
             if merged:
-                write_cache(cache_key, merged)
+                if kind == 'stock':
+                    # 只落增量：daily.db 热表 upsert + daily_parquet 归档合并，读取时自动合并为全量
+                    _db_write_kline('stock', ts_code, period, adjust, klines)
+                    _db_log_update("kline", f"{ts_code} {period} {adjust}", "fetch_ok", len(klines))
+                else:
+                    write_cache(cache_key, merged)
                 print(f"[K线缓存更新] {secid} {period} 合并后 {len(merged)} 条 ({merged[0].get('date')} ~ {merged[-1].get('date')})")
 
             # 从合并后的数据中按 limit/end_date 裁剪返回
@@ -1731,7 +1793,25 @@ class TushareAPI:
         
         腾讯接口返回分笔成交数据，需按分钟聚合成与东财一致的分钟数据
         对于指数/板块代码（market==2 或 is_index_code 为 True），使用东方财富分时接口（腾讯个股接口不支持）
+
+        本地存储：个股分钟线归档至 minute_parquet/date=YYYY-MM-DD/{code}.parquet，
+        并写入 daily.db/minute_kline 热表。当日收盘后再次请求会直接命中本地数据。
         """
+        code = convert_secid_to_pure_code(secid)
+        is_stock = not is_board_code(secid) and not is_index_code(secid)
+        today = datetime.now().strftime('%Y-%m-%d')
+        now_dt = datetime.now()
+
+        # 1. 非交易时段（当日行情已走完）优先命中本地分钟库，避免重复请求
+        if is_stock and (now_dt.hour, now_dt.minute) >= (15, 5):
+            try:
+                saved = _db_read_minute(code, today)
+                if saved:
+                    _db_log_update("minute", f"{code} {today}", "hit", len(saved))
+                    return saved
+            except Exception:
+                pass
+
         if ak is None:
             return {"error": "akshare 未安装，无法获取分时数据"}
         try:
@@ -1808,7 +1888,10 @@ class TushareAPI:
                     "up": up,
                 })
                 prev_minute_close = current
-            
+
+            # 落库：minute_parquet/date=YYYY-MM-DD/{code}.parquet + daily.db/minute_kline
+            if is_stock and trends:
+                TushareAPI._persist_trend(code, today, trends)
             return trends
         except Exception as e:
             try:
@@ -1817,9 +1900,21 @@ class TushareAPI:
                     mk = secid.split(".")[0]
                     if mk == "2" or is_index_code(secid):
                         return TushareAPI._get_trend_from_eastmoney(secid)
-                return TushareAPI._get_trend_from_163(secid)
+                fallback = TushareAPI._get_trend_from_163(secid)
+                if is_stock and isinstance(fallback, list) and fallback:
+                    TushareAPI._persist_trend(code, today, fallback)
+                return fallback
             except:
                 return {"error": str(e)}
+
+    @staticmethod
+    def _persist_trend(code: str, trade_date: str, trends: List[Dict[str, Any]]) -> None:
+        """把分钟分时数据写入本地分钟库（失败不影响主流程）"""
+        try:
+            rows = _db_write_minute(code, trade_date, trends)
+            _db_log_update("minute", f"{code} {trade_date}", "fetch_ok", rows)
+        except Exception:
+            pass
 
 
     @staticmethod
@@ -3078,14 +3173,11 @@ class TushareAPI:
                 if target_date != today_str:
                     print(f"[涨跌比缓存命中] {target_date}")
                     return cached[target_date]
-                # 当天数据：检查文件修改时间是否超过 1 小时
-                path = _cache_path(cache_key)
-                if os.path.exists(path):
-                    mtime = os.path.getmtime(path)
-                    age_hours = (datetime.now().timestamp() - mtime) / 3600
-                    if age_hours <= 1:
-                        print(f"[涨跌比缓存命中] {target_date}")
-                        return cached[target_date]
+                # 当天数据：检查本地缓存写入时间是否超过 1 小时
+                written_at = _db_cache_updated_at(cache_key)
+                if written_at and (time.time() - written_at) / 3600 <= 1:
+                    print(f"[涨跌比缓存命中] {target_date}")
+                    return cached[target_date]
                 # 当天缓存过期，移除后重新请求
                 cached.pop(target_date, None)
 
@@ -3237,14 +3329,11 @@ class TushareAPI:
                 if target_date != today_str:
                     print(f"[市值档成交统计缓存命中] {target_date}")
                     return cached[target_date]
-                # 当天数据：检查文件修改时间是否超过 1 小时
-                path = _cache_path(cache_key)
-                if os.path.exists(path):
-                    mtime = os.path.getmtime(path)
-                    age_hours = (datetime.now().timestamp() - mtime) / 3600
-                    if age_hours <= 1:
-                        print(f"[市值档成交统计缓存命中] {target_date}")
-                        return cached[target_date]
+                # 当天数据：检查本地缓存写入时间是否超过 1 小时
+                written_at = _db_cache_updated_at(cache_key)
+                if written_at and (time.time() - written_at) / 3600 <= 1:
+                    print(f"[市值档成交统计缓存命中] {target_date}")
+                    return cached[target_date]
                 cached.pop(target_date, None)
 
             # 1. 获取全市场每日指标（流通市值、换手率在 daily_basic；成交额在 daily）
