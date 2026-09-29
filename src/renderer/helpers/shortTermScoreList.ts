@@ -32,6 +32,47 @@ export interface ShortTermScoreRow {
   error?: string; // 评分失败原因
 }
 
+/**
+ * 由各维度评分结果生成列表行（STList 与个股详情页共用）
+ * 这样「个股详情页执行短线评分」与「列表批量评分」写入数据库缓存的字段结构完全一致。
+ */
+export function buildShortTermScoreRow(params: {
+  code: string;
+  name?: string;
+  overall: Score.ShortTermScoreResult;
+  market: Score.MarketScoreResult;
+  sector: Score.SectorScoreResult;
+  stock: Score.StockScoreResult;
+  volume: Score.VolumeScoreResult;
+  rsi: Score.RsiScoreResult;
+  money: Score.MoneyScoreResult;
+  /** 评分失败原因（有值时该行不会写入缓存，便于下次重算） */
+  error?: string;
+}): ShortTermScoreRow {
+  const { code, name, overall, market, sector, stock, volume, rsi, money, error } = params;
+  const row: ShortTermScoreRow = {
+    code,
+    name: name || code,
+    total: overall.total,
+    grade: overall.grade,
+    advice: overall.advice,
+    summary: overall.summary,
+    stockScore: stock.available ? stock.score : null,
+    sectorScore: sector.available ? sector.score : null,
+    marketScore: market.available ? market.score : null,
+    volumeScore: volume.available ? volume.score : null,
+    rsiScore: rsi.available ? rsi.score : null,
+    rsiPattern: rsi.pattern,
+    sectorTrend: sector.available ? sector.trendDesc : '',
+    moneyScore: money.available ? money.score : null,
+    moneyNote: money.note,
+  };
+  if (error) {
+    row.error = error;
+  }
+  return row;
+}
+
 interface ComputeOptions {
   source: FundApiType; // K线数据源
   concurrency?: number; // 并发数，默认3
@@ -60,6 +101,48 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   const results: ShortTermScoreRow[] = [];
   if (!items || items.length === 0) {
     return results;
+  }
+
+  const total = items.length;
+  let done = 0;
+  /** 未命中缓存、需要实际取数计算的股票 */
+  const pending: ShortTermScoreItem[] = [...items];
+
+  // ---- 评分结果缓存（meta.db/api_cache，按交易日分桶）----
+  // 命中缓存的股票直接出分（不再取数/计算），未命中的计算完成后回写数据库。
+  // 训练模式下「当前训练日」就是评分基准日，可先查缓存；非训练模式需先取到行情最后交易日再查。
+  const trainDateKey = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
+  let cacheDate = trainDateKey;
+  let cachedRows: Record<string, any> = {};
+
+  /** 用缓存结果填充（未命中的进入 pending） */
+  const fillFromCache = () => {
+    pending.length = 0;
+    items.forEach((item) => {
+      const hit = cachedRows[item.code];
+      if (hit && typeof hit === 'object') {
+        // 名字以调用方股票池为准（缓存行可能只存了代码）
+        const row = { ...hit, code: item.code, name: hit.name || item.name || item.code } as ShortTermScoreRow;
+        results.push(row);
+        done += 1;
+        try {
+          onRow?.(row, item, done, total);
+        } catch {
+          // 回调异常不影响主流程
+        }
+        return;
+      }
+      pending.push(item);
+    });
+  };
+
+  if (cacheDate) {
+    cachedRows = await Services.Tushare.GetShortTermScoreCacheFromTushare(cacheDate, source);
+    fillFromCache();
+    if (!pending.length) {
+      // 该交易日已全部缓存，无需再取数计算
+      return results;
+    }
   }
 
   // ---- 公共上下文：三大指数日K（大盘评分对比基准 + 涨跌比日期来源）----
@@ -183,30 +266,34 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       const stock = Score.scoreStock(volume, rsi, money);
       const overall = Score.composeShortTermScore(market, sector, stock);
 
-      row.total = overall.total;
-      row.grade = overall.grade;
-      row.advice = overall.advice;
-      row.summary = overall.summary;
-      row.stockScore = stock.available ? stock.score : null;
-      row.sectorScore = sector.available ? sector.score : null;
-      row.marketScore = market.available ? market.score : null;
-      row.volumeScore = volume.available ? volume.score : null;
-      row.rsiScore = rsi.available ? rsi.score : null;
-      row.rsiPattern = rsi.pattern;
-      row.sectorTrend = sector.available ? sector.trendDesc : '';
-      row.moneyScore = money.available ? money.score : null;
-      row.moneyNote = money.note;
-      return row;
+      return buildShortTermScoreRow({
+        code,
+        name: item.name || code,
+        overall,
+        market,
+        sector,
+        stock,
+        volume,
+        rsi,
+        money,
+      });
     } catch (e: any) {
       row.error = e?.message || '评分失败';
       return row;
     }
   };
 
+  // 非训练模式：此时才拿到行情基准日（数据中的最后一个交易日），按该日查一次缓存
+  if (!cacheDate) {
+    cacheDate = anchorDate || '';
+    if (cacheDate) {
+      cachedRows = await Services.Tushare.GetShortTermScoreCacheFromTushare(cacheDate, source);
+      fillFromCache();
+    }
+  }
+
   // 并发工作池：逐只回调，支持暂停
-  const queue = [...items];
-  const total = items.length;
-  let done = 0;
+  const queue = [...pending];
   const worker = async () => {
     while (queue.length > 0) {
       if (shouldStop?.()) {
@@ -223,6 +310,19 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, () => worker()));
+
+  // ---- 回写本次评分结果（失败行不写，便于下次重算）----
+  if (cacheDate) {
+    const fresh: Record<string, any> = {};
+    results.forEach((r) => {
+      if (!r.error) {
+        fresh[r.code] = r;
+      }
+    });
+    if (Object.keys(fresh).length) {
+      await Services.Tushare.SaveShortTermScoreCacheToTushare(cacheDate, fresh, source);
+    }
+  }
   return results;
 }

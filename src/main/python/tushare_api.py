@@ -439,6 +439,26 @@ def _now_timestamp() -> float:
     return datetime.now().timestamp()
 
 
+def _real_today_str() -> str:
+    """真实当天日期 YYYYMMDD（不受训练模式 as-of 影响）
+
+    用于判断某个缓存条目是否属于「当日」数据：训练模式下 _now() 返回的是训练日期，
+    而训练日期属于历史，其数据不再变化，可以长期复用缓存；只有真实当天（盘中数据仍在更新）
+    才需要按短时效校验。
+    """
+    return datetime.now().strftime('%Y%m%d')
+
+
+# 短线评分结果缓存 key 前缀（meta.db/api_cache）：一个交易日一条记录，值为该日全部个股的评分行
+_SHORT_TERM_SCORE_CACHE_PREFIX = "short_term_score"
+
+
+def _short_term_score_cache_key(date: str, source: Any = None) -> str:
+    """短线评分缓存 key：按交易日一条（带数据源，避免切换K线数据源后复用旧源算出的分数）"""
+    src = str(source) if source is not None else ""
+    return f"{_SHORT_TERM_SCORE_CACHE_PREFIX}_{date}_{src}" if src else f"{_SHORT_TERM_SCORE_CACHE_PREFIX}_{date}"
+
+
 def cached_api_call(func_name: str, max_age_hours: int, api_func, **kwargs):
     """带缓存的 API 调用"""
     cache_key = _cache_key(func_name, **kwargs)
@@ -3881,6 +3901,20 @@ class TushareAPI:
             # 个股也用东财数据源（moneyflow_dc），与东方财富APP一致
             source = "dc"
 
+            # 数据库缓存（meta.db/api_cache）：按「个股/板块 + 代码 + 周期 + 截止交易日」缓存。
+            # 历史交易日的数据不会变化 → 长期复用；真实当天（盘中）资金流仍可能更新 → 1 小时时效。
+            # 训练模式下 _now() 为训练日期，属于历史日期，因此训练日结果可长期复用。
+            cache_key = f"moneyflow_{'ind' if is_board else 'stock'}_{code}_{days or 0}_{today}"
+            cached = read_cache(cache_key, max_age_hours=8760)
+            if isinstance(cached, dict) and not cached.get("error"):
+                if today != _real_today_str():
+                    print(f"[资金流缓存命中] {cache_key}")
+                    return cached
+                written_at = _db_cache_updated_at(cache_key)
+                if written_at and (time.time() - written_at) / 3600 <= 1:
+                    print(f"[资金流缓存命中] {cache_key}")
+                    return cached
+
             if days:
                 start_date = (datetime.strptime(today, '%Y%m%d') - timedelta(days=days + 45)).strftime('%Y%m%d')
 
@@ -3968,7 +4002,7 @@ class TushareAPI:
                 # 最新一日的详细分档数据
                 latest = daily_data[-1]
 
-                return {
+                result = {
                     "source": source,
                     # 各周期主力净流入
                     "main_1d": round(main_1d, 2),
@@ -4009,15 +4043,77 @@ class TushareAPI:
                     "detail_amount": [round(d.get("total_amount", 0), 2) for d in daily_data],
                     "total_amount_20d": round(sum(d.get("total_amount", 0) for d in daily_data), 2),
                 }
+                write_cache(cache_key, result)
+                return result
 
             # 无 days 参数：保持向后兼容，只返回当日数据
             day_data = TushareAPI._get_money_flow_single_day(pro, code, today)
             if day_data is None:
                 return {"error": "No data"}
             day_data["source"] = source
+            write_cache(cache_key, day_data)
             return day_data
 
         except Exception as e:
+            return {"error": str(e)}
+
+    # ------------------ 短线评分结果缓存（按交易日）------------------
+
+    @staticmethod
+    def get_short_term_score_cache(date: Optional[str] = None, source: Any = None) -> Dict[str, Any]:
+        """读取指定交易日的个股短线评分结果缓存（meta.db/api_cache，按交易日一条记录）
+
+        返回 {股票代码: 评分行}；未命中返回 {}。
+        训练模式下调用方传入训练日期即按该训练日缓存，每个训练日各自独立。
+        历史交易日的结果不会变化，长期有效；真实当天的结果盘中可能变化，按 1 小时时效。
+        source（K线数据源）参与缓存 key：不同数据源的K线/板块/量能口径不同，分数不可混用，
+        切换数据源后会自动按新源重新评分。
+        """
+        try:
+            target = (date or _now()).replace('-', '').replace('/', '')
+            cache_key = _short_term_score_cache_key(target, source)
+            cached = read_cache(cache_key, max_age_hours=8760)
+            if not isinstance(cached, dict) or not isinstance(cached.get("rows"), dict) or not cached["rows"]:
+                return {}
+            # 真实当天：盘中数据仍在变化，按 1 小时时效校验；历史交易日直接命中
+            if target == _real_today_str():
+                written_at = _db_cache_updated_at(cache_key)
+                if not written_at or (time.time() - written_at) / 3600 > 1:
+                    return {}
+            rows = cached["rows"]
+            print(f"[短线评分缓存命中] {target} 共 {len(rows)} 只")
+            return rows
+        except Exception as e:
+            print(f"[短线评分缓存读取失败] {date}: {e}")
+            return {}
+
+    @staticmethod
+    def save_short_term_score_cache(date: Optional[str] = None, stocks: Optional[Dict[str, Any]] = None, source: Any = None) -> Dict[str, Any]:
+        """把个股短线评分结果按交易日写入数据库缓存（meta.db/api_cache）
+
+        Args:
+            date: 交易日（YYYYMMDD / YYYY-MM-DD），训练模式下为当前训练日
+            stocks: {股票代码: 评分行}，同一天多次写入按代码合并更新（不影响其它交易日）
+            source: K线数据源标识，参与缓存 key，避免切换数据源后复用旧分数
+        """
+        try:
+            target = (date or _now()).replace('-', '').replace('/', '')
+            if not isinstance(stocks, dict) or not stocks:
+                return {"date": target, "saved": 0}
+            cache_key = _short_term_score_cache_key(target, source)
+            cached = read_cache(cache_key, max_age_hours=8760)
+            rows = cached.get("rows") if isinstance(cached, dict) else None
+            if not isinstance(rows, dict):
+                rows = {}
+            rows.update(stocks)
+            write_cache(
+                cache_key,
+                {"date": target, "source": str(source) if source is not None else None, "rows": rows},
+            )
+            print(f"[短线评分缓存写入] {target} 本次 {len(stocks)} 只，累计 {len(rows)} 只")
+            return {"date": target, "saved": len(stocks), "total": len(rows)}
+        except Exception as e:
+            print(f"[短线评分缓存写入失败] {date}: {e}")
             return {"error": str(e)}
 
     @staticmethod

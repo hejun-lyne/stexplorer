@@ -1294,6 +1294,61 @@ export async function GetMoneyFlowFromTushare(secid: string, days?: number): Pro
   }
 }
 
+// ==================== 短线评分结果缓存（按交易日，存 meta.db/api_cache） ====================
+
+/** 批量写入时的分组大小：命令行参数过长在 Windows/Linux 上会被截断，这里按 50 只一组写入 */
+const SHORT_SCORE_CACHE_CHUNK = 50;
+
+/**
+ * 读取某个交易日的个股短线评分结果缓存
+ * @param date 交易日（YYYYMMDD）；训练模式下为当前训练日
+ * @param source K线数据源标识（不同数据源的评分口径不同，不匹配视为未命中）
+ * @returns { [股票代码]: 评分行 }，未命中返回 {}
+ */
+export async function GetShortTermScoreCacheFromTushare(date: string, source?: string | number): Promise<Record<string, any>> {
+  try {
+    if (!date) {
+      return {};
+    }
+    const result = await callTushare('get_short_term_score_cache', { date, source });
+    if (result && typeof result === 'object' && !result.error) {
+      return result as Record<string, any>;
+    }
+    return {};
+  } catch (error) {
+    logError(error, 'GetShortTermScoreCacheFromTushare', '读取短线评分缓存失败');
+    return {};
+  }
+}
+
+/**
+ * 把个股短线评分结果按交易日写入数据库缓存（同一天多次写入按代码合并，不影响其它交易日）
+ * @param date 交易日（YYYYMMDD）；训练模式下为当前训练日
+ * @param stocks { [股票代码]: 评分行 }
+ * @param source K线数据源标识，随评分一起记录
+ */
+export async function SaveShortTermScoreCacheToTushare(
+  date: string,
+  stocks: Record<string, any>,
+  source?: string | number
+): Promise<void> {
+  try {
+    if (!date || !stocks) {
+      return;
+    }
+    const codes = Object.keys(stocks);
+    for (let i = 0; i < codes.length; i += SHORT_SCORE_CACHE_CHUNK) {
+      const chunk: Record<string, any> = {};
+      codes.slice(i, i + SHORT_SCORE_CACHE_CHUNK).forEach((code) => {
+        chunk[code] = stocks[code];
+      });
+      await callTushare('save_short_term_score_cache', { date, stocks: chunk, source });
+    }
+  } catch (error) {
+    logError(error, 'SaveShortTermScoreCacheToTushare', '写入短线评分缓存失败');
+  }
+}
+
 // ==================== 板块资金流向评分 ====================
 
 export interface BoardMoneyFlowScoreDim {
