@@ -4057,6 +4057,46 @@ class TushareAPI:
         except Exception as e:
             return {"error": str(e)}
 
+    @staticmethod
+    def get_money_flow_batch(codes: Optional[List[str]] = None, days: Optional[int] = None, trade_date: Optional[str] = None) -> Dict[str, Any]:
+        """批量获取多只个股的资金流向（内部逐只复用 get_money_flow，命中各自的数据库缓存）
+
+        返回 {股票代码: 资金流向}。训练周期预计算短线评分时使用：
+        一次进程启动即可取回全部标的的资金流，避免为每只股票各启动一次 python 进程。
+        """
+        result: Dict[str, Any] = {}
+        if not codes:
+            return result
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def fetch_one(code: str) -> Tuple[str, Any]:
+            try:
+                return code, TushareAPI.get_money_flow(code, days, trade_date)
+            except Exception as e:  # pragma: no cover
+                return code, {"error": str(e)}
+
+        # 并发数控制在 6，避免触发 Tushare 限流
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            future_map = {executor.submit(fetch_one, c): c for c in codes}
+            for future in as_completed(future_map):
+                code, data = future.result()
+                result[code] = data
+        print(f"[资金流批量] {len(codes)} 只完成")
+        return result
+
+    @staticmethod
+    def get_market_activity_stats_batch(dates: Optional[List[str]] = None) -> Dict[str, Any]:
+        """批量获取多个交易日的市值档成交活跃度（复用 get_market_activity_stats 及其按日期缓存）"""
+        result: Dict[str, Any] = {}
+        for d in (dates or []):
+            key = str(d).replace('-', '').replace('/', '')
+            try:
+                result[key] = TushareAPI.get_market_activity_stats(key)
+            except Exception as e:  # pragma: no cover
+                result[key] = {"error": str(e)}
+        print(f"[市值档统计批量] {len(result)} 天完成")
+        return result
+
     # ------------------ 短线评分结果缓存（按交易日）------------------
 
     @staticmethod
@@ -4086,6 +4126,25 @@ class TushareAPI:
         except Exception as e:
             print(f"[短线评分缓存读取失败] {date}: {e}")
             return {}
+
+    @staticmethod
+    def get_short_term_score_cached_summary(dates: Optional[List[str]] = None, codes: Optional[List[str]] = None, source: Any = None) -> Dict[str, Any]:
+        """检查多个交易日已缓存的短线评分对指定股票池的覆盖情况
+
+        返回 {交易日(YYYYMMDD): 尚未缓存的股票数}。
+        训练周期预计算用它跳过「已覆盖本次全部股票」的交易日，只补算新增的交易日 / 股票
+        （每推进一个训练日只需补算新的一天，无需重算整个窗口）。
+        """
+        result: Dict[str, Any] = {}
+        code_list = codes or []
+        for d in (dates or []):
+            target = str(d).replace('-', '').replace('/', '')
+            cached = read_cache(_short_term_score_cache_key(target, source), max_age_hours=8760)
+            rows = cached.get("rows") if isinstance(cached, dict) else {}
+            if not isinstance(rows, dict):
+                rows = {}
+            result[target] = sum(1 for c in code_list if c not in rows)
+        return result
 
     @staticmethod
     def save_short_term_score_cache(date: Optional[str] = None, stocks: Optional[Dict[str, Any]] = None, source: Any = None) -> Dict[str, Any]:

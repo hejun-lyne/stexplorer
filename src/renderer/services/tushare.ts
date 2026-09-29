@@ -653,7 +653,8 @@ export async function BatchGetKFromTushare(
   secids: string[],
   date: string,
   limit: number,
-  code: number = KLineType.Day
+  code: number = KLineType.Day,
+  options?: { ignoreTrain?: boolean }
 ): Promise<Record<string, Stock.KLineItem[]>> {
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
@@ -665,12 +666,16 @@ export async function BatchGetKFromTushare(
   const endDate = date.replace(/-/g, '');
 
   try {
-    const batchResult = await callTushare('get_kline_data_batch', {
-      secids,
-      period,
-      limit,
-      end_date: endDate,
-    });
+    const batchResult = await callTushare(
+      'get_kline_data_batch',
+      {
+        secids,
+        period,
+        limit,
+        end_date: endDate,
+      },
+      options
+    );
 
     if (batchResult.error || typeof batchResult !== 'object') {
       console.error('批量获取K线失败:', batchResult.error || 'Invalid response');
@@ -1014,17 +1019,40 @@ export interface BankuaiMatchResult {
  * @param fuzzy 是否启用模糊匹配（默认 true）
  * @returns 匹配板块的 secid 和类型（行业/概念），未找到返回 null
  */
+/**
+ * 板块列表（行业 + 概念）本地记忆缓存：
+ * 按名称反查板块代码会先拉全量板块列表，短线评分等场景会对同一批板块名反复解析，
+ * 每次都重新启动 python 进程开销很大，这里按 10 分钟记忆一次（只缓存非空结果）。
+ */
+let boardListMemo: { at: number; industry: Stock.BanKuaiItem[]; concept: Stock.BanKuaiItem[] } | null = null;
+const BOARD_LIST_MEMO_TTL = 10 * 60 * 1000;
+
+async function GetBoardListsMemo(): Promise<{ industry: Stock.BanKuaiItem[]; concept: Stock.BanKuaiItem[] }> {
+  const now = Date.now();
+  if (boardListMemo && now - boardListMemo.at < BOARD_LIST_MEMO_TTL) {
+    return boardListMemo;
+  }
+  const [industryResult, gainianResult] = await Promise.all([
+    GetBanKuaisFromTushare(0, 'dc'),
+    GetBanKuaisFromTushare(1, 'dc'),
+  ]);
+  const memo = {
+    at: now,
+    industry: (industryResult?.arr || []) as Stock.BanKuaiItem[],
+    concept: (gainianResult?.arr || []) as Stock.BanKuaiItem[],
+  };
+  if (memo.industry.length || memo.concept.length) {
+    boardListMemo = memo;
+  }
+  return memo;
+}
+
 export async function GetBankuaiCodeByNameFromTushare(name: string, fuzzy = true): Promise<BankuaiMatchResult | null> {
   if (!name) {
     return null;
   }
   try {
-    const [industryResult, gainianResult] = await Promise.all([
-           GetBanKuaisFromTushare(0, 'dc'),
-      GetBanKuaisFromTushare(1, 'dc'),
-    ]);
-    const industryBks: Stock.BanKuaiItem[] = industryResult?.arr || [];
-    const conceptBks: Stock.BanKuaiItem[] = gainianResult?.arr || [];
+    const { industry: industryBks, concept: conceptBks } = await GetBoardListsMemo();
     const trimmedName = name.trim();
     const findMatch = (list: Stock.BanKuaiItem[]): Stock.BanKuaiItem | undefined => {
       // 1. 精确匹配
@@ -1322,6 +1350,34 @@ export async function GetShortTermScoreCacheFromTushare(date: string, source?: s
 }
 
 /**
+ * 检查多个交易日的短线评分缓存对指定股票池的覆盖情况
+ * @param dates 交易日数组（YYYYMMDD / YYYY-MM-DD）
+ * @param codes 股票代码数组
+ * @param source K线数据源标识
+ * @returns { [YYYYMMDD]: 尚未缓存的股票数 }；失败返回 {}
+ */
+export async function GetShortTermScoreCachedSummaryFromTushare(
+  dates: string[],
+  codes: string[],
+  source?: string | number,
+  options?: { ignoreTrain?: boolean }
+): Promise<Record<string, number>> {
+  try {
+    if (!dates || !dates.length || !codes || !codes.length) {
+      return {};
+    }
+    const result = await callTushare('get_short_term_score_cached_summary', { dates, codes, source }, options);
+    if (result && typeof result === 'object' && !result.error) {
+      return result as Record<string, number>;
+    }
+    return {};
+  } catch (error) {
+    logError(error, 'GetShortTermScoreCachedSummaryFromTushare', '读取短线评分缓存覆盖情况失败');
+    return {};
+  }
+}
+
+/**
  * 把个股短线评分结果按交易日写入数据库缓存（同一天多次写入按代码合并，不影响其它交易日）
  * @param date 交易日（YYYYMMDD）；训练模式下为当前训练日
  * @param stocks { [股票代码]: 评分行 }
@@ -1548,13 +1604,16 @@ export async function BatchGetStrongStocksFromTushare(startDate: string, endDate
  * @param dates 交易日期数组 (YYYYMMDD)
  * @returns 按日期分组的市场情绪数据
  */
-export async function GetUpRatioFromTushare(dates: string[]): Promise<Record<string, any>> {
+export async function GetUpRatioFromTushare(
+  dates: string[],
+  options?: { ignoreTrain?: boolean }
+): Promise<Record<string, any>> {
   if (!dates || dates.length === 0) {
     return {};
   }
 
   try {
-    const result = await callTushare('get_up_down_ratio_batch', { dates });
+    const result = await callTushare('get_up_down_ratio_batch', { dates }, options);
 
     if (result.error || typeof result !== 'object') {
       console.error('批量获取涨跌比数据失败:', result.error || 'Invalid response');
@@ -1586,6 +1645,66 @@ export async function GetMarketActivityStatsFromTushare(date?: string): Promise<
   } catch (error) {
     logError(error, 'GetMarketActivityStatsFromTushare', '获取市值档成交统计失败');
     return null;
+  }
+}
+
+/**
+ * 批量获取多只个股的资金流向（一次 python 进程取回全部标的，训练周期预计算用）
+ * @param codes 6位股票代码数组
+ * @param days 返回最近 N 个交易日的资金流（不传则只返回当日）
+ * @param options.ignoreTrain 忽略训练过滤（预计算整段训练窗口时按窗口末日取数）
+ * @param options.tradeDate 截止交易日（ignoreTrain 时必传，否则默认取真实当天）
+ * @returns { [股票代码]: 资金流向 }，失败返回 {}
+ */
+export async function BatchGetMoneyFlowFromTushare(
+  codes: string[],
+  days?: number,
+  options?: { ignoreTrain?: boolean; tradeDate?: string }
+): Promise<Record<string, any>> {
+  try {
+    if (!codes || codes.length === 0) {
+      return {};
+    }
+    const params: Record<string, any> = { codes };
+    if (days) {
+      params.days = days;
+    }
+    if (options?.ignoreTrain && options?.tradeDate) {
+      params.trade_date = options.tradeDate.replace(/-/g, '');
+    }
+    const result = await callTushare('get_money_flow_batch', params, { ignoreTrain: options?.ignoreTrain });
+    if (result && typeof result === 'object' && !result.error) {
+      return result as Record<string, any>;
+    }
+    return {};
+  } catch (error) {
+    logError(error, 'BatchGetMoneyFlowFromTushare', '批量获取资金流向失败');
+    return {};
+  }
+}
+
+/**
+ * 批量获取多个交易日的市值档成交活跃度（一次 python 进程取回全部日期）
+ * @param dates 交易日期数组（YYYYMMDD / YYYY-MM-DD）
+ * @param options.ignoreTrain 忽略训练过滤（预计算整段训练窗口时用到）
+ * @returns { [YYYYMMDD]: 市值档统计 }，失败返回 {}
+ */
+export async function GetMarketActivityStatsBatchFromTushare(
+  dates: string[],
+  options?: { ignoreTrain?: boolean }
+): Promise<Record<string, any>> {
+  try {
+    if (!dates || dates.length === 0) {
+      return {};
+    }
+    const result = await callTushare('get_market_activity_stats_batch', { dates }, options);
+    if (result && typeof result === 'object' && !result.error) {
+      return result as Record<string, any>;
+    }
+    return {};
+  } catch (error) {
+    logError(error, 'GetMarketActivityStatsBatchFromTushare', '批量获取市值档成交统计失败');
+    return {};
   }
 }
 // ==================== 涨停股票评分 (LimitUpScorer) ====================

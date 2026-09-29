@@ -73,6 +73,66 @@ export function buildShortTermScoreRow(params: {
   return row;
 }
 
+/** 空评分行（取数/计算失败时使用） */
+export function emptyShortTermScoreRow(code: string, name?: string): ShortTermScoreRow {
+  return {
+    code,
+    name: name || code,
+    total: null,
+    grade: '',
+    advice: '',
+    summary: '',
+    stockScore: null,
+    sectorScore: null,
+    marketScore: null,
+    volumeScore: null,
+    rsiScore: null,
+    rsiPattern: '',
+    sectorTrend: '',
+    moneyScore: null,
+    moneyNote: '',
+  };
+}
+
+/** 个股对应的大盘评分基准指数（沪市→上证指数，创业板→创业板指，其余→深证成指） */
+export function indexSecidOfStock(code: string): string {
+  return code.startsWith('6') ? '1.000001' : code.startsWith('3') ? '0.399006' : '0.399001';
+}
+
+/**
+ * 单只股票在「某个交易日」的短线评分（纯计算，不取数）：
+ * 传入的 K线/资金明细必须已按该交易日截断。列表批量评分、训练周期预计算共用这一套算法，
+ * 保证同一天的评分口径完全一致。
+ */
+export function computeShortTermRowForDate(params: {
+  code: string;
+  name?: string;
+  klines: Stock.KLineItem[];
+  indexKlines: Stock.KLineItem[];
+  boardKlines: Stock.KLineItem[];
+  boardName: string;
+  upRatioMap?: Score.UpRatioMap | null;
+  marketStats?: Score.MarketActivityStats | null;
+  circMv?: number;
+  detailMain?: number[];
+  detailRetail?: number[];
+}): ShortTermScoreRow {
+  const { code, name, klines, indexKlines, boardKlines, boardName, upRatioMap, marketStats, circMv, detailMain, detailRetail } = params;
+  if (!klines || klines.length < 30) {
+    const row = emptyShortTermScoreRow(code, name);
+    row.error = `日K数据不足（${klines?.length || 0}条）`;
+    return row;
+  }
+  const market = Score.scoreMarket(klines, indexKlines || [], upRatioMap);
+  const sector = Score.scoreSector(klines, boardKlines, boardName);
+  const volume = Score.scoreStockVolume(klines, marketStats, circMv);
+  const rsi = Score.scoreStockRsi(klines);
+  const money = Score.scoreStockMoney(detailMain, detailRetail);
+  const stock = Score.scoreStock(volume, rsi, money);
+  const overall = Score.composeShortTermScore(market, sector, stock);
+  return buildShortTermScoreRow({ code, name, overall, market, sector, stock, volume, rsi, money });
+}
+
 interface ComputeOptions {
   source: FundApiType; // K线数据源
   concurrency?: number; // 并发数，默认3
@@ -184,32 +244,15 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     marketStats = null;
   }
 
-  const emptyRow = (item: ShortTermScoreItem): ShortTermScoreRow => ({
-    code: item.code,
-    name: item.name || item.code,
-    total: null,
-    grade: '',
-    advice: '',
-    summary: '',
-    stockScore: null,
-    sectorScore: null,
-    marketScore: null,
-    volumeScore: null,
-    rsiScore: null,
-    rsiPattern: '',
-    sectorTrend: '',
-    moneyScore: null,
-    moneyNote: '',
-  });
+  const emptyRow = (item: ShortTermScoreItem): ShortTermScoreRow => emptyShortTermScoreRow(item.code, item.name);
 
   const processOne = async (item: ShortTermScoreItem): Promise<ShortTermScoreRow> => {
-    const row = emptyRow(item);
     const code = item.code;
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
-    const indexSecid = code.startsWith('6') ? '1.000001' : code.startsWith('3') ? '0.399006' : '0.399001';
     try {
       const dklines = await fetchDayKlines(source, secid, 250);
       if (!dklines || dklines.length < 30) {
+        const row = emptyRow(item);
         row.error = `日K数据不足（${dklines?.length || 0}条）`;
         return row;
       }
@@ -258,26 +301,21 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
         // 资金获取失败时按维度缺失处理
       }
 
-      const market = Score.scoreMarket(dklines, indexKlinesMap[indexSecid] || [], upRatioMap);
-      const sector = Score.scoreSector(dklines, boardKlines, boardName);
-      const volume = Score.scoreStockVolume(dklines, marketStats, item.circMv);
-      const rsi = Score.scoreStockRsi(dklines);
-      const money = Score.scoreStockMoney(detailMain, detailRetail);
-      const stock = Score.scoreStock(volume, rsi, money);
-      const overall = Score.composeShortTermScore(market, sector, stock);
-
-      return buildShortTermScoreRow({
+      return computeShortTermRowForDate({
         code,
-        name: item.name || code,
-        overall,
-        market,
-        sector,
-        stock,
-        volume,
-        rsi,
-        money,
+        name: item.name,
+        klines: dklines,
+        indexKlines: indexKlinesMap[indexSecidOfStock(code)] || [],
+        boardKlines,
+        boardName,
+        upRatioMap,
+        marketStats,
+        circMv: item.circMv,
+        detailMain,
+        detailRetail,
       });
     } catch (e: any) {
+      const row = emptyRow(item);
       row.error = e?.message || '评分失败';
       return row;
     }

@@ -25,6 +25,7 @@ import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-des
 import dayjs from 'dayjs';
 import { scoreColor } from '@/helpers/shortTermScore';
 import { computeShortTermScoreRows, ShortTermScoreItem, ShortTermScoreRow } from '@/helpers/shortTermScoreList';
+import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -97,7 +98,17 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const isShortScorePausedRef = React.useRef(false);
   const shortScoreRemainingRef = React.useRef<ShortTermScoreItem[]>([]);
   const shortScoreTotalRef = React.useRef(0);
-  const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
+
+  // 训练周期评分预计算（仅训练模式）：把训练窗口内每个交易日 × 每只股票的评分预先算好并落库
+  const [precomputing, setPrecomputing] = useState(false);
+  const [precomputeDone, setPrecomputeDone] = useState(0);
+  const [precomputeTotal, setPrecomputeTotal] = useState(0);
+  const [precomputeMsg, setPrecomputeMsg] = useState('');
+  const isPrecomputePausedRef = React.useRef(false);
+
+  const { kLineApiSourceSetting, ontrain, trainDate, trainStartDate, trainEndDate } = useSelector(
+    (state: StoreState) => state.setting.systemSetting
+  );
   const { stockConfigsMapping } = useSelector((state: StoreState) => state.stock);
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
@@ -460,47 +471,53 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
   }, [mainInLoading, mainInData.length, displayMode, signalData, riskData, leaderData, leaderDisplayCount, stocks]);
 
+  // ========== 当前股票池（沿用选股漏斗：优先取上一步的有效结果） ==========
+  // 短线评分与「训练周期评分预计算」共用，保证预计算覆盖的正是当前要评分的这批股票
+  const collectCurrentItems = useCallback((): ShortTermScoreItem[] => {
+    const lookupName = (code: string) => stocks.find((s) => s.code === code)?.name || '';
+    const lookupHybk = (code: string) => {
+      const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
+      return stockConfigsMapping[secid]?.hybk || null;
+    };
+    if (displayMode === 'mainIn') {
+      return mainInData.filter((d: any) => d.buy_signal).map((d: any) => {
+        const code = d.ts_code.split('.')[0];
+        return { code, name: d.name || lookupName(code), circMv: Number(d.circ_mv) || undefined, hybk: lookupHybk(code) };
+      });
+    }
+    if (displayMode === 'signals') {
+      return signalData.filter((d: any) => d.has_signal).map((d: any) => {
+        const code = d.ts_code.split('.')[0];
+        return { code, name: lookupName(code), hybk: lookupHybk(code) };
+      });
+    }
+    if (displayMode === 'risk') {
+      return riskData.filter((d: any) => d.passed).map((d: any) => {
+        const code = d.ts_code.split('.')[0];
+        return { code, name: lookupName(code), hybk: lookupHybk(code) };
+      });
+    }
+    if (displayMode === 'leaders') {
+      return leaderData.slice(0, leaderDisplayCount).map((d: any) => {
+        const code = d.ts_code.split('.')[0];
+        return { code, name: lookupName(code), hybk: lookupHybk(code) };
+      });
+    }
+    return stocks.map((s) => ({
+      code: s.code,
+      name: s.name,
+      circMv: (s as any).lt ? (s as any).lt * 1e8 : undefined,
+      hybk: lookupHybk(s.code),
+    }));
+  }, [stocks, stockConfigsMapping, displayMode, mainInData, signalData, riskData, leaderData, leaderDisplayCount]);
+
   // ========== 短线评分 ==========
   const handleShortScore = useCallback(async () => {
     if (shortScoreLoading) {
       isShortScorePausedRef.current = true;
       return;
     }
-    // 获取当前显示的股票列表（沿用选股漏斗：优先取上一步的有效结果）
-    const lookupName = (code: string) => stocks.find((s) => s.code === code)?.name || '';
-    const lookupHybk = (code: string) => {
-      const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
-      return stockConfigsMapping[secid]?.hybk || null;
-    };
-    let currentItems: ShortTermScoreItem[] = [];
-    if (displayMode === 'mainIn') {
-      currentItems = mainInData.filter((d: any) => d.buy_signal).map((d: any) => {
-        const code = d.ts_code.split('.')[0];
-        return { code, name: d.name || lookupName(code), circMv: Number(d.circ_mv) || undefined, hybk: lookupHybk(code) };
-      });
-    } else if (displayMode === 'signals') {
-      currentItems = signalData.filter((d: any) => d.has_signal).map((d: any) => {
-        const code = d.ts_code.split('.')[0];
-        return { code, name: lookupName(code), hybk: lookupHybk(code) };
-      });
-    } else if (displayMode === 'risk') {
-      currentItems = riskData.filter((d: any) => d.passed).map((d: any) => {
-        const code = d.ts_code.split('.')[0];
-        return { code, name: lookupName(code), hybk: lookupHybk(code) };
-      });
-    } else if (displayMode === 'leaders') {
-      currentItems = leaderData.slice(0, leaderDisplayCount).map((d: any) => {
-        const code = d.ts_code.split('.')[0];
-        return { code, name: lookupName(code), hybk: lookupHybk(code) };
-      });
-    } else {
-      currentItems = stocks.map((s) => ({
-        code: s.code,
-        name: s.name,
-        circMv: (s as any).lt ? (s as any).lt * 1e8 : undefined,
-        hybk: lookupHybk(s.code),
-      }));
-    }
+    const currentItems = collectCurrentItems();
 
     // 暂停后恢复：继续处理剩余未评分项；全新开始：重置
     if (shortScoreRemainingRef.current.length === 0) {
@@ -543,7 +560,61 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     } finally {
       setShortScoreLoading(false);
     }
-  }, [shortScoreLoading, displayMode, signalData, riskData, leaderData, leaderDisplayCount, mainInData, stocks, kLineApiSourceSetting, stockConfigsMapping]);
+  }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting]);
+
+  // ========== 训练周期评分预计算（仅训练模式） ==========
+  // 把「当前股票池 × 整段训练窗口（trainStartDate ~ trainEndDate）」的短线评分一次性算完并落库，
+  // 之后每推进一个训练日，执行短线评分都会直接命中数据库缓存，无需再等待取数计算。
+  const handlePrecompute = useCallback(async () => {
+    if (precomputing) {
+      // 再次点击视为暂停：当前交易日算完后停止
+      isPrecomputePausedRef.current = true;
+      return;
+    }
+    if (!ontrain || (!trainDate && !trainEndDate)) {
+      console.log('[预计算] 仅训练模式下可用');
+      return;
+    }
+    const items = collectCurrentItems();
+    if (!items.length) {
+      console.log('[预计算] 没有可预计算的股票');
+      return;
+    }
+    isPrecomputePausedRef.current = false;
+    setPrecomputing(true);
+    setPrecomputeDone(0);
+    setPrecomputeTotal(0);
+    setPrecomputeMsg('准备中...');
+    try {
+      const res = await precomputeShortTermScores({
+        items,
+        startDate: trainStartDate || '',
+        // 整段训练窗口：只有推进到最后一天才会用到窗口末日，提前算好避免每天等待
+        endDate: trainEndDate || trainDate,
+        source: kLineApiSourceSetting,
+        shouldStop: () => isPrecomputePausedRef.current,
+        onProgress: (done, total, message) => {
+          setPrecomputeDone(done);
+          setPrecomputeTotal(total);
+          setPrecomputeMsg(message);
+        },
+      });
+      console.log(
+        `[预计算] 窗口共 ${res.totalDates} 个交易日：新算 ${res.dates} 个、复用缓存 ${res.reused} 个，` +
+          `写入 ${res.rows} 条评分（数据不足跳过 ${res.skipped} 条）`
+      );
+      setPrecomputeMsg(
+        isPrecomputePausedRef.current
+          ? `已暂停：新算 ${res.dates} 个交易日`
+          : `完成：新算 ${res.dates} 个交易日，复用 ${res.reused} 个，共 ${res.rows} 条评分`
+      );
+    } catch (e) {
+      console.error('训练周期评分预计算失败:', e);
+      setPrecomputeMsg('预计算失败');
+    } finally {
+      setPrecomputing(false);
+    }
+  }, [precomputing, ontrain, trainDate, trainStartDate, trainEndDate, kLineApiSourceSetting, collectCurrentItems]);
 
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
@@ -803,6 +874,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           >
             {shortScoreLoading ? `评分中 ${shortScoreProgress}%` : '短线评分'}
           </Button>
+          {ontrain && (
+            <Button
+              size="small"
+              onClick={handlePrecompute}
+              loading={precomputing}
+              style={{ marginLeft: 4 }}
+            >
+              {precomputing
+                ? `预计算中 ${precomputeDone}/${precomputeTotal || '-'}`
+                : '预计算训练评分'}
+            </Button>
+          )}
+          {ontrain && precomputeMsg && (
+            <span style={{ marginLeft: 6, fontSize: 12, color: 'var(--secondary-text-color)' }}>{precomputeMsg}</span>
+          )}
           {displayMode !== 'stocks' && (
             <Button
               size="small"

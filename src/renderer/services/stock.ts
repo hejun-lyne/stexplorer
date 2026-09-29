@@ -1379,7 +1379,27 @@ export async function GetFlowKFromEastmoney(secid: string, limit?: number) {
   }
 }
 
+/**
+ * 股票所属板块的本地持久化缓存：
+ * 东财 slist 是「快照」接口（不支持按历史交易日查询），而个股所属板块变化很慢，
+ * 短线评分/训练预计算等场景会对同一批股票反复调用，逐只打网络请求非常耗时。
+ * 这里本地缓存 7 天（读不到缓存时照常请求，写入失败忽略）。
+ */
+const STOCK_BAN_KUAI_CACHE_TTL = 7 * 24 * 3600 * 1000;
+
 export async function GetStockBankuaisFromEastmoney(secid: string) {
+  const cacheKey = `stock_bankuais_${secid}`;
+  const electron = (window.contextModules as any)?.electron;
+  try {
+    const cached = await electron?.readCache?.(cacheKey);
+    const payload = cached?.success ? cached?.data?.data : null;
+    if (payload && Array.isArray(payload.list) && payload.list.length && Date.now() - (payload.at || 0) < STOCK_BAN_KUAI_CACHE_TTL) {
+      return payload.list;
+    }
+  } catch (e) {
+    // 缓存读取失败时忽略，走正常请求
+  }
+
   const { body } = await got<{
     data: {
       diff: {
@@ -1408,12 +1428,17 @@ export async function GetStockBankuaisFromEastmoney(secid: string) {
     responseType: 'json',
   });
   try {
-    return Object.values(body?.data?.diff || {}).map((_) => ({
+    const list = Object.values(body?.data?.diff || {}).map((_) => ({
       code: _.f12,
       name: _.f14,
       secid: `${_.f13}.${_.f12}`,
       zdf: Number(_.f3 / 100.0),
     }));
+    // 只缓存非空结果，避免接口偶发返回空把缓存写坏
+    if (list.length) {
+      electron?.writeCache?.(cacheKey, { at: Date.now(), list })?.catch?.(() => undefined);
+    }
+    return list;
   } catch (error) {
     console.log(error);
     return [];
