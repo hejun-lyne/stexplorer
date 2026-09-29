@@ -94,6 +94,54 @@ export function emptyShortTermScoreRow(code: string, name?: string): ShortTermSc
   };
 }
 
+/** 日期统一成 YYYY-MM-DD（兼容 YYYYMMDD / 带时间） */
+const toDay = (v: any): string => {
+  const s = String(v || '').trim();
+  if (/^\d{8}$/.test(s)) {
+    return `${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6, 8)}`;
+  }
+  return s.substring(0, 10).replace(/\//g, '-');
+};
+
+/** 按日期截断K线：保留 <= date 的最后 keep 根 */
+function sliceKlines(ks: Stock.KLineItem[] | undefined, date: string, keep: number): Stock.KLineItem[] {
+  if (!ks || !ks.length) {
+    return [];
+  }
+  if (!date) {
+    return ks.length > keep ? ks.slice(-keep) : ks;
+  }
+  const cut = ks.filter((k) => toDay(k.date) <= date);
+  return cut.length > keep ? cut.slice(-keep) : cut;
+}
+
+/**
+ * 按日期截断资金明细
+ *
+ * 评分必须严格基于「评分基准日」为止的数据。上游取数可能因训练过滤未生效/数据源缓存
+ * 而返回更晚的数据（个股详情页使用的是已截断的同一份数据），这里统一再切一次，
+ * 保证列表侧与详情页口径完全一致，且缓存键与数据基准日对应。
+ */
+function sliceMoneyTo(mf: any, date: string, keep: number): { detailMain: number[]; detailRetail: number[] } {
+  const dates: string[] = Array.isArray(mf?.detail_dates) ? mf.detail_dates : [];
+  const main: number[] = Array.isArray(mf?.detail_main) ? mf.detail_main : [];
+  const retail: number[] = Array.isArray(mf?.detail_retail) ? mf.detail_retail : [];
+  if (!main.length) {
+    return { detailMain: [], detailRetail: [] };
+  }
+  const keepIdx: number[] = [];
+  dates.forEach((d, i) => {
+    if (!d || !date || toDay(d) <= date) {
+      keepIdx.push(i);
+    }
+  });
+  const tail = keepIdx.slice(-keep);
+  return {
+    detailMain: tail.map((i) => Number(main[i]) || 0),
+    detailRetail: tail.map((i) => Number(retail[i]) || 0),
+  };
+}
+
 /** 个股对应的大盘评分基准指数（沪市→上证指数，创业板→创业板指，其余→深证成指） */
 export function indexSecidOfStock(code: string): string {
   return code.startsWith('6') ? '1.000001' : code.startsWith('3') ? '0.399006' : '0.399001';
@@ -145,10 +193,39 @@ async function fetchDayKlines(
   source: FundApiType,
   secid: string,
   limit: number,
-  options?: { allowSynthesis?: boolean }
+  options?: { allowSynthesis?: boolean; ignoreTrain?: boolean }
 ): Promise<Stock.KLineItem[]> {
   const r = await Services.Stock.GetKFromDataSource(source, secid, KLineType.Day, limit, options);
   return ((r?.ks as Stock.KLineItem[]) || []);
+}
+
+/**
+ * 评分基准日归位到「真实交易日」
+ *
+ * 训练模式下 key 直接取自训练日期，而训练日期可能落在非交易日（节假日/周末）。
+ * 此时 K线/资金等数据实际只到「该日之前的最后一个交易日」，若仍按非交易日读写缓存，
+ * 就会把上一交易日的结果写成该日评分，之后再读取就会拿到名不副实（已过期）的分数。
+ * 这里用指数日K（取时不截断）把基准日归位到 <= 该日期的最后一个真实交易日。
+ */
+async function resolveScoreCacheDate(source: FundApiType, date: string): Promise<string> {
+  const canonical = `${date.substring(0, 4)}-${date.substring(4, 6)}-${date.substring(6, 8)}`;
+  try {
+    const ks = await fetchDayKlines(source, '1.000001', 30, { ignoreTrain: true });
+    const dates = [
+      ...new Set(ks.map((k) => String(k?.date || '').substring(0, 10)).filter(Boolean)),
+    ].sort();
+    const before = dates.filter((d) => d <= canonical);
+    if (before.length) {
+      const resolved = before[before.length - 1].replace(/-/g, '');
+      if (resolved !== date) {
+        console.warn(`[短线评分] 基准日 ${canonical} 不是交易日，按 ${resolved} 读写评分缓存`);
+      }
+      return resolved;
+    }
+  } catch {
+    // 归位失败时沿用原日期
+  }
+  return date;
 }
 
 /**
@@ -197,6 +274,8 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   };
 
   if (cacheDate) {
+    // 训练日期可能是非交易日，先归位到真实交易日再读写缓存
+    cacheDate = await resolveScoreCacheDate(source, cacheDate);
     cachedRows = await Services.Tushare.GetShortTermScoreCacheFromTushare(cacheDate, source);
     fillFromCache();
     if (!pending.length) {
@@ -239,18 +318,23 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   let marketStats: any = null;
   const anchorDate = [...allIndexDates].sort().pop();
   try {
-    marketStats = await Services.Tushare.GetMarketActivityStatsFromTushare(anchorDate);
+    // 训练模式已有明确基准日，优先用它（数据源若返回更晚的数据，这里不能跟着取更晚的统计）
+    marketStats = await Services.Tushare.GetMarketActivityStatsFromTushare(cacheDate || anchorDate);
   } catch {
     marketStats = null;
   }
 
   const emptyRow = (item: ShortTermScoreItem): ShortTermScoreRow => emptyShortTermScoreRow(item.code, item.name);
 
+  // 评分基准日（YYYY-MM-DD）：与写入缓存用的 key 对应，所有输入序列都按它截断，
+  // 保证「列表批量评分」与「个股详情页」完全同口径（见 sliceKlines / sliceMoneyTo 说明）
+  const scoreDay = cacheDate ? `${cacheDate.substring(0, 4)}-${cacheDate.substring(4, 6)}-${cacheDate.substring(6, 8)}` : '';
+
   const processOne = async (item: ShortTermScoreItem): Promise<ShortTermScoreRow> => {
     const code = item.code;
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
     try {
-      const dklines = await fetchDayKlines(source, secid, 250);
+      const dklines = sliceKlines(await fetchDayKlines(source, secid, 250), scoreDay, 250);
       if (!dklines || dklines.length < 30) {
         const row = emptyRow(item);
         row.error = `日K数据不足（${dklines?.length || 0}条）`;
@@ -282,7 +366,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
             (!!lastDate && Math.abs(new Date(trainDate).getTime() - new Date(lastDate).getTime()) / 86400000 <= 15);
           if (ks.length && nearTrainDate) {
             boardName = cleanBoardName(bk.name) || bk.name;
-            boardKlines = ks;
+            boardKlines = sliceKlines(ks, scoreDay, 60);
             break;
           }
         }
@@ -295,8 +379,9 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       let detailRetail: number[] | undefined;
       try {
         const mf = await Services.Tushare.GetMoneyFlowFromTushare(code, 60);
-        detailMain = mf?.detail_main;
-        detailRetail = mf?.detail_retail;
+        const sliced = sliceMoneyTo(mf, scoreDay, 60);
+        detailMain = sliced.detailMain;
+        detailRetail = sliced.detailRetail;
       } catch {
         // 资金获取失败时按维度缺失处理
       }
@@ -305,7 +390,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
         code,
         name: item.name,
         klines: dklines,
-        indexKlines: indexKlinesMap[indexSecidOfStock(code)] || [],
+        indexKlines: sliceKlines(indexKlinesMap[indexSecidOfStock(code)], scoreDay, 60),
         boardKlines,
         boardName,
         upRatioMap,

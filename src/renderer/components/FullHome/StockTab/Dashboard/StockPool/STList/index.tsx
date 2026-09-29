@@ -96,6 +96,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [shortScoreData, setShortScoreData] = useState<ShortTermScoreRow[]>([]);
   const [shortScoreProgress, setShortScoreProgress] = useState(0);
   const isShortScorePausedRef = React.useRef(false);
+  const isShortScoreRunningRef = React.useRef(false);
   const shortScoreRemainingRef = React.useRef<ShortTermScoreItem[]>([]);
   const shortScoreTotalRef = React.useRef(0);
 
@@ -532,6 +533,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
 
     isShortScorePausedRef.current = false;
+    isShortScoreRunningRef.current = true;
     setShortScoreLoading(true);
     setDisplayMode('shortScore');
     setCurrentPage(1);
@@ -559,6 +561,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       console.error('短线评分失败:', e);
     } finally {
       setShortScoreLoading(false);
+      isShortScoreRunningRef.current = false;
     }
   }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting]);
 
@@ -634,6 +637,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       mayGetStocks(kLineApiSourceSetting, secid, 200);
     }
   }, [secid, kLineApiSourceSetting]);
+
+  // 评分基准日随训练日/数据源变化：旧结果是上一交易日（或上一数据源）算的，直接展示会误导，需清空重算
+  useEffect(() => {
+    if (isShortScoreRunningRef.current) {
+      return;
+    }
+    setShortScoreData([]);
+    setShortScoreProgress(0);
+    shortScoreRemainingRef.current = [];
+  }, [trainDate, kLineApiSourceSetting]);
 
   const updateFtypes = useCallback(
     (ts: any[]) => {
