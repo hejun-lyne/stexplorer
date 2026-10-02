@@ -1052,6 +1052,35 @@ export function clearStockTradePointAction(secid: string, isTrain: boolean, type
   };
 }
 
+/**
+ * 清除「所有标的」的指定类型买卖标记。
+ * 训练账户为所有标的共享，重新开始训练时必须整体清零，否则其它标的的历史买入
+ * 仍会消耗共享资金，导致可用资金不是初始资金。
+ */
+export function clearAllStockTradePointAction(isTrain: boolean, type: string): ThunkAction {
+  return (dispatch, getState) => {
+    try {
+      const {
+        stock: { stockConfigs },
+      } = getState();
+      stockConfigs.forEach((ss) => {
+        if (isTrain) {
+          // 保留手动标记 (t 不存在或为 false)
+          if (ss.buyPoints) ss.buyPoints = ss.buyPoints.filter((s) => s.t !== type);
+          if (ss.sellPoints) ss.sellPoints = ss.sellPoints.filter((s) => s.t !== type);
+        } else {
+          // 保留训练标记 (t === true)
+          if (ss.buyPoints) ss.buyPoints = ss.buyPoints.filter((s) => s.t === type);
+          if (ss.sellPoints) ss.sellPoints = ss.sellPoints.filter((s) => s.t === type);
+        }
+      });
+      dispatch(setStockConfigAction(Utils.DeepCopy(stockConfigs)));
+    } catch (error) {
+      console.log('清除全部标的标记点出错', error);
+    }
+  };
+}
+
 export function setBacktestMarksAction(
   secid: string,
   buyPoints: { x: string; y: number; t: string }[],

@@ -22,7 +22,7 @@ import { createMainWindow, creatWorkerWindow } from './window';
 import log from 'electron-log';
 import * as fs from 'fs';
 import path from 'path';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { Worker } from 'worker_threads';
 import { resolve } from 'path';
 // PythonShell 已替换为 child_process.spawn，避免 mode:'text' 的 eval 行为
@@ -30,6 +30,8 @@ import { resolve } from 'path';
 import * as ts from 'typescript';
 import { PromiseWorker } from './promiseWorker';
 import * as localFileStorage from './localFileStorage';
+import * as cacheStore from './cacheStore';
+import { pythonService, PERSISTENT_SCRIPTS, resolvePythonScriptDir } from './pythonServer';
 import os from 'os';
 
 let willQuitApp = false;
@@ -298,6 +300,64 @@ function getOptimalWorkerCount(): number {
   return Math.min(count, memLimited, 16); // 软上限 16，避免极端情况
 }
 
+/**
+ * 单次 spawn 运行 python 脚本（非常驻路径：低频脚本或常驻进程不可用时的兜底）
+ * 返回 stdout 行数组（去除空行），与旧实现保持一致
+ */
+function runPythonScriptOnce(fileName: string, params: string[]): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const pythonPath =
+      process.env.PYTHON_PATH || (process.platform === 'win32' ? 'python' : '/usr/bin/python3');
+    const scriptPath = resolvePythonScriptDir();
+    const scriptFullPath = path.join(scriptPath, fileName);
+
+    console.log(`Running Python script (single): ${fileName}`);
+    console.log(`Script full path: ${scriptFullPath}`);
+
+    const child = spawn(pythonPath, ['-u', scriptFullPath, ...params], {
+      cwd: scriptPath,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    });
+
+    const stdoutLines: string[] = [];
+    const stderrLines: string[] = [];
+
+    child.stdout.on('data', (data: Buffer) => {
+      stdoutLines.push(data.toString());
+    });
+
+    child.stderr.on('data', (data: Buffer) => {
+      stderrLines.push(data.toString());
+    });
+
+    child.on('close', (code: number | null) => {
+      if (code !== 0) {
+        const stderr = stderrLines.join('');
+        const stdout = stdoutLines.join('');
+        console.error('Python script error: exit code', code);
+        if (stderr) {
+          console.error('Python stderr output:', stderr);
+        }
+        if (stdout) {
+          console.error('Python stdout output:', stdout);
+        }
+        const detail = `${stderr ? ': ' + stderr.trim() : ''}${stdout.trim() ? '\n' + stdout.trim() : ''}`;
+        reject(new Error(`process exited with code ${code}${detail}`));
+        return;
+      }
+      console.log(`${fileName} finished.`);
+      const allOutput = stdoutLines.join('');
+      const lines = allOutput.split('\n').filter((l: string) => l.trim());
+      resolve(lines);
+    });
+
+    child.on('error', (err: Error) => {
+      console.error('Failed to start Python process:', err);
+      reject(err);
+    });
+  });
+}
+
 async function init() {
   console.log('当前工作目录：' + app.getAppPath());
   lockSingleInstance();
@@ -403,6 +463,8 @@ async function init() {
   });
   app.on('before-quit', function () {
     willQuitApp = true;
+    // 回收常驻 python 子进程
+    pythonService.dispose();
   });
   app.on('window-all-closed', () => {
     console.log('[Main] App closing, local file storage is safe');
@@ -1013,8 +1075,13 @@ async function init() {
       return { success: false, error: error.message };
     }
   });
-  ipcMain.handle('sqlite-read', (event, { table, id }) => {
+  ipcMain.handle('sqlite-read', async (event, { table, id }) => {
     try {
+      // 缓存类表走数据库（stock_db），用户数据（settings/notes/books…）仍走文件
+      if (cacheStore.isDbBackedTable(table)) {
+        const result = await cacheStore.readLocalData(table, id);
+        return { success: true, data: result };
+      }
       const result = localFileStorage.readLocalData(table, id);
       return { success: true, data: result };
     } catch (error: any) {
@@ -1022,8 +1089,12 @@ async function init() {
       return { success: false, error: error.message };
     }
   });
-  ipcMain.handle('sqlite-write', (event, { table, data, lastModified, id }) => {
+  ipcMain.handle('sqlite-write', async (event, { table, data, lastModified, id }) => {
     try {
+      if (cacheStore.isDbBackedTable(table)) {
+        await cacheStore.writeLocalData(table, data, lastModified, id);
+        return { success: true };
+      }
       localFileStorage.writeLocalData(table, data, lastModified, id);
       return { success: true };
     } catch (error: any) {
@@ -1031,8 +1102,12 @@ async function init() {
       return { success: false, error: error.message };
     }
   });
-  ipcMain.handle('sqlite-delete', (event, { table, id }) => {
+  ipcMain.handle('sqlite-delete', async (event, { table, id }) => {
     try {
+      if (cacheStore.isDbBackedTable(table)) {
+        await cacheStore.deleteLocalData(table, id);
+        return { success: true };
+      }
       localFileStorage.deleteLocalData(table, id);
       return { success: true };
     } catch (error: any) {
@@ -1153,9 +1228,10 @@ async function init() {
     }
   });
 
-  ipcMain.handle('backtest-cache-read', (event, { key }) => {
+  // 缓存统一落到 stock_db 数据库（meta.db/api_cache），由常驻 python 进程读写
+  ipcMain.handle('backtest-cache-read', async (event, { key }) => {
     try {
-      const result = localFileStorage.readCache(key);
+      const result = await cacheStore.readCache(key);
       return { success: true, data: result };
     } catch (error: any) {
       console.error('[Main] Error reading backtest cache:', error);
@@ -1163,9 +1239,9 @@ async function init() {
     }
   });
 
-  ipcMain.handle('backtest-cache-write', (event, { key, data }) => {
+  ipcMain.handle('backtest-cache-write', async (event, { key, data }) => {
     try {
-      const result = localFileStorage.writeCache(key, data);
+      const result = await cacheStore.writeCache(key, data);
       return { success: result };
     } catch (error: any) {
       console.error('[Main] Error writing backtest cache:', error);
@@ -1184,76 +1260,20 @@ async function init() {
   });
   
   ipcMain.handle('run-python-script', async (event, config) => {
-    return new Promise((resolve, reject) => {
-      const pythonPath = process.env.PYTHON_PATH || 
-        (process.platform === 'win32' ? 'python' : '/usr/bin/python3');
-      
-      let scriptPath: string;
-      
-      if (process.env.PYTHON_SCRIPT_PATH) {
-        scriptPath = process.env.PYTHON_SCRIPT_PATH;
-      } else if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-        scriptPath = path.join(__dirname, '../python');
-      } else {
-        scriptPath = path.join(process.resourcesPath, 'python');
+    const fileName = config?.fileName;
+    const params: string[] = Array.isArray(config?.params) ? config.params : [];
+
+    // 常驻进程：tushare/akshare 这类高频、重依赖脚本只启动一次，
+    // 避免训练模式「下一天」多路取数时反复 spawn 进程 + 重复 import。
+    if (PERSISTENT_SCRIPTS.has(fileName)) {
+      try {
+        return await pythonService.run(fileName, params);
+      } catch (error) {
+        console.error('[Main] 常驻 python 调用失败，回退到单次 spawn:', error);
       }
-      
-      const scriptFullPath = path.join(scriptPath, config.fileName);
-      
-      console.log(`Running Python script: ${config.fileName}`);
-      console.log(`Python path: ${pythonPath}`);
-      console.log(`Script path: ${scriptPath}`);
-      console.log(`Script full path: ${scriptFullPath}`);
-      console.log(`Script exists: ${fs.existsSync(scriptFullPath)}`);
-      
-      // 使用 child_process.spawn 替代 PythonShell，避免 mode:'text' 的 eval 行为
-      const { spawn } = require('child_process');
-      const child = spawn(pythonPath, ['-u', scriptFullPath, ...config.params], {
-        cwd: scriptPath,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-      });
-      
-      const stdoutLines: string[] = [];
-      const stderrLines: string[] = [];
-      
-      child.stdout.on('data', (data: Buffer) => {
-        stdoutLines.push(data.toString());
-      });
-      
-      child.stderr.on('data', (data: Buffer) => {
-        stderrLines.push(data.toString());
-      });
-      
-      child.on('close', (code: number | null) => {
-        if (code !== 0) {
-          const stderr = stderrLines.join('');
-          const stdout = stdoutLines.join('');
-          console.error('Python script error: exit code', code);
-          if (stderr) {
-            console.error('Python stderr output:', stderr);
-          }
-          if (stdout) {
-            console.error('Python stdout output:', stdout);
-          }
-          // stderr 可能只有第三方库警告，补充 stdout（脚本的错误信息通常打印在 stdout 的 JSON 里）
-          const detail = `${stderr ? ': ' + stderr.trim() : ''}${stdout.trim() ? '\n' + stdout.trim() : ''}`;
-          reject(new Error(`process exited with code ${code}${detail}`));
-          return;
-        }
-        console.log(`${config.fileName} finished.`);
-        // 将所有 stdout 行合并，按换行分割成数组
-        const allOutput = stdoutLines.join('');
-        const lines = allOutput.split('\n').filter((l: string) => l.trim());
-        console.log('stdout lines count:', lines.length);
-        console.log('results', lines);
-        resolve(lines);
-      });
-      
-      child.on('error', (err: Error) => {
-        console.error('Failed to start Python process:', err);
-        reject(err);
-      });
-    });
+    }
+
+    return runPythonScriptOnce(fileName, params);
   });
   ipcMain.handle('app-quit', (event, config) => {
     app.quit();

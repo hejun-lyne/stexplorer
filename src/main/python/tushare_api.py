@@ -232,6 +232,38 @@ def _cut_klines_by_end_date(klines: Any, end_date: Any) -> Any:
     return result
 
 
+# 全量复权因子的进程内记忆（key: ts_code），避免同一进程里反复拉取
+_ADJ_FACTOR_MEMO: Dict[str, Any] = {}
+
+
+def get_adj_factors_full(ts_code: str):
+    """取某只股票的全量复权因子（升序 DataFrame），进程内记忆 + 磁盘缓存
+
+    复权必须固定一个「全局基准」：前复权以最新交易日的因子为基准、后复权以最早因子为基准。
+    若像以前那样用「本次请求区间最后一根」当基准，同一交易日在不同窗口
+    （训练日逐日推进、limit 不同）会被算成不同价格，归档合并后就出现假跳空
+    （价格与涨跌幅自相矛盾，K线/均线/RSI 全被污染）。
+    """
+    if ts_code in _ADJ_FACTOR_MEMO:
+        return _ADJ_FACTOR_MEMO[ts_code]
+    df = None
+    try:
+        cache_key = f"adj_factor_full_{ts_code}"
+        cached = read_cache(cache_key, max_age_hours=24 * 7)
+        if isinstance(cached, pd.DataFrame) and not cached.empty:
+            df = cached
+        else:
+            df = get_pro().adj_factor(ts_code=ts_code)
+            if df is not None and not df.empty:
+                df = df.sort_values('trade_date', ascending=True).reset_index(drop=True)
+                write_cache(cache_key, df)
+    except Exception as e:
+        print(f"[复权因子获取失败] {ts_code}: {e}")
+        df = None
+    _ADJ_FACTOR_MEMO[ts_code] = df if (df is not None and not df.empty) else None
+    return _ADJ_FACTOR_MEMO[ts_code]
+
+
 def _to_float(val) -> float:
     try:
         if val is None:
@@ -1262,11 +1294,13 @@ class TushareAPI:
                     print(f"[market2 fallback] index_daily 失败 ({result.get('error')})，尝试 dc_daily")
                 elif isinstance(result, list) and len(result) == 0:
                     print(f"[market2 fallback] index_daily 返回空，尝试 dc_daily")
-                result = TushareAPI._get_board_kline(secid, period)
+                result = TushareAPI._get_board_kline(secid, period, end_date_fmt)
                 return _cut_klines_by_end_date(result, end_date_fmt)
 
             if is_board_code(secid):
-                result = TushareAPI._get_board_kline(secid, period)
+                # 必须把 end_date 透传下去：dc_daily 按 [target-2年, target] 查询，
+                # 否则训练模式回看历史窗口时只能拿到最近两年、裁剪后为空
+                result = TushareAPI._get_board_kline(secid, period, end_date_fmt)
                 # 板块 K 线不走统一缓存；按 end_date 裁剪，避免训练模式下出现未来数据
                 return _cut_klines_by_end_date(result, end_date_fmt)
 
@@ -1300,14 +1334,16 @@ class TushareAPI:
             freq_map = {'daily': 'D', 'weekly': 'W', 'monthly': 'M'}
             freq = freq_map.get(period, 'D')
 
-            # 1. 优先使用 pro_bar 获取复权数据（一站式接口）
+            # 1. 取原始行情（不复权）。复权统一在下面手动处理：
+            #    pro_bar(adj='qfq') 的基准是「请求区间末日」，训练日逐日推进时同一交易日会被算成不同价格，
+            #    落库合并后出现假跳空（本例 000927 在 2024-01-02→01-03 假跌 1.87%，真实是涨 1.49%）。
             df = None
             try:
-                df = ts.pro_bar(ts_code=ts_code, freq=freq, adj=adjust, start_date=start_date, end_date=end_date_fmt)
+                df = ts.pro_bar(ts_code=ts_code, freq=freq, adj=None, start_date=start_date, end_date=end_date_fmt)
             except Exception as e:
                 print(f"[pro_bar 失败] {ts_code}: {e}")
 
-            # 2. pro_bar 失败，fallback 到基础接口 + 手动复权
+            # 2. pro_bar 失败，fallback 到基础接口
             if df is None or df.empty:
                 if period == 'daily':
                     df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
@@ -1318,17 +1354,31 @@ class TushareAPI:
                 else:
                     df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
 
-                # 手动复权
-                if adjust in ('qfq', 'hfq') and df is not None and not df.empty:
-                    try:
-                        adj_df = pro.adj_factor(ts_code=ts_code, start_date=start_date, end_date=end_date_fmt)
-                        if adj_df is not None and not adj_df.empty:
-                            df = df.merge(adj_df[['trade_date', 'adj_factor']], on='trade_date', how='left')
-                            base_factor = df['adj_factor'].iloc[-1] if adjust == 'qfq' else df['adj_factor'].iloc[0]
+            # 3. 手动复权：基准固定为该股「全量因子」的最新一根（前复权）/ 最早一根（后复权），
+            #    与请求窗口无关，任何窗口取到的同一天价格都完全一致
+            if adjust in ('qfq', 'hfq') and df is not None and not df.empty:
+                try:
+                    factors = get_adj_factors_full(ts_code)
+                    if factors is not None and not factors.empty:
+                        fmap = {
+                            str(k): float(v)
+                            for k, v in zip(factors['trade_date'].astype(str), factors['adj_factor'])
+                        }
+                        df['adj_factor'] = df['trade_date'].astype(str).map(fmap)
+                        df['adj_factor'] = df['adj_factor'].ffill().bfill()
+                        base_factor = (
+                            float(factors['adj_factor'].iloc[-1])
+                            if adjust == 'qfq'
+                            else float(factors['adj_factor'].iloc[0])
+                        )
+                        if base_factor:
                             for col in ['open', 'high', 'low', 'close']:
                                 df[col] = df[col] * df['adj_factor'] / base_factor
-                    except Exception as e:
-                        print(f"[手动复权失败] {ts_code}: {e}")
+                    else:
+                        # 因子取不到时退回旧口径（窗口内最后一根），至少保证不复权可读
+                        print(f"[复权因子缺失，按窗口基准降级] {ts_code}")
+                except Exception as e:
+                    print(f"[手动复权失败] {ts_code}: {e}")
 
             # 限流 / 网络抖动导致的空结果：稍等后重试一次（tushare 的每分钟配额窗口很短）
             if df is None or df.empty:
@@ -1336,7 +1386,24 @@ class TushareAPI:
                     import time as _time
                     _time.sleep(1.5)
                     print(f"[K线重试] {secid} {period} limit={limit} end_date={end_date_fmt}")
-                    df = ts.pro_bar(ts_code=ts_code, freq=freq, adj=adjust, start_date=start_date, end_date=end_date_fmt)
+                    df = ts.pro_bar(ts_code=ts_code, freq=freq, adj=None, start_date=start_date, end_date=end_date_fmt)
+                    if adjust in ('qfq', 'hfq') and df is not None and not df.empty:
+                        factors = get_adj_factors_full(ts_code)
+                        if factors is not None and not factors.empty:
+                            fmap = {
+                                str(k): float(v)
+                                for k, v in zip(factors['trade_date'].astype(str), factors['adj_factor'])
+                            }
+                            df['adj_factor'] = df['trade_date'].astype(str).map(fmap)
+                            df['adj_factor'] = df['adj_factor'].ffill().bfill()
+                            base_factor = (
+                                float(factors['adj_factor'].iloc[-1])
+                                if adjust == 'qfq'
+                                else float(factors['adj_factor'].iloc[0])
+                            )
+                            if base_factor:
+                                for col in ['open', 'high', 'low', 'close']:
+                                    df[col] = df[col] * df['adj_factor'] / base_factor
                 except Exception as e:
                     print(f"[K线重试失败] {ts_code}: {e}")
 
@@ -1562,26 +1629,36 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
-    def _get_board_kline(secid: str, period: str = "daily") -> List[Dict[str, Any]]:
+    def _get_board_kline(secid: str, period: str = "daily", end_date: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取东财板块K线（dc_daily，6000积分）
 
+        end_date：数据截止日（YYYYMMDD / YYYY-MM-DD）。不传则按「当前数据截止日」`_now()` 取。
+
+        注意：训练模式回看历史窗口时必须传 end_date。dc_daily 只按 [target-2年, target] 查询，
+        若终点始终用「今天」，取回的就是最近两年，再按训练日裁剪会得到空数组
+        （表现为板块维度在整段训练窗口里都缺失）。
+
         缓存策略：参照 get_kline_data，缓存 key 与 trade_date 无关，
-        通过比较缓存最新日期与预期最新交易日来判断缓存是否过期。
+        按「是否覆盖 [target-2年, target] 所需区间」判断缓存有效性，新数据与缓存合并保留更长区间。
         """
         try:
             code = convert_secid_to_pure_code(secid)
             pro = get_pro()
-            today = _now()
-            # 用 trade_cal 获取最近交易日，避免非交易日导致 dc_daily 返回空
-            trade_date = today
+            target_dt = _parse_date_str(str(end_date).replace('-', '')) if end_date else None
+            if target_dt is None:
+                target_dt = _now_date()
+            today = target_dt.strftime('%Y-%m-%d')
+            target_str = target_dt.strftime('%Y%m%d')
+            # 用 trade_cal 获取「目标日或之前最近的交易日」，避免非交易日导致 dc_daily 返回空
+            trade_date = target_str
             try:
-                cal_df = pro.trade_cal(exchange='SSE', start_date=(_now_date() - timedelta(days=30)).strftime('%Y%m%d'), end_date=today, is_open='1')
+                cal_df = pro.trade_cal(exchange='SSE', start_date=(target_dt - timedelta(days=30)).strftime('%Y%m%d'), end_date=target_str, is_open='1')
                 if cal_df is not None and not cal_df.empty:
-                    # trade_cal 默认返回降序，iloc[0] 才是最近交易日
-                    trade_date = str(cal_df['cal_date'].iloc[0])
+                    # trade_cal 默认返回降序，取最大值即目标日之前最近的交易日
+                    trade_date = str(cal_df['cal_date'].max())
             except Exception:
                 pass
-            start_date = (_now_date() - timedelta(days=730)).strftime("%Y%m%d")
+            start_date = (target_dt - timedelta(days=730)).strftime("%Y%m%d")
 
             # dc_daily 需要 BKxxxx.DC 格式
             ts_code = f"{code}.DC" if not code.endswith(".DC") else code
@@ -1590,8 +1667,10 @@ class TushareAPI:
             # 训练模式会回看更早的日期，如果缓存里只有近期数据却判定为「命中」，
             # 调用方按 end_date 截断后会得到空数组（表现为「板块K线数据不足」）。
             cache_key = f"board_kline_{ts_code}_{period}"
-            expected_last_str = today.replace('-', '')
+            expected_last_str = trade_date
             expected_last = _parse_date_str(expected_last_str)
+            # 需要覆盖的历史长度：至少能支撑评分用的近 20 日均线（留足缓冲）
+            need_start = _parse_date_str((target_dt - timedelta(days=120)).strftime('%Y%m%d'))
 
             cached_df = read_cache(cache_key, max_age_hours=168 * 4)  # 最长缓存 4 周
             cache_valid = False
@@ -1602,21 +1681,40 @@ class TushareAPI:
                 cache_min_date = _parse_date_str(cache_min_date_str)
                 if cache_max_date is not None and expected_last is not None:
                     covers_end = cache_max_date >= expected_last
-                    covers_start = cache_min_date is not None and cache_min_date <= expected_last
+                    covers_start = cache_min_date is not None and (need_start is None or cache_min_date <= need_start)
                     if covers_end and covers_start:
                         cache_valid = True
                         print(f"[板块K线缓存命中] {ts_code} 缓存区间={cache_min_date_str}~{cache_max_date_str} 覆盖需求={expected_last_str}")
                     elif not covers_end:
                         print(f"[板块K线缓存过期] {ts_code} 缓存最新={cache_max_date_str} < 需求={expected_last_str}，重新拉取")
                     else:
-                        print(f"[板块K线缓存范围不足] {ts_code} 缓存最早={cache_min_date_str} 晚于需求={expected_last_str}，重新拉取")
+                        print(f"[板块K线缓存范围不足] {ts_code} 缓存最早={cache_min_date_str} 晚于需求={need_start}，重新拉取")
+
+            # 缓存可能是「多段拼接」的（每次各取 [target-2年, target]，不同时点取到的时间段并不连续）。
+            # 只比较 min/max 会把有洞的缓存判成命中，裁剪后就只剩残缺的一段（表现为某些交易日板块维度缺失），
+            # 因此还要检查「目标日附近」是否真的有K线；没有就重新拉取并把缺口合并进来。
+            if cache_valid and expected_last is not None:
+                window_from = _parse_date_str((target_dt - timedelta(days=45)).strftime('%Y%m%d'))
+                try:
+                    hit_in_window = 0
+                    for d in cached_df['trade_date'].astype(str).tolist():
+                        dt = _parse_date_str(d)
+                        if dt is not None and (window_from is None or dt >= window_from) and dt <= expected_last:
+                            hit_in_window += 1
+                    if hit_in_window == 0:
+                        print(
+                            f"[板块K线缓存有洞] {ts_code} 缓存 {cache_min_date_str}~{cache_max_date_str} "
+                            f"未覆盖目标日附近（{window_from}~{expected_last_str}），重新拉取"
+                        )
+                        cache_valid = False
+                except Exception:
+                    pass
 
             if cache_valid:
                 df = cached_df
             else:
-                # 缓存无效，重新拉取。直接用 today 作为 end_date（不用 trade_date），
-                # 因为 dc_daily 接口本身支持未来日期查询，会返回截至最新数据
-                df = safe_api_call(pro.dc_daily, ts_code=ts_code, start_date=start_date, end_date=today)
+                # 缓存无效，按目标窗口重新拉取（终点用目标交易日，而不是「今天」）
+                df = safe_api_call(pro.dc_daily, ts_code=ts_code, start_date=start_date, end_date=trade_date)
                 if isinstance(df, pd.DataFrame) and not df.empty:
                     # 与已有缓存合并（保留更长区间），避免训练模式回看时把近期缓存覆盖掉
                     if isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
@@ -1638,12 +1736,12 @@ class TushareAPI:
                 if not df.empty:
                     debug_info["date_range"] = [str(df['trade_date'].min()), str(df['trade_date'].max())]
 
-            # 如果 range 查询返回空，尝试逐日查询最近5天
+            # 如果 range 查询返回空，尝试逐日查询目标日附近的最近5个交易日
             if df is None or (isinstance(df, pd.DataFrame) and df.empty):
                 debug_info["range_empty"] = True
                 range_dfs = []
                 try:
-                    cal_df = pro.trade_cal(exchange='SSE', start_date=(_now_date() - timedelta(days=10)).strftime('%Y%m%d'), end_date=today, is_open='1')
+                    cal_df = pro.trade_cal(exchange='SSE', start_date=(target_dt - timedelta(days=10)).strftime('%Y%m%d'), end_date=target_str, is_open='1')
                     if cal_df is not None and not cal_df.empty:
                         # trade_cal 默认返回降序，sorted 升序后取 [-5:] 才是最近5天
                         recent_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
@@ -3295,17 +3393,28 @@ class TushareAPI:
         """
         result = {}
         for date in dates:
-            try:
-                data = TushareAPI.get_up_down_ratio(date=date)
-                # 统一键为 YYYYMMDD
-                key = date.replace("-", "")
+            key = date.replace("-", "")
+            # 逐日取数全市场行情，批量回看时容易撞上限流/超时；
+            # 失败必须重试，否则该日缺失会让评分里的大盘维度整段不可用（训练窗口内尤其明显）
+            data: Any = None
+            last_err = ""
+            for attempt in range(3):
+                try:
+                    data = TushareAPI.get_up_down_ratio(date=date)
+                except Exception as e:
+                    data = {"error": str(e)}
                 if isinstance(data, dict) and data.get("error"):
-                    result[key] = {"error": data["error"]}
-                else:
-                    result[key] = data
-            except Exception as e:
-                key = date.replace("-", "")
-                result[key] = {"error": str(e)}
+                    last_err = str(data.get("error"))
+                    if attempt < 2:
+                        time.sleep(1.5 * (attempt + 1))
+                    continue
+                last_err = ""
+                break
+            if last_err:
+                print(f"[涨跌比重试后仍失败] {key}: {last_err}")
+                result[key] = {"error": last_err}
+            else:
+                result[key] = data
         return result
 
     @staticmethod

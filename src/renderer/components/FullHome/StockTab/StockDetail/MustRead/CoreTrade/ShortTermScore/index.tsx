@@ -62,13 +62,16 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   // 训练模式：按训练日期区分请求缓存，并在训练日期变化时重新取数（评分必须基于训练日期为止的数据）
   const trainKey = ontrain && trainDate ? trainDate : 'live';
 
-  // ---- 评分（与 STList 批量评分 / 训练周期预计算共用同一套取数与评分逻辑，口径必然一致）----
-  // 取数、板块选择、大盘对比基准（市值风格板块优先）全部在评分内核里完成，
-  // 算完还会把该交易日的结果写回这只股票的评分序列，列表下次评分直接命中同一份数据。
+  // ---- 评分（与 STList 批量评分 / 训练周期预计算共用同一套取数与评分逻辑）----
+  // 默认「以缓存为准」：先按基准日在评分序列里取点，命中就直接展示缓存行
+  // （与列表点「短线评分」看到的是同一行数据，天然一致）；
+  // 未命中才现算，算完写回序列。想看逐日明细时可点「重新计算明细」强制现算。
   const [scoreData, setScoreData] = useState<Awaited<ReturnType<typeof ScoreList.computeStockScoreForCode>> | null>(
     null
   );
   const [scoreError, setScoreError] = useState<string | null>(null);
+  const [cachedScore, setCachedScore] = useState<{ row: ScoreList.ShortTermScoreRow; day: string } | null>(null);
+  const [forceLive, setForceLive] = useState(false);
   const { run: runScore, loading: scoreLoading } = useRequest(
     async () => {
       const r = await ScoreList.computeStockScoreForCode({
@@ -101,13 +104,129 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   useEffect(() => {
     setScoreData(null);
     setScoreError(null);
-    runScore();
-  }, [code, kLineApiSourceSetting, trainKey, circMv, moneyFlow]);
+    setCachedScore(null);
+    let canceled = false;
+    (async () => {
+      // 先看缓存（同一基准日的评分行），命中就不再取数计算
+      if (!forceLive) {
+        const hit = await ScoreList.getCachedScoreRow({
+          code,
+          source: kLineApiSourceSetting,
+          date: ontrain && trainDate ? trainDate : undefined,
+        });
+        if (canceled) {
+          return;
+        }
+        if (hit) {
+          setCachedScore(hit);
+          return;
+        }
+      }
+      if (!canceled) {
+        runScore();
+      }
+    })();
+    return () => {
+      canceled = true;
+    };
+  }, [code, kLineApiSourceSetting, trainKey, circMv, moneyFlow, forceLive]);
 
   const dklines = scoreData?.klines || null;
   const result = scoreData?.detail || null;
   // 大盘评分对比基准名称：市值风格板块优先，缺失时回退所属指数（由评分内核决定）
   const marketBaselineName = scoreData?.baselineName || indexName;
+
+  // ---- 缓存命中：直接展示缓存行（与列表「短线评分」同一份数据）----
+  if (cachedScore && !scoreData) {
+    const r = cachedScore.row;
+    const dims = [
+      { label: '个股表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.stock, score: r.stockScore },
+      { label: '板块表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.sector, score: r.sectorScore },
+      { label: '大盘表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.market, score: r.marketScore },
+    ];
+    const dayText = cachedScore.day
+      ? `${cachedScore.day.substring(0, 4)}-${cachedScore.day.substring(4, 6)}-${cachedScore.day.substring(6, 8)}`
+      : '';
+    return (
+      <div>
+        <div
+          style={{
+            padding: '12px 16px',
+            borderRadius: 8,
+            backgroundColor: 'var(--card-background-color)',
+            border: '1px solid var(--border-color)',
+          }}
+        >
+          <Row className={styles.rowheader} style={{ marginBottom: 12 }}>
+            <Col span={16}>短线综合评分（评分基准日 {dayText || '--'}）</Col>
+            <Col span={8} style={{ textAlign: 'right' }}>
+              <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>与列表「短线评分」同一份缓存</span>
+            </Col>
+          </Row>
+          <Row style={{ marginBottom: 8, alignItems: 'center' }}>
+            <Col span={6}>综合评分</Col>
+            <Col span={6}>
+              <span style={{ fontSize: 28, fontWeight: 'bold', color: Score.scoreColor(r.total ?? 0) }}>
+                {(r.total ?? 0).toFixed(1)}
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}> / 100</span>
+            </Col>
+            <Col span={6}>评级 / 建议</Col>
+            <Col span={6}>
+              <span
+                style={{
+                  fontSize: 20,
+                  fontWeight: 'bold',
+                  marginRight: 8,
+                  color: Score.scoreColor(r.total ?? 0),
+                }}
+              >
+                {r.grade || '--'}
+              </span>
+              <span style={{ fontSize: 12 }}>{r.advice || '--'}</span>
+            </Col>
+          </Row>
+          {dims.map((dim) => (
+            <Row key={dim.label} style={{ marginBottom: 6, fontSize: 13, alignItems: 'center' }}>
+              <Col span={6}>
+                {dim.label}
+                <span style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}>
+                  权重{(dim.weight * 100).toFixed(0)}%
+                </span>
+              </Col>
+              <Col span={4} className={dim.score == null ? '' : Utils.GetValueColor(dim.score - 50).textClass}>
+                {dim.score == null ? '--' : dim.score.toFixed(1)}
+              </Col>
+              <Col span={14}>
+                {dim.score == null ? (
+                  <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>数据不足（未参与加权）</span>
+                ) : (
+                  <ScoreBar value={dim.score} max={100} />
+                )}
+              </Col>
+            </Row>
+          ))}
+          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+            {r.summary}
+            {r.rsiPattern ? `｜RSI：${r.rsiPattern}` : ''}
+            {r.moneyNote ? `｜资金：${r.moneyNote}` : ''}
+            {r.sectorTrend ? `｜板块：${r.sectorTrend}` : ''}
+          </div>
+          {r.error ? (
+            <div style={{ marginTop: 6, fontSize: 12, color: '#ff4d4f' }}>{r.error}（该交易日按 0 分计入缓存）</div>
+          ) : null}
+          <div style={{ marginTop: 10 }}>
+            <Button size="small" onClick={() => setForceLive(true)} loading={scoreLoading}>
+              重新计算明细
+            </Button>
+            <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--secondary-text-color)' }}>
+              重新计算会现取数据、展开逐日明细，并覆盖该交易日的缓存
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (scoreLoading && !dklines) {
     return (

@@ -249,12 +249,12 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
     message.success('已继续上一次训练');
   }, [progress, capital, commission, dispatch]);
 
-  // 重新开始训练（清除上次进度与模拟买卖记录）
+  // 重新开始训练（清除上次进度与全部模拟买卖记录）
   const handleRestartTrain = useCallback(() => {
     setShowResumeModal(false);
     setIstrain(true);
     dispatch(restartTrainAction());
-    message.success('已重新开始训练，上一次训练的模拟买卖记录已清除');
+    message.success('已重新开始训练，训练账户的模拟买卖记录已清除，资金重新从初始资金计算');
   }, [dispatch]);
   return (
     <CustomDrawerContent title="设置" enterText="保存" onClose={onClose} onEnter={onSave}>
@@ -290,7 +290,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
             </div>
             <div>初始资金：{progress.initialCapital} ｜ 佣金：{(progress.commissionRate * 100).toFixed(4)}%</div>
             <div style={{ marginTop: 8, color: '#999', fontSize: 12 }}>
-              「继续上一次训练」保留上次的模拟持仓与买卖记录；「重新开始」将清除该标的上一次训练的模拟买卖记录，并从当前配置的开始日期重新训练。
+              「继续上一次训练」保留上次的模拟持仓与买卖记录；「重新开始」将清除训练账户内全部标的的模拟买卖记录（账户为共享，资金重新从初始资金计算），并从当前配置的开始日期重新训练。
             </div>
           </div>
         )}

@@ -20,6 +20,9 @@ import {
  * 之后在 STList 执行短线评分会直接命中序列、不再逐只取数计算，个股详情页算完也会写回同一条序列，
  * 因此「列表分」与「详情页分」必然一致。
  *
+ * 无有效数据的股票（日K不足 / 取数失败）同样按 0 分写入序列，这样点击短线评分不会因为它们
+ * 每次都重新尝试取数；确实需要重算时，删掉对应的 `short_term_score_series_*` 缓存键再跑一次即可。
+ *
  * 训练窗口是已知的历史区间，因此这里一次把**整段窗口（trainStartDate ~ trainEndDate）**算完：
  * 取数按窗口末日（`ignoreTrain` 绕过训练日期收敛，原始数据不进入界面，渲染层出口仍按训练日截断），
  * 但每只股票在每个交易日的评分只用「该交易日及之前」的K线/资金明细切片计算，
@@ -69,6 +72,7 @@ export interface PrecomputeResult {
   /** 写入的评分行数 */
   rows: number;
   /** 因数据不足跳过的评分行数 */
+  /** 其中无有效数据（日K不足 / 取数失败）的行数：这些行同样按 0 分写入缓存 */
   skipped: number;
   /** 训练窗口内的交易日总数 */
   totalDates: number;
@@ -99,7 +103,7 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   const secids = codes.map(secidOf);
   const indexSecids = ['1.000001', '0.399001', '0.399006'];
 
-  // ---- 1. 交易日历：三大指数日K的日期并集，限制在训练窗口 [startDate, endDate] 内 ----
+  // ---- 1. 交易日历：三大指数日K的日期并集，限制在训练窗口 [startDate 的归位日, endDate] 内 ----
   const windowDays = Math.max(0, dayjs(endDate).diff(dayjs(startDate || endDate), 'day'));
   const indexLimit = Math.ceil(windowDays / 2) + INDEX_KLINES_PER_DAY + 20;
   onProgress?.(0, 0, '拉取指数日K...');
@@ -110,12 +114,16 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   indexSecids.forEach((s) => {
     (indexKlinesMap[s] || []).forEach((k) => {
       const d = toDay(k.date);
-      if ((!startDate || d >= startDate) && d <= endDate) {
+      if (d && d <= endDate) {
         dateSet.add(d);
       }
     });
   });
-  const days = [...dateSet].sort();
+  const allDays = [...dateSet].sort();
+  // 窗口起点若非交易日（如 2024-01-01 元旦），其评分基准日会归位到上一个交易日，
+  // 因此往前多覆盖一个交易日，避免训练第一天必然未命中缓存。
+  const firstIdx = startDate ? allDays.findIndex((d) => d >= startDate) : 0;
+  const days = allDays.slice(firstIdx > 0 ? firstIdx - 1 : 0);
   result.totalDates = days.length;
   result.days = days;
   if (!days.length || shouldStop?.()) {
@@ -196,7 +204,9 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
       { ignoreTrain: true }
     );
     boardList.forEach((c) => {
-      ctx.boardKlinesMap[c] = fetched[`90.${c}`] || [];
+      // 取数失败时接口会返回 {error}，这里必须归一成数组，否则后续切片会抛异常把该股打成 0 分
+      const ks = fetched[`90.${c}`];
+      ctx.boardKlinesMap[c] = Array.isArray(ks) ? ks : [];
     });
   }
 
@@ -213,9 +223,10 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
       try {
         const inputs = await buildStockScoreInputs(ctx, item, day);
         const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, ...inputs });
+        // 无有效数据（日K不足 / 取数失败）的股票也按 0 分写入序列：
+        // 这类股票不会再算出别的结果，写入后列表点击不会再为它们重复取数。
         if (row.error) {
           result.skipped += 1;
-          continue;
         }
         buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
         count += 1;

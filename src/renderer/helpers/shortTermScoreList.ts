@@ -94,6 +94,20 @@ export function emptyShortTermScoreRow(code: string, name?: string): ShortTermSc
   };
 }
 
+/**
+ * 「无有效数据」的占位评分行：分值记 0，并写明原因
+ *
+ * 这类结果（如日K不足、数据源没有该股行情）不会再变化，因此也按 0 分写入评分序列，
+ * 避免每次点击短线评分都为它们重新取数 —— 有缓存就不再重试拉取。
+ */
+export function zeroShortTermScoreRow(code: string, name?: string, reason?: string): ShortTermScoreRow {
+  const row = emptyShortTermScoreRow(code, name);
+  row.total = 0;
+  row.grade = 'D';
+  row.error = reason || '无有效数据';
+  return row;
+}
+
 /** 日期统一成 YYYY-MM-DD（兼容 YYYYMMDD / 带时间） */
 const toDay = (v: any): string => {
   const s = String(v || '').trim();
@@ -105,7 +119,8 @@ const toDay = (v: any): string => {
 
 /** 按日期截断K线：保留 <= date 的最后 keep 根 */
 function sliceKlines(ks: Stock.KLineItem[] | undefined, date: string, keep: number): Stock.KLineItem[] {
-  if (!ks || !ks.length) {
+  // 取数失败时上游可能返回 {error} 之类的对象，必须挡住，否则会抛异常把整只股票打成 0 分
+  if (!ks || !Array.isArray(ks) || !ks.length) {
     return [];
   }
   if (!date) {
@@ -180,9 +195,8 @@ export function computeShortTermScoreForDate(params: {
 }): { row: ShortTermScoreRow; detail: ShortTermScoreDetail | null } {
   const { code, name, klines, baselineKlines, boardKlines, boardName, upRatioMap, marketStats, circMv, detailMain, detailRetail } = params;
   if (!klines || klines.length < 30) {
-    const row = emptyShortTermScoreRow(code, name);
-    row.error = `日K数据不足（${klines?.length || 0}条）`;
-    return { row, detail: null };
+    // 无有效数据：按 0 分写入缓存（见 zeroShortTermScoreRow 说明）
+    return { row: zeroShortTermScoreRow(code, name, `日K数据不足（${klines?.length || 0}条）`), detail: null };
   }
   const market = Score.scoreMarket(klines, baselineKlines || [], upRatioMap);
   const sector = Score.scoreSector(klines, boardKlines, boardName);
@@ -597,7 +611,11 @@ export async function resolveScoreDate(source: FundApiType, date: string, ctx?: 
     if (ctx && ctx.indexKlinesMap['1.000001'] && ctx.indexKlinesMap['1.000001'].length) {
       ks = ctx.indexKlinesMap['1.000001'];
     } else {
-      ks = await fetchDayKlines(source, '1.000001', 30, { ignoreTrain: true });
+      // 关键：这里必须让训练过滤生效（不能传 ignoreTrain）。
+      // 训练过滤生效时取到的是「截止到训练日」的数据，训练日为非交易日（周末/节假日）时，
+      // 最后一根就是上一个真实交易日；若传 ignoreTrain，拿到的是「真实今天」的最近 N 根，
+      // 筛 `<= 训练日` 永远为空，归位就形同虚设（缓存 key 会写成非交易日 → 必然未命中）。
+      ks = await fetchDayKlines(source, '1.000001', 30);
       if (ctx) {
         ctx.indexKlinesMap['1.000001'] = ks;
       }
@@ -607,7 +625,7 @@ export async function resolveScoreDate(source: FundApiType, date: string, ctx?: 
     if (before.length) {
       const resolved = before[before.length - 1].replace(/-/g, '');
       if (resolved !== date.replace(/-/g, '')) {
-        console.warn(`[短线评分] 基准日 ${canonical} 不是交易日，按 ${resolved} 读写评分缓存`);
+        console.warn(`[短线评分] 基准日 ${canonical} 不是交易日（或当天无数据），按 ${resolved} 读写评分缓存`);
       }
       return resolved;
     }
@@ -694,6 +712,40 @@ export function pickScoreRow(
   return { row: series[key] as ShortTermScoreRow, date: target };
 }
 
+/**
+ * 读某只股票在「某个基准日」的缓存评分行（详情页/列表共用的唯一分数来源）
+ *
+ * 命中即返回该日缓存行，未命中返回 null（由调用方现算并回写序列）。
+ * 有了它，「列表分」与「详情页分」读的是同一份数据，不会再出现两边不一致。
+ */
+export async function getCachedScoreRow(params: {
+  code: string;
+  source: FundApiType;
+  /** 训练日期（YYYY-MM-DD / YYYYMMDD）；留空表示非训练模式（按行情最后交易日） */
+  date?: string;
+}): Promise<{ row: ShortTermScoreRow; day: string } | null> {
+  const { code, source } = params;
+  const trainDay = params.date ? toDay(params.date) : '';
+  let dayKey = '';
+  if (trainDay) {
+    dayKey = await resolveScoreDate(source, trainDay.replace(/-/g, ''));
+  } else {
+    try {
+      const ks = await fetchDayKlines(source, '1.000001', 30);
+      const dates = [...new Set(ks.map((k) => toDay(k?.date)).filter(Boolean))].sort();
+      dayKey = (dates[dates.length - 1] || '').replace(/-/g, '');
+    } catch {
+      dayKey = '';
+    }
+  }
+  if (!dayKey) {
+    return null;
+  }
+  const series = await loadScoreSeries([code], source);
+  const hit = pickScoreRow(series[code], dayKey);
+  return hit ? { row: { ...hit.row, code, name: hit.row.name || code }, day: hit.date } : null;
+}
+
 /** 回写评分序列（按交易日合并到每只股票自己的序列里） */
 export async function saveScoreSeries(series: ShortTermScoreSeries, source: FundApiType): Promise<void> {
   if (!series || !Object.keys(series).length) {
@@ -767,9 +819,10 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   if (scoreDayKey) {
     fillFromSeries(await loadScoreSeries(codes, source));
     if (!pending.length) {
-      console.log(`[短线评分] ${scoreDayKey} 全部命中评分序列缓存（${total} 只），无需取数`);
+      console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
       return results;
     }
+    console.log(`[短线评分] 基准日 ${scoreDayKey}：序列命中 ${total - pending.length} 只，需现算 ${pending.length} 只`);
   }
 
   // ---- 未命中：准备公共上下文（指数日K / 涨跌比）----
@@ -791,8 +844,10 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     if (scoreDayKey) {
       fillFromSeries(await loadScoreSeries(codes, source));
       if (!pending.length) {
+        console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
         return results;
       }
+      console.log(`[短线评分] 基准日 ${scoreDayKey}：序列命中 ${total - pending.length} 只，需现算 ${pending.length} 只`);
     }
   }
   await ensureMarketStats(ctx, scoreDayKey);
@@ -805,9 +860,8 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       const inputs = await buildStockScoreInputs(ctx, item, scoreDay);
       return computeShortTermScoreForDate({ code: item.code, name: item.name, ...inputs }).row;
     } catch (e: any) {
-      const row = emptyShortTermScoreRow(item.code, item.name);
-      row.error = e?.message || '评分失败';
-      return row;
+      // 取数异常同样按 0 分入缓存，避免每次点击都为同一只股票重复取数
+      return zeroShortTermScoreRow(item.code, item.name, e?.message || '评分失败');
     }
   };
 
@@ -832,15 +886,20 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, () => worker()));
 
   // ---- 回写评分序列：按交易日合并到每只股票自己的序列 ----
+  // 无有效数据的股票也按 0 分写入（行内带原因），下次点击直接命中，不再重新取数。
   if (scoreDayKey) {
     const series: ShortTermScoreSeries = {};
+    let zeroCount = 0;
     results.forEach((r) => {
-      // 「数据不足」是稳定结果，一并入序列，避免每次点击都重跑一遍取数
-      if (!r.error || r.error.indexOf('数据不足') >= 0) {
-        series[r.code] = { [scoreDayKey]: r };
+      if (r.error) {
+        zeroCount += 1;
       }
+      series[r.code] = { [scoreDayKey]: r };
     });
     await saveScoreSeries(series, source);
+    if (zeroCount) {
+      console.log(`[短线评分] 其中 ${zeroCount} 只无有效数据，已按 0 分写入缓存（后续不再重复取数）`);
+    }
   }
   return results;
 }
@@ -888,8 +947,9 @@ export async function computeStockScoreForCode(params: {
   const dayKey = scoreDayKey || lastDate.replace(/-/g, '');
   const scoreDay = dayKey ? `${dayKey.substring(0, 4)}-${dayKey.substring(4, 6)}-${dayKey.substring(6, 8)}` : '';
 
-  // 非训练模式下没有明确基准日时，也把「数据最后交易日」的评分写回序列，供列表直接命中
-  if (dayKey && !row.error) {
+  // 把该交易日的结果写回这只股票的评分序列，供列表直接命中；
+  // 无有效数据时同样是 0 分占位行（带原因），避免列表为它重复取数。
+  if (dayKey) {
     await saveScoreSeries({ [code]: { [dayKey]: row } }, source);
   }
 

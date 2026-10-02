@@ -2,7 +2,7 @@ import { ThunkAction } from '@/reducers/types';
 import { batch } from 'react-redux';
 import moment from 'moment';
 import { setSystemSettingAction, SYNC_SYSTEM_SETTING } from './setting';
-import { clearStockTradePointAction } from './stock';
+import { clearAllStockTradePointAction } from './stock';
 
 /** 训练模式买卖点的类型标记，用于和手动标记点区分 */
 export const TRAIN_TYPE = 'train';
@@ -183,16 +183,16 @@ export function resumeTrainAction(): ThunkAction {
   };
 }
 
-/** 重新开始训练（丢弃上次进度，并清除该标的上一次训练的模拟买卖记录） */
+/** 重新开始训练（丢弃上次进度，并清除所有标的的模拟买卖记录） */
 export function restartTrainAction(): ThunkAction {
   return (dispatch, getState) => {
     const {
       train: { progress },
       setting: { systemSetting },
     } = getState();
-    if (progress && progress.secid) {
-      dispatch(clearStockTradePointAction(progress.secid, true, TRAIN_TYPE));
-    }
+    // 训练账户为所有标的共享：必须清空全部标的的模拟买卖点，否则其它标的的历史买入
+    // 仍会消耗共享资金，导致可用资金不等于初始资金
+    dispatch(clearAllStockTradePointAction(true, TRAIN_TYPE));
     batch(() => {
       dispatch({ type: SYNC_TRAIN_PROGRESS, payload: [null, moment(new Date()).format('YYYY-MM-DD HH:mm:ss')] });
       dispatch(

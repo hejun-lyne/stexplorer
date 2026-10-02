@@ -167,3 +167,13 @@ stats.json
 # 通常这些在 dist/ 中已经包含了
 mlruns/
 src/main/python/__pycache__/
+
+# =========================
+# 本地数据目录（SQLite 热数据 / Parquet 归档 / 回测缓存）
+# 体积会持续增长（当前 100MB+），不要提交进仓库
+# =========================
+/data/
+stock_db/
+*.parquet
+*.db-wal
+*.db-shm

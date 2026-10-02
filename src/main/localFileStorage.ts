@@ -172,32 +172,42 @@ export function initLocalFileStorage(): boolean {
   }
 }
 
-// 获取文件路径
-function getFilePath(table: string, id?: number | string | object): string {
+/**
+ * 计算数据的相对存储路径（不含 .json 后缀）。
+ *
+ * 既用于拼接旧的文件路径，也作为数据库缓存 key
+ * （见 cacheStore.ts：`local:<relPath>`），保证两条链路一一对应。
+ */
+export function getStorageRelPath(table: string, id?: number | string | object): string {
   if (table === 'notes' && typeof id === 'object') {
     const { bookId, noteId } = id as { bookId: number; noteId: number | string };
-    return path.join(dataDir, NOTES_DIR, `${bookId}_${noteId}.json`);
+    return `${NOTES_DIR}/${bookId}_${noteId}`;
   }
-  
+
   if (table === 'strategies' && typeof id === 'object') {
     const { groupId, strategyId } = id as { groupId: number; strategyId: number };
-    return path.join(dataDir, STRATEGIES_DIR, `${groupId}_${strategyId}.json`);
+    return `${STRATEGIES_DIR}/${groupId}_${strategyId}`;
   }
-  
+
   const filename = FILE_MAP[table];
   if (!filename) {
     if (table.indexOf('kimi_analysis') >= 0) {
-      return path.join(dataDir, 'kimi_analysis', `${table}.json`);
-    } else if(table.indexOf('kline_cache') >= 0) {
-      return path.join(dataDir, 'kline_cache', `${table}_${id}.json`);
-    } else if(table.indexOf('board_stocks_cache') >= 0) {
-      return path.join(dataDir, 'board_stocks_cache', `${table}.json`);
-    } else if(table.indexOf('stock_trend') >= 0) {
-      return path.join(dataDir, 'stock_trend', `${table}_${id}.json`);
+      return `kimi_analysis/${table}`;
+    } else if (table.indexOf('kline_cache') >= 0) {
+      return `kline_cache/${table}_${id}`;
+    } else if (table.indexOf('board_stocks_cache') >= 0) {
+      return `board_stocks_cache/${table}`;
+    } else if (table.indexOf('stock_trend') >= 0) {
+      return `stock_trend/${table}_${id}`;
     }
-    return path.join(dataDir, `${table}_${id}.json`);
+    return `${table}_${id}`;
   }
-  return path.join(dataDir, filename);
+  return filename.replace(/\.json$/, '');
+}
+
+// 获取文件路径
+function getFilePath(table: string, id?: number | string | object): string {
+  return path.join(dataDir, `${getStorageRelPath(table, id)}.json`);
 }
 
 // 读取数据
@@ -613,5 +623,6 @@ export default {
   writeCache,
   setCustomStoragePath,
   getStoragePath,
+  getStorageRelPath,
   TABLE_MAP,
 };

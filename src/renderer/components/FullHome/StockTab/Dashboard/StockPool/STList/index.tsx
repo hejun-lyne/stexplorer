@@ -604,7 +604,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       });
       console.log(
         `[预计算] 窗口共 ${res.totalDates} 个交易日：新算 ${res.dates} 个、复用缓存 ${res.reused} 个，` +
-          `写入 ${res.rows} 条评分（数据不足跳过 ${res.skipped} 条）`
+          `写入 ${res.rows} 条评分（其中 ${res.skipped} 条无有效数据，已按 0 分写入）`
       );
       setPrecomputeMsg(
         isPrecomputePausedRef.current

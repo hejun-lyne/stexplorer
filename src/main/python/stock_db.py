@@ -122,6 +122,15 @@ def set_db_root(storage_path: str) -> str:
     return _db_root
 
 
+def set_cache_dir(storage_path: str) -> str:
+    """``set_db_root`` 的别名。
+
+    ``py_service.py`` 的常驻进程会在 ``--storage-path`` 变化时自动调用 ``mod.set_cache_dir``，
+    这里提供同名入口，使 stock_db 也能被同一套常驻机制正确指定存储目录。
+    """
+    return set_db_root(storage_path)
+
+
 def get_db_root() -> str:
     """当前 stock_db 根目录。"""
     return _db_root
@@ -1234,6 +1243,87 @@ def vacuum() -> None:
             conn.execute("VACUUM")
         except Exception as e:  # pragma: no cover
             _warn_once(f"VACUUM {db_name} 失败: {e}")
+
+
+# ============================================================
+# 主进程通用 KV 缓存接口（渲染进程 readCache / writeCache 的落库实现）
+# ============================================================
+
+def _now_iso() -> str:
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}Z"
+
+
+class CacheAPI:
+    """供 ``py_service.py`` 常驻进程调用的通用 KV 缓存接口。
+
+    存储位置与 tushare 数据一致：``stock_db/meta.db`` 的 ``api_cache`` 表。
+    返回结构与旧文件缓存完全一致，渲染进程无需改动：
+
+        {"data": <业务数据>, "cachedAt": <ISO 时间字符串>}
+
+    对应旧的 ``backups/backtest_cache/{key}.json`` 内容格式。
+    """
+
+    def get(self, key: str) -> Optional[Any]:
+        """读取缓存；不存在返回 None。不做 TTL 判定（时效由调用方自行判断）。"""
+        return read_cache(key, max_age_hours=-1)
+
+    def put(self, key: str, data: Any = None, cachedAt: Optional[str] = None) -> bool:
+        """写入缓存，自动包一层 ``{data, cachedAt}`` 信封。"""
+        if not key:
+            return False
+        payload = {"data": data, "cachedAt": cachedAt or _now_iso()}
+        write_cache(key, payload)
+        return True
+
+    def put_many(self, items: Optional[List[Dict[str, Any]]] = None) -> int:
+        """批量写入。items 为 ``[{"key":..., "data":..., "cachedAt":...}]``。"""
+        count = 0
+        for item in items or []:
+            if isinstance(item, dict) and item.get("key") and self.put(
+                item["key"], item.get("data"), item.get("cachedAt")
+            ):
+                count += 1
+        return count
+
+    def get_raw(self, key: str) -> Optional[Any]:
+        """读取原始值（不做 ``{data, cachedAt}`` 信封包装）。
+
+        用于主进程「本地数据」层（旧 ``<table>_<id>.json`` 文件），
+        其内容形如 ``{"lastModified": ..., "data": ...}``，需原样存取。
+        """
+        return read_cache(key, max_age_hours=-1)
+
+    def put_raw(self, key: str, value: Any = None) -> bool:
+        """原样写入任意 JSON 值（不包装信封）。"""
+        if not key:
+            return False
+        write_cache(key, value)
+        return True
+
+    def delete(self, key: str) -> bool:
+        delete_cache(key)
+        return True
+
+    def keys(self, prefix: str = "") -> List[str]:
+        """列出（可按前缀过滤）已缓存的 key。"""
+        try:
+            if prefix:
+                rows = _query(
+                    _META_DB,
+                    "SELECT cache_key FROM api_cache WHERE cache_key LIKE ? ORDER BY cache_key",
+                    (f"{prefix}%",),
+                )
+            else:
+                rows = _query(_META_DB, "SELECT cache_key FROM api_cache ORDER BY cache_key")
+        except Exception:
+            return []
+        return [r["cache_key"] for r in rows]
+
+    def info(self) -> Dict[str, Any]:
+        """缓存规模信息，便于主进程诊断。"""
+        row = _query_one(_META_DB, "SELECT COUNT(*) AS c FROM api_cache")
+        return {"root": _db_root, "entries": int(row["c"]) if row else 0}
 
 
 # ============================================================

@@ -43,7 +43,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -262,6 +262,123 @@ def migrate_dir(legacy_dir: str, dry_run: bool = False, verbose: bool = False,
     return report
 
 
+# 走 sqlite-read/sqlite-write 的「缓存类」表目录（与 cacheStore.ts 的白名单保持一致）。
+# 对应的数据库 key 规则：``local:<相对 storage 根目录的路径，不含 .json>``
+LOCAL_DATA_DIRS = ("stock_trend",)
+
+
+def _verify_and_delete(path: str, key: str, errors: List[str]) -> bool:
+    """确认数据库已存在该 key 后再删除源文件，避免误删未迁移成功的数据。"""
+    try:
+        if sdb.read_cache(key, max_age_hours=-1) is None:
+            errors.append(f"{os.path.basename(path)}: 删除前校验失败（库中无 {key}），已保留")
+            return False
+        os.remove(path)
+        return True
+    except Exception as e:
+        errors.append(f"{os.path.basename(path)}: 删除失败 {e}")
+        return False
+
+
+def migrate_local_data_dirs(storage_path: Optional[str], dry_run: bool = False,
+                            delete_source: bool = False, verbose: bool = False,
+                            dirs: Iterable[str] = LOCAL_DATA_DIRS) -> Dict[str, Any]:
+    """迁移 ``<storage>/<dir>/*.json`` 形式的「本地数据」缓存到 api_cache。
+
+    这些文件对应主进程 sqlite-read/sqlite-write 的缓存类表（如 stock_trend），
+    内容原样入库，DB key 为 ``local:<dir>/<文件名主干>``。
+    """
+    report: Dict[str, Any] = {
+        "dirs": {},
+        "migrated": 0,
+        "deleted": 0,
+        "skipped_conflict": 0,
+        "errors": [],
+        "dry_run": dry_run,
+        "delete_source": delete_source,
+    }
+    if not storage_path:
+        return report
+
+    root = os.path.expanduser(storage_path)
+    for d in dirs:
+        target = os.path.join(root, d)
+        if not os.path.isdir(target):
+            continue
+        names = sorted(fn for fn in os.listdir(target) if fn.endswith(".json"))
+        dir_stat = {"migrated": 0, "deleted": 0, "total": len(names)}
+        for fn in names:
+            path = os.path.join(target, fn)
+            if not os.path.isfile(path):
+                continue
+            if _is_conflict_file(fn):
+                report["skipped_conflict"] += 1
+                continue
+            key = f"local:{d}/{fn[:-5]}"
+            try:
+                payload = _load_json(path)
+                if not dry_run:
+                    sdb.write_cache(key, payload, updated_at=os.path.getmtime(path))
+                    if delete_source and _verify_and_delete(path, key, report["errors"]):
+                        report["deleted"] += 1
+                        dir_stat["deleted"] += 1
+                report["migrated"] += 1
+                dir_stat["migrated"] += 1
+            except Exception as e:
+                report["errors"].append(f"{fn}: {e}")
+        report["dirs"][d] = dir_stat
+        if verbose:
+            print(f"  ... {d}: 迁移 {dir_stat['migrated']}/{dir_stat['total']}，"
+                  f"删除源文件 {dir_stat['deleted']}", file=sys.stderr)
+    return report
+
+
+def migrate_backtest_dir(legacy_dir: str, dry_run: bool = False,
+                         verbose: bool = False, delete_source: bool = False) -> Dict[str, Any]:
+    """迁移主进程通用 KV 缓存（旧 ``backups/backtest_cache/*.json``）到 meta.db/api_cache。
+
+    文件内容形如 ``{"data": ..., "cachedAt": "..."}``，原样存入缓存表，
+    使渲染进程 readCache 的返回结构与迁移前完全一致。
+    """
+    report: Dict[str, Any] = {
+        "legacy_dir": legacy_dir,
+        "total_files": 0,
+        "migrated": 0,
+        "deleted": 0,
+        "skipped_conflict": 0,
+        "errors": [],
+        "dry_run": dry_run,
+        "delete_source": delete_source,
+    }
+    if not os.path.isdir(legacy_dir):
+        return report
+
+    names = sorted(fn for fn in os.listdir(legacy_dir) if fn.endswith(".json"))
+    report["total_files"] = len(names)
+
+    for fn in names:
+        path = os.path.join(legacy_dir, fn)
+        if not os.path.isfile(path):
+            continue
+        if _is_conflict_file(fn):
+            report["skipped_conflict"] += 1
+            continue
+        try:
+            payload = _load_json(path)
+            if not dry_run:
+                sdb.write_cache(fn[:-5], payload, updated_at=os.path.getmtime(path))
+                if delete_source and _verify_and_delete(path, fn[:-5], report["errors"]):
+                    report["deleted"] += 1
+            report["migrated"] += 1
+        except Exception as e:
+            report["errors"].append(f"{fn}: {e}")
+
+    if verbose:
+        print(f"  ... 通用缓存迁移完成: {report['migrated']}，删除源文件 {report['deleted']}",
+              file=sys.stderr)
+    return report
+
+
 def resolve_legacy_dirs(storage_path: Optional[str], explicit: Optional[str],
                         all_legacy: bool) -> List[str]:
     """确定要迁移的旧缓存目录列表。"""
@@ -302,23 +419,44 @@ def main() -> None:
     parser.add_argument("--verbose", "-v", action="store_true", help="输出进度")
     parser.add_argument("--limit", type=int, default=0, help="最多处理多少个文件（调试用）")
     parser.add_argument("--stats", action="store_true", help="迁移后打印 db_stats")
+    parser.add_argument("--backtest-cache-dir", default=None,
+                        help="主进程通用 KV 缓存目录（旧 backups/backtest_cache），默认取 <storage-path>/backups/backtest_cache")
+    parser.add_argument("--skip-backtest-cache", action="store_true",
+                        help="跳过主进程通用 KV 缓存（stock_bankuais 等）的迁移")
+    parser.add_argument("--skip-legacy", action="store_true",
+                        help="跳过旧 tushare_cache 目录的迁移，只迁通用 KV 缓存")
+    parser.add_argument("--skip-local-data", action="store_true",
+                        help="跳过 stock_trend 等「本地数据」缓存目录的迁移")
+    parser.add_argument("--delete-migrated", action="store_true",
+                        help="迁移校验成功后删除源 JSON 文件（stock_trend / backtest_cache）")
     args = parser.parse_args()
 
     if args.storage_path:
         sdb.set_db_root(args.storage_path)
     sdb.init_db()
 
-    legacy_dirs = resolve_legacy_dirs(args.storage_path, args.legacy_dir, args.all_legacy)
-    if not legacy_dirs:
+    legacy_dirs = [] if args.skip_legacy else resolve_legacy_dirs(
+        args.storage_path, args.legacy_dir, args.all_legacy
+    )
+
+    # 主进程通用 KV 缓存目录（stock_bankuais_* 等）
+    backtest_dir = args.backtest_cache_dir
+    if not backtest_dir and args.storage_path:
+        backtest_dir = os.path.join(os.path.expanduser(args.storage_path), "backups", "backtest_cache")
+    if args.skip_backtest_cache:
+        backtest_dir = None
+
+    if not legacy_dirs and not (backtest_dir and os.path.isdir(backtest_dir)):
         print(json.dumps({
             "error": "未找到旧缓存目录",
             "hint": "用 --legacy-dir 显式指定，例如 ~/.stexplorer/tushare_cache",
         }, ensure_ascii=False, indent=2))
         sys.exit(1)
 
-    print("旧缓存目录：", file=sys.stderr)
-    for d in legacy_dirs:
-        print(f"  - {d}  （{_dir_summary(d)}）", file=sys.stderr)
+    if legacy_dirs:
+        print("旧缓存目录：", file=sys.stderr)
+        for d in legacy_dirs:
+            print(f"  - {d}  （{_dir_summary(d)}）", file=sys.stderr)
     print(f"新数据库根目录：{sdb.get_db_root()}  (parquet={'启用' if sdb.parquet_enabled() else '禁用'})",
           file=sys.stderr)
 
@@ -326,6 +464,25 @@ def main() -> None:
     for d in legacy_dirs:
         print(f"\n开始迁移：{d}", file=sys.stderr)
         reports.append(migrate_dir(d, dry_run=args.dry_run, verbose=args.verbose, limit=args.limit))
+
+    backtest_report = None
+    if backtest_dir and os.path.isdir(backtest_dir):
+        print(f"\n开始迁移通用 KV 缓存：{backtest_dir}", file=sys.stderr)
+        backtest_report = migrate_backtest_dir(
+            backtest_dir, dry_run=args.dry_run, verbose=args.verbose,
+            delete_source=args.delete_migrated,
+        )
+
+    # stock_trend 等「本地数据」缓存目录（sqlite-read/sqlite-write 缓存类表）
+    local_report = None
+    if not args.skip_local_data:
+        print("\n开始迁移本地数据缓存目录：", file=sys.stderr)
+        for d in LOCAL_DATA_DIRS:
+            print(f"  - {os.path.join(os.path.expanduser(args.storage_path or ''), d)}", file=sys.stderr)
+        local_report = migrate_local_data_dirs(
+            args.storage_path, dry_run=args.dry_run, delete_source=args.delete_migrated,
+            verbose=args.verbose,
+        )
 
     output: Dict[str, Any] = {
         "reports": reports,
@@ -336,6 +493,10 @@ def main() -> None:
             "errors": sum(len(r["errors"]) for r in reports),
         },
     }
+    if backtest_report is not None:
+        output["backtest_cache"] = backtest_report
+    if local_report is not None:
+        output["local_data"] = local_report
     if args.stats:
         output["db_stats"] = sdb.db_stats()
 
