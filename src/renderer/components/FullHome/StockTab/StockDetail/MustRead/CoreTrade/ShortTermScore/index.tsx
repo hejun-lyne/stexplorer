@@ -1,16 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button, Col, Collapse, Row, Spin, Tooltip } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
 import { useSelector } from 'react-redux';
 import { useRequest } from 'ahooks';
-import dayjs from 'dayjs';
-import * as Services from '@/services';
 import * as Utils from '@/utils';
 import { StoreState } from '@/reducers/types';
-import { Stock } from '@/types/stock';
-import { KLineType } from '@/utils/enums';
 import styles from '../../index.scss';
 import * as Score from '@/helpers/shortTermScore';
+import * as ScoreList from '@/helpers/shortTermScoreList';
 import MoneyFlowChart from '../MoneyFlowChart';
 
 export interface ShortTermScoreProps {
@@ -54,12 +51,8 @@ const ScoreBar = ({ value, max }: { value: number; max: number }) => (
   </div>
 );
 
-/** 市值风格板块（大盘评分的对比基准） */
-const SIZE_BOARD_NAMES = ['微盘股', '小盘股', '中盘股', '大盘股'];
-
 const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyFlow, circMv }) => {
   const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
-  const indexSecid = code.startsWith('6') ? '1.000001' : code.startsWith('3') ? '0.399006' : '0.399001';
   const indexName = code.startsWith('6') ? '上证指数' : code.startsWith('3') ? '创业板指' : '深证成指';
 
   // 用户在板块页手动设置的活跃板块（优先）
@@ -69,208 +62,54 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   // 训练模式：按训练日期区分请求缓存，并在训练日期变化时重新取数（评分必须基于训练日期为止的数据）
   const trainKey = ontrain && trainDate ? trainDate : 'live';
 
-  // ---- 个股日K（自取250日，保证RSI历史分位足够；统一走数据源设置） ----
-  const [dklines, setDklines] = useState<Stock.KLineItem[] | null>(null);
-  const [dkError, setDkError] = useState<string | null>(null);
-  const { run: runGetDK, loading: dkLoading } = useRequest(
+  // ---- 评分（与 STList 批量评分 / 训练周期预计算共用同一套取数与评分逻辑，口径必然一致）----
+  // 取数、板块选择、大盘对比基准（市值风格板块优先）全部在评分内核里完成，
+  // 算完还会把该交易日的结果写回这只股票的评分序列，列表下次评分直接命中同一份数据。
+  const [scoreData, setScoreData] = useState<Awaited<ReturnType<typeof ScoreList.computeStockScoreForCode>> | null>(
+    null
+  );
+  const [scoreError, setScoreError] = useState<string | null>(null);
+  const { run: runScore, loading: scoreLoading } = useRequest(
     async () => {
-      const r = await Services.Stock.GetKFromSetting(secid, KLineType.Day, 250);
-      if (r?.ks?.length) {
-        return r.ks;
+      const r = await ScoreList.computeStockScoreForCode({
+        code,
+        source: kLineApiSourceSetting,
+        // 训练模式下按训练日期取数（评分必须基于训练日期为止的数据）
+        date: ontrain && trainDate ? trainDate : undefined,
+        circMv,
+        moneyFlow,
+        hybk: hybk || null,
+      });
+      if (!r || !r.detail) {
+        // 抛错而不是返回空结果，避免空结果被 cacheKey 缓存导致重试失效
+        throw new Error(r?.row?.error || '未获取到日K数据');
       }
-      // 抛错而不是返回空数组，避免空结果被 cacheKey 缓存导致重试失效
-      throw new Error('未获取到日K数据');
+      return r;
     },
     {
       manual: true,
-      cacheKey: `ShortTermK/${secid}/${kLineApiSourceSetting}/${trainKey}`,
-      onSuccess: (ks) => {
-        setDkError(null);
-        setDklines(ks);
+      cacheKey: `ShortTermScore/${code}/${kLineApiSourceSetting}/${trainKey}`,
+      onSuccess: (r) => {
+        setScoreError(null);
+        setScoreData(r);
       },
-      onError: (e) => setDkError(e?.message || '请求失败'),
+      onError: (e) => setScoreError(e?.message || '请求失败'),
       throwOnError: false,
-    },
+    }
   );
 
-  // ---- 所属指数日K（统一走数据源设置） ----
-  const [indexKlines, setIndexKlines] = useState<Stock.KLineItem[] | null>(null);
-  const { run: runGetIndexK } = useRequest(
-    async () => {
-      const r = await Services.Stock.GetKFromSetting(indexSecid, KLineType.Day, 60);
-      return r?.ks || [];
-    },
-    {
-      manual: true,
-      cacheKey: `ShortTermIndex/${indexSecid}/${kLineApiSourceSetting}/${trainKey}`,
-      onSuccess: setIndexKlines,
-      throwOnError: false,
-    },
-  );
-
-  // ---- 所属板块 / 市值风格板块 ----
-  const [board, setBoard] = useState<{ code: string; name: string } | null>(null);
-  const [sizeBoard, setSizeBoard] = useState<{ code: string; name: string } | null>(null);
   useEffect(() => {
-    setBoard(null);
-    setSizeBoard(null);
+    setScoreData(null);
+    setScoreError(null);
+    runScore();
+  }, [code, kLineApiSourceSetting, trainKey, circMv, moneyFlow]);
 
-    // 板块 BK 代码在不同数据源命名空间并不一致（例：「轻工制造」在 tushare 是 BK1212，
-    // 而 BK1643 在 tushare 是「小盘股」）。统一按「名称」在当前数据源的板块列表里解析代码，
-    // 避免出现「名称与代码错配」而取不到数据。
-    const cleanBoardName = (name: string) => String(name || '').replace(/[，,]\s*BK\d+\s*$/i, '').trim();
-    const resolveBoardCode = (name: string): Promise<string> =>
-      Services.Stock.ResolveBoardCodeByName(name, kLineApiSourceSetting);
-    // 训练模式：探测板块在训练日期附近是否仍有真实行情（不使用成分股合成值）
-    const hasRealDataNear = async (code: string): Promise<boolean> => {
-      if (!code) {
-        return false;
-      }
-      try {
-        const r = await Services.Stock.GetKFromSetting(`90.${code}`, KLineType.Day, 30, { allowSynthesis: false });
-        const ks = r && r.ks ? r.ks : [];
-        const lastDate = ks.length ? String(ks[ks.length - 1].date).substring(0, 10) : '';
-        return !!lastDate && Math.abs(dayjs(trainDate).diff(dayjs(lastDate), 'day')) <= 15;
-      } catch (e) {
-        return false;
-      }
-    };
+  const dklines = scoreData?.klines || null;
+  const result = scoreData?.detail || null;
+  // 大盘评分对比基准名称：市值风格板块优先，缺失时回退所属指数（由评分内核决定）
+  const marketBaselineName = scoreData?.baselineName || indexName;
 
-    // 非训练模式：已配置板块优先（显示时去掉名字里附带的代码）
-    if (hybk && !(ontrain && trainDate)) {
-      setBoard({ code: hybk.code, name: cleanBoardName(hybk.name) });
-    }
-
-    Services.Stock.GetStockBankuaisFromEastmoney(secid)
-      .then(async (list: any[]) => {
-        const boards: any[] = Array.isArray(list) ? list : [];
-
-        if (ontrain && trainDate) {
-          // 候选：已配置板块优先，其次所属板块；逐个按名称解析代码并探测训练日附近是否有真实数据
-          const candidates: { code: string; name: string }[] = [];
-          if (hybk) {
-            candidates.push({ code: hybk.code, name: hybk.name });
-          }
-          boards.forEach((b) => {
-            if (b && b.code && !candidates.some((c) => c.code === b.code)) {
-              candidates.push({ code: b.code, name: b.name });
-            }
-          });
-
-          let picked: { code: string; name: string } | null = null;
-          for (const c of candidates.slice(0, 10)) {
-            const resolved = (await resolveBoardCode(c.name)) || c.code;
-            if (await hasRealDataNear(resolved)) {
-              picked = { code: resolved, name: cleanBoardName(c.name) || c.name };
-              break;
-            }
-          }
-
-          if (picked) {
-            const configuredCode = hybk ? (await resolveBoardCode(hybk.name)) || hybk.code : '';
-            if (configuredCode && picked.code !== configuredCode) {
-              console.warn(
-                `[短线评分] 已配置板块「${cleanBoardName(hybk?.name || '')}」(${configuredCode}) 在训练日 ${trainDate} 无数据，改用「${picked.name}」(${picked.code})`
-              );
-            }
-            setBoard(picked);
-          } else {
-            console.warn(`[短线评分] ${secid} 在训练日 ${trainDate} 附近没有可用历史的板块，板块相对强度不参与评分`);
-            if (hybk) {
-              setBoard({ code: hybk.code, name: cleanBoardName(hybk.name) });
-            } else if (boards.length) {
-              setBoard({ code: boards[0].code, name: boards[0].name });
-            }
-          }
-        } else if (!hybk && boards.length) {
-          setBoard({ code: boards[0].code, name: boards[0].name });
-        }
-
-        // 市值风格板块（大盘/中盘/小盘/微盘）：代码同样按名称解析，避免命名空间不一致
-        const size = boards.find((b: any) => SIZE_BOARD_NAMES.includes(b.name));
-        if (size) {
-          const sizeCode = (await resolveBoardCode(size.name)) || size.code;
-          setSizeBoard({ code: sizeCode, name: size.name });
-        }
-      })
-      .catch(() => undefined);
-  }, [secid, hybk, trainKey, kLineApiSourceSetting]);
-
-  // ---- 板块日K（统一走数据源设置；评分基准只用真实板块数据，不用成分股合成的近似值） ----
-  const fetchBoardKlines = async (boardCode: string): Promise<Stock.KLineItem[]> => {
-    const r = await Services.Stock.GetKFromSetting(`90.${boardCode}`, KLineType.Day, 60, { allowSynthesis: false });
-    return r?.ks || [];
-  };
-  const [boardKlines, setBoardKlines] = useState<Stock.KLineItem[] | null>(null);
-  useEffect(() => {
-    setBoardKlines(null);
-    if (board) {
-      fetchBoardKlines(board.code).then(setBoardKlines).catch(() => setBoardKlines([]));
-    }
-  }, [board, kLineApiSourceSetting, trainKey]);
-
-  // ---- 市值风格板块日K（大盘评分对比基准，失败时回退所属指数） ----
-  const [sizeBoardKlines, setSizeBoardKlines] = useState<Stock.KLineItem[] | null>(null);
-  useEffect(() => {
-    setSizeBoardKlines(null);
-    if (sizeBoard) {
-      fetchBoardKlines(sizeBoard.code).then(setSizeBoardKlines).catch(() => setSizeBoardKlines([]));
-    }
-  }, [sizeBoard, kLineApiSourceSetting, trainKey]);
-
-  // ---- 近10日涨跌比 ----
-  const [upRatioMap, setUpRatioMap] = useState<Record<string, any> | null>(null);
-  useEffect(() => {
-    if (!dklines || dklines.length === 0) {
-      return;
-    }
-    const dates = dklines
-      .slice(-Score.SHORT_TERM_SCORE_CONFIG.marketDays)
-      .map((k) => k.date.replace(/-/g, ''));
-    Services.Tushare.GetUpRatioFromTushare(dates)
-      .then(setUpRatioMap)
-      .catch(() => setUpRatioMap({}));
-  }, [dklines]);
-
-  // ---- 同类市值成交统计 ----
-  const [marketStats, setMarketStats] = useState<any>(null);
-  useEffect(() => {
-    if (!dklines || dklines.length === 0) {
-      return;
-    }
-    const lastDate = dklines[dklines.length - 1].date.replace(/-/g, '');
-    Services.Tushare.GetMarketActivityStatsFromTushare(lastDate)
-      .then(setMarketStats)
-      .catch(() => setMarketStats(null));
-  }, [dklines]);
-
-  useEffect(() => {
-    setDklines(null);
-    setDkError(null);
-    setIndexKlines(null);
-    runGetDK();
-    runGetIndexK();
-  }, [secid, kLineApiSourceSetting, trainKey]);
-
-  // ---- 评分计算 ----
-  // 大盘评分对比基准：优先市值风格板块（大盘/中盘/小盘/微盘股），无数据时回退所属指数
-  const marketBaselineKlines = sizeBoardKlines && sizeBoardKlines.length ? sizeBoardKlines : indexKlines;
-  const marketBaselineName = sizeBoardKlines && sizeBoardKlines.length ? sizeBoard?.name || indexName : indexName;
-  const result = useMemo(() => {
-    if (!dklines || dklines.length < 30) {
-      return null;
-    }
-    const market = Score.scoreMarket(dklines, marketBaselineKlines || [], upRatioMap);
-    const sector = Score.scoreSector(dklines, boardKlines, board?.name || '');
-    const volume = Score.scoreStockVolume(dklines, marketStats, circMv);
-    const rsi = Score.scoreStockRsi(dklines);
-    const money = Score.scoreStockMoney(moneyFlow?.detail_main, moneyFlow?.detail_retail);
-    const stockScore = Score.scoreStock(volume, rsi, money);
-    const overall = Score.composeShortTermScore(market, sector, stockScore);
-    return { overall, market, sector, stock: stockScore, volume, rsi, money };
-  }, [dklines, indexKlines, upRatioMap, boardKlines, board, marketStats, circMv, moneyFlow, marketBaselineKlines]);
-
-  if (dkLoading && !dklines) {
+  if (scoreLoading && !dklines) {
     return (
       <div style={{ textAlign: 'center', padding: 40 }}>
         <Spin /> 短线评分数据加载中...
@@ -281,13 +120,13 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     return (
       <div style={{ textAlign: 'center', padding: 40, color: 'var(--secondary-text-color)' }}>
         <div style={{ marginBottom: 12 }}>
-          {dkError
-            ? `日K数据获取失败（${dkError}），请检查K线数据源设置或稍后重试`
+          {scoreError
+            ? `评分失败（${scoreError}），请检查K线数据源设置或稍后重试`
             : dklines && dklines.length < 30
               ? `日K数据不足（${dklines.length}条，至少需要30条），无法计算短线评分`
               : '暂无日K数据，无法计算短线评分'}
         </div>
-        <Button size="small" onClick={() => runGetDK()}>
+        <Button size="small" onClick={() => runScore()}>
           重试
         </Button>
       </div>

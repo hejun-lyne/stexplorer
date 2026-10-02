@@ -1322,86 +1322,93 @@ export async function GetMoneyFlowFromTushare(secid: string, days?: number): Pro
   }
 }
 
-// ==================== 短线评分结果缓存（按交易日，存 meta.db/api_cache） ====================
+// ==================== 短线评分结果缓存（按个股的评分时间序列，存 meta.db/api_cache） ====================
+// 评分被当作个股的一条时间序列（一只股票一条记录，值为 { 交易日: 评分行 }），
+// 与 K线 / 资金流等时间序列同一层存储语义：一次批量读写整个股票池，按「评分基准日」取点。
 
 /** 批量写入时的分组大小：命令行参数过长在 Windows/Linux 上会被截断，这里按 50 只一组写入 */
 const SHORT_SCORE_CACHE_CHUNK = 50;
 
 /**
- * 读取某个交易日的个股短线评分结果缓存
- * @param date 交易日（YYYYMMDD）；训练模式下为当前训练日
- * @param source K线数据源标识（不同数据源的评分口径不同，不匹配视为未命中）
- * @returns { [股票代码]: 评分行 }，未命中返回 {}
+ * 批量读取多只股票的「短线评分时间序列」
+ *
+ * 评分被当作个股的一条时间序列存储（一条序列含该股多个交易日的评分行），
+ * 一次进程调用即可取回整个股票池的全部序列，避免逐只 / 逐日读写。
+ * @param codes 6位股票代码数组
+ * @param source K线数据源标识
+ * @returns { [股票代码]: { [交易日YYYYMMDD]: 评分行 } }，未命中的股票为 {}
  */
-export async function GetShortTermScoreCacheFromTushare(date: string, source?: string | number): Promise<Record<string, any>> {
+export async function GetShortTermScoreSeriesFromTushare(
+  codes: string[],
+  source?: string | number,
+  options?: { ignoreTrain?: boolean }
+): Promise<Record<string, Record<string, any>>> {
   try {
-    if (!date) {
+    if (!codes || !codes.length) {
       return {};
     }
-    const result = await callTushare('get_short_term_score_cache', { date, source });
+    const result = await callTushare('get_short_term_score_series_batch', { codes, source }, options);
     if (result && typeof result === 'object' && !result.error) {
-      return result as Record<string, any>;
+      return result as Record<string, Record<string, any>>;
     }
     return {};
   } catch (error) {
-    logError(error, 'GetShortTermScoreCacheFromTushare', '读取短线评分缓存失败');
+    logError(error, 'GetShortTermScoreSeriesFromTushare', '读取短线评分序列失败');
     return {};
   }
 }
 
 /**
- * 检查多个交易日的短线评分缓存对指定股票池的覆盖情况
- * @param dates 交易日数组（YYYYMMDD / YYYY-MM-DD）
- * @param codes 股票代码数组
+ * 批量写入多只股票的短线评分时间序列（按交易日合并，不影响其它交易日 / 其它股票）
+ * @param series { [股票代码]: { [交易日YYYYMMDD]: 评分行 } }
  * @param source K线数据源标识
- * @returns { [YYYYMMDD]: 尚未缓存的股票数 }；失败返回 {}
  */
-export async function GetShortTermScoreCachedSummaryFromTushare(
-  dates: string[],
+export async function SaveShortTermScoreSeriesToTushare(
+  series: Record<string, Record<string, any>>,
+  source?: string | number
+): Promise<void> {
+  try {
+    if (!series) {
+      return;
+    }
+    const codes = Object.keys(series);
+    if (!codes.length) {
+      return;
+    }
+    for (let i = 0; i < codes.length; i += SHORT_SCORE_CACHE_CHUNK) {
+      const chunk: Record<string, any> = {};
+      codes.slice(i, i + SHORT_SCORE_CACHE_CHUNK).forEach((code) => {
+        chunk[code] = series[code];
+      });
+      await callTushare('save_short_term_score_series_batch', { stocks: chunk, source });
+    }
+  } catch (error) {
+    logError(error, 'SaveShortTermScoreSeriesToTushare', '写入短线评分序列失败');
+  }
+}
+
+/**
+ * 检查多只股票的评分序列对指定交易日的覆盖情况（预计算增量补算用）
+ * @returns { [交易日YYYYMMDD]: 该日仍缺失的股票数 }；失败返回 {}
+ */
+export async function GetShortTermScoreSeriesSummaryFromTushare(
   codes: string[],
+  dates: string[],
   source?: string | number,
   options?: { ignoreTrain?: boolean }
 ): Promise<Record<string, number>> {
   try {
-    if (!dates || !dates.length || !codes || !codes.length) {
+    if (!codes?.length || !dates?.length) {
       return {};
     }
-    const result = await callTushare('get_short_term_score_cached_summary', { dates, codes, source }, options);
+    const result = await callTushare('get_short_term_score_series_summary', { codes, dates, source }, options);
     if (result && typeof result === 'object' && !result.error) {
       return result as Record<string, number>;
     }
     return {};
   } catch (error) {
-    logError(error, 'GetShortTermScoreCachedSummaryFromTushare', '读取短线评分缓存覆盖情况失败');
+    logError(error, 'GetShortTermScoreSeriesSummaryFromTushare', '读取短线评分序列覆盖情况失败');
     return {};
-  }
-}
-
-/**
- * 把个股短线评分结果按交易日写入数据库缓存（同一天多次写入按代码合并，不影响其它交易日）
- * @param date 交易日（YYYYMMDD）；训练模式下为当前训练日
- * @param stocks { [股票代码]: 评分行 }
- * @param source K线数据源标识，随评分一起记录
- */
-export async function SaveShortTermScoreCacheToTushare(
-  date: string,
-  stocks: Record<string, any>,
-  source?: string | number
-): Promise<void> {
-  try {
-    if (!date || !stocks) {
-      return;
-    }
-    const codes = Object.keys(stocks);
-    for (let i = 0; i < codes.length; i += SHORT_SCORE_CACHE_CHUNK) {
-      const chunk: Record<string, any> = {};
-      codes.slice(i, i + SHORT_SCORE_CACHE_CHUNK).forEach((code) => {
-        chunk[code] = stocks[code];
-      });
-      await callTushare('save_short_term_score_cache', { date, stocks: chunk, source });
-    }
-  } catch (error) {
-    logError(error, 'SaveShortTermScoreCacheToTushare', '写入短线评分缓存失败');
   }
 }
 

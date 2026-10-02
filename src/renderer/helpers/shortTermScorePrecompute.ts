@@ -1,25 +1,29 @@
 import dayjs from 'dayjs';
 import * as Services from '@/services';
 import { FundApiType, KLineType } from '@/utils/enums';
-import { Stock } from '@/types/stock';
 import * as Score from './shortTermScore';
 import {
-  computeShortTermRowForDate,
-  indexSecidOfStock,
+  buildStockScoreInputs,
+  computeShortTermScoreForDate,
+  createScoreContext,
+  primeBoards,
+  saveScoreSeries,
   ShortTermScoreItem,
+  ShortTermScoreSeries,
 } from './shortTermScoreList';
 
 /**
  * 训练周期短线评分预计算
  *
- * 用途：训练模式下按「每个交易日 × 每只股票」预先算好短线评分并写入数据库缓存
- * （meta.db/api_cache，key = short_term_score_{交易日}_{数据源}），之后在 STList 执行短线评分
- * 会直接命中缓存、不再逐只取数计算。
+ * 用途：训练模式下按「每只股票 × 每个交易日」预先算好短线评分，写入该股票的**评分时间序列**
+ * （meta.db/api_cache，key = short_term_score_series_{股票代码}_{数据源}，值为 { 交易日: 评分行 }）。
+ * 之后在 STList 执行短线评分会直接命中序列、不再逐只取数计算，个股详情页算完也会写回同一条序列，
+ * 因此「列表分」与「详情页分」必然一致。
  *
  * 训练窗口是已知的历史区间，因此这里一次把**整段窗口（trainStartDate ~ trainEndDate）**算完：
  * 取数按窗口末日（`ignoreTrain` 绕过训练日期收敛，原始数据不进入界面，渲染层出口仍按训练日截断），
  * 但每只股票在每个交易日的评分只用「该交易日及之前」的K线/资金明细切片计算，
- * 所以第 D 天算出的分数，与训练日推进到 D 时现算的结果完全一致；界面也只在训练日到达 D 后才读该日缓存。
+ * 所以第 D 天算出的分数，与训练日推进到 D 时现算的结果完全一致；界面也只在训练日到达 D 后才读该日结果。
  *
  * 性能设计（把原来「每只股票每天各启动若干 python 进程」变成一次批量取数）：
  * - 个股日K / 指数日K / 板块日K：各一次 `get_kline_data_batch`（内部线程池 + 各自数据库缓存）
@@ -27,9 +31,9 @@ import {
  * - 市值档成交统计：一次 `get_market_activity_stats_batch`
  * - 涨跌比：一次 `get_up_down_ratio_batch`（按日期，历史日期长期缓存）
  * - 板块代码解析：进程内记忆板块列表（见 services/tushare.ts 的 GetBoardListsMemo）
- * 之后逐日只在内存中切片 + 纯函数评分，并按交易日写入缓存。
+ * 之后逐日只在内存中切片 + 纯函数评分，最后按「股票」一次性写回各自的评分序列。
  *
- * 增量：开始前会检查每个交易日对本次股票池的缓存覆盖情况，已覆盖全部股票的日子直接跳过；
+ * 增量：开始前会检查每只股票的评分序列对本次股票池的覆盖情况，已覆盖全部股票的日子直接跳过；
  * 整段窗口预计算完成后，训练日推进（下一天）无需再做任何取数/计算。
  */
 
@@ -41,8 +45,8 @@ const INDEX_KLINES_PER_DAY = 60;
 const BOARD_KLINES_PER_DAY = 60;
 /** 每个交易日评分所需的资金明细天数（20日累计 + 30日形态识别，留缓冲） */
 const MONEY_DAYS_PER_DAY = 60;
-/** 板块数据与训练日的最大间隔（天）：超过则认为板块当日无行情，换下一个候选板块 */
-const BOARD_NEAR_DAYS = 15;
+/** 每计算多少个交易日落盘一次（兼顾中断安全与写入次数） */
+const FLUSH_EVERY_DAYS = 20;
 
 export interface PrecomputeOptions {
   items: ShortTermScoreItem[];
@@ -81,33 +85,6 @@ const toDay = (v: any): string => {
   return s.substring(0, 10).replace(/\//g, '-');
 };
 
-/** 按日期截断K线：保留 <= date 的最后 keep 根 */
-function sliceKlines(ks: Stock.KLineItem[] | undefined, date: string, keep: number): Stock.KLineItem[] {
-  if (!ks || !ks.length) {
-    return [];
-  }
-  const cut = ks.filter((k) => toDay(k.date) <= date);
-  return cut.length > keep ? cut.slice(-keep) : cut;
-}
-
-/** 按日期截断资金明细（主力/散户逐日净流入） */
-function sliceMoney(mf: any, date: string): { detailMain: number[]; detailRetail: number[] } {
-  const dates: string[] = Array.isArray(mf?.detail_dates) ? mf.detail_dates : [];
-  const main: number[] = Array.isArray(mf?.detail_main) ? mf.detail_main : [];
-  const retail: number[] = Array.isArray(mf?.detail_retail) ? mf.detail_retail : [];
-  const keepIdx: number[] = [];
-  dates.forEach((d, i) => {
-    if (toDay(d) <= date) {
-      keepIdx.push(i);
-    }
-  });
-  const tail = keepIdx.slice(-MONEY_DAYS_PER_DAY);
-  return {
-    detailMain: tail.map((i) => Number(main[i]) || 0),
-    detailRetail: tail.map((i) => Number(retail[i]) || 0),
-  };
-}
-
 export async function precomputeShortTermScores(options: PrecomputeOptions): Promise<PrecomputeResult> {
   const { items, source, shouldStop, onProgress } = options;
   const result: PrecomputeResult = { dates: 0, reused: 0, rows: 0, skipped: 0, totalDates: 0, days: [] };
@@ -145,11 +122,11 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     return result;
   }
 
-  // ---- 2. 增量检查：已覆盖本次全部股票池的交易日直接跳过（只补算新增的交易日 / 股票）----
-  const covered = await Services.Tushare.GetShortTermScoreCachedSummaryFromTushare(days, codes, source, {
+  // ---- 2. 增量检查：每只股票的评分序列已覆盖的交易日直接跳过（只补算缺口）----
+  const summary = await Services.Tushare.GetShortTermScoreSeriesSummaryFromTushare(codes, days, source, {
     ignoreTrain: true,
   });
-  const pendingDays = days.filter((d) => (covered[d.replace(/-/g, '')] ?? Infinity) > 0);
+  const pendingDays = days.filter((d) => (summary[d.replace(/-/g, '')] ?? Infinity) > 0);
   result.reused = days.length - pendingDays.length;
   if (!pendingDays.length) {
     onProgress?.(days.length, days.length, `${days.length} 个交易日均已缓存`);
@@ -174,69 +151,7 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     { ignoreTrain: true, tradeDate: endDate }
   );
 
-  // ---- 5. 板块：每只股票解析一次所属板块（手动设置优先），再一次性批量取板块K线 ----
-  onProgress?.(0, pendingDays.length, '解析所属板块...');
-  const candidatesByCode: Record<string, { code: string; name: string }[]> = {};
-  const candidateCodes = new Set<string>();
-  for (const item of items) {
-    if (shouldStop?.()) {
-      return result;
-    }
-    const candidates: any[] = item.hybk
-      ? [item.hybk]
-      : await Services.Stock.GetStockBankuaisFromEastmoney(secidOf(item.code))
-          .then((list: any[]) => (list || []).slice(0, 3))
-          .catch(() => []);
-    const resolved: { code: string; name: string }[] = [];
-    for (const bk of candidates) {
-      if (!bk) {
-        continue;
-      }
-      const code = (await Services.Stock.ResolveBoardCodeByName(bk.name, source)) || bk.code;
-      if (!code || resolved.some((r) => r.code === code)) {
-        continue;
-      }
-      const name = String(bk.name || '').replace(/[，,]\s*BK\d+\s*$/i, '').trim() || String(bk.name || '');
-      resolved.push({ code, name });
-      candidateCodes.add(code);
-    }
-    candidatesByCode[item.code] = resolved;
-  }
-
-  const boardKlinesMap: Record<string, Stock.KLineItem[]> = {};
-  const candidateList = [...candidateCodes];
-  if (candidateList.length) {
-    const boardSecids = candidateList.map((c) => `90.${c}`);
-    const fetched = await Services.Tushare.BatchGetKFromTushare(
-      boardSecids,
-      endDate,
-      days.length + BOARD_KLINES_PER_DAY + 10,
-      KLineType.Day,
-      { ignoreTrain: true }
-    );
-    candidateList.forEach((c, i) => {
-      boardKlinesMap[c] = fetched[boardSecids[i]] || [];
-    });
-  }
-
-  // 与单日评分一致：优先选「训练日期附近仍有行情」的板块（避免选中早已停更的板块）
-  const boardChoice: Record<string, { code: string; name: string } | null> = {};
-  Object.keys(candidatesByCode).forEach((code) => {
-    const list = candidatesByCode[code] || [];
-    let picked: { code: string; name: string } | null = null;
-    for (const c of list) {
-      const ks = boardKlinesMap[c.code] || [];
-      const lastDate = ks.length ? toDay(ks[ks.length - 1].date) : '';
-      const near = !!lastDate && Math.abs(dayjs(endDate).diff(dayjs(lastDate), 'day')) <= BOARD_NEAR_DAYS;
-      if (ks.length && near) {
-        picked = c;
-        break;
-      }
-    }
-    boardChoice[code] = picked || list[0] || null;
-  });
-
-  // ---- 6. 大盘维度公共数据：涨跌比（按日，覆盖每个交易日所需的近10日窗口）----
+  // ---- 5. 大盘维度公共数据：涨跌比（按日，覆盖每个交易日所需的近10日窗口）----
   const allIndexDays = [
     ...new Set(indexSecids.flatMap((s) => (indexKlinesMap[s] || []).map((k) => toDay(k.date)))),
   ].sort();
@@ -245,56 +160,82 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   onProgress?.(0, pendingDays.length, '拉取涨跌比...');
   const upRatioMap = await Services.Tushare.GetUpRatioFromTushare(allIndexDays.slice(from), { ignoreTrain: true });
 
-  // ---- 7. 市值档成交统计（按日，一次批量取回）----
+  // ---- 6. 市值档成交统计（按日，一次批量取回）----
   onProgress?.(0, pendingDays.length, '拉取市值档成交统计...');
   const marketStatsMap = await Services.Tushare.GetMarketActivityStatsBatchFromTushare(pendingDays, {
     ignoreTrain: true,
   });
 
-  // ---- 8. 逐日计算（内存切片 + 纯函数评分），按交易日写入数据库缓存 ----
+  // ---- 7. 评分共享上下文：批量数据一次性塞进 ctx，逐日只在内存切片 ----
+  // 与列表 / 详情页共用同一套取数与评分逻辑（buildStockScoreInputs + computeShortTermScoreForDate），
+  // 保证「预计算第 D 天」=「训练日推进到 D 现算」=「个股详情页看到的结果」。
+  const ctx = createScoreContext(source, {
+    indexKlinesMap,
+    stockKlinesMap,
+    moneyFlowMap,
+    upRatioMap,
+    marketStatsMap,
+  });
+
+  // ---- 8. 板块：每只股票解析一次所属板块（手动设置优先），再一次性批量取板块K线 ----
+  onProgress?.(0, pendingDays.length, '解析所属板块...');
+  const boardCodes = new Set<string>();
+  for (const item of items) {
+    if (shouldStop?.()) {
+      return result;
+    }
+    (await primeBoards(ctx, item)).forEach((c) => boardCodes.add(c));
+  }
+  if (boardCodes.size) {
+    const boardList = [...boardCodes];
+    const fetched = await Services.Tushare.BatchGetKFromTushare(
+      boardList.map((c) => `90.${c}`),
+      endDate,
+      days.length + BOARD_KLINES_PER_DAY + 10,
+      KLineType.Day,
+      { ignoreTrain: true }
+    );
+    boardList.forEach((c) => {
+      ctx.boardKlinesMap[c] = fetched[`90.${c}`] || [];
+    });
+  }
+
+  // ---- 9. 逐日计算（内存切片 + 纯函数评分），按「股票」写回评分序列 ----
+  let buffer: ShortTermScoreSeries = {};
   for (let di = 0; di < pendingDays.length; di += 1) {
     if (shouldStop?.()) {
       break;
     }
     const day = pendingDays[di];
-    const rows: Record<string, any> = {};
+    const dayKey = day.replace(/-/g, '');
+    let count = 0;
     for (const item of items) {
-      const code = item.code;
-      const klines = sliceKlines(stockKlinesMap[secidOf(code)], day, STOCK_KLINES_PER_DAY);
-      if (klines.length < 30) {
+      try {
+        const inputs = await buildStockScoreInputs(ctx, item, day);
+        const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, ...inputs });
+        if (row.error) {
+          result.skipped += 1;
+          continue;
+        }
+        buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
+        count += 1;
+        result.rows += 1;
+      } catch {
         result.skipped += 1;
-        continue;
       }
-      const bk = boardChoice[code];
-      const { detailMain, detailRetail } = sliceMoney(moneyFlowMap[code], day);
-      const row = computeShortTermRowForDate({
-        code,
-        name: item.name,
-        klines,
-        indexKlines: sliceKlines(indexKlinesMap[indexSecidOfStock(code)], day, INDEX_KLINES_PER_DAY),
-        boardKlines: bk ? sliceKlines(boardKlinesMap[bk.code], day, BOARD_KLINES_PER_DAY) : [],
-        boardName: bk ? bk.name : '',
-        upRatioMap,
-        marketStats: marketStatsMap[day.replace(/-/g, '')] || null,
-        circMv: item.circMv,
-        detailMain,
-        detailRetail,
-      });
-      if (row.error) {
-        result.skipped += 1;
-        continue;
-      }
-      rows[code] = row;
     }
-    const count = Object.keys(rows).length;
-    if (count) {
-      await Services.Tushare.SaveShortTermScoreCacheToTushare(day, rows, source);
-      result.rows += count;
-      result.dates += 1;
-    }
+    result.dates += 1;
     onProgress?.(di + 1, pendingDays.length, `${day} 完成（${count} 只）`);
+    // 定期落盘，中断时已算完的交易日不会丢失
+    if ((di + 1) % FLUSH_EVERY_DAYS === 0 && Object.keys(buffer).length) {
+      await saveScoreSeries(buffer, source);
+      buffer = {};
+    }
     // 让出主线程，避免长时间阻塞 UI
     await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (Object.keys(buffer).length) {
+    await saveScoreSeries(buffer, source);
   }
 
   return result;
