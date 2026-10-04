@@ -4773,15 +4773,54 @@ export async function FromDataSource(source: Enums.FundApiType, secid: string) {
   return FromEastmoney(secid);
 }
 
-export async function GetBanKuaisFromDataSource(source: Enums.FundApiType, type: BKType, pageSize = 20, dataSource = 'dc') {
+/**
+ * 板块列表（行业/概念）的本地持久化缓存：
+ * BKList 在切换「行业/概念」标签、切换数据源或重新挂载时都会重新拉取板块列表，
+ * Akshare 源每次都要走一次 python 调用、东财源要打网络请求，重复拉取代价高。
+ * 这里按「数据源 + 板块类型 + dc/ths + 分页大小」做本地缓存（默认 10 分钟）。
+ * 只缓存非空结果，读取失败/未命中时照常请求；点「刷新」时传 forceRefresh 跳过缓存。
+ */
+const BOARD_LIST_CACHE_TTL = 10 * 60 * 1000;
+
+export async function GetBanKuaisFromDataSource(
+  source: Enums.FundApiType,
+  type: BKType,
+  pageSize = 20,
+  dataSource = 'dc',
+  forceRefresh = false,
+) {
+  const cacheKey = `board_list_${source}_${type}_${dataSource}_${pageSize}`;
+  const electron = (window.contextModules as any)?.electron;
+
+  // 1. 尝试读取缓存
+  if (!forceRefresh) {
+    try {
+      const cached = await electron?.readCache?.(cacheKey);
+      const payload = cached?.success ? cached?.data?.data : null;
+      if (payload?.result?.arr?.length && Date.now() - (payload.at || 0) < BOARD_LIST_CACHE_TTL) {
+        return payload.result;
+      }
+    } catch (e) {
+      // 缓存读取失败时忽略，走正常请求
+    }
+  }
+
+  // 2. 请求新数据
+  let result: any;
   if (source === Enums.FundApiType.Akshare) {
-    return AkshareAPI.GetBanKuaisFromAkshare(type, pageSize);
+    result = await AkshareAPI.GetBanKuaisFromAkshare(type, pageSize);
+  } else if (source === Enums.FundApiType.Tushare) {
+    result = await TushareAPI.GetBanKuaisFromTushare(type, dataSource);
+  } else {
+    // 默认使用 Eastmoney
+    result = await GetBanKuais(type, pageSize);
   }
-  if (source === Enums.FundApiType.Tushare) {
-    return TushareAPI.GetBanKuaisFromTushare(type, dataSource);
+
+  // 3. 只缓存非空结果，避免接口偶发返回空把缓存写坏
+  if (result?.arr?.length) {
+    electron?.writeCache?.(cacheKey, { at: Date.now(), result })?.catch?.(() => undefined);
   }
-  // 默认使用 Eastmoney
-  return GetBanKuais(type, pageSize);
+  return result;
 }
 
 export async function GetCompanyFromDataSource(source: Enums.FundApiType, secid: string) {

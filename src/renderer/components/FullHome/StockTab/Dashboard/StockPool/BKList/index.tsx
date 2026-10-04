@@ -343,7 +343,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           <Button
             size="small"
             type="primary"
-            onClick={() => runGetBankuais(kLineApiSourceSetting, type, pageSize, dataSource)}
+            onClick={() => runGetBankuais(kLineApiSourceSetting, type, pageSize, dataSource, true)}
           >
             刷新
           </Button>
