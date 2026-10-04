@@ -1,8 +1,16 @@
 import * as Services from '@/services';
 import * as TrainFilter from '@/utils/trainFilter';
-import { FundApiType, KLineType } from '@/utils/enums';
+import { FundApiType, KLineType, SingleKLineShapeNames } from '@/utils/enums';
 import { Stock } from '@/types/stock';
 import * as Score from './shortTermScore';
+import * as Tech from './tech';
+
+/**
+ * 评分行结构版本：新增/变更展示字段时递增。
+ * `pickScoreRow` 只认版本一致的缓存行，旧版本行会被视为未命中并重新计算，
+ * 避免新增字段（如K线形态、是否放量）在旧缓存上永远显示为空。
+ */
+export const SCORE_ROW_VERSION = 3;
 
 /** 短线评分列表输入项 */
 export interface ShortTermScoreItem {
@@ -29,6 +37,14 @@ export interface ShortTermScoreRow {
   sectorTrend: string; // 板块趋势描述
   moneyScore: number | null; // 资金得分 /30
   moneyNote: string; // 资金形态说明
+  /** 最新交易日单根K线形态名称（复用 helpers/tech 识别结果） */
+  klineShape?: string;
+  /** 最新交易日K线是否阴线（true=阴线，false=阳线；无数据时 undefined） */
+  klineYin?: boolean;
+  /** 最新交易日是否放量 */
+  volumeExpanded?: boolean;
+  /** 行结构版本（用于淘汰旧缓存行，见 SCORE_ROW_VERSION） */
+  v?: number;
   error?: string; // 评分失败原因
 }
 
@@ -46,10 +62,16 @@ export function buildShortTermScoreRow(params: {
   volume: Score.VolumeScoreResult;
   rsi: Score.RsiScoreResult;
   money: Score.MoneyScoreResult;
+  /** 最新交易日单根K线形态名称（复用 helpers/tech 识别） */
+  klineShape?: string;
+  /** 最新交易日K线是否阴线 */
+  klineYin?: boolean;
+  /** 最新交易日是否放量 */
+  volumeExpanded?: boolean;
   /** 评分失败原因（有值时该行不会写入缓存，便于下次重算） */
   error?: string;
 }): ShortTermScoreRow {
-  const { code, name, overall, market, sector, stock, volume, rsi, money, error } = params;
+  const { code, name, overall, market, sector, stock, volume, rsi, money, klineShape, klineYin, volumeExpanded, error } = params;
   const row: ShortTermScoreRow = {
     code,
     name: name || code,
@@ -66,6 +88,10 @@ export function buildShortTermScoreRow(params: {
     sectorTrend: sector.available ? sector.trendDesc : '',
     moneyScore: money.available ? money.score : null,
     moneyNote: money.note,
+    klineShape: klineShape || '',
+    klineYin,
+    volumeExpanded: !!volumeExpanded,
+    v: SCORE_ROW_VERSION,
   };
   if (error) {
     row.error = error;
@@ -91,7 +117,45 @@ export function emptyShortTermScoreRow(code: string, name?: string): ShortTermSc
     sectorTrend: '',
     moneyScore: null,
     moneyNote: '',
+    klineShape: '',
+    v: SCORE_ROW_VERSION,
   };
+}
+
+/** 放量判定阈值：最新交易日成交量 / 前 5 个交易日平均成交量 ≥ 该倍数视为放量 */
+export const VOLUME_EXPAND_RATIO = 1.5;
+
+/**
+ * 最新交易日单根K线形态（复用 helpers/tech 的 DescribeKlines 识别结果）
+ * @returns name=形态名称，yin=是否阴线（收发阴）；数据不足或识别失败返回 null
+ */
+export function describeLatestKlineShape(klines: Stock.KLineItem[]): { name: string; yin: boolean } | null {
+  if (!klines || klines.length <= 40) {
+    return null;
+  }
+  try {
+    Tech.DescribeKlines(klines, true);
+    const desc = klines[klines.length - 1]?.describe;
+    if (!desc) {
+      return null;
+    }
+    return { name: SingleKLineShapeNames[desc.sshapeType] || '', yin: !!desc.yin };
+  } catch {
+    return null;
+  }
+}
+
+/** 最新交易日是否放量：当日成交量 / 前 5 个交易日平均成交量 ≥ VOLUME_EXPAND_RATIO */
+export function isLatestVolumeExpanded(klines: Stock.KLineItem[]): boolean {
+  if (!klines || klines.length < 6) {
+    return false;
+  }
+  const today = Number(klines[klines.length - 1]?.cjl) || 0;
+  const prev5 = klines.slice(-6, -1).reduce((s, k) => s + (Number(k?.cjl) || 0), 0) / 5;
+  if (prev5 <= 0) {
+    return false;
+  }
+  return today / prev5 >= VOLUME_EXPAND_RATIO;
 }
 
 /**
@@ -205,8 +269,22 @@ export function computeShortTermScoreForDate(params: {
   const money = Score.scoreStockMoney(detailMain, detailRetail);
   const stock = Score.scoreStock(volume, rsi, money);
   const overall = Score.composeShortTermScore(market, sector, stock);
+  const latestShape = describeLatestKlineShape(klines);
   return {
-    row: buildShortTermScoreRow({ code, name, overall, market, sector, stock, volume, rsi, money }),
+    row: buildShortTermScoreRow({
+      code,
+      name,
+      overall,
+      market,
+      sector,
+      stock,
+      volume,
+      rsi,
+      money,
+      klineShape: latestShape?.name || '',
+      klineYin: latestShape?.yin,
+      volumeExpanded: isLatestVolumeExpanded(klines),
+    }),
     detail: { overall, market, sector, stock, volume, rsi, money },
   };
 }
@@ -728,7 +806,12 @@ export function pickScoreRow(
   if (!key || !series[key] || typeof series[key] !== 'object') {
     return null;
   }
-  return { row: series[key] as ShortTermScoreRow, date: target };
+  const row = series[key] as ShortTermScoreRow;
+  // 只认当前结构版本的缓存行：旧版本行缺少新增字段，视为未命中并重算
+  if ((row as any).v !== SCORE_ROW_VERSION) {
+    return null;
+  }
+  return { row, date: target };
 }
 
 /**
@@ -794,11 +877,19 @@ interface ComputeOptions {
  *
  * 公共数据（指数K线 / 涨跌比 / 市值档统计）只准备一次，个股数据并发拉取并逐只回调，支持中途暂停。
  */
-export async function computeShortTermScoreRows(items: ShortTermScoreItem[], options: ComputeOptions): Promise<ShortTermScoreRow[]> {
+export interface ComputeRowsResult {
+  rows: ShortTermScoreRow[];
+  /** 评分基准日（YYYYMMDD）；未确定时为空串 */
+  scoreDayKey: string;
+  /** 评分基准日为止的交易日（YYYYMMDD，升序，含基准日），供列表「近 N 日评分」历史列使用 */
+  recentDays: string[];
+}
+
+export async function computeShortTermScoreRows(items: ShortTermScoreItem[], options: ComputeOptions): Promise<ComputeRowsResult> {
   const { source, concurrency = 3, shouldStop, onRow } = options;
   const results: ShortTermScoreRow[] = [];
   if (!items || items.length === 0) {
-    return results;
+    return { rows: results, scoreDayKey: '', recentDays: [] };
   }
 
   const total = items.length;
@@ -812,6 +903,26 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   let scoreDayKey = trainDateKey ? await resolveScoreDate(source, trainDateKey, ctx) : '';
 
   const codes = items.map((i) => i.code);
+
+  /**
+   * 评分基准日为止的交易日（来自评分流程已取的指数日K，训练模式下已被收敛到训练日）。
+   * 直接复用它作为列表历史列的交易日，避免再单独取一次数（单独取数失败会让历史列整体消失）。
+   */
+  const collectRecentDays = (): string[] => {
+    if (!scoreDayKey) {
+      return [];
+    }
+    const set = new Set<string>();
+    Object.keys(ctx.indexKlinesMap).forEach((s) => {
+      (ctx.indexKlinesMap[s] || []).forEach((k) => {
+        const d = String(k?.date || '').replace(/-/g, '').substring(0, 8);
+        if (d && d <= scoreDayKey) {
+          set.add(d);
+        }
+      });
+    });
+    return [...set].sort();
+  };
 
   /** 用评分序列填充（未命中的进入 pending） */
   const fillFromSeries = (series: ShortTermScoreSeries) => {
@@ -839,7 +950,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     fillFromSeries(await loadScoreSeries(codes, source));
     if (!pending.length) {
       console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
-      return results;
+      return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
     }
     console.log(`[短线评分] 基准日 ${scoreDayKey}：序列命中 ${total - pending.length} 只，需现算 ${pending.length} 只`);
   }
@@ -864,7 +975,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       fillFromSeries(await loadScoreSeries(codes, source));
       if (!pending.length) {
         console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
-        return results;
+        return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
       }
       console.log(`[短线评分] 基准日 ${scoreDayKey}：序列命中 ${total - pending.length} 只，需现算 ${pending.length} 只`);
     }
@@ -920,7 +1031,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       console.log(`[短线评分] 其中 ${zeroCount} 只无有效数据，已按 0 分写入缓存（后续不再重复取数）`);
     }
   }
-  return results;
+  return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
 }
 
 /**

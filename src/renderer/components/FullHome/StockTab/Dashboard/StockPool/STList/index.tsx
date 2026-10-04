@@ -35,7 +35,7 @@ import {
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
 
 /** 短线评分列表「近 N 日评分」历史列展示的交易日数量 */
-const SHORT_SCORE_HISTORY_DAYS = 10;
+const SHORT_SCORE_HISTORY_DAYS = 15;
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -113,6 +113,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   // 「近 N 日评分」历史列：交易日列表 + 每只股票的评分序列
   const [shortScoreDays, setShortScoreDays] = useState<string[]>([]);
   const [shortScoreSeries, setShortScoreSeries] = useState<ShortTermScoreSeries>({});
+  // 过滤：仅保留「近 N 个交易日出现过 ≥ 阈值分」的股票（阈值可填写，默认 60）
+  const [shortScoreFilterEnabled, setShortScoreFilterEnabled] = useState(false);
+  const [shortScoreFilterScore, setShortScoreFilterScore] = useState(60);
 
   // 训练周期评分预计算（仅训练模式）：把训练窗口内每个交易日 × 每只股票的评分预先算好并落库
   const [precomputing, setPrecomputing] = useState(false);
@@ -561,7 +564,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setCurrentPage(1);
 
     try {
-      await computeShortTermScoreRows(shortScoreRemainingRef.current, {
+      const computed = await computeShortTermScoreRows(shortScoreRemainingRef.current, {
         source: kLineApiSourceSetting,
         concurrency: 3,
         shouldStop: () => isShortScorePausedRef.current,
@@ -575,6 +578,10 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           setShortScoreProgress(Math.round(((shortScoreTotalRef.current - shortScoreRemainingRef.current.length) / shortScoreTotalRef.current) * 100));
         },
       });
+      // 历史列交易日：优先用评分流程内部（已按训练日收敛）的交易日，避免单独取数失败导致历史列消失
+      if (computed.recentDays.length) {
+        setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
+      }
       // 计算完成（或暂停）后刷新评分序列，用于渲染「近 N 日评分」历史列
       try {
         setShortScoreSeries(await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting));
@@ -746,6 +753,26 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     });
   }, []);
 
+  // 「近 N 日评分」列实际展示的交易日：
+  // 优先用评分流程返回的交易日（已按训练日收敛）；若为空则退回评分序列里已存在的交易日
+  // （训练模式下以训练日为上限，避免读到预计算写入的未来交易日），保证有数据时历史列不消失。
+  const shortScoreDisplayDays = React.useMemo(() => {
+    if (shortScoreDays.length) {
+      return shortScoreDays;
+    }
+    const cap = ontrain && trainDate ? String(trainDate).replace(/-/g, '') : '';
+    const set = new Set<string>();
+    Object.values(shortScoreSeries || {}).forEach((m) => {
+      Object.keys(m || {}).forEach((k) => {
+        const d = String(k).replace(/-/g, '');
+        if (d && (!cap || d <= cap)) {
+          set.add(d);
+        }
+      });
+    });
+    return [...set].sort().slice(-SHORT_SCORE_HISTORY_DAYS);
+  }, [shortScoreDays, shortScoreSeries, ontrain, trainDate]);
+
   // 使用 useMemo 在 render 阶段计算 showList，避免 useLayoutEffect 中 setState 导致的无限循环
   const showList = React.useMemo(() => {
     if (displayMode === 'leaders') {
@@ -810,11 +837,28 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
 
     if (displayMode === 'shortScore') {
       let list = [...shortScoreData];
+      // 过滤：近 N 个交易日出现过 ≥ 阈值分（当日分 + 历史列序列任一命中即可）
+      if (shortScoreFilterEnabled) {
+        const threshold = Number(shortScoreFilterScore);
+        list = list.filter((s: any) => {
+          if (s.total != null && s.total >= threshold) {
+            return true;
+          }
+          const series = shortScoreSeries?.[s.code];
+          if (!series) {
+            return false;
+          }
+          return shortScoreDisplayDays.some((d) => {
+            const v = series[d]?.total;
+            return v != null && v >= threshold;
+          });
+        });
+      }
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
         list.sort((a: any, b: any) => {
-          const left = Number(a[keys[0]]);
-          const right = Number(b[keys[0]]);
+          const left = Number(a[keys[0]]) || 0;
+          const right = Number(b[keys[0]]) || 0;
           if (left === right) return 0;
           const t = sortTypes[keys[0]];
           return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
@@ -832,7 +876,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreSeries, shortScoreDisplayDays]);
   return (
     <>
       <div className={classNames(styles.header, styles.actbar)}>
@@ -917,6 +961,31 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           >
             {shortScoreLoading ? `评分中 ${shortScoreProgress}%` : '短线评分'}
           </Button>
+          {displayMode === 'shortScore' && (
+            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <Checkbox
+                checked={shortScoreFilterEnabled}
+                onChange={(e) => {
+                  setShortScoreFilterEnabled(e.target.checked);
+                  setCurrentPage(1);
+                }}
+              />
+              <span>近{SHORT_SCORE_HISTORY_DAYS}日出现过≥</span>
+              <InputNumber
+                size="small"
+                min={0}
+                max={100}
+                step={5}
+                value={shortScoreFilterScore}
+                onChange={(v) => {
+                  setShortScoreFilterScore(typeof v === 'number' ? v : 60);
+                  setCurrentPage(1);
+                }}
+                style={{ width: 56 }}
+              />
+              <span>分</span>
+            </span>
+          )}
           {ontrain && (
             <Button
               size="small"
@@ -1034,27 +1103,18 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       ) : displayMode === 'shortScore' ? (
         <Row className={styles.header}>
           <Col span={2}>股票名称</Col>
-          <Col span={2}>
-            评分
-            <Button size="small" type="text" icon={sortTypes.total == 1 ? <CaretUpOutlined /> : sortTypes.total == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('total')} />
-          </Col>
-          <Col span={2} title="个股 = 资金60 + 量能20（以资金为重，抓微笑曲线金叉；RSI 仅计算与展示，不计入加权）">
-            个股
-            <Button size="small" type="text" icon={sortTypes.stockScore == 1 ? <CaretUpOutlined /> : sortTypes.stockScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('stockScore')} />
-          </Col>
-          <Col span={2}>
-            板块
-            <Button size="small" type="text" icon={sortTypes.sectorScore == 1 ? <CaretUpOutlined /> : sortTypes.sectorScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('sectorScore')} />
-          </Col>
-          <Col span={2}>
-            大盘
-            <Button size="small" type="text" icon={sortTypes.marketScore == 1 ? <CaretUpOutlined /> : sortTypes.marketScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('marketScore')} />
-          </Col>
-          <Col span={4} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
+          <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
-          {shortScoreDays.map((d) => (
+          <Col span={3} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）">
+            K线形态
+          </Col>
+          <Col span={2}>
+            放量
+            <Button size="small" type="text" icon={sortTypes.volumeExpanded == 1 ? <CaretUpOutlined /> : sortTypes.volumeExpanded == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('volumeExpanded')} />
+          </Col>
+          {shortScoreDisplayDays.map((d) => (
             <Col
               span={1}
               key={d}
@@ -1253,29 +1313,38 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 }}>
                   <span style={{ color: '#1890ff' }}>{s.name || s.code}</span>
                 </Col>
-                <Col span={2} style={{ color: s.total == null ? 'var(--reverse-text-color)' : scoreColor(s.total), fontWeight: 'bold' }} title={s.summary}>
-                  {s.total == null ? '--' : s.total.toFixed(1)}
-                </Col>
-                <Col span={2} className={s.stockScore == null ? '' : Utils.GetValueColor(s.stockScore - 50).textClass}>
-                  {s.stockScore == null ? '--' : s.stockScore.toFixed(0)}
-                </Col>
-                <Col span={2} className={s.sectorScore == null ? '' : Utils.GetValueColor(s.sectorScore - 50).textClass}>
-                  {s.sectorScore == null ? '--' : s.sectorScore.toFixed(0)}
-                </Col>
-                <Col span={2} className={s.marketScore == null ? '' : Utils.GetValueColor(s.marketScore - 50).textClass}>
-                  {s.marketScore == null ? '--' : s.marketScore.toFixed(0)}
-                </Col>
-                <Col span={4} title={s.error || s.rsiPattern}>
+                <Col
+                  span={2}
+                  title={s.error || s.rsiPattern}
+                  style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                >
                   {s.error ? (
                     <span style={{ color: '#ff4d4f', fontSize: 12 }}>{s.error}</span>
                   ) : (
-                    <span style={{ fontSize: 12 }}>
-                      {s.rsiScore == null ? '--' : `${s.rsiScore.toFixed(0)}/40`}
-                      <span style={{ color: 'var(--secondary-text-color)', marginLeft: 4 }}>{s.rsiPattern || '--'}</span>
-                    </span>
+                    <span style={{ fontSize: 12 }}>{s.rsiScore == null ? '--' : `${s.rsiScore.toFixed(0)}/40`}</span>
                   )}
                 </Col>
-                {shortScoreDays.map((d) => {
+                <Col
+                  span={3}
+                  style={{ fontSize: 12 }}
+                  title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${s.error ? `｜${s.error}` : ''}`}
+                >
+                  {s.klineShape ? (
+                    <span className={Utils.GetValueColor(s.klineYin ? -1 : 1).textClass}>{s.klineShape}</span>
+                  ) : (
+                    '--'
+                  )}
+                </Col>
+                <Col span={2} title={s.volumeExpanded == null ? '无数据' : s.volumeExpanded ? '最新交易日放量' : '最新交易日未放量'}>
+                  {s.volumeExpanded == null ? (
+                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
+                  ) : s.volumeExpanded ? (
+                    <span className="text-up">是</span>
+                  ) : (
+                    <span style={{ color: 'var(--reverse-text-color)' }}>否</span>
+                  )}
+                </Col>
+                {shortScoreDisplayDays.map((d) => {
                   const dayRow = shortScoreSeries?.[s.code]?.[d];
                   const v = dayRow ? dayRow.total : null;
                   const dayText = `${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)}`;

@@ -4774,13 +4774,20 @@ export async function FromDataSource(source: Enums.FundApiType, secid: string) {
 }
 
 /**
- * 板块列表（行业/概念）的本地持久化缓存：
+ * 板块列表（行业/概念）的进程内内存缓存：
  * BKList 在切换「行业/概念」标签、切换数据源或重新挂载时都会重新拉取板块列表，
  * Akshare 源每次都要走一次 python 调用、东财源要打网络请求，重复拉取代价高。
- * 这里按「数据源 + 板块类型 + dc/ths + 分页大小」做本地缓存（默认 10 分钟）。
- * 只缓存非空结果，读取失败/未命中时照常请求；点「刷新」时传 forceRefresh 跳过缓存。
+ *
+ * 注意：这里刻意只做内存缓存，不用 readCache/writeCache 持久化。
+ * 持久化缓存走的是 python 进程 + SQLite(stock_db/meta.db) 往返，且该库与
+ * tushare_api 的 24h 板块缓存（dc_index）共用、busy_timeout 达 30s；
+ * 把它 await 在取数主链路上，命中也要先等一趟跨进程读取，撞锁时还会阻塞，
+ * 反而比不缓存更慢，所以这里保持纯内存（命中瞬时、不会卡住加载）。
+ * 按「数据源 + 板块类型 + dc/ths + 分页大小」区分，只缓存非空结果。
+ * 点「刷新」时传 forceRefresh 跳过缓存。
  */
 const BOARD_LIST_CACHE_TTL = 10 * 60 * 1000;
+const boardListMemCache = new Map<string, { at: number; result: any }>();
 
 export async function GetBanKuaisFromDataSource(
   source: Enums.FundApiType,
@@ -4789,19 +4796,13 @@ export async function GetBanKuaisFromDataSource(
   dataSource = 'dc',
   forceRefresh = false,
 ) {
-  const cacheKey = `board_list_${source}_${type}_${dataSource}_${pageSize}`;
-  const electron = (window.contextModules as any)?.electron;
+  const cacheKey = `${source}_${type}_${dataSource}_${pageSize}`;
 
-  // 1. 尝试读取缓存
+  // 1. 命中内存缓存直接返回
   if (!forceRefresh) {
-    try {
-      const cached = await electron?.readCache?.(cacheKey);
-      const payload = cached?.success ? cached?.data?.data : null;
-      if (payload?.result?.arr?.length && Date.now() - (payload.at || 0) < BOARD_LIST_CACHE_TTL) {
-        return payload.result;
-      }
-    } catch (e) {
-      // 缓存读取失败时忽略，走正常请求
+    const cached = boardListMemCache.get(cacheKey);
+    if (cached?.result?.arr?.length && Date.now() - cached.at < BOARD_LIST_CACHE_TTL) {
+      return cached.result;
     }
   }
 
@@ -4818,7 +4819,7 @@ export async function GetBanKuaisFromDataSource(
 
   // 3. 只缓存非空结果，避免接口偶发返回空把缓存写坏
   if (result?.arr?.length) {
-    electron?.writeCache?.(cacheKey, { at: Date.now(), result })?.catch?.(() => undefined);
+    boardListMemCache.set(cacheKey, { at: Date.now(), result });
   }
   return result;
 }

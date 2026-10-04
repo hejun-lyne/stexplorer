@@ -436,7 +436,7 @@ export function calculateChouMa(klines: { date: string; zg: number; zd: number; 
   } as Stock.ChouMaItem;
 }
 
-export function DescribeKlines(klines: Stock.KLineItem[]) {
+export function DescribeKlines(klines: Stock.KLineItem[], lastOnly = false) {
   const referDays = 40; // 参考最近10天的k线作为形态判别
   if (klines.length <= referDays) {
     return;
@@ -559,6 +559,10 @@ export function DescribeKlines(klines: Stock.KLineItem[]) {
       sshapeType: shapeType,
       mshapeType: Enums.MultiKlineShape.Unknown,
     };
+    // 只需最新一根K线形态时（如短线评分列表）提前结束，避免整段重复计算
+    if (lastOnly) {
+      break;
+    }
   }
 }
 
