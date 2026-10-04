@@ -283,9 +283,13 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     if (config && !all.some((t) => t.secid === config.secid)) {
       pushTrades(config);
     }
+    // 同日排序：先卖后买。
+    // A 股卖出资金当日即可用于买入，且买卖点只记「日期」不记「时间」，若把买入排在卖出前，
+    // 「卖出 A 换仓买入 B」同日操作时会先按未回款的现金去算 B 的买入，因不足一手被静默跳过，
+    // 结果买点存在但持仓显示为空仓。
     const trades = all
       .filter((t) => (!startDate || t.date >= startDate) && (!currentDay || t.date <= currentDay))
-      .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : a.isBuy === b.isBuy ? 0 : a.isBuy ? -1 : 1));
+      .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : a.isBuy === b.isBuy ? 0 : a.isBuy ? 1 : -1));
 
     let cash = capital;
     let realized = 0;
