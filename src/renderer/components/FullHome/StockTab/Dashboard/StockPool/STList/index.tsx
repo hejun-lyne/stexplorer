@@ -24,8 +24,18 @@ import { StoreState } from '@/reducers/types';
 import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { scoreColor } from '@/helpers/shortTermScore';
-import { computeShortTermScoreRows, ShortTermScoreItem, ShortTermScoreRow } from '@/helpers/shortTermScoreList';
+import {
+  computeShortTermScoreRows,
+  loadScoreSeries,
+  resolveRecentTradingDays,
+  ShortTermScoreItem,
+  ShortTermScoreRow,
+  ShortTermScoreSeries,
+} from '@/helpers/shortTermScoreList';
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
+
+/** 短线评分列表「近 N 日评分」历史列展示的交易日数量 */
+const SHORT_SCORE_HISTORY_DAYS = 10;
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -99,6 +109,10 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const isShortScoreRunningRef = React.useRef(false);
   const shortScoreRemainingRef = React.useRef<ShortTermScoreItem[]>([]);
   const shortScoreTotalRef = React.useRef(0);
+  const shortScoreCodesRef = React.useRef<string[]>([]);
+  // 「近 N 日评分」历史列：交易日列表 + 每只股票的评分序列
+  const [shortScoreDays, setShortScoreDays] = useState<string[]>([]);
+  const [shortScoreSeries, setShortScoreSeries] = useState<ShortTermScoreSeries>({});
 
   // 训练周期评分预计算（仅训练模式）：把训练窗口内每个交易日 × 每只股票的评分预先算好并落库
   const [precomputing, setPrecomputing] = useState(false);
@@ -530,6 +544,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       setShortScoreProgress(0);
       shortScoreTotalRef.current = currentItems.length;
       shortScoreRemainingRef.current = [...currentItems];
+      shortScoreCodesRef.current = currentItems.map((i) => i.code);
+      // 历史列：先取近 N 个交易日（口径与评分基准日一致），已有序列稍后一并刷新
+      setShortScoreSeries({});
+      try {
+        setShortScoreDays(await resolveRecentTradingDays(kLineApiSourceSetting, SHORT_SCORE_HISTORY_DAYS));
+      } catch {
+        setShortScoreDays([]);
+      }
     }
 
     isShortScorePausedRef.current = false;
@@ -553,6 +575,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           setShortScoreProgress(Math.round(((shortScoreTotalRef.current - shortScoreRemainingRef.current.length) / shortScoreTotalRef.current) * 100));
         },
       });
+      // 计算完成（或暂停）后刷新评分序列，用于渲染「近 N 日评分」历史列
+      try {
+        setShortScoreSeries(await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting));
+      } catch {
+        // 读取失败不影响本次展示
+      }
       if (!isShortScorePausedRef.current) {
         setShortScoreProgress(100);
         console.log(`[短线评分] 完成，共 ${shortScoreTotalRef.current} 只`);
@@ -646,6 +674,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setShortScoreData([]);
     setShortScoreProgress(0);
     shortScoreRemainingRef.current = [];
+    setShortScoreSeries({});
+    setShortScoreDays([]);
   }, [trainDate, kLineApiSourceSetting]);
 
   const updateFtypes = useCallback(
@@ -1008,7 +1038,6 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             评分
             <Button size="small" type="text" icon={sortTypes.total == 1 ? <CaretUpOutlined /> : sortTypes.total == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('total')} />
           </Col>
-          <Col span={1}>评级</Col>
           <Col span={2} title="个股 = 资金60 + 量能20（以资金为重，抓微笑曲线金叉；RSI 仅计算与展示，不计入加权）">
             个股
             <Button size="small" type="text" icon={sortTypes.stockScore == 1 ? <CaretUpOutlined /> : sortTypes.stockScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('stockScore')} />
@@ -1025,12 +1054,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
-          <Col span={4}>板块趋势</Col>
-          <Col span={2}>
-            资金
-            <Button size="small" type="text" icon={sortTypes.moneyScore == 1 ? <CaretUpOutlined /> : sortTypes.moneyScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('moneyScore')} />
-          </Col>
-          <Col span={3}>建议</Col>
+          {shortScoreDays.map((d) => (
+            <Col
+              span={1}
+              key={d}
+              style={{ fontSize: 11, textAlign: 'center', padding: 0 }}
+              title={`${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)} 短线评分`}
+            >
+              {d.substring(4, 6)}-{d.substring(6, 8)}
+            </Col>
+          ))}
         </Row>
       ) : (
         <Row className={styles.header}>
@@ -1203,7 +1236,6 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           })
         ) : displayMode === 'shortScore' ? (
           showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
-            const gradeColor = s.grade === 'A' ? '#52c41a' : s.grade === 'B' ? '#1890ff' : s.grade === 'C' ? '#faad14' : s.grade === 'D' ? '#ff4d4f' : 'var(--reverse-text-color)';
             const rowBg =
               s.grade === 'A' ? 'rgba(82, 196, 26, 0.08)'
                 : s.grade === 'B' ? 'rgba(24, 144, 255, 0.06)'
@@ -1224,9 +1256,6 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 <Col span={2} style={{ color: s.total == null ? 'var(--reverse-text-color)' : scoreColor(s.total), fontWeight: 'bold' }} title={s.summary}>
                   {s.total == null ? '--' : s.total.toFixed(1)}
                 </Col>
-                <Col span={1}>
-                  <span style={{ color: gradeColor, fontWeight: 'bold' }}>{s.grade || '--'}</span>
-                </Col>
                 <Col span={2} className={s.stockScore == null ? '' : Utils.GetValueColor(s.stockScore - 50).textClass}>
                   {s.stockScore == null ? '--' : s.stockScore.toFixed(0)}
                 </Col>
@@ -1246,15 +1275,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                     </span>
                   )}
                 </Col>
-                <Col span={4} style={{ fontSize: 12 }} title={s.sectorTrend}>
-                  {s.sectorTrend || '--'}
-                </Col>
-                <Col span={2} title={s.moneyNote} className={s.moneyScore == null ? '' : Utils.GetValueColor(s.moneyScore - 20).textClass}>
-                  {s.moneyScore == null ? '--' : s.moneyScore.toFixed(0)}
-                </Col>
-                <Col span={3} style={{ fontSize: 12 }}>
-                  {s.total == null ? '--' : s.advice || '--'}
-                </Col>
+                {shortScoreDays.map((d) => {
+                  const dayRow = shortScoreSeries?.[s.code]?.[d];
+                  const v = dayRow ? dayRow.total : null;
+                  const dayText = `${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)}`;
+                  return (
+                    <Col
+                      span={1}
+                      key={d}
+                      style={{ fontSize: 11, textAlign: 'center', padding: 0, color: v == null ? 'var(--reverse-text-color)' : scoreColor(v) }}
+                      title={dayRow ? `${dayText}：${v == null ? '--' : v.toFixed(1)}` : `${dayText}：无评分`}
+                    >
+                      {v == null ? '--' : v.toFixed(0)}
+                    </Col>
+                  );
+                })}
               </Row>
             );
           })

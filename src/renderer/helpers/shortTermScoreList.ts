@@ -636,6 +636,25 @@ export async function resolveScoreDate(source: FundApiType, date: string, ctx?: 
 }
 
 /**
+ * 取最近 count 个交易日（YYYYMMDD，升序）
+ *
+ * 用于短线评分列表的「近 N 日评分」历史列：日期口径与评分基准日一致（指数日K），
+ * 训练模式下受训练日收敛，因此不会取到训练日之后的交易日。
+ */
+export async function resolveRecentTradingDays(source: FundApiType, count: number): Promise<string[]> {
+  if (!count || count <= 0) {
+    return [];
+  }
+  try {
+    const ks = await fetchDayKlines(source, '1.000001', count + 20);
+    const dates = [...new Set(ks.map((k) => toDay(k?.date)).filter(Boolean))].sort();
+    return dates.slice(-count).map((d) => d.replace(/-/g, ''));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * 预热某只股票的板块信息：拉取所属板块、解析候选板块代码
  *
  * 预计算用它把「需要批量取K线的板块代码」一次性收集好（所属板块候选 + 市值风格板块），
