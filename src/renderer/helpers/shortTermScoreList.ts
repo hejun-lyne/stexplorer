@@ -10,7 +10,7 @@ import * as Tech from './tech';
  * `pickScoreRow` 只认版本一致的缓存行，旧版本行会被视为未命中并重新计算，
  * 避免新增字段（如K线形态、是否放量）在旧缓存上永远显示为空。
  */
-export const SCORE_ROW_VERSION = 3;
+export const SCORE_ROW_VERSION = 4;
 
 /** 短线评分列表输入项 */
 export interface ShortTermScoreItem {
@@ -45,6 +45,8 @@ export interface ShortTermScoreRow {
   volumeExpanded?: boolean;
   /** 行结构版本（用于淘汰旧缓存行，见 SCORE_ROW_VERSION） */
   v?: number;
+  /** 数据未就绪（日K不足 / 未覆盖到评分基准日）：不写入缓存，下次运行会重新取数计算并更新缓存 */
+  pending?: boolean;
   error?: string; // 评分失败原因
 }
 
@@ -127,15 +129,22 @@ export const VOLUME_EXPAND_RATIO = 1.5;
 
 /**
  * 最新交易日单根K线形态（复用 helpers/tech 的 DescribeKlines 识别结果）
- * @returns name=形态名称，yin=是否阴线（收发阴）；数据不足或识别失败返回 null
+ * @param klines 已按评分基准日截断的日K
+ * @param expectDay 评分基准日：若提供，则要求最后一根K线的日期与之相同，
+ *                  否则说明数据没到当天（停牌/取数失败回退到旧缓存），不做判定，避免把旧交易日的形态与阴阳当成当日的
+ * @returns name=形态名称，yin=是否阴线（收发阴）；数据不足/未到当日/识别失败返回 null
  */
-export function describeLatestKlineShape(klines: Stock.KLineItem[]): { name: string; yin: boolean } | null {
+export function describeLatestKlineShape(klines: Stock.KLineItem[], expectDay?: string): { name: string; yin: boolean } | null {
   if (!klines || klines.length <= 40) {
+    return null;
+  }
+  const last = klines[klines.length - 1];
+  if (expectDay && toDay(last?.date) !== toDay(expectDay)) {
     return null;
   }
   try {
     Tech.DescribeKlines(klines, true);
-    const desc = klines[klines.length - 1]?.describe;
+    const desc = last?.describe;
     if (!desc) {
       return null;
     }
@@ -161,14 +170,15 @@ export function isLatestVolumeExpanded(klines: Stock.KLineItem[]): boolean {
 /**
  * 「无有效数据」的占位评分行：分值记 0，并写明原因
  *
- * 这类结果（如日K不足、数据源没有该股行情）不会再变化，因此也按 0 分写入评分序列，
- * 避免每次点击短线评分都为它们重新取数 —— 有缓存就不再重试拉取。
+ * 这类结果（如日K不足、取数失败、数据未覆盖到评分基准日）标记为 `pending`：
+ * 不写入评分序列缓存，下次运行会重新取数计算，取到数据后再正常写缓存。
  */
 export function zeroShortTermScoreRow(code: string, name?: string, reason?: string): ShortTermScoreRow {
   const row = emptyShortTermScoreRow(code, name);
   row.total = 0;
   row.grade = 'D';
   row.error = reason || '无有效数据';
+  row.pending = true;
   return row;
 }
 
@@ -256,8 +266,10 @@ export function computeShortTermScoreForDate(params: {
   circMv?: number;
   detailMain?: number[];
   detailRetail?: number[];
+  /** 评分基准日（YYYY-MM-DD / YYYYMMDD）：用于校验K线是否真的到当日，未提供则不校验 */
+  scoreDay?: string;
 }): { row: ShortTermScoreRow; detail: ShortTermScoreDetail | null } {
-  const { code, name, klines, baselineKlines, boardKlines, boardName, upRatioMap, marketStats, circMv, detailMain, detailRetail } = params;
+  const { code, name, klines, baselineKlines, boardKlines, boardName, upRatioMap, marketStats, circMv, detailMain, detailRetail, scoreDay } = params;
   if (!klines || klines.length < 30) {
     // 无有效数据：按 0 分写入缓存（见 zeroShortTermScoreRow 说明）
     return { row: zeroShortTermScoreRow(code, name, `日K数据不足（${klines?.length || 0}条）`), detail: null };
@@ -269,22 +281,30 @@ export function computeShortTermScoreForDate(params: {
   const money = Score.scoreStockMoney(detailMain, detailRetail);
   const stock = Score.scoreStock(volume, rsi, money);
   const overall = Score.composeShortTermScore(market, sector, stock);
-  const latestShape = describeLatestKlineShape(klines);
+  const latestShape = describeLatestKlineShape(klines, scoreDay);
+  const row = buildShortTermScoreRow({
+    code,
+    name,
+    overall,
+    market,
+    sector,
+    stock,
+    volume,
+    rsi,
+    money,
+    klineShape: latestShape?.name || '',
+    klineYin: latestShape?.yin,
+    volumeExpanded: isLatestVolumeExpanded(klines),
+  });
+  // 日K未覆盖到评分基准日（个股停牌 / 上游取数失败回退到旧缓存）：标记为未就绪。
+  // 未就绪的行不写入缓存，下次运行会重新取数计算并把正确结果写回缓存。
+  const lastDay = toDay(klines[klines.length - 1]?.date);
+  if (scoreDay && lastDay !== toDay(scoreDay)) {
+    row.pending = true;
+    row.error = `数据未覆盖到 ${toDay(scoreDay)}（最后一根 ${lastDay || '--'}）`;
+  }
   return {
-    row: buildShortTermScoreRow({
-      code,
-      name,
-      overall,
-      market,
-      sector,
-      stock,
-      volume,
-      rsi,
-      money,
-      klineShape: latestShape?.name || '',
-      klineYin: latestShape?.yin,
-      volumeExpanded: isLatestVolumeExpanded(klines),
-    }),
+    row,
     detail: { overall, market, sector, stock, volume, rsi, money },
   };
 }
@@ -336,6 +356,8 @@ export interface ScoreSharedContext {
   indexKlinesMap: Record<string, Stock.KLineItem[]>;
   /** 个股日K（secid -> 日K，同上） */
   stockKlinesMap: Record<string, Stock.KLineItem[]>;
+  /** 已对某标的做过「日K未覆盖基准日」重试的标记（每次运行每只最多重试一次，避免预计算逐日重复请求） */
+  stockRetryMap: Record<string, boolean>;
   /** 资金流（code -> moneyflow） */
   moneyFlowMap: Record<string, any>;
   /** 板块日K（板块代码 -> 日K） */
@@ -361,6 +383,7 @@ export function createScoreContext(source: FundApiType, init?: Partial<ScoreShar
     source,
     indexKlinesMap: {},
     stockKlinesMap: {},
+    stockRetryMap: {},
     moneyFlowMap: {},
     boardKlinesMap: {},
     upRatioMap: null,
@@ -385,6 +408,14 @@ async function fetchDayKlines(
 ): Promise<Stock.KLineItem[]> {
   const r = await Services.Stock.GetKFromDataSource(source, secid, KLineType.Day, limit, options);
   return ((r?.ks as Stock.KLineItem[]) || []);
+}
+
+/** 判断日K是否覆盖到指定交易日（最后一根日期 >= 目标日） */
+function klinesCoverDay(ks: Stock.KLineItem[] | undefined, day: string): boolean {
+  if (!ks || !ks.length || !day) {
+    return false;
+  }
+  return toDay(ks[ks.length - 1]?.date) >= toDay(day);
 }
 
 /** 公共上下文：三大指数日K（缺失的才取，已预取的部分保持不动） */
@@ -611,6 +642,19 @@ export async function buildStockScoreInputs(
   // 个股日K（预计算走批量预取，单只评分现取并回填缓存）
   if (!ctx.stockKlinesMap[secid]) {
     ctx.stockKlinesMap[secid] = await fetchDayKlines(ctx.source, secid, 250);
+  }
+  // 日K未覆盖到评分基准日（多为上游取数失败时回退到旧缓存所致）→ 重试拉取一次，
+  // 每次运行每只标的只重试一次，避免预计算里逐日重复请求。
+  if (scoreDay && !klinesCoverDay(ctx.stockKlinesMap[secid], scoreDay) && !ctx.stockRetryMap[secid]) {
+    ctx.stockRetryMap[secid] = true;
+    try {
+      const retried = await fetchDayKlines(ctx.source, secid, 250);
+      if (klinesCoverDay(retried, scoreDay) || (retried?.length || 0) > (ctx.stockKlinesMap[secid]?.length || 0)) {
+        ctx.stockKlinesMap[secid] = retried;
+      }
+    } catch {
+      // 重试失败保持原数据，由上层按「未就绪」处理（不写缓存，下次再试）
+    }
   }
   const klines = sliceKlines(ctx.stockKlinesMap[secid], scoreDay, 250);
 
@@ -885,6 +929,9 @@ export interface ComputeRowsResult {
   recentDays: string[];
 }
 
+/** 每只股票评分所需的日K根数（与单只取数口径一致） */
+const SCORE_KLINES_PER_STOCK = 250;
+
 export async function computeShortTermScoreRows(items: ShortTermScoreItem[], options: ComputeOptions): Promise<ComputeRowsResult> {
   const { source, concurrency = 3, shouldStop, onRow } = options;
   const results: ShortTermScoreRow[] = [];
@@ -982,13 +1029,33 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   }
   await ensureMarketStats(ctx, scoreDayKey);
 
+  // ---- 批量回填个股日K（关键）----
+  // 逐只打 Tushare 极易触发限流/配额，导致大量股票的取数返回空；此时数据层会退回到
+  // 「上一个训练日」的旧缓存，列表上就表现为几乎全部「数据未覆盖到基准日」。
+  // 这里先用批量接口把整池当日的日K一次拉全（python 侧线程池并发），显著降低限流；
+  // 个股当日停牌/批量失败时，仍由 per-stock 取数逻辑兜底。
+  if (scoreDayKey && pending.length && source === FundApiType.Tushare) {
+    try {
+      const secids = pending.map((i) => (i.code.startsWith('6') ? `1.${i.code}` : `0.${i.code}`));
+      const batch = await Services.Tushare.BatchGetKFromTushare(secids, scoreDayKey, SCORE_KLINES_PER_STOCK, KLineType.Day);
+      secids.forEach((secid) => {
+        const ks = batch?.[secid];
+        if (Array.isArray(ks) && ks.length) {
+          ctx.stockKlinesMap[secid] = ks;
+        }
+      });
+    } catch {
+      // 批量取数失败时退回逐只取数，不影响主流程
+    }
+  }
+
   // 评分基准日（YYYY-MM-DD）：所有输入序列都按它截断，保证与个股详情页同口径
   const scoreDay = scoreDayKey ? `${scoreDayKey.substring(0, 4)}-${scoreDayKey.substring(4, 6)}-${scoreDayKey.substring(6, 8)}` : '';
 
   const processOne = async (item: ShortTermScoreItem): Promise<ShortTermScoreRow> => {
     try {
       const inputs = await buildStockScoreInputs(ctx, item, scoreDay);
-      return computeShortTermScoreForDate({ code: item.code, name: item.name, ...inputs }).row;
+      return computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay, ...inputs }).row;
     } catch (e: any) {
       // 取数异常同样按 0 分入缓存，避免每次点击都为同一只股票重复取数
       return zeroShortTermScoreRow(item.code, item.name, e?.message || '评分失败');
@@ -1016,19 +1083,20 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, () => worker()));
 
   // ---- 回写评分序列：按交易日合并到每只股票自己的序列 ----
-  // 无有效数据的股票也按 0 分写入（行内带原因），下次点击直接命中，不再重新取数。
+  // 数据未就绪（pending：日K不足 / 未覆盖到基准日）的行不写缓存，下次运行会重新取数计算并更新缓存。
   if (scoreDayKey) {
     const series: ShortTermScoreSeries = {};
-    let zeroCount = 0;
+    let pendingCount = 0;
     results.forEach((r) => {
-      if (r.error) {
-        zeroCount += 1;
+      if (r.pending) {
+        pendingCount += 1;
+        return;
       }
       series[r.code] = { [scoreDayKey]: r };
     });
     await saveScoreSeries(series, source);
-    if (zeroCount) {
-      console.log(`[短线评分] 其中 ${zeroCount} 只无有效数据，已按 0 分写入缓存（后续不再重复取数）`);
+    if (pendingCount) {
+      console.log(`[短线评分] 其中 ${pendingCount} 只数据未就绪（日K不足/未覆盖基准日），本次不写缓存，下次重试`);
     }
   }
   return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
@@ -1072,14 +1140,14 @@ export async function computeStockScoreForCode(params: {
   const item: ShortTermScoreItem = { code, name, circMv, hybk: hybk || null };
 
   const inputs = await buildStockScoreInputs(ctx, item, scoreDayKey, { moneyFlow });
-  const { row, detail } = computeShortTermScoreForDate({ code, name, ...inputs });
+  const { row, detail } = computeShortTermScoreForDate({ code, name, scoreDay: scoreDayKey, ...inputs });
   const lastDate = inputs.klines.length ? toDay(inputs.klines[inputs.klines.length - 1].date) : '';
   const dayKey = scoreDayKey || lastDate.replace(/-/g, '');
   const scoreDay = dayKey ? `${dayKey.substring(0, 4)}-${dayKey.substring(4, 6)}-${dayKey.substring(6, 8)}` : '';
 
   // 把该交易日的结果写回这只股票的评分序列，供列表直接命中；
-  // 无有效数据时同样是 0 分占位行（带原因），避免列表为它重复取数。
-  if (dayKey) {
+  // 数据未就绪（pending）时不写缓存，下次运行会重新取数计算。
+  if (dayKey && !row.pending) {
     await saveScoreSeries({ [code]: { [dayKey]: row } }, source);
   }
 

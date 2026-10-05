@@ -38,6 +38,7 @@ import {
  *
  * 增量：开始前会检查每只股票的评分序列对本次股票池的覆盖情况，已覆盖全部股票的日子直接跳过；
  * 整段窗口预计算完成后，训练日推进（下一天）无需再做任何取数/计算。
+ * 「忽略缓存」（options.ignoreCache）时不做上面的增量判断，先清掉窗口内已存的评分行再整段重算。
  */
 
 /** 每个交易日评分所需的个股历史K线根数（RSI24 + 历史分位需要较长历史） */
@@ -62,6 +63,13 @@ export interface PrecomputeOptions {
   shouldStop?: () => boolean;
   /** 进度回调：已完成交易日数 / 待计算交易日总数 / 说明 */
   onProgress?: (done: number, total: number, message: string) => void;
+  /**
+   * 忽略已有缓存，整段窗口重新计算：
+   * - 不做「已覆盖交易日直接跳过」的增量判断，窗口内所有交易日全部重算并覆盖写入；
+   * - 重算前先清掉窗口内这批股票已存的评分行，避免旧行残留（被覆盖判定当成「已覆盖」而跳过）。
+   * 默认 false（增量补算）。
+   */
+  ignoreCache?: boolean;
 }
 
 export interface PrecomputeResult {
@@ -90,7 +98,7 @@ const toDay = (v: any): string => {
 };
 
 export async function precomputeShortTermScores(options: PrecomputeOptions): Promise<PrecomputeResult> {
-  const { items, source, shouldStop, onProgress } = options;
+  const { items, source, shouldStop, onProgress, ignoreCache } = options;
   const result: PrecomputeResult = { dates: 0, reused: 0, rows: 0, skipped: 0, totalDates: 0, days: [] };
   const endDate = toDay(options.endDate);
   if (!items || !items.length || !endDate) {
@@ -130,15 +138,26 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     return result;
   }
 
-  // ---- 2. 增量检查：每只股票的评分序列已覆盖的交易日直接跳过（只补算缺口）----
-  const summary = await Services.Tushare.GetShortTermScoreSeriesSummaryFromTushare(codes, days, source, {
-    ignoreTrain: true,
-  });
-  const pendingDays = days.filter((d) => (summary[d.replace(/-/g, '')] ?? Infinity) > 0);
-  result.reused = days.length - pendingDays.length;
-  if (!pendingDays.length) {
-    onProgress?.(days.length, days.length, `${days.length} 个交易日均已缓存`);
-    return result;
+  // ---- 2. 待计算交易日 ----
+  // 默认增量：本次股票池已全覆盖的交易日直接跳过，只补缺口；
+  // ignoreCache（点「预计算训练评分」从头重算）时：先清掉窗口内已存的评分行，再整段重算，
+  // 避免旧行残留导致「明明重算了却还是旧分数 / 显示未覆盖」。
+  let pendingDays: string[];
+  if (ignoreCache) {
+    onProgress?.(0, days.length, '忽略缓存：清理窗口内旧评分...');
+    await Services.Tushare.ClearShortTermScoreSeriesFromTushare(codes, days, source);
+    pendingDays = [...days];
+    result.reused = 0;
+  } else {
+    const summary = await Services.Tushare.GetShortTermScoreSeriesSummaryFromTushare(codes, days, source, {
+      ignoreTrain: true,
+    });
+    pendingDays = days.filter((d) => (summary[d.replace(/-/g, '')] ?? Infinity) > 0);
+    result.reused = days.length - pendingDays.length;
+    if (!pendingDays.length) {
+      onProgress?.(days.length, days.length, `${days.length} 个交易日均已缓存`);
+      return result;
+    }
   }
 
   // ---- 3. 个股日K（一次批量取全：窗口交易日数 + 每个交易日所需历史根数）----
@@ -222,11 +241,11 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     for (const item of items) {
       try {
         const inputs = await buildStockScoreInputs(ctx, item, day);
-        const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, ...inputs });
-        // 无有效数据（日K不足 / 取数失败）的股票也按 0 分写入序列：
-        // 这类股票不会再算出别的结果，写入后列表点击不会再为它们重复取数。
-        if (row.error) {
+        const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay: day, ...inputs });
+        // 数据未就绪（日K不足 / 未覆盖到基准日）：不写缓存，留给后续运行重新取数计算
+        if (row.pending) {
           result.skipped += 1;
+          continue;
         }
         buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
         count += 1;

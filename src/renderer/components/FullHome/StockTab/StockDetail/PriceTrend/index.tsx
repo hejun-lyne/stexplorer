@@ -1390,6 +1390,10 @@ function updateKChart(
   toDate?: string,
   bkks?: Stock.KLineItem[]
 ) {
+  // opts 可能为 undefined（分时图对象被误当成 K 线图传入等），直接返回避免抛错导致白屏
+  if (!opts || !opts.visualMap) {
+    return;
+  }
   // 取数失败时 klines 可能为 undefined，这里兜底成空数组，避免后续 .map / 取最后一条抛错
   const _klines = filterKlinesByToDate(klines, toDate) || [];
   const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
@@ -1957,7 +1961,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         if (currentBK && data.bkklines[currentBK] && data.bkklines[currentBK][kIndex]) {
           bkks = data.bkklines[currentBK][kIndex];
         }
-        if (chartOptions[kIndex]) {
+        // 分时图（索引 0）存的是分时图「对象」，只有 K 线图才是 [K线opts, 缠论opts] 数组
+        if (Array.isArray(chartOptions[kIndex])) {
           updateKChart(chartOptions[kIndex][0], data.klines[kIndex], _displayToDate, bkks);
           updateCChart(chartOptions[kIndex][1], data.chans[kIndex], data.clines[kIndex]);
           runCalculateTech(filterKlinesByToDate(data.klines[kIndex], _displayToDate), kIndex, techType);
@@ -2800,7 +2805,10 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
 
     useEffect(() => {
       for (let i = 0; i < DefaultKTypes.length; i++) {
-        if (chartOptions[i]) {
+        // chartOptions[0] 是分时图对象（非数组），只有 K 线图才是 [K线opts, 缠论opts] 数组。
+        // 训练模式点「下一天」会改变 displayToDate 触发本 effect，若用 undefined 调 updateKChart 会抛
+        // "Cannot read property 'visualMap' of undefined"。
+        if (Array.isArray(chartOptions[i])) {
           updateKChart(chartOptions[i][0], klineData.klines[i], displayToDate);
           runCalculateTech(filterKlinesByToDate(klineData.klines[i], displayToDate), i, chartOptions[i][0].techType);
           // handeKline({ ks: klineData.klines[i], kt: DefaultKTypes[i] });

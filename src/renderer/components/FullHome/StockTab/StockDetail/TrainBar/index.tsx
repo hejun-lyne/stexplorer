@@ -148,21 +148,31 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     [secid, stockName, startDate, endDate, days, capital, commission]
   );
 
-  // 校正训练日期：保证当前日期落在交易日上
+  // 校正训练日期：仅在「早于窗口首个交易日」或「晚于窗口最后交易日」时兜底校正。
+  // 训练日是全局的（所有标的共享），因此：
+  //  - 不能用 days.find(d => d >= currentDay) 把训练日“推进”到当前标的的下一个交易日（个股停牌会缺日）；
+  //  - 也不能在训练日晚于个股数据末尾时就回退到最后一天（会提前判定“训练结束”，
+  //    同时触发股票池列表页按训练日清空）。
   useEffect(() => {
     if (!ontrain || !days.length) {
       return;
     }
-    if (currentDay && days.includes(currentDay)) {
+    // 训练日落在窗口 [首, 末] 内即视为有效（个股当日停牌不影响全局训练日）
+    if (currentDay && currentDay >= days[0] && currentDay <= days[days.length - 1]) {
       return;
     }
-    const first = days.find((d) => d >= currentDay) || days[days.length - 1];
-    dispatch(setTrainCurrentDateAction(first));
-    saveProgress(first);
+    const target = !currentDay || currentDay < days[0] ? days[0] : days[days.length - 1];
+    if (target === currentDay) {
+      return;
+    }
+    dispatch(setTrainCurrentDateAction(target));
+    saveProgress(target);
   }, [ontrain, days, currentDay, saveProgress]);
 
   /** 训练窗口内的每日收盘价（交易日 -> 收盘价）：买入、卖出、浮盈统一按当日收盘价 */
   const [dayClosesMap, setDayClosesMap] = useState<Record<string, number>>({});
+  /** 当前训练日的行情是否已取回（用于区分「加载中」与「当日停牌」） */
+  const [dayPricesLoaded, setDayPricesLoaded] = useState(false);
   /** 已取过行情的训练日期：数据层按训练日期截断，训练日期推进后必须重新取数 */
   const dayClosesKeyRef = useRef('');
   useEffect(() => {
@@ -175,11 +185,13 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     if (dayClosesKeyRef.current === key) {
       return;
     }
+    setDayPricesLoaded(false);
     let mounted = true;
     Helpers.Stock.GetTrainDayPrices(secid).then(({ closes }) => {
       if (mounted) {
         dayClosesKeyRef.current = key;
         setDayClosesMap(closes);
+        setDayPricesLoaded(true);
       }
     });
     return () => {
@@ -227,6 +239,12 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     const latest = dates.filter((d) => !currentDay || d <= currentDay).sort().pop();
     return latest ? dayClosesMap[latest] : 0;
   }, [dayClosesMap, currentDay]);
+
+  // 当前训练日的「真实」收盘价：当日停牌/无行情时为 0。
+  // 停牌股不能交易，只有「估值」才允许退回最近一个交易日收盘价（见 currentClose）。
+  const todayClose = (currentDay && Number(dayClosesMap[currentDay])) || 0;
+  /** 当日是否停牌（训练日当天该股没有行情）；行情加载完成前不判定 */
+  const suspended = !!currentDay && dayPricesLoaded && todayClose <= 0;
 
   // 训练窗口内的买卖记录（按时间正序，日期统一按天比较）
   // 买入：date 为买入当日、price 为当日收盘价、amount 为委托金额；
@@ -365,15 +383,19 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
 
   const trade = useCallback(
     (isBuy: boolean) => {
-      if (!currentDay || !currentClose) {
-        message.warning('当前训练日期的收盘价还在加载中');
+      if (!currentDay) {
+        return;
+      }
+      // 停牌（当日无行情）不能交易：估值可以退回上一交易日收盘价，成交价必须用当日真实收盘价
+      if (!todayClose) {
+        message.warning(suspended ? `${currentDay} 该股停牌，无法交易` : '当前训练日期的收盘价还在加载中');
         return;
       }
       if (isBuy) {
         // 买入：按当前训练日收盘价成交（T+1，成交当日不可卖出）
         // 买入校验：金额为空按全部可用资金处理，否则必须 > 0、不超过可用资金、且至少能买一手
         const input = buyAmount == null || isNaN(Number(buyAmount)) ? account.cash : Number(buyAmount);
-        const perLotCost = currentClose * MIN_LOT * (1 + commission);
+        const perLotCost = todayClose * MIN_LOT * (1 + commission);
         if (!input || input <= 0) {
           message.warning('请输入买入金额');
           return;
@@ -386,8 +408,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
           message.warning(`买入金额不足一手（按当前收盘价估算至少需要 ${perLotCost.toFixed(2)} 元，含佣金）`);
           return;
         }
-        dispatch(addStockTradePointAction(secid, currentDay, currentClose, true, TRAIN_TYPE, input));
-        message.success(`已买入：${currentDay} 按收盘价 ${currentClose.toFixed(2)} 成交（T+1，当日不可卖出）`);
+        dispatch(addStockTradePointAction(secid, currentDay, todayClose, true, TRAIN_TYPE, input));
+        message.success(`已买入：${currentDay} 按收盘价 ${todayClose.toFixed(2)} 成交（T+1，当日不可卖出）`);
         return;
       }
       // 卖出：按当前训练日收盘价成交
@@ -395,9 +417,9 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         message.warning('T+1：买入成交当日不可卖出，请推进到下一个交易日');
         return;
       }
-      dispatch(addStockTradePointAction(secid, currentDay, currentClose, false, TRAIN_TYPE));
+      dispatch(addStockTradePointAction(secid, currentDay, todayClose, false, TRAIN_TYPE));
     },
-    [currentDay, currentClose, secid, buyAmount, account.cash, commission, boughtToday]
+    [currentDay, todayClose, suspended, secid, buyAmount, account.cash, commission, boughtToday]
   );
 
   const clearBS = useCallback(() => {
@@ -478,11 +500,11 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     dispatch(syncStockMarktypeAction(secid, t));
   }, []);
 
-  // 买入按当前训练日收盘价成交：需要当日有收盘价，且资金够买一手
+  // 买入按当前训练日收盘价成交：需要当日有真实收盘价（停牌日不可交易），且资金够买一手
   const canBuy =
-    !!config && currentClose > 0 && Math.floor(account.cash / (currentClose * MIN_LOT * (1 + commission))) >= 1;
-  // T+1：买入成交当日不可卖出
-  const canSell = !!config && account.shares > 0 && currentClose > 0 && !boughtToday;
+    !!config && !suspended && todayClose > 0 && Math.floor(account.cash / (todayClose * MIN_LOT * (1 + commission))) >= 1;
+  // T+1：买入成交当日不可卖出；停牌日不可卖出
+  const canSell = !!config && account.shares > 0 && !suspended && todayClose > 0 && !boughtToday;
   const profitClass = Utils.GetValueColor(account.profit).textClass;
   const realizedClass = Utils.GetValueColor(account.realized).textClass;
 
@@ -526,7 +548,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
             <>
               <div className={styles.item}>
                 <span className={styles.label}>收盘价</span>
-                <span className={styles.strong}>{currentClose > 0 ? currentClose.toFixed(2) : '加载中'}</span>
+                <span className={styles.strong}>{currentClose > 0 ? currentClose.toFixed(2) : dayPricesLoaded ? '--' : '加载中'}</span>
+                {suspended && <Tag style={{ marginLeft: 4 }}>停牌</Tag>}
               </div>
               <div className={styles.item}>
                 <span className={styles.label}>持仓</span>
@@ -591,7 +614,11 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
                 <span className={styles.hint}>
                   {finished
                     ? '已到训练最后一天：不再进行买卖，可直接结算归档'
-                    : `买入按当日(${currentDay || '--'})收盘价成交（T+1：买入当日不可卖出）；卖出按当日收盘价`}
+                    : suspended
+                      ? `${currentDay || '--'} 停牌：当日不能买卖，持仓按最近收盘价${
+                          currentClose > 0 ? ` ${currentClose.toFixed(2)}` : ''
+                        }估值，可继续「下一天」`
+                      : `买入按当日(${currentDay || '--'})收盘价成交（T+1：买入当日不可卖出）；卖出按当日收盘价`}
                   {pendingBuy ? ` ｜ 历史委托 ${pendingBuy.date} 待按收盘价补成交` : ''}
                 </span>
               )}

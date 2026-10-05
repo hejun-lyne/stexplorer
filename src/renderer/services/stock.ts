@@ -809,7 +809,7 @@ export async function GetKFromDataSource(
   secid: string,
   code: number,
   limit?: number,
-  options?: { allowSynthesis?: boolean; ignoreTrain?: boolean }
+  options?: { allowSynthesis?: boolean; ignoreTrain?: boolean; endDate?: string }
 ) {
   // ignoreTrain：本次取数绕过训练过滤（按调用生效，非全局开关），
   // 仅供训练会话自身的「日历类」数据使用（如训练窗口的交易日列表）
@@ -942,14 +942,14 @@ export async function GetKFromDataSource(
         } else if (effectiveSource === Enums.FundApiType.XTick) {
           r = await GetKFromXTick(secid, code);
         } else if (effectiveSource === Enums.FundApiType.Akshare) {
-          r = await AkshareAPI.GetKFromAkshare(secid, code, fetchLimit, { ignoreTrain });
+          r = await AkshareAPI.GetKFromAkshare(secid, code, fetchLimit, { ignoreTrain, endDate: options?.endDate });
         } else if (effectiveSource === Enums.FundApiType.Tushare) {
           // Tushare 侧缓存需要 limit 才能判断「缓存是否真的覆盖请求区间」，未传时给一个默认条数
           r = await TushareAPI.GetKFromTushare(
             secid,
             code,
             fetchLimit && fetchLimit > 0 ? fetchLimit : 1000,
-            { ignoreTrain }
+            { ignoreTrain, endDate: options?.endDate }
           );
         }
 
@@ -1028,7 +1028,7 @@ export async function GetKFromSetting(
   secid: string,
   code: number,
   limit?: number,
-  options?: { allowSynthesis?: boolean; ignoreTrain?: boolean }
+  options?: { allowSynthesis?: boolean; ignoreTrain?: boolean; endDate?: string }
 ) {
   const source = store.getState().setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney;
   return GetKFromDataSource(source, secid, code, limit, options);

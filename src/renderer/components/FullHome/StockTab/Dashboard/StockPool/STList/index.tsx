@@ -23,7 +23,6 @@ import { batch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { scoreColor } from '@/helpers/shortTermScore';
 import {
   computeShortTermScoreRows,
   loadScoreSeries,
@@ -630,6 +629,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         // 整段训练窗口：只有推进到最后一天才会用到窗口末日，提前算好避免每天等待
         endDate: trainEndDate || trainDate,
         source: kLineApiSourceSetting,
+        // 点击「预计算训练评分」= 忽略已有评分缓存、整段窗口重新计算（暂停后再次点击同样重头算）
+        ignoreCache: true,
         shouldStop: () => isPrecomputePausedRef.current,
         onProgress: (done, total, message) => {
           setPrecomputeDone(done);
@@ -1296,11 +1297,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           })
         ) : displayMode === 'shortScore' ? (
           showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+            // 不用红色表示低分：只保留 A/B 的淡色底，去掉 D（低分）的红色底
             const rowBg =
               s.grade === 'A' ? 'rgba(82, 196, 26, 0.08)'
                 : s.grade === 'B' ? 'rgba(24, 144, 255, 0.06)'
-                  : s.grade === 'D' ? 'rgba(255, 77, 79, 0.06)'
-                    : undefined;
+                  : undefined;
             return (
               <Row
                 key={s.code}
@@ -1315,14 +1316,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 </Col>
                 <Col
                   span={2}
-                  title={s.error || s.rsiPattern}
+                  title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
-                  {s.error ? (
-                    <span style={{ color: '#ff4d4f', fontSize: 12 }}>{s.error}</span>
-                  ) : (
-                    <span style={{ fontSize: 12 }}>{s.rsiScore == null ? '--' : `${s.rsiScore.toFixed(0)}/40`}</span>
-                  )}
+                  {/* RSI 列只展示 RSI 分值：数据未就绪的说明放到悬停提示，不再把「数据未覆盖到」占满 RSI 单元格 */}
+                  <span style={{ fontSize: 12, color: s.pending ? '#faad14' : undefined }}>
+                    {s.rsiScore == null ? '--' : `${s.rsiScore.toFixed(0)}/40`}
+                  </span>
                 </Col>
                 <Col
                   span={3}
@@ -1348,11 +1348,19 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                   const dayRow = shortScoreSeries?.[s.code]?.[d];
                   const v = dayRow ? dayRow.total : null;
                   const dayText = `${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)}`;
+                  // 不用红色表示低分：未开启阈值过滤时用默认色；开启后按阈值分 up/down 两色
+                  const cellClass =
+                    v == null || !shortScoreFilterEnabled
+                      ? ''
+                      : v >= Number(shortScoreFilterScore)
+                        ? 'text-up'
+                        : 'text-down';
                   return (
                     <Col
                       span={1}
                       key={d}
-                      style={{ fontSize: 11, textAlign: 'center', padding: 0, color: v == null ? 'var(--reverse-text-color)' : scoreColor(v) }}
+                      className={cellClass}
+                      style={{ fontSize: 11, textAlign: 'center', padding: 0, color: v == null ? 'var(--reverse-text-color)' : undefined }}
                       title={dayRow ? `${dayText}：${v == null ? '--' : v.toFixed(1)}` : `${dayText}：无评分`}
                     >
                       {v == null ? '--' : v.toFixed(0)}

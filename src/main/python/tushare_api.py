@@ -424,6 +424,50 @@ def _get_expected_last_trade_date(period: str = "daily") -> str:
         return _now('%Y-%m-%d')
 
 
+# <= 目标日的最后一个交易日缓存（同一进程内按目标日记忆化，避免逐只股票重复请求交易日历）
+_TRADE_DAY_LE_CACHE: Dict[str, Optional[str]] = {}
+
+
+def _last_trade_date_on_or_before(target: str) -> Optional[str]:
+    """返回 <= target 的最后一个交易日（YYYY-MM-DD），无法确定时返回 None。
+
+    训练模式回看历史日期时，必须按「目标日」判断缓存是否覆盖：不能用「最近交易日」。
+    本地交易日历（meta.db/trade_cal）缺失该区间时请求 Tushare trade_cal 并落库；
+    结果按 target 记忆化，避免逐只股票重复打接口。
+    """
+    key = str(target or '').replace('/', '-')[:10]
+    if not key:
+        return None
+    if key in _TRADE_DAY_LE_CACHE:
+        return _TRADE_DAY_LE_CACHE[key]
+    result: Optional[str] = None
+    try:
+        dt = _parse_date_str(key)
+        if dt is not None:
+            cal_start = (dt - timedelta(days=40)).strftime('%Y-%m-%d')
+            cal_end = dt.strftime('%Y-%m-%d')
+            try:
+                days = _db_load_trade_cal_range(cal_start, cal_end)
+            except Exception:
+                days = []
+            # 本地日历没有覆盖到目标日附近时，请求上游并落库
+            if not days or days[-1] < (dt - timedelta(days=7)).strftime('%Y-%m-%d'):
+                pro = get_pro()
+                cal_df = pro.trade_cal(exchange='SSE', start_date=cal_start.replace('-', ''),
+                                       end_date=cal_end.replace('-', ''), is_open='1')
+                if cal_df is not None and not cal_df.empty:
+                    cal_dates = pd.to_datetime(cal_df['cal_date']).dt.strftime('%Y-%m-%d').tolist()
+                    _db_upsert_trade_cal(cal_dates, 'SSE')
+                    days = _db_load_trade_cal_range(cal_start, cal_end)
+            if days:
+                result = sorted(days)[-1]
+    except Exception as e:
+        print(f"[_last_trade_date_on_or_before 失败] {target}: {e}")
+        result = None
+    _TRADE_DAY_LE_CACHE[key] = result
+    return result
+
+
 # ============ 训练模式：全局数据截止日期（as-of date）============
 # 训练模式下，所有「以当天为默认终点」的取数与指标计算都以该日期为终点，
 # 保证无论外部是否传日期参数、内部如何互相调用，都不会使用训练日期之后的数据。
@@ -1233,9 +1277,24 @@ class TushareAPI:
                 if expected_last is None or last_date < expected_last:
                     return False
             else:
-                # 指定了 end_date：检查缓存是否覆盖到 end_date
+                # 指定了 end_date：检查缓存是否真的覆盖到 end_date。
+                # 关键：要看「<= end_date 的最后一条」是否到达「<= end_date 的最后一个交易日」，
+                # 而不是整条缓存的最后日期——缓存里可能同时存在历史片段和后期的数据（中间断档），
+                # 用整条缓存的最后日期判断会误判为「已覆盖」，裁剪后拿到的却是断档前的旧数据
+                # （表现为列表里大量「数据未覆盖到基准日（最后一根 上一个训练日）」）。
                 end_date_dt = _parse_date_str(end_date_std)
-                if end_date_dt is None or last_date < end_date_dt:
+                if end_date_dt is None:
+                    return False
+                last_le = None
+                for k in cached_data:
+                    d = _parse_date_str(k.get('date', ''))
+                    if d is not None and d <= end_date_dt and (last_le is None or d > last_le):
+                        last_le = d
+                if last_le is None:
+                    return False
+                expected_last = _last_trade_date_on_or_before(end_date_std) or end_date_std
+                expected_dt = _parse_date_str(expected_last)
+                if expected_dt is not None and last_le < expected_dt:
                     return False
                 # 缓存起始日期晚于 end_date 时，缓存里根本没有这段历史（如训练模式回看更早的日期），
                 # 必须重新按 end_date 取数，否则会把「裁剪后的空数组」当成有效结果返回
@@ -1263,6 +1322,31 @@ class TushareAPI:
             if limit > 0 and len(data) > limit:
                 data = data[-limit:]
             return data
+
+        def _covers_end(data: List[Dict]) -> bool:
+            """降级/兜底返回的数据是否覆盖到本次请求的截止日（最后一个交易日）。
+
+            请求了 end_date（训练模式回看某交易日）时，如果缓存/结果只到「上一个训练日」，
+            就绝不能把它当成该交易日的数据返回：否则上层会拿旧数据算出名不副实的分数，
+            并在列表里显示成「数据未覆盖到基准日」。这里只判断覆盖度，不改变数据本身。
+            """
+            if not isinstance(data, list) or not data:
+                return False
+            if not end_date_std:
+                return True
+            end_date_dt = _parse_date_str(end_date_std)
+            if end_date_dt is None:
+                return True
+            last_le = None
+            for k in data:
+                d = _parse_date_str(k.get('date', ''))
+                if d is not None and d <= end_date_dt and (last_le is None or d > last_le):
+                    last_le = d
+            if last_le is None:
+                return False
+            expected_last = _last_trade_date_on_or_before(end_date_std) or end_date_std
+            expected_dt = _parse_date_str(expected_last)
+            return expected_dt is None or last_le >= expected_dt
 
         # 尝试命中缓存
         if _is_cache_sufficient(cached):
@@ -1408,16 +1492,18 @@ class TushareAPI:
                     print(f"[K线重试失败] {ts_code}: {e}")
 
             if df is None or df.empty:
-                # 请求无数据时，如果有缓存则返回过期缓存（降级）
+                # 请求无数据时，如果有缓存则返回过期缓存（降级）；但只有该缓存覆盖到本次截止日时才算有效，
+                # 否则会把「上一个训练日的旧数据」当成当日数据（列表上表现为「数据未覆盖到基准日」）。
                 if isinstance(cached, list) and cached:
                     degraded = _slice_from_cache(cached)
-                    if degraded:
+                    if degraded and _covers_end(degraded):
                         print(f"[K线请求无数据，返回过期缓存] {secid} {period}")
                         return degraded
-                    # 缓存里不含请求区间（例如训练模式回看的日期早于缓存范围）：
-                    # 不能返回空数组，否则上层会把「请求失败/无数据」误判成「数据源返回空」而丢失原因
-                    print(f"[K线请求无数据，且缓存不含 {end_date_fmt} 之前的区间] {secid} {period}")
-                    return {"error": f"No data available (本地缓存不含 {end_date_fmt} 之前的区间)"}
+                    print(
+                        f"[K线请求无数据，且缓存未覆盖 {end_date_fmt}] {secid} {period} "
+                        f"缓存区间={cached[0].get('date')}~{cached[-1].get('date')}"
+                    )
+                    return {"error": f"No data available (上游无数据，本地缓存未覆盖 {end_date_fmt})"}
                 return {"error": "No data available"}
 
             # Tushare 默认返回降序（最新日期在前），需转为升序（最早日期在前）
@@ -1470,15 +1556,14 @@ class TushareAPI:
             print(f"[K线裁剪后为空] {secid} {period} end_date={end_date_fmt} 合并后 {len(merged)} 条")
             return {"error": f"No data available (接口返回区间内无 {end_date_fmt} 之前的数据)"}
         except Exception as e:
-            # 请求失败时，如果有缓存则返回过期缓存（降级）
+            # 请求失败时，如果有缓存则返回过期缓存（降级）；同样要求覆盖到本次截止日，避免拿旧数据冒充当日
             if isinstance(cached, list) and cached:
                 degraded = _slice_from_cache(cached)
-                if degraded:
+                if degraded and _covers_end(degraded):
                     print(f"[K线请求失败，返回过期缓存] {secid} {period}: {e}")
                     return degraded
-                # 过期缓存里没有请求区间时，必须把真实失败原因返回给上层，不能返回空数组
-                print(f"[K线请求失败，且缓存不含 {end_date_fmt} 之前的区间] {secid} {period}: {e}")
-                return {"error": f"{e} (本地缓存不含 {end_date_fmt} 之前的区间)"}
+                print(f"[K线请求失败，且缓存未覆盖 {end_date_fmt}] {secid} {period}: {e}")
+                return {"error": f"{e} (本地缓存未覆盖 {end_date_fmt})"}
             return {"error": str(e)}
 
     @staticmethod
@@ -4269,6 +4354,50 @@ class TushareAPI:
             print(f"[短线评分序列写入] {len(out)} 只")
         except Exception as e:
             print(f"[短线评分序列写入失败] {e}")
+            return {"error": str(e)}
+        return out
+
+    @staticmethod
+    def clear_short_term_score_series_batch(
+        codes: Optional[List[str]] = None,
+        dates: Optional[List[str]] = None,
+        source: Any = None,
+    ) -> Dict[str, Any]:
+        """删除多只股票评分序列中指定交易日的行（dates 为空表示清空整条序列）。
+
+        用途：「预计算训练评分」选择忽略缓存、整段窗口重算时，先把窗口内已有结果清掉，
+        避免重算后仍残留旧版本 / 旧数据算出的评分行（这些行会被覆盖判定当成「已覆盖」，
+        导致增量补算跳过、列表一直显示旧分数或「未覆盖」）。
+        """
+        out: Dict[str, Any] = {}
+        try:
+            targets = {
+                str(d).replace('-', '').replace('/', '')
+                for d in (dates or [])
+                if d
+            }
+            for c in (codes or []):
+                code = str(c)
+                cache_key = _short_term_score_series_key(code, source)
+                cached = read_cache(cache_key, max_age_hours=8760)
+                rows = cached.get("rows") if isinstance(cached, dict) else None
+                if not isinstance(rows, dict) or not rows:
+                    continue
+                if targets:
+                    rows = {
+                        d: r for d, r in rows.items()
+                        if str(d).replace('-', '').replace('/', '') not in targets
+                    }
+                else:
+                    rows = {}
+                write_cache(
+                    cache_key,
+                    {"code": code, "source": str(source) if source is not None else None, "rows": rows},
+                )
+                out[code] = len(rows)
+            print(f"[短线评分序列清理] {len(out)} 只（删除 {len(targets)} 个交易日）")
+        except Exception as e:
+            print(f"[短线评分序列清理失败] {e}")
             return {"error": str(e)}
         return out
 

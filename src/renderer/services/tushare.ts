@@ -590,7 +590,7 @@ export async function GetKFromTushare(
   secid: string,
   code: number,
   limit?: number,
-  options?: { ignoreTrain?: boolean }
+  options?: { ignoreTrain?: boolean; endDate?: string }
 ): Promise<{ ks: Stock.KLineItem[], kt: number, source?: string, error?: string }> {
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
@@ -602,7 +602,13 @@ export async function GetKFromTushare(
 
   try {
     let klines: any[] = [];
-    const result = await callTushare('get_kline_data', { secid, period, limit: limit || 0 }, options);
+    // endDate：显式指定数据截止日。训练模式下 python 侧未传 end_date 时会默认收敛到全局训练日，
+    // 取「训练窗口交易日历」这类需要完整区间的数据时必须显式给出截止日（通常为真实今天）。
+    const params: Record<string, any> = { secid, period, limit: limit || 0 };
+    if (options?.endDate) {
+      params.end_date = options.endDate;
+    }
+    const result = await callTushare('get_kline_data', params, options);
 
     if (result.error || !Array.isArray(result) || result.length === 0) {
       const reason = result.error || 'Empty data';
@@ -1409,6 +1415,35 @@ export async function GetShortTermScoreSeriesSummaryFromTushare(
   } catch (error) {
     logError(error, 'GetShortTermScoreSeriesSummaryFromTushare', '读取短线评分序列覆盖情况失败');
     return {};
+  }
+}
+
+/**
+ * 批量删除多只股票评分序列中指定交易日的行（`dates` 为空表示清空整条序列）
+ *
+ * 用于「预计算训练评分」忽略缓存、整段窗口重算前先清掉窗口内的旧结果，
+ * 避免残留行被覆盖判定当成「已覆盖」而跳过重算。
+ * 这是缓存维护操作，按调用忽略训练过滤（否则窗口内晚于当前训练日的日期会被裁掉）。
+ */
+export async function ClearShortTermScoreSeriesFromTushare(
+  codes: string[],
+  dates: string[] | undefined,
+  source?: string | number
+): Promise<void> {
+  try {
+    if (!codes?.length) {
+      return;
+    }
+    const dayKeys = (dates || []).map((d) => String(d).replace(/-/g, ''));
+    for (let i = 0; i < codes.length; i += SHORT_SCORE_CACHE_CHUNK) {
+      await callTushare(
+        'clear_short_term_score_series_batch',
+        { codes: codes.slice(i, i + SHORT_SCORE_CACHE_CHUNK), dates: dayKeys, source },
+        { ignoreTrain: true }
+      );
+    }
+  } catch (error) {
+    logError(error, 'ClearShortTermScoreSeriesFromTushare', '清理短线评分序列失败');
   }
 }
 

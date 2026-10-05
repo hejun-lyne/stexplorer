@@ -385,7 +385,7 @@ export async function GetKFromAkshare(
   secid: string,
   code: number,
   limit?: number,
-  options?: { ignoreTrain?: boolean }
+  options?: { ignoreTrain?: boolean; endDate?: string }
 ): Promise<{ ks: Stock.KLineItem[], kt: number, source?: string, error?: string }> {
   const periodMap: Record<number, string> = {
     [KLineType.Day]: 'daily',
@@ -397,7 +397,12 @@ export async function GetKFromAkshare(
 
   try {
     let klines: any[] = [];
-    const result = await callAkshare('get_kline_data', { secid, period }, options);
+    // endDate：显式指定数据截止日（训练模式下用于取完整区间，见 GetKFromTushare 同名说明）
+    const params: Record<string, any> = { secid, period };
+    if (options?.endDate) {
+      params.end_date = options.endDate;
+    }
+    const result = await callAkshare('get_kline_data', params, options);
 
     if (result.error || !Array.isArray(result) || result.length === 0) {
       const reason = result.error || 'Empty data';

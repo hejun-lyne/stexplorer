@@ -859,19 +859,58 @@ function UpdateTradings(secids: string[], stocksMapping: Record<string, Stock.Al
 const TRAIN_DAYS_CACHE: Record<string, string[]> = {};
 
 /**
+ * 训练交易日历使用的标的：A 股个股统一用所属市场大盘指数。
+ *
+ * 之前直接用个股自身的日K取交易日历，个股停牌/次新股会缺日，导致不同标的的交易日列表不一致；
+ * 而训练日是全局的，训练工具栏会拿「当前标的」的列表去校正全局训练日，日期就会被带偏
+ * （既会让其它标的提前“训练结束”，也会触发列表页清空）。
+ * 交易日历全市场一致，因此个股统一改用大盘，指数/板块/港美股/期货等直接使用自身。
+ */
+function GetTrainCalendarSecid(secid: string): string {
+  const dot = secid.indexOf('.');
+  const code = dot >= 0 ? secid.substring(dot + 1) : secid;
+  if (dot < 0 || !/^\d{6}$/.test(code)) {
+    return secid;
+  }
+  if (secid.startsWith('1.')) {
+    // 沪市指数（1.000001）与沪市个股共用上证指数日历
+    return '1.000001';
+  }
+  if (secid.startsWith('0.')) {
+    // 深市指数（0.399001 深证成指 / 0.399006 创业板指）直接用自身
+    if (code.startsWith('399')) {
+      return secid;
+    }
+    return code.startsWith('3') ? '0.399006' : '0.399001';
+  }
+  return secid;
+}
+
+/**
  * 获取训练窗口内的交易日列表（只返回日期，用于按交易日步进、跳过非交易日）
  * 需要完整交易日历，因此临时关闭数据层过滤（结果按标的+窗口缓存，一次训练只取一次）
  */
 export async function GetTrainTradingDays(secid: string, startDate: string, endDate: string): Promise<string[]> {
-  const cacheKey = `${secid}_${startDate}_${endDate}`;
+  // 缓存键带版本：修复「日历只到训练日」后，避免同一会话内命中旧的（被截断的）缓存
+  const cacheKey = `v2_${secid}_${startDate}_${endDate}`;
   if (TRAIN_DAYS_CACHE[cacheKey]) {
     return TRAIN_DAYS_CACHE[cacheKey];
   }
   try {
-    // 需要整个训练窗口的交易日历（含训练日之后的交易日），所以本次取数要绕过训练过滤。
+    // 交易日历需要「完整训练窗口（含训练日之后的交易日）」，因此必须显式给出截止日：
+    // 训练模式下 python 侧 get_kline_data 未传 end_date 时会把终点默认收敛到全局训练日，
+    // 导致日历只到训练日当天 —— 训练工具栏据此判断 currentDay 已是最后一天，就会
+    // 误显示「训练结束」而不给「下一天」，并且校正逻辑会把全局训练日带偏。
     // 用「按调用」的 ignoreTrain：只影响这一次请求，不会像全局开关那样把并发请求的过滤一起关掉。
-    const r = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, 2000, { ignoreTrain: true });
-    const ks = (r && r.ks) || [];
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const fetchEnd = endDate && endDate > todayStr ? endDate : todayStr;
+    const calendarSecid = GetTrainCalendarSecid(secid);
+    let ks = ((await Services.Stock.GetKFromSetting(calendarSecid, Enums.KLineType.Day, 2000, { ignoreTrain: true, endDate: fetchEnd })) || {}).ks || [];
+    // 大盘日历取不到时回退到标的自身（特殊市场/指数）
+    if (!ks.length && calendarSecid !== secid) {
+      ks = ((await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, 2000, { ignoreTrain: true, endDate: fetchEnd })) || {}).ks || [];
+    }
     const days = ks.map((k) => k.date).filter((d) => d >= startDate && d <= endDate);
     if (days.length) {
       TRAIN_DAYS_CACHE[cacheKey] = days;

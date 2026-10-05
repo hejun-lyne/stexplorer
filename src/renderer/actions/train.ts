@@ -165,10 +165,9 @@ export function resumeTrainAction(): ThunkAction {
       dispatch(startTrainAction());
       return;
     }
-    // 恢复交易日列表，使训练工具栏无需重新请求即可继续按天推进
-    if (progress.days && progress.days.length) {
-      dispatch(setTrainDaysAction(`${progress.secid}_${progress.startDate}_${progress.endDate}`, progress.secid, progress.name, progress.days));
-    }
+    // 不恢复旧的交易日列表：旧版本存的可能是「被训练日截断 / 按个股缺失」的列表，
+    // 会让训练工具栏误判「已到窗口最后一天」（不显示「下一天」）。
+    // 改由训练工具栏按完整训练窗口（大盘交易日历）重新计算，保证列表覆盖到结束日期。
     dispatch(
       setSystemSettingAction({
         ...systemSetting,
