@@ -100,6 +100,78 @@ export async function GetStockFlowTrends(secids: string[]) {
   );
 }
 
+/**
+ * 由分时数据合成「当日K线」
+ *
+ * 用途：「当日评分」——数据源在盘中（乃至收盘后一段时间）还没有当日日K，
+ * 此时用当日分时（逐分钟）聚合成一根日K补进日K序列，让「评分基准日 = 最后一根K线」成立，
+ * 各维度评分与K线形态（含是否放量）才能按当日数据算出来。
+ *
+ * 口径与个股详情页分时图合成当日K线一致（开=首分钟价、收=末分钟价、高/低=分时极值、
+ * 量=分时成交量之和、额=成交量×收盘价），保证两处看到的当日K线是同一根。
+ *
+ * @param params.trends 分时数据（时间升序）
+ * @param params.date 该分时所属交易日（YYYY-MM-DD）
+ * @param params.prevClose 昨收（用于涨跌额/涨跌幅/振幅）
+ * @param params.floatShares 流通股本（股）：有值时按 成交量/流通股本 估算换手率（量能横向对比用）
+ */
+export function BuildDailyKFromTrends(params: {
+  secid: string;
+  trends: Stock.TrendItem[];
+  date: string;
+  prevClose?: number;
+  floatShares?: number;
+}): Stock.KLineItem | null {
+  const { secid, trends, date, prevClose = 0, floatShares } = params;
+  if (!secid || !date || !trends || !trends.length) {
+    return null;
+  }
+  const kp = Number(trends[0]?.current) || 0;
+  const sp = Number(trends[trends.length - 1]?.current) || 0;
+  if (kp <= 0 || sp <= 0) {
+    return null;
+  }
+  let zg = kp;
+  let zd = kp;
+  let cjl = 0;
+  trends.forEach((t) => {
+    const cur = Number(t?.current) || 0;
+    if (cur <= 0) {
+      return;
+    }
+    if (cur > zg) {
+      zg = cur;
+    }
+    if (cur < zd) {
+      zd = cur;
+    }
+    cjl += Number(t?.vol) || 0;
+  });
+  const zs = Number(prevClose) || 0;
+  const zde = zs > 0 ? sp - zs : 0;
+  const zdf = zs > 0 ? (sp / zs - 1) * 100 : 0;
+  const zf = zs > 0 ? ((zg - zd) / zs) * 100 : 0;
+  const cje = cjl * 100 * sp;
+  const hsl = floatShares && floatShares > 0 && cjl > 0 ? ((cjl * 100) / floatShares) * 100 : 0;
+  return {
+    secid,
+    type: Enums.KLineType.Day,
+    date,
+    kp,
+    sp,
+    zg,
+    zd,
+    zs,
+    cjl,
+    cje,
+    zf,
+    zdf,
+    zde,
+    hsl,
+    chan: 0,
+  } as Stock.KLineItem;
+}
+
 export function SortStocks(responseStocks: Stock.AllData[], stockConfigs?: Stock.SettingItem[]) {
   const {
     stockSortMode: { type: stockSortType, order: stockSortOrder },

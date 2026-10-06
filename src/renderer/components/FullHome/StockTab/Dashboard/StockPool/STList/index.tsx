@@ -25,6 +25,7 @@ import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-des
 import dayjs from 'dayjs';
 import {
   computeShortTermScoreRows,
+  computeTodayScoreRows,
   loadScoreSeries,
   resolveRecentTradingDays,
   ShortTermScoreItem,
@@ -155,6 +156,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   // 过滤：仅保留「近 N 个交易日出现过 ≥ 阈值分」的股票（阈值可填写，默认 60）
   const [shortScoreFilterEnabled, setShortScoreFilterEnabled] = useState(false);
   const [shortScoreFilterScore, setShortScoreFilterScore] = useState(60);
+  // 当日评分（用当日分时补全当日K线后重新评分）
+  const [todayScoreLoading, setTodayScoreLoading] = useState(false);
+  const [todayScoreProgress, setTodayScoreProgress] = useState(0);
+  const isTodayScorePausedRef = React.useRef(false);
+  const todayScoreRunningRef = React.useRef(false);
+  const todayScoreDoneRef = React.useRef(0);
 
   // 训练周期评分预计算（仅训练模式）：把训练窗口内每个交易日 × 每只股票的评分预先算好并落库
   const [precomputing, setPrecomputing] = useState(false);
@@ -696,6 +703,82 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
   }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays]);
 
+  // ========== 当日评分（当日分时补全当日K线后重新评分） ==========
+  // 盘中（或收盘后数据源还没生成当日日K）时，短线评分拿不到基准日的日K，当日列只显示 --。
+  // 这里针对过滤后的股票池逐只取当日分时，合成一根当日K线补进日K序列，再重算评分与K线形态；
+  // 结果按交易日写入评分序列（标记 intraday），当日日K生成后再点一次即可用官方口径覆盖。
+  const handleTodayScore = useCallback(async () => {
+    if (todayScoreLoading) {
+      // 再次点击视为暂停：当前股票算完后停止（已算完的结果保留在列表里）
+      isTodayScorePausedRef.current = true;
+      return;
+    }
+    const currentItems = collectCurrentItems();
+    if (currentItems.length === 0) {
+      console.log('[当日评分] 没有可评分的股票');
+      return;
+    }
+
+    isTodayScorePausedRef.current = false;
+    todayScoreRunningRef.current = true;
+    todayScoreDoneRef.current = 0;
+    setShortScoreData([]);
+    setShortScoreProgress(0);
+    setTodayScoreProgress(0);
+    setTodayScoreLoading(true);
+    shortScoreTotalRef.current = currentItems.length;
+    shortScoreRemainingRef.current = [];
+    shortScoreCodesRef.current = currentItems.map((i) => i.code);
+    setShortScoreSeries({});
+    setDisplayMode('shortScore');
+    setCurrentPage(1);
+    try {
+      setShortScoreDays(await resolveRecentTradingDays(kLineApiSourceSetting, SHORT_SCORE_HISTORY_DAYS));
+    } catch {
+      setShortScoreDays([]);
+    }
+
+    try {
+      const computed = await computeTodayScoreRows(currentItems, {
+        source: kLineApiSourceSetting,
+        concurrency: 6,
+        shouldStop: () => isTodayScorePausedRef.current,
+        onRow: (row) => {
+          todayScoreDoneRef.current += 1;
+          setShortScoreData((prev) => [...prev, row]);
+          setTodayScoreProgress(Math.round((todayScoreDoneRef.current / currentItems.length) * 100));
+        },
+      });
+      // 历史列交易日：优先用评分流程内部（含当日）的交易日，保证当日列一定在
+      if (computed.recentDays.length) {
+        setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
+      }
+      // 刷新评分序列（当日列读的是序列里的行）
+      try {
+        const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
+          -SHORT_SCORE_HISTORY_DAYS
+        );
+        setShortScoreSeries(
+          await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays })
+        );
+      } catch {
+        // 读取失败不影响本次展示
+      }
+      if (!isTodayScorePausedRef.current) {
+        setTodayScoreProgress(100);
+        console.log(
+          `[当日评分] 完成，共 ${currentItems.length} 只（分时补全 ${computed.filled} 只、无法补全 ${computed.skipped} 只）`
+        );
+      }
+    } catch (e) {
+      console.error('当日评分失败:', e);
+    } finally {
+      setTodayScoreLoading(false);
+      todayScoreRunningRef.current = false;
+      todayScoreDoneRef.current = 0;
+    }
+  }, [todayScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays]);
+
   // ========== 训练周期评分预计算（仅训练模式） ==========
   // 把「当前股票池 × 整段训练窗口（trainStartDate ~ trainEndDate）」的短线评分一次性算完并落库，
   // 之后每推进一个训练日，执行短线评分都会直接命中数据库缓存，无需再等待取数计算。
@@ -798,11 +881,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
 
   // 评分基准日随训练日/数据源变化：旧结果是上一交易日（或上一数据源）算的，直接展示会误导，需清空重算
   useEffect(() => {
-    if (isShortScoreRunningRef.current) {
+    if (isShortScoreRunningRef.current || todayScoreRunningRef.current) {
       return;
     }
     setShortScoreData([]);
     setShortScoreProgress(0);
+    setTodayScoreProgress(0);
     shortScoreRemainingRef.current = [];
     setShortScoreSeries({});
     setShortScoreDays([]);
@@ -1105,6 +1189,15 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             style={{ marginLeft: 4 }}
           >
             {shortScoreLoading ? `评分中 ${shortScoreProgress}%` : '短线评分'}
+          </Button>
+          <Button
+            size="small"
+            onClick={handleTodayScore}
+            loading={todayScoreLoading}
+            style={{ marginLeft: 4 }}
+            title="用当日分时补全当日K线后重新评分（当日日K还没生成时使用；日K生成后再点一次会按官方日K覆盖）"
+          >
+            {todayScoreLoading ? `当日评分中 ${todayScoreProgress}%` : '当日评分'}
           </Button>
           {displayMode === 'shortScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
@@ -1471,7 +1564,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 <Col
                   span={3}
                   style={{ fontSize: 12 }}
-                  title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${s.error ? `｜${s.error}` : ''}`}
+                  title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${s.intraday ? '｜当日K线由分时补全' : ''}${s.error ? `｜${s.error}` : ''}`}
                 >
                   {s.klineShape ? (
                     <span className={Utils.GetValueColor(s.klineYin ? -1 : 1).textClass}>{s.klineShape}</span>
@@ -1508,7 +1601,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                       key={d}
                       className={cellClass}
                       style={{ fontSize: 11, textAlign: 'center', padding: 0, color: v == null ? 'var(--reverse-text-color)' : undefined }}
-                      title={dayRow ? `${dayText}：${v == null ? '--' : v.toFixed(1)}` : `${dayText}：无评分`}
+                      title={dayRow ? `${dayText}：${v == null ? '--' : v.toFixed(1)}${dayRow.intraday ? '（当日K线由分时补全）' : ''}` : `${dayText}：无评分`}
                     >
                       {v == null ? '--' : v.toFixed(0)}
                     </Col>
