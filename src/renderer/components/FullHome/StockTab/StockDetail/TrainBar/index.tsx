@@ -10,6 +10,7 @@ import {
   addStockMarkLineAction,
   addStockTagAction,
   addStockTradePointAction,
+  clearAllStockTradePointAction,
   clearKNoteAction,
   clearStockTradePointAction,
   deleteStockMarkLineAction,
@@ -436,27 +437,79 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     }
     setSettling(true);
     try {
-      // 日收盘价同样取自数据层（已按当前训练日期过滤，不含未来数据）
-      const dayCloses = await Helpers.Stock.GetTrainDayCloses(secid);
+      // 结算口径＝训练过程中的「共享组合账户」：把所有标的的训练买卖点按日期合并后统一回放。
+      // 只回放当前标的会让归档里只剩当前标的的几笔成交，与训练时界面显示的可用资金/持仓完全不符。
+      const combined: { secid: string; name: string; date: string; price: number; isBuy: boolean; amount?: number }[] = [];
+      const collect = (c: any) => {
+        if (!c || !c.secid) {
+          return;
+        }
+        const name = c.name || c.secid;
+        ((c.buyPoints || []) as any[])
+          .filter((t) => isTrainMark(t.t))
+          .forEach((t) =>
+            combined.push({ secid: c.secid, name, date: String(t.x).substring(0, 10), price: t.y, isBuy: true, amount: t.a })
+          );
+        ((c.sellPoints || []) as any[])
+          .filter((t) => isTrainMark(t.t))
+          .forEach((t) =>
+            combined.push({ secid: c.secid, name, date: String(t.x).substring(0, 10), price: t.y, isBuy: false })
+          );
+      };
+      Object.values(stockConfigsMapping || {}).forEach(collect);
+      // 兜底：当前标的配置若尚未进入 stockConfigsMapping，补一次
+      if (config && !combined.some((t) => t.secid === config.secid)) {
+        collect(config);
+      }
+      const settleTrades = combined
+        .filter((t) => (!startDate || t.date >= startDate) && t.date <= currentDay)
+        .filter((t) => Number(t.price) > 0);
+
+      // 各标的的逐日收盘价（数据层已按当前训练日期过滤，不含未来数据；当前标的直接用已加载的行情）
+      const dayClosesBySecid: Record<string, Record<string, number>> = {};
+      const secidsToValue = [...new Set(settleTrades.map((t) => t.secid))];
+      const CLOSE_FETCH_CONCURRENCY = 5;
+      for (let i = 0; i < secidsToValue.length; i += CLOSE_FETCH_CONCURRENCY) {
+        const chunk = secidsToValue.slice(i, i + CLOSE_FETCH_CONCURRENCY);
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.all(
+          chunk.map(async (sid) => {
+            try {
+              dayClosesBySecid[sid] =
+                sid === secid && Object.keys(dayClosesMap).length
+                  ? { ...dayClosesMap }
+                  : await Helpers.Stock.GetTrainDayCloses(sid);
+            } catch {
+              dayClosesBySecid[sid] = {};
+            }
+          })
+        );
+      }
+
       const result = Helpers.TrainSettle.SettleTrain({
         startDate: startDate || days[0],
         endDate: currentDay,
         initialCapital: capital,
         commissionRate: commission,
         days,
-        dayCloses,
-        trades: trainTrades,
+        dayClosesBySecid,
+        trades: settleTrades,
       });
+      const tradedSecids = [...new Set(result.trades.map((t) => t.secid).filter(Boolean))];
       const record: Train.ArchiveRecord = {
         ...result,
         id: `${secid}_${moment().format('YYYYMMDDHHmmss')}`,
-        secid,
-        name: stock?.detail?.name || secid,
+        // 组合结算：一次训练可能跨多只标的。单标的时保留原标的，便于左侧归档一眼看出是哪只
+        secid: tradedSecids.length > 1 ? 'ALL' : settleTrades[0]?.secid || secid,
+        name:
+          tradedSecids.length > 1
+            ? `训练组合（${tradedSecids.length} 只标的）`
+            : settleTrades[0]?.name || stock?.detail?.name || secid,
         createdAt: moment().format('YYYY-MM-DD HH:mm:ss'),
       };
       dispatch(addTrainArchiveAction(record));
-      // 归档后清理本次训练的买卖标记，避免影响下一次训练
-      dispatch(clearStockTradePointAction(secid, true, TRAIN_TYPE));
+      // 组合已整体结算归档：清掉所有标的的训练买卖标记，避免影响下一次训练
+      dispatch(clearAllStockTradePointAction(true, TRAIN_TYPE));
       // 训练已结算归档，清除未完成进度
       dispatch(clearTrainProgressAction());
       setSettlement(record);
@@ -468,7 +521,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     } finally {
       setSettling(false);
     }
-  }, [currentDay, days, secid, startDate, capital, commission, trainTrades, stock]);
+  }, [currentDay, days, secid, startDate, capital, commission, stockConfigsMapping, config, dayClosesMap, stock]);
 
   const removeTag = useCallback((t) => {
     dispatch(deleteStockTagAction(t, secid));

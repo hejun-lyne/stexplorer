@@ -96,7 +96,20 @@ const TrainSettlement: React.FC<TrainSettlementProps> = React.memo(({ record }) 
     [record]
   );
 
+  /** 组合结算（一次训练跨多只标的）时，成交明细需要标明标的 */
+  const showSecidColumn = record.trades.some((t) => !!t.secid);
+
   const columns = [
+    ...(showSecidColumn
+      ? [
+          {
+            title: '标的',
+            dataIndex: 'name',
+            width: 90,
+            render: (v: string, r: Train.TradeLog) => v || r.secid || '--',
+          },
+        ]
+      : []),
     { title: '日期', dataIndex: 'date', width: 96 },
     {
       title: '操作',
@@ -133,7 +146,7 @@ const TrainSettlement: React.FC<TrainSettlementProps> = React.memo(({ record }) 
     <div className={styles.container}>
       <div className={styles.header}>
         <div className={styles.stock}>
-          {archive.name ? `${archive.name}（${archive.secid}）` : ''}
+          {archive.name ? `${archive.name}${archive.secid && archive.secid !== 'ALL' ? `（${archive.secid}）` : ''}` : ''}
         </div>
         <div className={styles.sub}>
           训练区间：{record.startDate} ~ {record.endDate} ｜ 初始资金：{formatNumber(record.initialCapital, 0)} ｜ 佣金：
@@ -156,7 +169,7 @@ const TrainSettlement: React.FC<TrainSettlementProps> = React.memo(({ record }) 
         <Table
           className={styles.table}
           size="small"
-          rowKey={(r: Train.TradeLog) => `${r.date}_${r.type}_${r.price}_${r.count}`}
+          rowKey={(r: Train.TradeLog) => `${r.secid || ''}_${r.date}_${r.type}_${r.price}_${r.count}`}
           columns={columns}
           dataSource={record.trades}
           pagination={false}

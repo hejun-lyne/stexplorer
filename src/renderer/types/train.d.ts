@@ -11,10 +11,12 @@ declare namespace Train {
     amount: number; // 成交金额
     commission: number; // 交易佣金
     cash: number; // 成交后可用资金
-    shares: number; // 成交后持仓股数
-    costPrice: number; // 成交后持仓成本
+    shares: number; // 成交后该标的持仓股数
+    costPrice: number; // 成交后该标的持仓成本
     profit: number; // 已实现盈亏（仅卖出）
     profitRatio: number; // 已实现收益率%（仅卖出）
+    secid?: string; // 标的代码（组合结算时用于区分成交属于哪只标的）
+    name?: string; // 标的名称（仅用于展示）
   }
 
   /** 每日净值点 */
