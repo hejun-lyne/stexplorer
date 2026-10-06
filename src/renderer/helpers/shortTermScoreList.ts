@@ -47,6 +47,10 @@ export interface ShortTermScoreRow {
   v?: number;
   /** 数据未就绪（日K不足 / 未覆盖到评分基准日）：不写入缓存，下次运行会重新取数计算并更新缓存 */
   pending?: boolean;
+  /** 评分基准日尚未上市：确定性结论，会写入缓存以避免反复取数 */
+  notListed?: boolean;
+  /** 上市日期（YYYYMMDD），notListed 时用于展示 */
+  listDate?: string;
   error?: string; // 评分失败原因
 }
 
@@ -180,6 +184,43 @@ export function zeroShortTermScoreRow(code: string, name?: string, reason?: stri
   row.error = reason || '无有效数据';
   row.pending = true;
   return row;
+}
+
+/**
+ * 「评分基准日尚未上市」的占位行：不计分、不取数
+ *
+ * 与「无有效数据」不同，这是确定性结论（上市日期不会再变），因此**会写入评分序列缓存**，
+ * 这样后续再评分（含训练日推进后的重复点击）不会再对这只股票发起取数，
+ * 也就不会再刷「数据源未返回 daily 数据」的错误日志。
+ */
+export function notListedShortTermScoreRow(
+  code: string,
+  name: string | undefined,
+  listDate: string,
+  scoreDayKey: string
+): ShortTermScoreRow {
+  const row = emptyShortTermScoreRow(code, name);
+  const list = toDay(listDate);
+  const day = toDay(scoreDayKey);
+  row.notListed = true;
+  row.listDate = listDate.replace(/-/g, '');
+  row.error = `尚未上市（上市日 ${list || listDate}，晚于评分基准日 ${day || scoreDayKey}），已跳过`;
+  return row;
+}
+
+/**
+ * 判断某只股票在评分基准日是否已上市
+ * @param listDate 上市日期（YYYYMMDD / YYYY-MM-DD），缺省或无效时返回 null（无法判断，按已上市处理）
+ * @param scoreDayKey 评分基准日（YYYYMMDD）
+ * @returns true=已上市；false=尚未上市；null=上市日期未知
+ */
+export function isListedOnDay(listDate: string | undefined | null, scoreDayKey: string): boolean | null {
+  const list = String(listDate || '').replace(/-/g, '').replace(/\//g, '').substring(0, 8);
+  const day = String(scoreDayKey || '').replace(/-/g, '').substring(0, 8);
+  if (!list || list.length < 8 || !/^\d{8}$/.test(list) || !/^\d{8}$/.test(day)) {
+    return null;
+  }
+  return list <= day;
 }
 
 /** 日期统一成 YYYY-MM-DD（兼容 YYYYMMDD / 带时间） */
@@ -816,17 +857,29 @@ export async function primeBoards(ctx: ScoreSharedContext, item: ShortTermScoreI
   return [...new Set(codes)];
 }
 
-/** 读取评分序列（一次取回整个股票池的序列，{ 股票代码: { 交易日: 评分行 } }） */
+/**
+ * 读取评分序列（一次取回整个股票池的序列，{ 股票代码: { 交易日: 评分行 } }）
+ *
+ * @param options.dates 只取这些交易日的行（强烈建议传）：
+ *   预计算会把整段训练窗口写进序列，全量传回渲染进程可能有几十 MB，
+ *   而列表实际只用「当前基准日 + 近 N 日历史列」。
+ */
 export async function loadScoreSeries(
   codes: string[],
   source: FundApiType,
-  options?: { ignoreTrain?: boolean }
+  options?: { ignoreTrain?: boolean; dates?: string[] }
 ): Promise<ShortTermScoreSeries> {
   if (!codes || !codes.length) {
     return {};
   }
   try {
-    return (await Services.Tushare.GetShortTermScoreSeriesFromTushare(codes, source, options)) || {};
+    // 带上行结构版本：只认当前版本的行，与 pickScoreRow 的判定保持一致
+    return (
+      (await Services.Tushare.GetShortTermScoreSeriesFromTushare(codes, source, {
+        ...options,
+        rowVersion: SCORE_ROW_VERSION,
+      })) || {}
+    );
   } catch {
     return {};
   }
@@ -887,20 +940,28 @@ export async function getCachedScoreRow(params: {
   if (!dayKey) {
     return null;
   }
-  const series = await loadScoreSeries([code], source);
+  // 只取该基准日一行，避免把整条序列传回渲染进程
+  const series = await loadScoreSeries([code], source, { dates: [dayKey] });
   const hit = pickScoreRow(series[code], dayKey);
   return hit ? { row: { ...hit.row, code, name: hit.row.name || code }, day: hit.date } : null;
 }
 
-/** 回写评分序列（按交易日合并到每只股票自己的序列里） */
-export async function saveScoreSeries(series: ShortTermScoreSeries, source: FundApiType): Promise<void> {
+/**
+ * 回写评分序列（按交易日合并到每只股票自己的序列里）
+ *
+ * 返回是否全部写入成功。失败时打日志（不再静默）：写入失败意味着本次评分没有落库，
+ * 下次点击短线评分仍要重新取数计算（表现就是「预计算跑完了还是慢」）。
+ */
+export async function saveScoreSeries(series: ShortTermScoreSeries, source: FundApiType): Promise<boolean> {
   if (!series || !Object.keys(series).length) {
-    return;
+    return true;
   }
   try {
     await Services.Tushare.SaveShortTermScoreSeriesToTushare(series, source);
-  } catch {
-    // 回写失败不影响本次展示
+    return true;
+  } catch (e: any) {
+    console.error('[短线评分] 评分序列写入失败，本次结果未落库（下次点击需重新计算）:', e?.message || e);
+    return false;
   }
 }
 
@@ -994,7 +1055,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
 
   // ---- 命中序列即出分：一次调用取回整个股票池的全部序列 ----
   if (scoreDayKey) {
-    fillFromSeries(await loadScoreSeries(codes, source));
+    fillFromSeries(await loadScoreSeries(codes, source, { dates: [scoreDayKey] }));
     if (!pending.length) {
       console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
       return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
@@ -1019,7 +1080,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     });
     scoreDayKey = [...dates].sort().pop() || '';
     if (scoreDayKey) {
-      fillFromSeries(await loadScoreSeries(codes, source));
+      fillFromSeries(await loadScoreSeries(codes, source, { dates: [scoreDayKey] }));
       if (!pending.length) {
         console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
         return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
@@ -1028,6 +1089,38 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     }
   }
   await ensureMarketStats(ctx, scoreDayKey);
+
+  // ---- 评分基准日尚未上市的股票：直接跳过，不进入取数 ----
+  // 这类股票在基准日根本没有行情，逐只取数只会拿到空数据并刷出
+  //「数据源 Tushare 未返回 xxx 的 daily 数据」的日志；而且结论是确定的（上市日期不会再变），
+  // 所以直接生成「跳过」行并写入评分序列缓存，后续点击不会再尝试取数。
+  if (scoreDayKey && pending.length) {
+    const listDates = await Services.Tushare.GetStockListDatesFromTushare(pending.map((i) => i.code));
+    const notListed: ShortTermScoreItem[] = [];
+    const keep: ShortTermScoreItem[] = [];
+    pending.forEach((item) => {
+      if (isListedOnDay(listDates[item.code], scoreDayKey) === false) {
+        notListed.push(item);
+      } else {
+        keep.push(item);
+      }
+    });
+    if (notListed.length) {
+      notListed.forEach((item) => {
+        const row = notListedShortTermScoreRow(item.code, item.name, listDates[item.code] || '', scoreDayKey);
+        results.push(row);
+        done += 1;
+        try {
+          onRow?.(row, item, done, total);
+        } catch {
+          // 回调异常不影响主流程
+        }
+      });
+      pending.length = 0;
+      pending.push(...keep);
+      console.log(`[短线评分] 基准日 ${scoreDayKey}：${notListed.length} 只尚未上市，已跳过取数`);
+    }
+  }
 
   // ---- 批量回填个股日K（关键）----
   // 逐只打 Tushare 极易触发限流/配额，导致大量股票的取数返回空；此时数据层会退回到
@@ -1138,6 +1231,19 @@ export async function computeStockScoreForCode(params: {
   const trainDay = params.date ? toDay(params.date) : '';
   const scoreDayKey = trainDay ? await resolveScoreDate(source, trainDay, ctx) : '';
   const item: ShortTermScoreItem = { code, name, circMv, hybk: hybk || null };
+
+  // 评分基准日尚未上市：直接返回「跳过」行，不做任何取数（避免刷「未返回 daily 数据」的日志），
+  // 并把结论写回评分序列，列表侧之后也会直接命中、不再尝试。
+  if (scoreDayKey) {
+    const listDates = await Services.Tushare.GetStockListDatesFromTushare([code]);
+    if (isListedOnDay(listDates[code], scoreDayKey) === false) {
+      const row = notListedShortTermScoreRow(code, name, listDates[code] || '', scoreDayKey);
+      const scoreDay = `${scoreDayKey.substring(0, 4)}-${scoreDayKey.substring(4, 6)}-${scoreDayKey.substring(6, 8)}`;
+      await saveScoreSeries({ [code]: { [scoreDayKey]: row } }, source);
+      console.warn(`[短线评分] ${code} ${row.error}`);
+      return { row, detail: null, klines: [], lastDate: '', scoreDay, scoreDayKey, boardName: '', baselineName: '' };
+    }
+  }
 
   const inputs = await buildStockScoreInputs(ctx, item, scoreDayKey, { moneyFlow });
   const { row, detail } = computeShortTermScoreForDate({ code, name, scoreDay: scoreDayKey, ...inputs });

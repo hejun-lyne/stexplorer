@@ -6,8 +6,11 @@ import {
   buildStockScoreInputs,
   computeShortTermScoreForDate,
   createScoreContext,
+  isListedOnDay,
+  notListedShortTermScoreRow,
   primeBoards,
   saveScoreSeries,
+  SCORE_ROW_VERSION,
   ShortTermScoreItem,
   ShortTermScoreSeries,
 } from './shortTermScoreList';
@@ -65,9 +68,9 @@ export interface PrecomputeOptions {
   onProgress?: (done: number, total: number, message: string) => void;
   /**
    * 忽略已有缓存，整段窗口重新计算：
-   * - 不做「已覆盖交易日直接跳过」的增量判断，窗口内所有交易日全部重算并覆盖写入；
-   * - 重算前先清掉窗口内这批股票已存的评分行，避免旧行残留（被覆盖判定当成「已覆盖」而跳过）。
-   * 默认 false（增量补算）。
+   * 不做「已覆盖交易日直接跳过」的增量判断，窗口内所有交易日全部重算并覆盖写入
+   * （写入按「股票 + 交易日」覆盖合并，不会预清缓存，避免中途失败产生空洞）。
+   * 默认 false（增量补算，只补缺口）。
    */
   ignoreCache?: boolean;
 }
@@ -79,13 +82,24 @@ export interface PrecomputeResult {
   reused: number;
   /** 写入的评分行数 */
   rows: number;
-  /** 因数据不足跳过的评分行数 */
-  /** 其中无有效数据（日K不足 / 取数失败）的行数：这些行同样按 0 分写入缓存 */
+  /** 数据未就绪（日K不足 / 未覆盖到基准日）而未写入缓存的行数 */
   skipped: number;
+  /** 评分基准日尚未上市、直接跳过取数的行数（这些行会以「未上市」写入缓存） */
+  notListed: number;
   /** 训练窗口内的交易日总数 */
   totalDates: number;
   /** 训练窗口内的交易日列表（升序，YYYY-MM-DD） */
   days: string[];
+  /** 写入失败的批次数（>0 表示本次结果没有完全落库，需重跑） */
+  writeErrors: number;
+  /** 写后校验：仍有缺失的「交易日 × 股票」条数（0 表示整段窗口都已覆盖） */
+  missingRows: number;
+  /** 写后校验：存在缺失的交易日（升序，YYYY-MM-DD） */
+  missingDays: string[];
+  /** 写后校验：缺口最多的前几个交易日（[日期, 缺失股票数]，用于日志定位） */
+  topGapDays: [string, number][];
+  /** 写后校验调用失败（无法判断覆盖情况，不要当成「全部未覆盖」） */
+  verifyFailed: boolean;
 }
 
 /** 日期统一成 YYYY-MM-DD（兼容 YYYYMMDD / 带时间） */
@@ -99,7 +113,20 @@ const toDay = (v: any): string => {
 
 export async function precomputeShortTermScores(options: PrecomputeOptions): Promise<PrecomputeResult> {
   const { items, source, shouldStop, onProgress, ignoreCache } = options;
-  const result: PrecomputeResult = { dates: 0, reused: 0, rows: 0, skipped: 0, totalDates: 0, days: [] };
+  const result: PrecomputeResult = {
+    dates: 0,
+    reused: 0,
+    rows: 0,
+    skipped: 0,
+    notListed: 0,
+    totalDates: 0,
+    days: [],
+    writeErrors: 0,
+    missingRows: 0,
+    missingDays: [],
+    topGapDays: [],
+    verifyFailed: false,
+  };
   const endDate = toDay(options.endDate);
   if (!items || !items.length || !endDate) {
     return result;
@@ -144,13 +171,18 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   // 避免旧行残留导致「明明重算了却还是旧分数 / 显示未覆盖」。
   let pendingDays: string[];
   if (ignoreCache) {
-    onProgress?.(0, days.length, '忽略缓存：清理窗口内旧评分...');
-    await Services.Tushare.ClearShortTermScoreSeriesFromTushare(codes, days, source);
+    // 忽略缓存 = 不做增量判断、窗口内所有交易日全部重算。
+    // 这里刻意「不」预先清空旧评分行：写入是按 (股票, 交易日) 覆盖合并的，重算到的交易日会被新结果覆盖。
+    // 预先清空一旦中途暂停 / 写入失败，就会把本来可用的缓存清成空洞，之后每次点击短线评分都要重新取数
+    // （表现就是「预计算跑完了还是慢」）。
     pendingDays = [...days];
     result.reused = 0;
   } else {
+    // 必须带上行结构版本：只统计当前版本的行，否则版本升级后会把旧行当成「已覆盖」而跳过重算，
+    // 列表侧按当前版本读取却全部未命中 → 表现为「预计算秒完成，点短线评分依然很慢」。
     const summary = await Services.Tushare.GetShortTermScoreSeriesSummaryFromTushare(codes, days, source, {
       ignoreTrain: true,
+      rowVersion: SCORE_ROW_VERSION,
     });
     pendingDays = days.filter((d) => (summary[d.replace(/-/g, '')] ?? Infinity) > 0);
     result.reused = days.length - pendingDays.length;
@@ -229,7 +261,13 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     });
   }
 
-  // ---- 9. 逐日计算（内存切片 + 纯函数评分），按「股票」写回评分序列 ----
+  // ---- 9. 上市日期：窗口内「尚未上市」的股票在其上市前的交易日直接跳过 ----
+  // 这些股票当天没有行情，逐日取数只会拿到空数据并刷出「未返回 daily 数据」的日志；
+  // 结论是确定的（上市日期不会再变），所以按日写一条「跳过」行入库，之后不再尝试取数。
+  onProgress?.(0, pendingDays.length, '读取上市日期...');
+  const listDateByCode = await Services.Tushare.GetStockListDatesFromTushare(codes);
+
+  // ---- 10. 逐日计算（内存切片 + 纯函数评分），按「股票」写回评分序列 ----
   let buffer: ShortTermScoreSeries = {};
   for (let di = 0; di < pendingDays.length; di += 1) {
     if (shouldStop?.()) {
@@ -239,6 +277,14 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     const dayKey = day.replace(/-/g, '');
     let count = 0;
     for (const item of items) {
+      if (isListedOnDay(listDateByCode[item.code], dayKey) === false) {
+        const skipRow = notListedShortTermScoreRow(item.code, item.name, listDateByCode[item.code], day);
+        buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: skipRow };
+        count += 1;
+        result.rows += 1;
+        result.notListed += 1;
+        continue;
+      }
       try {
         const inputs = await buildStockScoreInputs(ctx, item, day);
         const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay: day, ...inputs });
@@ -258,14 +304,44 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     onProgress?.(di + 1, pendingDays.length, `${day} 完成（${count} 只）`);
     // 定期落盘，中断时已算完的交易日不会丢失
     if ((di + 1) % FLUSH_EVERY_DAYS === 0 && Object.keys(buffer).length) {
-      await saveScoreSeries(buffer, source);
+      if (!(await saveScoreSeries(buffer, source))) {
+        result.writeErrors += 1;
+      }
       buffer = {};
     }
     // 让出主线程，避免长时间阻塞 UI
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   if (Object.keys(buffer).length) {
-    await saveScoreSeries(buffer, source);
+    if (!(await saveScoreSeries(buffer, source))) {
+      result.writeErrors += 1;
+    }
+  }
+
+  // ---- 11. 写后校验：确认窗口内的评分都已按当前版本落库 ----
+  // 校验口径与「点击短线评分时的读取判定」完全一致（含版本过滤）。
+  // 注意：这是「逐（交易日 × 股票）」的严格口径 —— 只要某天有个别股票没写入
+  // （停牌无数据 / 日K不足 / 上市前等），该天就会被算作有缺口；
+  // 因此这里统计的是缺口条数与涉及天数，而不是把「有天缺口」直接当成失败。
+  onProgress?.(days.length, days.length, '校验缓存覆盖...');
+  try {
+    const verify = await Services.Tushare.GetShortTermScoreSeriesSummaryFromTushare(codes, days, source, {
+      ignoreTrain: true,
+      rowVersion: SCORE_ROW_VERSION,
+    });
+    if (!verify || !Object.keys(verify).length) {
+      // 校验调用本身失败：不能据此判断「全部未覆盖」
+      result.verifyFailed = true;
+    } else {
+      const gaps = days
+        .map((d) => [d, Number(verify[d.replace(/-/g, '')]) || 0] as [string, number])
+        .filter(([, n]) => n > 0);
+      result.missingDays = gaps.map(([d]) => d);
+      result.missingRows = gaps.reduce((sum, [, n]) => sum + n, 0);
+      result.topGapDays = [...gaps].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    }
+  } catch {
+    result.verifyFailed = true;
   }
 
   return result;

@@ -1328,6 +1328,32 @@ export async function GetMoneyFlowFromTushare(secid: string, days?: number): Pro
   }
 }
 
+// ==================== 股票基础信息（上市日期） ====================
+
+/**
+ * 批量获取股票上市日期（YYYYMMDD）
+ *
+ * 训练 / 回测按历史交易日评分时用它可以先剔除「评分基准日尚未上市」的股票，
+ * 避免对这些没有行情的股票反复取数（并刷出「数据源未返回 daily 数据」的日志）。
+ * @param codes 6位股票代码数组
+ * @returns { [代码]: 上市日期YYYYMMDD }，失败返回 {}
+ */
+export async function GetStockListDatesFromTushare(codes: string[]): Promise<Record<string, string>> {
+  try {
+    if (!codes || !codes.length) {
+      return {};
+    }
+    const result = await callTushare('get_stock_list_dates', { codes });
+    if (result && typeof result === 'object' && !result.error) {
+      return result as Record<string, string>;
+    }
+    return {};
+  } catch (error) {
+    logError(error, 'GetStockListDatesFromTushare', '获取股票上市日期失败');
+    return {};
+  }
+}
+
 // ==================== 短线评分结果缓存（按个股的评分时间序列，存 meta.db/api_cache） ====================
 // 评分被当作个股的一条时间序列（一只股票一条记录，值为 { 交易日: 评分行 }），
 // 与 K线 / 资金流等时间序列同一层存储语义：一次批量读写整个股票池，按「评分基准日」取点。
@@ -1336,24 +1362,60 @@ export async function GetMoneyFlowFromTushare(secid: string, days?: number): Pro
 const SHORT_SCORE_CACHE_CHUNK = 50;
 
 /**
+ * 单次写入的 JSON 体积上限（字符数）
+ *
+ * 评分行带着中文描述（单行约 550 字节），一只股票一次可能带整段窗口的行，
+ * 按「股票数」分组时单次参数很容易到几百 KB；而命令行参数受系统上限约束
+ * （macOS ARG_MAX 约 1MB / Linux 单参数 128KB / Windows 命令行 32KB），
+ * 超限会让 python 直接起不来（E2BIG），且旧实现会静默吞掉失败
+ * → 表现为「预计算提示完成，点短线评分却依然很慢」。
+ * 这里按实际 JSON 体积分组，保证每次参数都远低于上限。
+ */
+const SHORT_SCORE_WRITE_MAX_CHARS = 60000;
+
+/** 评分序列缓存查询选项 */
+export interface ScoreSeriesQueryOptions {
+  ignoreTrain?: boolean;
+  /**
+   * 评分行结构版本（TS 侧 SCORE_ROW_VERSION）
+   *
+   * 必须与列表读取侧的版本判定一致：python 侧也按版本过滤后，预计算的「已覆盖」判断
+   * 才不会把旧版本行当成有效数据而跳过重算（否则会出现「预计算秒完成、点短线评分依然很慢」）。
+   */
+  rowVersion?: number;
+  /**
+   * 只取这些交易日（YYYYMMDD / YYYY-MM-DD）的评分行；为空表示整条序列。
+   *
+   * 预计算会把整段训练窗口写进序列（股票数 × 交易日数），全量传回渲染进程可能要几十 MB、
+   * 每次点击都传输会明显变慢，因此列表只按需取「当前评分基准日 + 近 N 日历史列」。
+   */
+  dates?: string[];
+}
+
+/**
  * 批量读取多只股票的「短线评分时间序列」
  *
  * 评分被当作个股的一条时间序列存储（一条序列含该股多个交易日的评分行），
  * 一次进程调用即可取回整个股票池的全部序列，避免逐只 / 逐日读写。
  * @param codes 6位股票代码数组
  * @param source K线数据源标识
+ * @param options.rowVersion 评分行结构版本：只返回该版本的行
  * @returns { [股票代码]: { [交易日YYYYMMDD]: 评分行 } }，未命中的股票为 {}
  */
 export async function GetShortTermScoreSeriesFromTushare(
   codes: string[],
   source?: string | number,
-  options?: { ignoreTrain?: boolean }
+  options?: ScoreSeriesQueryOptions
 ): Promise<Record<string, Record<string, any>>> {
   try {
     if (!codes || !codes.length) {
       return {};
     }
-    const result = await callTushare('get_short_term_score_series_batch', { codes, source }, options);
+    const result = await callTushare(
+      'get_short_term_score_series_batch',
+      { codes, source, version: options?.rowVersion, dates: options?.dates },
+      { ignoreTrain: options?.ignoreTrain }
+    );
     if (result && typeof result === 'object' && !result.error) {
       return result as Record<string, Record<string, any>>;
     }
@@ -1366,48 +1428,77 @@ export async function GetShortTermScoreSeriesFromTushare(
 
 /**
  * 批量写入多只股票的短线评分时间序列（按交易日合并，不影响其它交易日 / 其它股票）
+ *
+ * 写入失败会抛错（不再静默吞掉）：否则会出现「预计算提示完成、缓存里其实什么都没有」，
+ * 之后每次点击短线评分都要重新取数计算。
+ *
  * @param series { [股票代码]: { [交易日YYYYMMDD]: 评分行 } }
  * @param source K线数据源标识
+ * @returns 实际写入的股票数
  */
 export async function SaveShortTermScoreSeriesToTushare(
   series: Record<string, Record<string, any>>,
   source?: string | number
-): Promise<void> {
-  try {
-    if (!series) {
-      return;
-    }
-    const codes = Object.keys(series);
-    if (!codes.length) {
-      return;
-    }
-    for (let i = 0; i < codes.length; i += SHORT_SCORE_CACHE_CHUNK) {
-      const chunk: Record<string, any> = {};
-      codes.slice(i, i + SHORT_SCORE_CACHE_CHUNK).forEach((code) => {
-        chunk[code] = series[code];
-      });
-      await callTushare('save_short_term_score_series_batch', { stocks: chunk, source });
-    }
-  } catch (error) {
-    logError(error, 'SaveShortTermScoreSeriesToTushare', '写入短线评分序列失败');
+): Promise<number> {
+  if (!series) {
+    return 0;
   }
+  const codes = Object.keys(series).filter((code) => Object.keys(series[code] || {}).length);
+  if (!codes.length) {
+    return 0;
+  }
+  // 按 JSON 体积分组（而不是按股票数）：控制单次参数体积，避免参数过大导致 python 启动失败
+  const chunks: Record<string, Record<string, any>>[] = [];
+  codes.forEach((code) => {
+    const days = series[code];
+    let part: Record<string, any> = {};
+    let chars = 0;
+    Object.keys(days).forEach((day) => {
+      const size = JSON.stringify(days[day] || {}).length + 24; // 24 ≈ key/引号等固定开销
+      if (chars > 0 && chars + size > SHORT_SCORE_WRITE_MAX_CHARS) {
+        chunks.push({ [code]: part });
+        part = {};
+        chars = 0;
+      }
+      part[day] = days[day];
+      chars += size;
+    });
+    if (chars > 0) {
+      chunks.push({ [code]: part });
+    }
+  });
+
+  let written = 0;
+  for (const chunk of chunks) {
+    const result = await callTushare('save_short_term_score_series_batch', { stocks: chunk, source });
+    if (result && typeof result === 'object' && result.error) {
+      throw new Error(`写入短线评分序列失败：${result.error}`);
+    }
+    written += Object.keys(chunk).length;
+  }
+  return written;
 }
 
 /**
  * 检查多只股票的评分序列对指定交易日的覆盖情况（预计算增量补算用）
+ * @param options.rowVersion 评分行结构版本：只统计该版本的行（与列表读取判定一致）
  * @returns { [交易日YYYYMMDD]: 该日仍缺失的股票数 }；失败返回 {}
  */
 export async function GetShortTermScoreSeriesSummaryFromTushare(
   codes: string[],
   dates: string[],
   source?: string | number,
-  options?: { ignoreTrain?: boolean }
+  options?: ScoreSeriesQueryOptions
 ): Promise<Record<string, number>> {
   try {
     if (!codes?.length || !dates?.length) {
       return {};
     }
-    const result = await callTushare('get_short_term_score_series_summary', { codes, dates, source }, options);
+    const result = await callTushare(
+      'get_short_term_score_series_summary',
+      { codes, dates, source, version: options?.rowVersion },
+      { ignoreTrain: options?.ignoreTrain }
+    );
     if (result && typeof result === 'object' && !result.error) {
       return result as Record<string, number>;
     }

@@ -322,6 +322,7 @@ from stock_db import (  # noqa: E402
     read_minute as _db_read_minute,
     write_minute as _db_write_minute,
     upsert_stock_basic as _db_upsert_stock_basic,
+    load_stock_basic as _db_load_stock_basic,
     get_stock_basic_maps as _db_stock_basic_maps,
     stock_basic_count as _db_stock_basic_count,
     stock_basic_updated_at as _db_stock_basic_updated_at,
@@ -4291,11 +4292,51 @@ class TushareAPI:
         print(f"[市值档统计批量] {len(result)} 天完成")
         return result
 
+    # ------------------ 股票基础信息（上市日期）------------------
+
+    @staticmethod
+    def get_stock_list_dates(codes: Optional[List[str]] = None) -> Dict[str, Any]:
+        """批量获取股票上市日期（YYYYMMDD）
+
+        返回 {代码: 上市日期}；codes 传 6 位代码（如 001221）或 ts_code（001221.SZ）均可，
+        不传则返回全部股票。
+
+        数据取自 meta.db/stock_basic（与名称/行业同一份缓存：7 天内新鲜，过期自动向上游刷新）。
+        训练 / 回测按「历史交易日」评分时，先用它剔除评分基准日尚未上市的股票，
+        避免对这些没有行情的股票反复取数并刷出「数据源未返回 daily 数据」的错误日志。
+        """
+        try:
+            # 复用名称/行业映射的取数逻辑，顺带保证 stock_basic 表是新鲜的
+            _get_stock_basic_maps()
+            rows = _db_load_stock_basic()
+            want = {str(c).strip() for c in (codes or []) if str(c).strip()}
+            result: Dict[str, Any] = {}
+            for r in rows:
+                symbol = str(r.get("symbol") or "").strip()
+                ts_code = str(r.get("ts_code") or "").strip()
+                list_date = str(r.get("list_date") or "").replace("-", "").replace("/", "").strip()
+                if not list_date or len(list_date) < 8:
+                    continue
+                if want and symbol not in want and ts_code not in want:
+                    continue
+                if symbol:
+                    result[symbol] = list_date
+                if ts_code:
+                    result[ts_code] = list_date
+            print(f"[上市日期] 返回 {len(result)} 条（请求 {len(want) if want else '全部'}）")
+            return result
+        except Exception as e:
+            print(f"[上市日期读取失败] {e}")
+            return {}
+
     # ------------------ 短线评分「时间序列」缓存（按个股，一条序列含多个交易日）------------------
 
     @staticmethod
     def get_short_term_score_series_batch(
-        codes: Optional[List[str]] = None, source: Any = None
+        codes: Optional[List[str]] = None,
+        source: Any = None,
+        version: Any = None,
+        dates: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """批量读取多只股票的短线评分时间序列
 
@@ -4304,13 +4345,36 @@ class TushareAPI:
         与「按交易日分桶」（一天一条、值含全市场）不同，这里按个股存储，评分像K线一样
         成为该股票的一条时间序列：预计算一次写入整段训练窗口，之后列表 / 详情页按
         「评分基准日」在序列里取点即可，读写次数从 O(交易日数) 降为 O(股票数/批次)。
+
+        Args:
+            version: 评分行结构版本（TS 侧 SCORE_ROW_VERSION）。传入时只返回该版本的行，
+                与列表读取侧的版本判定保持一致。否则版本升级后，预计算的「已覆盖」判断
+                会认为旧版本行仍然有效而跳过重算，列表侧却全部判为未命中并重新取数（表现为
+                「预计算秒完成、点短线评分却依然很慢」）。
+            dates: 只返回这些交易日的行（YYYYMMDD / YYYY-MM-DD）；为空表示整条序列。
+                列表实际只用「当前评分基准日 + 近 N 日历史列」，整段训练窗口的序列
+                可能有几十 MB（股票数 × 交易日数 × 单行），全量传回渲染进程本身就很慢，
+                因此必须按需取点。
         """
+        targets = {str(d).replace('-', '').replace('/', '') for d in (dates or []) if d}
         result: Dict[str, Any] = {}
         try:
             for c in codes or []:
                 code = str(c)
                 cached = read_cache(_short_term_score_series_key(code, source), max_age_hours=8760)
                 rows = cached.get("rows") if isinstance(cached, dict) else None
+                if isinstance(rows, dict) and targets:
+                    rows = {
+                        d: r
+                        for d, r in rows.items()
+                        if str(d).replace('-', '').replace('/', '') in targets
+                    }
+                if isinstance(rows, dict) and version is not None:
+                    rows = {
+                        d: r
+                        for d, r in rows.items()
+                        if isinstance(r, dict) and r.get("v") == version
+                    }
                 result[code] = rows if isinstance(rows, dict) else {}
             hit = sum(1 for v in result.values() if v)
             print(f"[短线评分序列读取] {len(result)} 只，命中 {hit} 只")
@@ -4406,12 +4470,15 @@ class TushareAPI:
         codes: Optional[List[str]] = None,
         dates: Optional[List[str]] = None,
         source: Any = None,
+        version: Any = None,
     ) -> Dict[str, Any]:
         """检查多只股票的评分序列对指定交易日的覆盖情况
 
         返回 {交易日(YYYYMMDD): 该日仍缺失的股票数}，用于预计算只补算缺口。
+        version（评分行结构版本）会一并传入序列读取：只统计版本一致的行，避免旧版本行
+        让预计算误判「已覆盖」而跳过重算（列表侧按当前版本读取会全部未命中）。
         """
-        series = TushareAPI.get_short_term_score_series_batch(codes, source)
+        series = TushareAPI.get_short_term_score_series_batch(codes, source, version, dates)
         result: Dict[str, Any] = {}
         code_list = [str(c) for c in (codes or [])]
         for d in dates or []:

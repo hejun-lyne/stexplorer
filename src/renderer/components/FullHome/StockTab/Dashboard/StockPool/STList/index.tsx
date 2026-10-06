@@ -45,6 +45,44 @@ const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.FYZS], value: KFilterType.FYZS },
 ];
 
+/**
+ * 是否为「科创板 / 北交所」标的（按 6 位代码判断）
+ * - 科创板：688xxx / 689xxx（沪市）
+ * - 北交所：43xxxx / 83xxxx / 87xxxx / 88xxxx / 920xxx
+ */
+const isStarOrBseCode = (code: string): boolean => {
+  const c = String(code || '').trim();
+  if (!c) {
+    return false;
+  }
+  return (
+    c.startsWith('688') ||
+    c.startsWith('689') ||
+    c.startsWith('43') ||
+    c.startsWith('83') ||
+    c.startsWith('87') ||
+    c.startsWith('88') ||
+    c.startsWith('920')
+  );
+};
+
+/** 从列表行里取 6 位股票代码（列表行可能是 code / ts_code / secid 三种形态） */
+const codeOfListItem = (item: any): string => {
+  if (!item) {
+    return '';
+  }
+  if (item.code) {
+    return String(item.code).split('.')[0];
+  }
+  if (item.ts_code) {
+    return String(item.ts_code).split('.')[0];
+  }
+  if (item.secid) {
+    return String(item.secid).split('.').pop() || '';
+  }
+  return '';
+};
+
 export interface STListProps {
   industries: Stock.BanKuaiItem[];
   gainians: Stock.BanKuaiItem[];
@@ -63,6 +101,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [ftypes, setFtypes] = useState<number[]>([]);
   const [filterSecids, setFilterSecids] = useState<string[]>([]);
   const [nameFilter, setNameFilter] = useState('');
+  /** 排除科创板 + 北交所（默认勾选）：同时作用于列表展示与评分池（短线评分 / 训练周期预计算） */
+  const [excludeStarBse, setExcludeStarBse] = useState(true);
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
 
   // 选股流程状态
@@ -145,14 +185,28 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       setStocks(data.stocks as Stock.DetailItem[]);
       if (ftypes.length > 0) {
         setFiltering(true);
+        const base = excludeStarBse
+          ? (data.stocks as Stock.DetailItem[]).filter((s) => !isStarOrBseCode(s.code))
+          : (data.stocks as Stock.DetailItem[]);
         runFilterStocks(
-          data.stocks.map((s) => s.secid),
+          base.map((s) => s.secid),
           ftypes,
           fdays
         );
       }
     },
   });
+
+  /**
+   * 「排除科创板+北交所」后的板块股票池
+   *
+   * 选股漏斗各步（龙头识别 / 排雷 / 择时 / 主力建仓）、K线过滤、列表展示与评分池
+   * 统一以它为准：被排除的标的既不进入后续分析请求，也不会出现在列表或评分结果里。
+   */
+  const poolStocks = React.useMemo(
+    () => (excludeStarBse ? stocks.filter((s) => !isStarOrBseCode(s.code)) : stocks),
+    [stocks, excludeStarBse]
+  );
 
   const { run: runGetIndustryStocks } = useRequest(GetIndustryStocksFromTushare, {
     throwOnError: true,
@@ -161,8 +215,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       setStocks(data.stocks as Stock.DetailItem[]);
       if (ftypes.length > 0) {
         setFiltering(true);
+        const base = excludeStarBse
+          ? (data.stocks as any[]).filter((s: any) => !isStarOrBseCode(String(s?.code || s?.secid || '').split('.').pop() || ''))
+          : (data.stocks as any[]);
         runFilterStocks(
-          data.stocks.map((s: any) => s.secid),
+          base.map((s: any) => s.secid),
           ftypes,
           fdays
         );
@@ -231,7 +288,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         return;
       }
 
-      const allData = result.leaders;
+      // 排除科创板+北交所：后端返回的候选龙头里可能包含，这里统一过滤
+      const allData = excludeStarBse
+        ? result.leaders.filter((d: any) => !isStarOrBseCode(String(d?.ts_code || d?.code || '').split('.')[0]))
+        : result.leaders;
+      if (!allData.length) {
+        console.log('[龙头股] 排除科创板/北交所后没有可显示的标的');
+        return;
+      }
       console.log(`[龙头股] 获取到 ${allData.length} 只候选龙头，开始显示...`);
       setLeaderData(allData);
 
@@ -259,7 +323,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     } finally {
       setLeaderLoading(false);
     }
-  }, [leaderLoading, leaderData.length, secid]);
+  }, [leaderLoading, leaderData.length, secid, excludeStarBse]);
 
   // ========== 排雷过滤 ==========
   const handleRiskFilter = useCallback(async () => {
@@ -270,7 +334,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     // 获取当前显示的股票列表的 ts_code
     const currentStocks = displayMode === 'leaders'
       ? leaderData.slice(0, leaderDisplayCount).map((d: any) => d.ts_code)
-      : stocks.map((s) => {
+      : poolStocks.map((s) => {
           const code = s.secid.split('.').pop() || s.secid;
           return code.startsWith('6') ? `${code}.SH` : `${code}.SZ`;
         });
@@ -334,7 +398,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     } finally {
       setRiskLoading(false);
     }
-  }, [riskLoading, riskData.length, displayMode, leaderData, leaderDisplayCount, stocks]);
+  }, [riskLoading, riskData.length, displayMode, leaderData, leaderDisplayCount, poolStocks]);
 
   // ========== 择时信号 ==========
   const handleCheckSignals = useCallback(async () => {
@@ -347,7 +411,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       ? riskData.filter((d: any) => d.passed).map((d: any) => d.ts_code)
       : displayMode === 'leaders'
         ? leaderData.slice(0, leaderDisplayCount).map((d: any) => d.ts_code)
-        : stocks.map((s) => {
+        : poolStocks.map((s) => {
             const code = s.secid.split('.').pop() || s.secid;
             return code.startsWith('6') ? `${code}.SH` : `${code}.SZ`;
           });
@@ -410,7 +474,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     } finally {
       setSignalLoading(false);
     }
-  }, [signalLoading, signalData.length, displayMode, riskData, leaderData, leaderDisplayCount, stocks]);
+  }, [signalLoading, signalData.length, displayMode, riskData, leaderData, leaderDisplayCount, poolStocks]);
 
   // ========== 主力建仓过滤 ==========
   const handleMainInFilter = useCallback(async () => {
@@ -425,7 +489,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         ? riskData.filter((d: any) => d.passed).map((d: any) => d.ts_code)
         : displayMode === 'leaders'
           ? leaderData.slice(0, leaderDisplayCount).map((d: any) => d.ts_code)
-          : stocks.map((s) => {
+          : poolStocks.map((s) => {
               const code = s.secid.split('.').pop() || s.secid;
               return code.startsWith('6') ? `${code}.SH` : `${code}.SZ`;
             });
@@ -486,11 +550,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     } finally {
       setMainInLoading(false);
     }
-  }, [mainInLoading, mainInData.length, displayMode, signalData, riskData, leaderData, leaderDisplayCount, stocks]);
+  }, [mainInLoading, mainInData.length, displayMode, signalData, riskData, leaderData, leaderDisplayCount, poolStocks]);
 
   // ========== 当前股票池（沿用选股漏斗：优先取上一步的有效结果） ==========
   // 短线评分与「训练周期评分预计算」共用，保证预计算覆盖的正是当前要评分的这批股票
-  const collectCurrentItems = useCallback((): ShortTermScoreItem[] => {
+  const collectCurrentItemsRaw = useCallback((): ShortTermScoreItem[] => {
     const lookupName = (code: string) => stocks.find((s) => s.code === code)?.name || '';
     const lookupHybk = (code: string) => {
       const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
@@ -520,13 +584,39 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         return { code, name: lookupName(code), hybk: lookupHybk(code) };
       });
     }
-    return stocks.map((s) => ({
+    if (displayMode === 'shortScore' && shortScoreCodesRef.current.length) {
+      // 评分结果展示中再次评分：沿用上一次的股票池。
+      // （不这样做会退回「当前板块全部股票」，与「预计算训练评分」覆盖的股票池不一致，
+      //   多出来的股票只能现算，表现为「预计算过了、再点短线评分仍然很慢」。）
+      return shortScoreCodesRef.current.map((code) => {
+        const s = stocks.find((x) => x.code === code) as any;
+        return {
+          code,
+          name: s?.name || lookupName(code),
+          circMv: s?.lt ? s.lt * 1e8 : undefined,
+          hybk: lookupHybk(code),
+        };
+      });
+    }
+    return poolStocks.map((s) => ({
       code: s.code,
       name: s.name,
       circMv: (s as any).lt ? (s as any).lt * 1e8 : undefined,
       hybk: lookupHybk(s.code),
     }));
-  }, [stocks, stockConfigsMapping, displayMode, mainInData, signalData, riskData, leaderData, leaderDisplayCount]);
+  }, [stocks, poolStocks, stockConfigsMapping, displayMode, mainInData, signalData, riskData, leaderData, leaderDisplayCount]);
+
+  /**
+   * 评分池：在「当前股票池」基础上按「排除科创板+北交所」过滤
+   * （短线评分与训练周期预计算都用它，保证预计算覆盖的正是要评分的这批股票）
+   */
+  const collectCurrentItems = useCallback((): ShortTermScoreItem[] => {
+    const list = collectCurrentItemsRaw();
+    if (!excludeStarBse) {
+      return list;
+    }
+    return list.filter((i) => !isStarOrBseCode(i.code));
+  }, [collectCurrentItemsRaw, excludeStarBse]);
 
   // ========== 短线评分 ==========
   const handleShortScore = useCallback(async () => {
@@ -581,9 +671,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       if (computed.recentDays.length) {
         setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
       }
-      // 计算完成（或暂停）后刷新评分序列，用于渲染「近 N 日评分」历史列
+      // 计算完成（或暂停）后刷新评分序列，用于渲染「近 N 日评分」历史列。
+      // 只取历史列需要的交易日：整套训练窗口的序列（股票数 × 交易日数）可能有几十 MB，
+      // 全量传回渲染进程会明显拖慢点击。
       try {
-        setShortScoreSeries(await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting));
+        const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
+          -SHORT_SCORE_HISTORY_DAYS
+        );
+        setShortScoreSeries(
+          await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays })
+        );
       } catch {
         // 读取失败不影响本次展示
       }
@@ -597,7 +694,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       setShortScoreLoading(false);
       isShortScoreRunningRef.current = false;
     }
-  }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting]);
+  }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays]);
 
   // ========== 训练周期评分预计算（仅训练模式） ==========
   // 把「当前股票池 × 整段训练窗口（trainStartDate ~ trainEndDate）」的短线评分一次性算完并落库，
@@ -638,14 +735,39 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           setPrecomputeMsg(message);
         },
       });
+      // 写后校验：真正需要关注的是「写入失败」与「校验调用失败」；
+      // 个别股票在某天没有数据（停牌 / 日K不足 / 上市前）会按 (交易日 × 股票) 记为缺口，
+      // 点「短线评分」时只会补算这些缺口，不影响整体速度，因此不按「异常」提示。
+      const warnParts: string[] = [];
+      if (res.writeErrors) {
+        warnParts.push(`${res.writeErrors} 批写入失败`);
+      }
+      if (res.verifyFailed) {
+        warnParts.push('覆盖校验调用失败');
+      }
+      const gapInfo = res.verifyFailed
+        ? '；未能校验覆盖情况'
+        : res.missingRows
+          ? `；覆盖校验：${res.missingRows} 个「交易日×股票」未覆盖（涉及 ${res.missingDays.length} 天，多为停牌/日K不足，点「短线评分」只会补算这些）`
+          : '；覆盖校验：整段窗口已全部覆盖，点「短线评分」直接命中缓存';
+      const topInfo = res.topGapDays.length
+        ? `；缺口最多：${res.topGapDays.map(([d, n]) => `${d}(${n}只)`).join('、')}`
+        : '';
       console.log(
         `[预计算] 窗口共 ${res.totalDates} 个交易日：新算 ${res.dates} 个、复用缓存 ${res.reused} 个，` +
-          `写入 ${res.rows} 条评分（其中 ${res.skipped} 条无有效数据，已按 0 分写入）`
+          `写入 ${res.rows} 条评分（其中 ${res.notListed} 条尚未上市已跳过取数、${res.skipped} 条数据未就绪未写入）` +
+          gapInfo +
+          topInfo +
+          (warnParts.length ? `；异常：${warnParts.join('，')}` : '')
       );
       setPrecomputeMsg(
         isPrecomputePausedRef.current
           ? `已暂停：新算 ${res.dates} 个交易日`
-          : `完成：新算 ${res.dates} 个交易日，复用 ${res.reused} 个，共 ${res.rows} 条评分`
+          : warnParts.length
+            ? `完成但有异常：${warnParts.join('，')}`
+            : res.missingRows
+              ? `完成：新算 ${res.dates} 个交易日；${res.missingRows} 条未覆盖（停牌/数据不足，点评分只补算这些）`
+              : `完成：新算 ${res.dates} 个交易日，复用 ${res.reused} 个，共 ${res.rows} 条评分`
       );
     } catch (e) {
       console.error('训练周期评分预计算失败:', e);
@@ -690,20 +812,20 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     (ts: any[]) => {
       setFtypes(ts);
       setCurrentPage(1);
-      if (ts.length && stocks.length) {
+      if (ts.length && poolStocks.length) {
         setFiltering(true);
         runFilterStocks(
-          stocks.map((s) => s.secid),
+          poolStocks.map((s) => s.secid),
           ts,
           fdays
         );
       }
     },
-    [stocks, fdays, runFilterStocks]
+    [poolStocks, fdays, runFilterStocks]
   );
   const filterStocks = React.useMemo(
-    () => (ftypes.length ? stocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : stocks),
-    [ftypes, stocks, filterSecids]
+    () => (ftypes.length ? poolStocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : poolStocks),
+    [ftypes, poolStocks, filterSecids]
   );
 
   // 格式化资金流向金额（元 -> 亿/万）
@@ -878,6 +1000,18 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
     return list;
   }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreSeries, shortScoreDisplayDays]);
+
+  /**
+   * 实际渲染的列表：按「排除科创板+北交所」过滤（对所有展示模式生效）
+   * 分页 total 同样用它，保证页码与可见行数一致。
+   */
+  const visibleShowList = React.useMemo(() => {
+    if (!excludeStarBse) {
+      return showList as any[];
+    }
+    return (showList as any[]).filter((item: any) => !isStarOrBseCode(codeOfListItem(item)));
+  }, [showList, excludeStarBse]);
+
   return (
     <>
       <div className={classNames(styles.header, styles.actbar)}>
@@ -920,6 +1054,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             value={ftypes}
             onChange={updateFtypes}
           />
+          <Checkbox
+            checked={excludeStarBse}
+            onChange={(e) => {
+              setExcludeStarBse(e.target.checked);
+              setCurrentPage(1);
+            }}
+            style={{ marginLeft: 8 }}
+          >
+            排除科创板+北交所
+          </Checkbox>
           &nbsp;
           {filtering && <span>筛选中...</span>}
           <Button
@@ -1164,7 +1308,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       )}
       <div className={classNames(styles.table, styles.moreheader)}>
         {displayMode === 'stocks' ? (
-          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
+          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
             <Row key={s.code} className={styles.row}>
               <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
                 {s.name}
@@ -1189,7 +1333,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             </Row>
           ))
         ) : displayMode === 'leaders' ? (
-          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => (
+          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => (
             <Row key={s.ts_code} className={styles.row}>
               <Col span={4}>
                 <span>{s.ts_code}</span>
@@ -1218,7 +1362,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             </Row>
           ))
         ) : displayMode === 'risk' ? (
-          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             const isPassed = s.passed === true;
             return (
               <Row
@@ -1254,7 +1398,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             );
           })
         ) : displayMode === 'signals' ? (
-          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             const hasSignal = s.has_signal === true;
             return (
               <Row
@@ -1296,7 +1440,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             );
           })
         ) : displayMode === 'shortScore' ? (
-          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             // 不用红色表示低分：只保留 A/B 的淡色底，去掉 D（低分）的红色底
             const rowBg =
               s.grade === 'A' ? 'rgba(82, 196, 26, 0.08)'
@@ -1331,6 +1475,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 >
                   {s.klineShape ? (
                     <span className={Utils.GetValueColor(s.klineYin ? -1 : 1).textClass}>{s.klineShape}</span>
+                  ) : s.notListed ? (
+                    // 评分基准日尚未上市：不计分、不取数（悬停看上市日期）
+                    <span style={{ color: 'var(--reverse-text-color)' }}>未上市</span>
                   ) : (
                     '--'
                   )}
@@ -1371,7 +1518,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             );
           })
         ) : (
-          showList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             const sceneCode = s.advice_scene || '';
             const isActiveScene = /^A-/.test(sceneCode) || sceneCode === 'G-1';
             const isWatchScene = /^(B-|G-[23])/.test(sceneCode);
@@ -1481,7 +1628,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         <Pagination
           current={currentPage}
           pageSize={pageSize}
-          total={showList.length}
+          total={visibleShowList.length}
           onChange={onPageChange}
           showSizeChanger={false}
           size="small"
