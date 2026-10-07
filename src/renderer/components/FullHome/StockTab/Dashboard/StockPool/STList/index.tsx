@@ -19,7 +19,7 @@ import {
 import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
 import classNames from 'classnames';
-import { batch, useSelector } from 'react-redux';
+import { batch, useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
@@ -33,6 +33,7 @@ import {
   ShortTermScoreSeries,
 } from '@/helpers/shortTermScoreList';
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
+import { setTrainCurrentDateAction, writeTrainProgressAction } from '@/actions/train';
 
 /** 短线评分列表「近 N 日评分」历史列展示的交易日数量 */
 const SHORT_SCORE_HISTORY_DAYS = 15;
@@ -170,10 +171,77 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [precomputeMsg, setPrecomputeMsg] = useState('');
   const isPrecomputePausedRef = React.useRef(false);
 
-  const { kLineApiSourceSetting, ontrain, trainDate, trainStartDate, trainEndDate } = useSelector(
-    (state: StoreState) => state.setting.systemSetting
-  );
+  const { kLineApiSourceSetting, ontrain, trainDate, trainStartDate, trainEndDate, initialCapital, commissionRate } =
+    useSelector((state: StoreState) => state.setting.systemSetting);
   const { stockConfigsMapping } = useSelector((state: StoreState) => state.stock);
+  // 训练工具栏维护的交易日列表 / 训练进度（训练模式下 STList 也要能按交易日推进）
+  const { days: trainDays, progress: trainProgress } = useSelector((state: StoreState) => state.train);
+  const dispatch = useDispatch();
+
+  // ========== 训练日推进（训练模式下，短线评分结果列表里也能直接看当前交易日 / 下一天） ==========
+  // 交易日列表优先用「按当前训练窗口现算」的结果（与训练工具栏同源：大盘日历、含训练日之后的交易日，
+  // 因此能算出真正的「下一天」）；取不到时退回训练工具栏写入 store 的列表。
+  const [trainWindowDays, setTrainWindowDays] = useState<string[]>([]);
+  useEffect(() => {
+    if (!ontrain || !trainStartDate || !trainEndDate) {
+      setTrainWindowDays([]);
+      return;
+    }
+    let mounted = true;
+    Helpers.Stock.GetTrainTradingDays(trainProgress?.secid || '1.000001', trainStartDate, trainEndDate)
+      .then((ds) => {
+        if (mounted) {
+          setTrainWindowDays(ds || []);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setTrainWindowDays([]);
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [ontrain, trainStartDate, trainEndDate, trainProgress?.secid]);
+
+  const trainCalendarDays = trainWindowDays.length ? trainWindowDays : trainDays;
+  const trainDayIdx = trainDate ? trainCalendarDays.indexOf(trainDate) : -1;
+  const nextTrainDay =
+    trainDayIdx >= 0 && trainDayIdx < trainCalendarDays.length - 1 ? trainCalendarDays[trainDayIdx + 1] : '';
+  const trainFinished = trainCalendarDays.length > 0 && trainDayIdx >= trainCalendarDays.length - 1;
+
+  const handleNextTrainDay = useCallback(() => {
+    if (!nextTrainDay) {
+      return;
+    }
+    dispatch(setTrainCurrentDateAction(nextTrainDay));
+    // 与训练工具栏一致：每推进一个交易日落盘一次进度（刷新/重启后可继续）
+    dispatch(
+      writeTrainProgressAction({
+        ...(trainProgress || ({} as Train.Progress)),
+        secid: trainProgress?.secid || '',
+        name: trainProgress?.name || '',
+        startDate: trainStartDate || trainProgress?.startDate || '',
+        endDate: trainEndDate || trainProgress?.endDate || '',
+        currentDate: nextTrainDay,
+        total: trainCalendarDays.length,
+        days: trainCalendarDays,
+        initialCapital: Number(initialCapital) || trainProgress?.initialCapital || 0,
+        commissionRate: Number(commissionRate) || trainProgress?.commissionRate || 0,
+        savedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      })
+    );
+  }, [
+    nextTrainDay,
+    dispatch,
+    trainProgress,
+    trainStartDate,
+    trainEndDate,
+    trainCalendarDays,
+    initialCapital,
+    commissionRate,
+  ]);
+
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
     manual: true,
@@ -892,6 +960,26 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setShortScoreDays([]);
   }, [trainDate, kLineApiSourceSetting]);
 
+  // 训练日切换（训练工具栏或列表里的「下一天」）→ 若正在展示「短线评分」结果列表，自动按新训练日重算。
+  // 用 ref 持有最新的 handleShortScore，避免把它写进依赖导致「评分状态变化 → effect 重跑」的循环。
+  const handleShortScoreRef = React.useRef<() => void>(() => {});
+  useEffect(() => {
+    handleShortScoreRef.current = handleShortScore;
+  }, [handleShortScore]);
+  const prevTrainDateRef = React.useRef(trainDate);
+  useEffect(() => {
+    const prev = prevTrainDateRef.current;
+    prevTrainDateRef.current = trainDate;
+    if (!ontrain || !trainDate || prev === trainDate) {
+      return;
+    }
+    if (displayMode !== 'shortScore' || isShortScoreRunningRef.current) {
+      return;
+    }
+    // 上面「清空旧结果」的 effect 已先执行，这里按新训练日重新计算
+    handleShortScoreRef.current();
+  }, [ontrain, trainDate, displayMode]);
+
   const updateFtypes = useCallback(
     (ts: any[]) => {
       setFtypes(ts);
@@ -1222,6 +1310,18 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 style={{ width: 56 }}
               />
               <span>分</span>
+            </span>
+          )}
+          {ontrain && displayMode === 'shortScore' && (
+            <span style={{ marginLeft: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>训练日</span>
+              <span style={{ fontSize: 12, fontWeight: 'bold' }}>{trainDate || '--'}</span>
+              <Button size="small" disabled={!nextTrainDay || shortScoreLoading} onClick={handleNextTrainDay}>
+                下一天
+              </Button>
+              {trainFinished && (
+                <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>（已到窗口最后一天）</span>
+              )}
             </span>
           )}
           {ontrain && (
