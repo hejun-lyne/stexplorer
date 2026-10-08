@@ -1550,6 +1550,49 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const [currentActivePeriod, setCurrentActivePeriod] = useState<Stock.PeriodMarkItem | null | undefined>(null);
     const [chartOptions, setChartOptions] = useState<any>({});
 
+    // 今日是否交易日（按数据源查交易日历）。异步未返回前为 null，此时用「工作日」兜底，
+    // 避免非交易时段（午休/盘后）因判定未就绪而漏掉当日K的合成。
+    const [isTradeDayToday, setIsTradeDayToday] = useState<boolean | null>(null);
+    const isTradeDayTodayRef = useRef<boolean | null>(null);
+    isTradeDayTodayRef.current = isTradeDayToday;
+    useEffect(() => {
+      let alive = true;
+      (async () => {
+        try {
+          const day = dayjs().format('YYYY-MM-DD');
+          const ok =
+            kLineApiSourceSetting === FundApiType.Tushare
+              ? await Services.Tushare.IsTradeDay(day)
+              : await Services.Akshare.IsTradeDay(day);
+          if (alive) setIsTradeDayToday(ok);
+        } catch {
+          if (alive) setIsTradeDayToday(null);
+        }
+      })();
+      return () => {
+        alive = false;
+      };
+    }, [kLineApiSourceSetting]);
+
+    /**
+     * 是否允许用分时合成/更新「当日K」。
+     * 交易日且已开盘（09:20 起，含午间休市与收盘后到当日结束）即允许：
+     * 只要数据源还没生成当日日K，就用分时补出/更新当日K。
+     * 盘前（<09:20）不合成：此时分时仍是上一交易日的，会造出错误的当日K。
+     */
+    const canBuildTodayKFromTrends = useCallback((): boolean => {
+      const now = new Date();
+      if (now.getHours() * 60 + now.getMinutes() < 9 * 60 + 20) {
+        return false;
+      }
+      const flag = isTradeDayTodayRef.current;
+      if (flag !== null) {
+        return flag;
+      }
+      const day = now.getDay();
+      return day >= 1 && day <= 5;
+    }, []);
+
     // 根据分时数据合成当日K线
     const buildDailyKFromTrends = (trends: Stock.TrendItem[], stockSecid: string, zsValue: number): Stock.KLineItem | null => {
       if (!trends || trends.length === 0) return null;
@@ -1653,15 +1696,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           updateTrendData(trends);
         }
 
-        // 同步更新日线K线：交易日（含收盘后）用分时数据填充/更新当日K线
-        const now = new Date();
-        const nowHour = now.getHours();
-        const nowDay = now.getDay();
-        const nowMinute = now.getMinutes();
-        const isWorkDay = nowDay >= 1 && nowDay <= 5;
-        const isTradingTime = Utils.JudgeWorkDayTime(now.getTime());
-        const isAfterMarketCloseToday = isWorkDay && !isTradingTime && (nowHour > 15 || (nowHour === 15 && nowMinute > 0));
-        if (isTradingTime || isAfterMarketCloseToday) {
+        // 同步更新日线K线：交易日的任意非交易时段（午休、收盘后）也用分时补/更新当日K线
+        if (canBuildTodayKFromTrends()) {
           const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
           const currentDayKlines = klineDataRef.current.klines[dayIndex];
           if (currentDayKlines && currentDayKlines.length > 0) {
@@ -1848,16 +1884,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         //     ks = ks.slice(0, stopIndex + 1);
         //   }
         // }
-        // 非交易日不使用分时来填充K线数据
-        const now = new Date();
-        const nowHour = now.getHours();
-        const nowDay = now.getDay();
-        const nowMinute = now.getMinutes();
-        const isWorkDay = nowDay >= 1 && nowDay <= 5;
-        const isTradingTime = Utils.JudgeWorkDayTime(now.getTime());
-        // 收盘后（15:00之后）到当天结束，仍为工作日
-        const isAfterMarketCloseToday = isWorkDay && !isTradingTime && (nowHour > 15 || (nowHour === 15 && nowMinute > 0));
-        if (isTradingTime || isAfterMarketCloseToday) {
+        // 交易日的任意非交易时段（午休、收盘后）也可用分时补当日K；非交易日则不用分时填K
+        if (canBuildTodayKFromTrends()) {
           const latestTrends = trendDataRef.current.trends;
           if (kt == KLineType.Day) {
             const today = new Date();
@@ -1872,8 +1900,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                 if (dailyK) {
                   ks = [...ks, dailyK];
                 }
-              } else if (isAfterMarketCloseToday) {
-                // 收盘后无分时数据，自动触发分时请求，请求成功后再合成今日K线
+              } else {
+                // 无分时数据，自动触发分时请求，请求成功后再合成今日K线
                 if (!requestTrends) {
                   setRequestTrends(true);
                   runGetTrends(kLineApiSourceSetting, secid);
@@ -1887,8 +1915,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                 if (dailyK) {
                   ks[ks.length - 1] = dailyK;
                 }
-              } else if (isAfterMarketCloseToday) {
-                // 收盘后无分时数据，自动触发分时请求
+              } else {
+                // 无分时数据，自动触发分时请求
                 if (!requestTrends) {
                   setRequestTrends(true);
                   runGetTrends(kLineApiSourceSetting, secid);

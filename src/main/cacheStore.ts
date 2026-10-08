@@ -43,15 +43,19 @@ async function callCacheApi(method: string, params: Record<string, any>): Promis
   }
   const lines = await pythonService.run(CACHE_SCRIPT, args);
 
+  // 末行即本次调用的 JSON 结果：可能是对象（get / get_raw），也可能是标量（put / put_raw 返回 true）。
+  // 旧实现只认以 '{' 开头的行，于是 put 系列返回的 `true` 会被判为「无有效返回」而抛错，
+  // 触发下面的文件回退——结果数据库和文件被同时写入（stock_trend / kline_cache 等一直是文件在长）。
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i];
-    if (!line || !line.startsWith('{')) {
+    if (!line) {
       continue;
     }
     let parsed: any;
     try {
       parsed = JSON.parse(line);
     } catch (e) {
+      // 非 JSON 行（python 的普通日志）跳过，继续往前找
       continue;
     }
     // python 侧异常时返回的是 { error: '...' }

@@ -262,9 +262,9 @@ def migrate_dir(legacy_dir: str, dry_run: bool = False, verbose: bool = False,
     return report
 
 
-# 走 sqlite-read/sqlite-write 的「缓存类」表目录（与 cacheStore.ts 的白名单保持一致）。
+# 走 sqlite-read/sqlite-write 的「缓存类」表目录（与 cacheStore.ts 的 DB_BACKED_TABLES 白名单保持一致）。
 # 对应的数据库 key 规则：``local:<相对 storage 根目录的路径，不含 .json>``
-LOCAL_DATA_DIRS = ("stock_trend",)
+LOCAL_DATA_DIRS = ("stock_trend", "kline_cache", "board_stocks_cache")
 
 
 def _verify_and_delete(path: str, key: str, errors: List[str]) -> bool:
