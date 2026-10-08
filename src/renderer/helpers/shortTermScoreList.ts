@@ -922,23 +922,84 @@ export async function resolveScoreDate(source: FundApiType, date: string, ctx?: 
   return date.replace(/-/g, '');
 }
 
+/** 取某年交易日历（返回 YYYYMMDD 升序；取数失败返回空数组） */
+async function fetchTradeCalendar(source: FundApiType, year: string): Promise<string[]> {
+  try {
+    const dates =
+      source === FundApiType.Tushare
+        ? await Services.Tushare.GetTradeDatesFromTushare(year)
+        : await Services.Akshare.GetTradeDatesFromAkshare(year);
+    return (dates || [])
+      .map((d: any) => String(d || '').replace(/-/g, '').substring(0, 8))
+      .filter((d: string) => /^\d{8}$/.test(d))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 某天是否交易日：直接查交易日历（按数据源分发）
+ *
+ * 交易日历是「哪天是交易日」的权威来源，不需要为了这个判断去取指数行情。
+ * 注意不能只看「日历里有没有这一天」：本地日历可能只存了近期一段（其它取数路径也会往这张表里写），
+ * 那样会把正常交易日误判成非交易日。因此只有确认日历「已覆盖到该日期之后」时才敢返回 false，
+ * 否则退回「周一~周五」的粗判断（宁可多算一次，也不要直接跳过）。
+ */
+export async function isTradeDayOn(source: FundApiType, dayKey: string): Promise<boolean> {
+  const day = toDay(dayKey);
+  if (!day) {
+    return false;
+  }
+  const key = day.replace(/-/g, '');
+  try {
+    const dates = await fetchTradeCalendar(source, key.substring(0, 4));
+    if (dates.length) {
+      if (dates.includes(key)) {
+        return true;
+      }
+      // 日历里没有这一天：只有它已覆盖到该日期之后，才能断定这不是交易日
+      if (dates[dates.length - 1] >= key) {
+        return false;
+      }
+      console.warn(
+        `[当日评分] ${day} 超出本地交易日历覆盖范围（日历截止 ${dates[dates.length - 1]}），按工作日兜底判断`
+      );
+    }
+  } catch {
+    // 取数失败：走下面的兜底判断
+  }
+  const weekday = dayjs(day).day();
+  return weekday !== 0 && weekday !== 6;
+}
+
 /**
  * 取最近 count 个交易日（YYYYMMDD，升序）
  *
- * 用于短线评分列表的「近 N 日评分」历史列：日期口径与评分基准日一致（指数日K），
- * 训练模式下受训练日收敛，因此不会取到训练日之后的交易日。
+ * 用于短线评分列表的「近 N 日评分」历史列：直接用交易日历（「哪天是交易日」的权威来源），
+ * 不再取指数日K —— 指数取数失败时历史列会整体消失，而交易日历不依赖行情数据。
+ * 训练模式下按训练日收敛，因此不会取到训练日之后的交易日。
  */
 export async function resolveRecentTradingDays(source: FundApiType, count: number): Promise<string[]> {
   if (!count || count <= 0) {
     return [];
   }
-  try {
-    const ks = await fetchDayKlines(source, '1.000001', count + 20);
-    const dates = [...new Set(ks.map((k) => toDay(k?.date)).filter(Boolean))].sort();
-    return dates.slice(-count).map((d) => d.replace(/-/g, ''));
-  } catch {
-    return [];
+  const cap = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '') || dayjs().format('YYYYMMDD');
+  const year = Number(cap.substring(0, 4));
+  const set = new Set<string>();
+  // 年初时当年交易日可能不足 count 个，往前再补一年
+  for (const y of [year, year - 1, year - 2]) {
+    const dates = await fetchTradeCalendar(source, String(y));
+    dates.forEach((d) => {
+      if (d <= cap) {
+        set.add(d);
+      }
+    });
+    if (set.size >= count) {
+      break;
+    }
   }
+  return [...set].sort().slice(-count);
 }
 
 /**
@@ -1094,6 +1155,8 @@ interface ComputeOptions {
   concurrency?: number; // 并发数，默认3
   shouldStop?: () => boolean; // 返回 true 时暂停（当前股票完成后停止取新任务）
   onRow?: (row: ShortTermScoreRow, item: ShortTermScoreItem, done: number, total: number) => void;
+  /** 历史列需要的交易日数量（仅「当日评分」使用：交易日历取最近 N 个交易日） */
+  historyDays?: number;
 }
 
 /**
@@ -1307,33 +1370,29 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
 
 /** 当日评分结果（在常规评分结果上追加补全统计） */
 export interface ComputeTodayRowsResult extends ComputeRowsResult {
-  /** 当日K线由分时补全后算出评分的股票数 */
+  /** 当日K线就绪、K线形态与 RSI 更新成功的股票数（当日K线由分时补全，或官方日K已就绪） */
   filled: number;
-  /** 当日分时不可用、无法补全当日K线的股票数（行按「数据未就绪」返回，不写缓存） */
+  /** 当日K线拿不到（分时不可用 / 形态识别失败 / 取数异常）的股票数 */
   skipped: number;
 }
 
 /**
- * 「当日评分」：用当日分时数据补全当日K线后重新评分（面向过滤后的股票池）
+ * 「当日评分」：只更新「只依赖K线」的部分 —— K线形态（含阴阳 / 是否放量）与 RSI 评分
  *
  * 背景：盘中（或收盘后数据源还没生成当日日K时）短线评分拿不到基准日的日K，列表当日列只显示 `--`。
- * 这个流程逐只取当日分时，聚合成一根日K补进日K序列末尾，让「最后一根K线 = 评分基准日」成立，
- * 于是各维度评分与K线形态（含是否放量）都能按当日数据算出，结果按交易日写入评分序列缓存。
- *
- * 规则：
- * - 官方日K已覆盖基准日的股票**不取分时**，直接按官方数据重算（当日日K生成后再点一次，即可用官方口径覆盖分时结果）；
- * - 分时拿不到（停牌 / 取数失败 / 分时日期不是基准日）的股票不写缓存，按「数据未就绪」返回（列表显示 --）；
- * - 指数日K同样用分时补全（大盘维度要与同一天的基准对比）；板块维度沿用最新可得的板块日K。
- * - 分时数据走数据源自己的服务层接口（Tushare 源 = tushare.ts 的 `GetTrendFromTushare`，
- *   即 python 侧 `get_stock_trend`），并统一按训练日期截断。
- * - 基准日取「指数分时里最近有行情的交易日」与官方口径基准日的较晚者：
- *   盘中当日日K还没生成时，官方口径会停在上一交易日，只有拿到指数分时的当天才能算出「当日」评分。
+ * 完整评分还要另外取指数分时 / 板块日K / 资金流 / 涨跌比 / 市值档统计，任何一处数据缺失都会连带影响分数；
+ * 而 K线形态与 RSI 都只需要个股日K（或当日分时合成的日K），所以这里刻意只算这两项：
+ * - 是否交易日直接查交易日历，不再用指数分时反推（避免指数取数失败把整条流程拖垮）；
+ * - 官方日K已覆盖当日的股票不取分时，直接按官方K线计算；
+ * - 否则取当日分时合成一根日K补在序列末尾再计算（停牌 / 取数失败则该行只保留说明）；
+ * - 只填 `klineShape / klineYin / volumeExpanded / rsiScore / rsiPattern / intraday`，其余维度一律留空；
+ * - 当日不给综合分（列表当日列显示 `--`），也不写入评分序列缓存（没有综合分可缓存）。
  */
 export async function computeTodayScoreRows(
   items: ShortTermScoreItem[],
   options: ComputeOptions
 ): Promise<ComputeTodayRowsResult> {
-  const { source, concurrency = 4, shouldStop, onRow } = options;
+  const { source, concurrency = 4, shouldStop, onRow, historyDays = 15 } = options;
   const results: ShortTermScoreRow[] = [];
   const total = items.length;
   let done = 0;
@@ -1342,81 +1401,127 @@ export async function computeTodayScoreRows(
   if (!items || !items.length) {
     return { rows: results, scoreDayKey: '', recentDays: [], filled, skipped };
   }
+
+  // 当日评分固定针对「当前交易日」：训练模式跟随训练日，非训练模式取真实今天
+  const trainDayKey = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
+  const dayKey = trainDayKey || dayjs().format('YYYYMMDD');
+  const scoreDay = `${dayKey.substring(0, 4)}-${dayKey.substring(4, 6)}-${dayKey.substring(6, 8)}`;
+  const recentDays = await resolveRecentTradingDays(source, historyDays);
+
+  // 是否交易日：直接查交易日历
+  if (!(await isTradeDayOn(source, dayKey))) {
+    console.log(`[当日评分] ${scoreDay} 不是交易日，已跳过`);
+    return { rows: results, scoreDayKey: dayKey, recentDays, filled, skipped };
+  }
+
   const ctx = createScoreContext(source);
 
-  await ensureIndexKlines(ctx);
-  // 官方日K口径的基准日：训练模式按训练日归位，非训练模式取指数日K的最后交易日
-  const realTodayKey = dayjs().format('YYYYMMDD');
-  const trainDateKey = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
-  const officialDay = await resolveScoreDate(source, trainDateKey || realTodayKey, ctx);
-
-  // 指数分时：确认「最近一个有行情的交易日」，盘中它比官方口径更靠后（当日日K还没生成）
-  const indexTrends: Record<string, Stock.TrendItem[]> = {};
-  await Promise.all(
-    INDEX_SECIDS.map(async (secid) => {
-      indexTrends[secid] = await fetchTrendsOfSource(source, secid);
-    })
-  );
-  const trendDayKey = INDEX_SECIDS.reduce((max, s) => {
-    const d = trendLastDay(indexTrends[s]);
-    return d > max ? d : max;
-  }, '');
-  const scoreDayKey = trendDayKey && trendDayKey > officialDay ? trendDayKey : officialDay;
-  if (!scoreDayKey) {
-    return { rows: results, scoreDayKey: '', recentDays: [], filled, skipped };
+  // ---- 批量预取个股日K ----
+  // 逐只打接口极易触发限流（「短线评分」同样先批量取一次），批量失败 / 个股停牌时仍由 processOne 逐只兜底。
+  const secidOfItem = (code: string) => (code.startsWith('6') ? `1.${code}` : `0.${code}`);
+  if (source === FundApiType.Tushare) {
+    try {
+      const secids = items.map((i) => secidOfItem(i.code));
+      const batch = await Services.Tushare.BatchGetKFromTushare(secids, dayKey, SCORE_KLINES_PER_STOCK, KLineType.Day);
+      secids.forEach((secid) => {
+        const ks = batch?.[secid];
+        if (Array.isArray(ks) && ks.length) {
+          ctx.stockKlinesMap[secid] = ks;
+        }
+      });
+    } catch {
+      // 批量取数失败时退回逐只取数，不影响主流程
+    }
   }
-  const scoreDay = `${scoreDayKey.substring(0, 4)}-${scoreDayKey.substring(4, 6)}-${scoreDayKey.substring(6, 8)}`;
 
-  // 指数当日K线：分时补全（指数日K还没到基准日时），大盘维度才有同一天的对比基准
-  INDEX_SECIDS.forEach((secid) => {
-    if (klinesCoverDay(ctx.indexKlinesMap[secid], scoreDayKey)) {
-      return;
+  // ---- 批量预取当日分时：只取「日K还没覆盖到当日」的股票 ----
+  // 逐只调用会被常驻 python 进程串行处理（JS 侧并发不起作用），一只 0.1~2s；
+  // 这里一次 IPC 走批量入口（python 侧线程池并发），整体从「分钟级」压到「秒级」。
+  const trendMap: Record<string, Stock.TrendItem[]> = {};
+  const needTrendSecids = items
+    .map((i) => secidOfItem(i.code))
+    .filter((secid) => !klinesCoverDay(ctx.stockKlinesMap[secid], dayKey));
+  if (source === FundApiType.Tushare && needTrendSecids.length) {
+    try {
+      const batchTrends = await Services.Tushare.GetTrendsBatchFromTushare(needTrendSecids);
+      needTrendSecids.forEach((secid) => {
+        const ts = batchTrends?.[secid];
+        if (Array.isArray(ts) && ts.length) {
+          trendMap[secid] = ts;
+        }
+      });
+      console.log(`[当日评分] 批量分时预取 ${needTrendSecids.length} 只，命中 ${Object.keys(trendMap).length} 只`);
+    } catch {
+      // 批量分时失败时退回逐只取数，不影响主流程
     }
-    const bar = buildTrendBar({
-      secid,
-      trends: indexTrends[secid],
-      klines: ctx.indexKlinesMap[secid],
-      dayKey: scoreDayKey,
-    });
-    if (bar) {
-      ctx.indexKlinesMap[secid] = mergeTrendBar(ctx.indexKlinesMap[secid], bar);
+  }
+
+  /** 当日行：只填「只依赖K线」的字段（K线形态 + RSI），综合分与其它维度一律留空（列表显示 --） */
+  const klineOnlyRow = (
+    item: ShortTermScoreItem,
+    info?: {
+      shape: { name: string; yin: boolean } | null;
+      intraday: boolean;
+      volumeExpanded: boolean;
+      rsi: Score.RsiScoreResult;
+    },
+    reason?: string
+  ): ShortTermScoreRow => {
+    const row = emptyShortTermScoreRow(item.code, item.name);
+    row.intraday = !!info?.intraday;
+    row.klineShape = info?.shape?.name || '';
+    row.klineYin = info?.shape?.yin;
+    row.volumeExpanded = info?.volumeExpanded;
+    if (info?.rsi) {
+      // RSI 只依赖K线：当日K线（可能是分时补全的）就绪时同样可算可展示；数据不足时留空显示 --
+      row.rsiScore = info.rsi.available ? info.rsi.score : null;
+      row.rsiPattern = info.rsi.pattern;
     }
-  });
+    if (reason) {
+      row.error = reason;
+      row.pending = true; // 没有当日数据可展示：标记未就绪，行内悬停可看原因
+    }
+    return row;
+  };
 
   const processOne = async (item: ShortTermScoreItem): Promise<ShortTermScoreRow> => {
     const code = item.code;
     const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
-    let intraday = false;
     try {
-      if (!ctx.stockKlinesMap[secid]) {
-        ctx.stockKlinesMap[secid] = await fetchDayKlines(ctx.source, secid, SCORE_KLINES_PER_STOCK);
+      let bars = ctx.stockKlinesMap[secid];
+      if (!bars) {
+        bars = await fetchDayKlines(ctx.source, secid, SCORE_KLINES_PER_STOCK);
+        ctx.stockKlinesMap[secid] = bars;
       }
-      if (!klinesCoverDay(ctx.stockKlinesMap[secid], scoreDayKey)) {
-        // 官方日K还没到基准日：用当日分时合成当日K线补在末尾
-        const trends = await fetchTrendsOfSource(source, secid);
-        const bar = buildTrendBar({
-          secid,
-          trends,
-          klines: ctx.stockKlinesMap[secid],
-          dayKey: scoreDayKey,
-          circMv: item.circMv,
-        });
+      let intraday = false;
+      if (!klinesCoverDay(bars, dayKey)) {
+        // 官方日K还没到当日：用当日分时合成一根日K补在末尾（优先用批量预取的结果）
+        const prefetched = trendMap[secid];
+        const trends = prefetched ? TrainFilter.CutTrends(prefetched) : await fetchTrendsOfSource(ctx.source, secid);
+        const bar = buildTrendBar({ secid, trends, klines: bars, dayKey, circMv: item.circMv });
         if (!bar) {
           skipped += 1;
-          return uncoveredShortTermScoreRow(code, item.name, `当日分时不可用，无法补全 ${scoreDay} 的日K`);
+          return klineOnlyRow(item, undefined, `当日分时不可用，无法补全 ${scoreDay} 的K线`);
         }
-        ctx.stockKlinesMap[secid] = mergeTrendBar(ctx.stockKlinesMap[secid], bar);
+        bars = mergeTrendBar(bars, bar);
         intraday = true;
       }
-      const inputs = await buildStockScoreInputs(ctx, item, scoreDay);
-      const { row } = computeShortTermScoreForDate({ code, name: item.name, scoreDay, intraday, ...inputs });
-      if (intraday && !row.pending) {
-        filled += 1;
+      // 复用完整评分同一套纯计算函数，保证「当日评分」与「短线评分」口径一致
+      const shape = describeLatestKlineShape(bars, dayKey);
+      const rsi = Score.scoreStockRsi(bars);
+      if (!shape) {
+        skipped += 1;
+        return klineOnlyRow(
+          item,
+          { shape: null, intraday, volumeExpanded: false, rsi },
+          `K线形态识别失败（日K ${bars.length} 条）`
+        );
       }
-      return row;
+      filled += 1;
+      return klineOnlyRow(item, { shape, intraday, volumeExpanded: isLatestVolumeExpanded(bars), rsi });
     } catch (e: any) {
-      // 取数异常按 0 分入缓存，避免每次点击都为同一只股票重复取数
-      return zeroShortTermScoreRow(code, item.name, e?.message || '评分失败');
+      skipped += 1;
+      return klineOnlyRow(item, undefined, e?.message || '取数失败');
     }
   };
 
@@ -1440,21 +1545,10 @@ export async function computeTodayScoreRows(
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
 
-  // ---- 回写评分序列：数据未就绪（无法补全当日K线）的行不写缓存 ----
-  const series: ShortTermScoreSeries = {};
-  results.forEach((r) => {
-    if (r.pending) {
-      return;
-    }
-    series[r.code] = { [scoreDayKey]: r };
-  });
-  if (Object.keys(series).length) {
-    await saveScoreSeries(series, source);
-  }
   console.log(
-    `[当日评分] 基准日 ${scoreDayKey}：共 ${total} 只，分时补全 ${filled} 只、无法补全 ${skipped} 只`
+    `[当日评分] 交易日 ${scoreDay}：共 ${total} 只，更新K线形态/RSI ${filled} 只、未取到 ${skipped} 只`
   );
-  return { rows: results, scoreDayKey, recentDays: recentDaysOnOrBefore(ctx, scoreDayKey), filled, skipped };
+  return { rows: results, scoreDayKey: dayKey, recentDays, filled, skipped };
 }
 
 /**

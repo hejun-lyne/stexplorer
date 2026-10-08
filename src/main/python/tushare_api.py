@@ -739,32 +739,60 @@ class TushareAPI:
     @staticmethod
     def get_trade_dates(year: Optional[int] = None) -> List[str]:
         try:
-            target_year = year if year is not None else _now_date().year
+            today = _now_date()
+            target_year = year if year is not None else today.year
             # 历史年份视为永久有效，当前年份 7 天内视为新鲜
-            max_age = 8760 if target_year < _now_date().year else 168
+            max_age = 8760 if target_year < today.year else 168
 
             # 1. 命中 meta.db/trade_cal（交易日历结构化表）
             dates: List[str] = []
             try:
-                dates = _db_load_trade_cal(target_year)
-                if dates and (target_year < _now_date().year
-                              or (time.time() - _db_trade_cal_updated_at(target_year)) <= max_age * 3600):
-                    return {"dates": dates}
+                dates = sorted(_db_load_trade_cal(target_year) or [])
             except Exception:
                 dates = []
 
-            # 2. 未命中/过期 → 请求上游并落库
-            pro = get_pro()
-            start_date = f"{target_year}0101"
-            end_date = f"{target_year}1231"
-            df = pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date, is_open='1')
-            if df is None or df.empty:
-                _db_log_update("trade_cal", str(target_year), "fetch_empty", 0)
-                return {"dates": dates} if dates else []
-            cal_dates = pd.to_datetime(df['cal_date']).dt.strftime('%Y-%m-%d').tolist()
-            _db_upsert_trade_cal(cal_dates, 'SSE')
-            _db_log_update("trade_cal", str(target_year), "fetch_ok", len(cal_dates))
-            return {"dates": cal_dates}
+            # 1.1 完整性校验：这张表是共用的，别的取数路径（如 _get_expected_last_trade_date
+            #     只拉近 90 天窗口）也会往里写，所以「updated_at 很新」并不代表整年都缓存了。
+            #     当前年份要求「年初 ~ 最近交易日」都有覆盖，否则当作未命中、重新拉整年。
+            def _covers_year(ds: List[str]) -> bool:
+                if not ds:
+                    return False
+                if target_year != today.year:
+                    return True
+                try:
+                    if str(ds[0]) > f"{target_year}-02-01":
+                        return False
+                    if str(ds[-1]) < (today - timedelta(days=7)).strftime('%Y-%m-%d'):
+                        return False
+                except Exception:
+                    return False
+                return True
+
+            if _covers_year(dates) and (
+                target_year < today.year
+                or (time.time() - _db_trade_cal_updated_at(target_year)) <= max_age * 3600
+            ):
+                return {"dates": dates}
+
+            # 2. 未命中/不完整/过期 → 请求上游并落库
+            try:
+                pro = get_pro()
+                start_date = f"{target_year}0101"
+                end_date = f"{target_year}1231"
+                df = pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date, is_open='1')
+                if df is None or df.empty:
+                    _db_log_update("trade_cal", str(target_year), "fetch_empty", 0)
+                    return {"dates": dates} if dates else []
+                cal_dates = pd.to_datetime(df['cal_date']).dt.strftime('%Y-%m-%d').tolist()
+                _db_upsert_trade_cal(cal_dates, 'SSE')
+                _db_log_update("trade_cal", str(target_year), "fetch_ok", len(cal_dates))
+                return {"dates": sorted(cal_dates)}
+            except Exception as fetch_err:
+                # 上游不可用时沿用本地已有日历（可能不完整），不要整体报错
+                print(f"[get_trade_dates] {target_year} 交易日历拉取失败，沿用本地日历：{fetch_err}")
+                if dates:
+                    return {"dates": dates}
+                return {"error": str(fetch_err)}
         except Exception as e:
             return {"error": str(e)}
 
@@ -1880,115 +1908,75 @@ class TushareAPI:
         except Exception as e:
             return {"error": str(e)}
 
-    # ------------------ 分时走势（新浪财经）------------------
+    # ------------------ 分时走势（腾讯财经）------------------
 
     @staticmethod
-    def _get_trend_from_eastmoney(secid: str) -> List[Dict[str, Any]]:
-        """从东方财富获取指数/板块分时数据（腾讯个股接口不支持 market==2 的指数代码）"""
+    def _get_trend_from_tencent_minute(secid: str) -> List[Dict[str, Any]]:
+        """
+        从腾讯财经获取指数（个股亦可）分时数据 —— 替代原东财 push2his 接口。
+
+        接口: https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=sh000001
+        返回 data.<symbol>.data.data 为分钟字符串数组，每行形如:
+            "HHMM 现价 累计成交量(手) 累计成交额(元)"
+        对累计值做差分得到每分钟成交量，字段口径与个股分时保持一致。
+
+        注意：腾讯不支持部分中证/国证指数代码（如 931068、930606），此时会返回空数据，
+        调用方按「无分时」处理。
+        """
         if requests is None:
             return {"error": "requests 未安装"}
         try:
-            url = "http://push2his.eastmoney.com/api/qt/stock/trends2/get"
-            params = {
-                "secid": secid,
-                "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
-                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
-                "ndays": 1,
-                "iscr": 0,
-                "iscca": 0,
-                "_": int(datetime.now().timestamp() * 1000),
-            }
-            resp = requests.get(url, params=params, timeout=10)
+            symbol = convert_secid_to_tx_symbol(secid)
+            url = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
+            resp = requests.get(
+                url,
+                params={"code": symbol},
+                timeout=10,
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"},
+            )
             resp.encoding = "utf-8"
-            data = resp.json()
-            if not data.get("data") or not data["data"].get("trends"):
-                return {"error": "No trend data available"}
-            
+            node = ((resp.json().get("data") or {}).get(symbol)) or {}
+            minute = node.get("data") or {}
+            rows = minute.get("data") or []
+            date_str = str(minute.get("date") or "")
+            if len(date_str) == 8 and date_str.isdigit():
+                day = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+            else:
+                day = datetime.now().strftime("%Y-%m-%d")
+
             trends = []
-            for item in data["data"]["trends"]:
-                parts = item.split(",")
-                if len(parts) < 8:
+            prev_cum_vol = 0
+            prev_close = None
+            for row in rows:
+                parts = str(row).split()
+                if len(parts) < 2 or len(parts[0]) < 4:
                     continue
-                datetime_str = parts[0]
-                last = _to_float(parts[1])
-                current = _to_float(parts[2])
-                vol = int(parts[5] or 0)
-                average = _to_float(parts[7])
+                current = _to_float(parts[1])
                 if current <= 0:
                     continue
-                up = 1 if current >= last else -1
+                cum_vol = _to_int(parts[2]) if len(parts) > 2 else 0
+                minute_vol = cum_vol - prev_cum_vol
+                if minute_vol < 0:
+                    minute_vol = 0
+                prev_cum_vol = cum_vol
+                # 均价：累计成交额 / (累计成交量×100)，与个股分时口径一致
+                average = (cum_vol and _to_float(parts[3]) / (cum_vol * 100)) or current
+                last = prev_close if prev_close is not None else current
+                hhmm = parts[0]
                 trends.append({
-                    "datetime": datetime_str,
+                    "datetime": f"{day} {hhmm[:2]}:{hhmm[2:4]}",
                     "current": current,
                     "last": last,
-                    "vol": vol,
-                    "average": average,
-                    "up": up,
+                    "vol": minute_vol,
+                    "average": round(average, 2),
+                    "up": 1 if current >= last else -1,
                 })
+                prev_close = current
+            if not trends:
+                return {"error": "No trend data available"}
             return trends
         except Exception as e:
             return {"error": str(e)}
-
-    @staticmethod
-    def _get_trend_from_163(secid: str) -> List[Dict[str, Any]]:
-        """备用：从 163 获取分时数据，按分钟聚合"""
-        if ak is None:
-            return {"error": "akshare 未安装"}
-        code = convert_secid_to_pure_code(secid)
-        df = ak.stock_zh_a_tick_163(symbol=code)
-        
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        # 按分钟聚合
-        minute_map = {}
-        
-        for _, row in df.iterrows():
-            price = float(row.get("价格", 0) or 0)
-            vol = int(row.get("成交量", 0) or 0)
-            time_str = row.get("时间", "")
-            
-            if price <= 0 or vol <= 0:
-                continue
-            
-            minute_key = time_str[:5] if len(time_str) >= 5 else time_str
-            
-            if minute_key not in minute_map:
-                minute_map[minute_key] = {"prices": [], "vols": [], "last_price": price}
-            minute_map[minute_key]["prices"].append(price)
-            minute_map[minute_key]["vols"].append(vol)
-            minute_map[minute_key]["last_price"] = price
-        
-        trends = []
-        prev_minute_close = None
-        total_money = 0
-        total_vol = 0
-        
-        for minute_key in sorted(minute_map.keys()):
-            data = minute_map[minute_key]
-            prices = data["prices"]
-            vols = data["vols"]
-            current = data["last_price"]
-            minute_vol = sum(vols)
-            
-            for p, v in zip(prices, vols):
-                total_money += p * v * 100
-            total_vol += minute_vol
-            average = total_money / (total_vol * 100) if total_vol > 0 else current
-            
-            last = prev_minute_close if prev_minute_close is not None else current
-            up = 1 if current >= last else -1
-            
-            trends.append({
-                "datetime": f"{today} {minute_key}",
-                "current": current,
-                "last": last,
-                "vol": minute_vol,
-                "average": round(average, 2),
-                "up": up,
-            })
-            prev_minute_close = current
-        
-        return trends
 
     @staticmethod
     def get_stock_trend(secid: str) -> List[Dict[str, Any]]:
@@ -1996,7 +1984,8 @@ class TushareAPI:
         获取分时走势数据 - 使用腾讯财经数据源
         
         腾讯接口返回分笔成交数据，需按分钟聚合成与东财一致的分钟数据
-        对于指数/板块代码（market==2 或 is_index_code 为 True），使用东方财富分时接口（腾讯个股接口不支持）
+        指数/板块代码（market==2 或 is_index_code 为 True）走腾讯分钟接口
+        （原先的 push2his.eastmoney.com 已替换，见 _get_trend_from_tencent_minute）
 
         本地存储：个股分钟线归档至 minute_parquet/date=YYYY-MM-DD/{code}.parquet，
         并写入 daily.db/minute_kline 热表。当日收盘后再次请求会直接命中本地数据。
@@ -2019,15 +2008,25 @@ class TushareAPI:
         if ak is None:
             return {"error": "akshare 未安装，无法获取分时数据"}
         try:
-            # 指数/板块代码，腾讯个股分时接口不支持，直接用东方财富
+            # 指数/板块代码，腾讯个股分笔接口不支持，改用腾讯分钟分时接口
             # market==2：东财概念指数/板块
             # market==1 + 指数代码：沪市/中证指数（如 1.000001 上证指数、1.000949 中证农业等）
             if "." in secid:
                 mk = secid.split(".")[0]
                 if mk == "2" or is_index_code(secid):
-                    return TushareAPI._get_trend_from_eastmoney(secid)
+                    return TushareAPI._get_trend_from_tencent_minute(secid)
 
             symbol = convert_secid_to_tx_symbol(secid)
+
+            # 个股优先走腾讯分钟接口：单只 1 次请求
+            # （分笔接口要逐页把全天分笔拉完，实测 1.5s+/只；分钟接口 ~0.07s，数据同源）
+            fast = TushareAPI._get_trend_from_tencent_minute(secid)
+            if isinstance(fast, list) and fast:
+                if is_stock:
+                    TushareAPI._persist_trend(code, today, fast)
+                return fast
+
+            # 兜底：腾讯分笔按分钟聚合（分钟接口不可用 / 停牌时）
             df = ak.stock_zh_a_tick_tx_js(symbol=symbol)
             
             if df.empty:
@@ -2099,17 +2098,46 @@ class TushareAPI:
             return trends
         except Exception as e:
             try:
-                # 指数代码走东方财富分时接口
+                # 指数代码走腾讯分钟分时接口（与个股同源）
                 if "." in secid:
                     mk = secid.split(".")[0]
                     if mk == "2" or is_index_code(secid):
-                        return TushareAPI._get_trend_from_eastmoney(secid)
-                fallback = TushareAPI._get_trend_from_163(secid)
+                        return TushareAPI._get_trend_from_tencent_minute(secid)
+                # 个股：分笔接口异常时兜底用腾讯分钟分时（akshare 已移除 163 分笔接口）
+                fallback = TushareAPI._get_trend_from_tencent_minute(secid)
                 if is_stock and isinstance(fallback, list) and fallback:
                     TushareAPI._persist_trend(code, today, fallback)
                 return fallback
             except:
                 return {"error": str(e)}
+
+    @staticmethod
+    def get_stock_trend_batch(secids: List[str]) -> Dict[str, Any]:
+        """批量获取分时数据（线程池并发，减少单只串行等待）
+
+        常驻 python 服务是「一行一请求」串行处理的，逐只调用分时会退化成 N 次串行等待
+        （一只 0.1~2s），因此批量入口统一走线程池。返回 {secid: [trend...] | {"error": ...}}。
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time as _time
+
+        results: Dict[str, Any] = {}
+        if not secids:
+            return results
+        t0 = _time.time()
+
+        # 分时是腾讯的 HTTP 请求，并发 8 足够快又不易触发限流
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_map = {executor.submit(TushareAPI.get_stock_trend, sid): sid for sid in secids}
+            for future in as_completed(future_map):
+                sid = future_map[future]
+                try:
+                    results[sid] = future.result()
+                except Exception as e:
+                    results[sid] = {"error": str(e)}
+
+        print(f"[PerfPython] trend batch {len(secids)}只: {(_time.time() - t0) * 1000:.1f}ms")
+        return results
 
     @staticmethod
     def _persist_trend(code: str, trade_date: str, trends: List[Dict[str, Any]]) -> None:

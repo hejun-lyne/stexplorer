@@ -126,15 +126,20 @@ export function BuildDailyKFromTrends(params: {
   if (!secid || !date || !trends || !trends.length) {
     return null;
   }
-  const kp = Number(trends[0]?.current) || 0;
-  const sp = Number(trends[trends.length - 1]?.current) || 0;
+  // 只聚合目标交易日当天的分时：调用方可能传入跨交易日的序列（上一交易日残留 / 多来源拼接），
+  // 否则成交量/成交额会把别的交易日的量一起累加，合成出的当日K量能异常大。
+  const dayKey = String(date).replace(/-/g, '').substring(0, 8);
+  const dayTrends = trends.filter((t) => String(t?.datetime || '').replace(/-/g, '').substring(0, 8) === dayKey);
+  const src = dayTrends.length ? dayTrends : trends;
+  const kp = Number(src[0]?.current) || 0;
+  const sp = Number(src[src.length - 1]?.current) || 0;
   if (kp <= 0 || sp <= 0) {
     return null;
   }
   let zg = kp;
   let zd = kp;
   let cjl = 0;
-  trends.forEach((t) => {
+  src.forEach((t) => {
     const cur = Number(t?.current) || 0;
     if (cur <= 0) {
       return;

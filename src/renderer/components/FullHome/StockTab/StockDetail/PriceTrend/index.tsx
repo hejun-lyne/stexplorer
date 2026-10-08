@@ -1553,12 +1553,18 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     // 根据分时数据合成当日K线
     const buildDailyKFromTrends = (trends: Stock.TrendItem[], stockSecid: string, zsValue: number): Stock.KLineItem | null => {
       if (!trends || trends.length === 0) return null;
-      let kp = trends[0].current;
-      let sp = trends[trends.length - 1].current;
-      let zg = trends[0].current;
-      let zd = trends[0].current;
+      const today = new Date();
+      const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+      // 只聚合「当日」分时：分时序列可能残留/拼接了别的交易日（上一交易日、多来源拼接），
+      // 否则合成K线的成交量/成交额会把其它交易日的量一起累加，表现为异常大。
+      const dayTrends = trends.filter((t) => String(t?.datetime || '').substring(0, 10) === dateStr);
+      const src = dayTrends.length ? dayTrends : trends;
+      let kp = src[0].current;
+      let sp = src[src.length - 1].current;
+      let zg = src[0].current;
+      let zd = src[0].current;
       let cjl = 0;
-      for (const t of trends) {
+      for (const t of src) {
         if (t.current > zg) zg = t.current;
         if (t.current < zd) zd = t.current;
         cjl += t.vol || 0;
@@ -1566,8 +1572,6 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       const zde = sp - zsValue;
       const zdf = zsValue !== 0 ? (zde / zsValue) * 100 : 0;
       const zf = zsValue !== 0 ? ((zg - zd) / zsValue) * 100 : 0;
-      const today = new Date();
-      const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
       return {
         secid: stockSecid,
         type: KLineType.Day,
@@ -1611,14 +1615,19 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             }
           }
           if (!found) {
-            // 未找到重叠点：检查新数据是否已完全包含在现有数据中（避免重复追加）
             const lastExistingTime = currentTrends[currentTrends.length - 1]?.datetime || '';
             const lastNewTime = trendd[trendd.length - 1]?.datetime || '';
-            if (lastExistingTime && lastNewTime && lastNewTime <= lastExistingTime) {
+            const existingDay = lastExistingTime.substring(0, 10);
+            const newDay = (trendd[0]?.datetime || '').substring(0, 10);
+            if (existingDay && newDay && existingDay !== newDay) {
+              // 跨交易日：直接以新一天的分时替换，避免把上一交易日（如节前）的分时也画进来
+              trends = trendd;
+            } else if (lastExistingTime && lastNewTime && lastNewTime <= lastExistingTime) {
               // 新数据的时间范围不超出已有数据，无需更新
               return;
+            } else {
+              trends = currentTrends.concat(trendd);
             }
-            trends = currentTrends.concat(trendd);
           }
         } else {
           trends = trendd;

@@ -771,21 +771,25 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
   }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays]);
 
-  // ========== 当日评分（当日分时补全当日K线后重新评分） ==========
+  // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
   // 盘中（或收盘后数据源还没生成当日日K）时，短线评分拿不到基准日的日K，当日列只显示 --。
-  // 这里针对过滤后的股票池逐只取当日分时，合成一根当日K线补进日K序列，再重算评分与K线形态；
-  // 结果按交易日写入评分序列（标记 intraday），当日日K生成后再点一次即可用官方口径覆盖。
-  const handleTodayScore = useCallback(async () => {
+  // 只针对「当前过滤结果的全部股票」（不分页）逐只取当日分时合成一根当日K线，
+  // 算「K线形态 / 阴阳 / 是否放量」与「RSI」，不跑完整评分流程（不取指数分时 / 板块 / 资金 / 涨跌比）；
+  // 当前交易日的评分列显示 -- 。是否交易日直接查交易日历；当日日K生成后再点一次即可用官方口径覆盖。
+  // 注意：这里刻意不用 useCallback —— 它要引用声明在后面的 visibleShowList，
+  // 普通函数在「调用时」才求值，因此不会踩到 TDZ。
+  const handleTodayScore = async () => {
     if (todayScoreLoading) {
       // 再次点击视为暂停：当前股票算完后停止（已算完的结果保留在列表里）
       isTodayScorePausedRef.current = true;
       return;
     }
-    const currentItems = collectCurrentItems();
+    const currentItems = collectVisibleItems();
     if (currentItems.length === 0) {
-      console.log('[当日评分] 没有可评分的股票');
+      console.log('[当日评分] 当前列表没有可评分的股票');
       return;
     }
+    console.log(`[当日评分] 处理当前过滤结果共 ${currentItems.length} 只（全部页）`);
 
     isTodayScorePausedRef.current = false;
     todayScoreRunningRef.current = true;
@@ -810,6 +814,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       const computed = await computeTodayScoreRows(currentItems, {
         source: kLineApiSourceSetting,
         concurrency: 6,
+        historyDays: SHORT_SCORE_HISTORY_DAYS,
         shouldStop: () => isTodayScorePausedRef.current,
         onRow: (row) => {
           todayScoreDoneRef.current += 1;
@@ -817,25 +822,36 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           setTodayScoreProgress(Math.round((todayScoreDoneRef.current / currentItems.length) * 100));
         },
       });
-      // 历史列交易日：优先用评分流程内部（含当日）的交易日，保证当日列一定在
+      // 历史列交易日：用交易日历给出的最近交易日（含当日），保证当日列一定在
       if (computed.recentDays.length) {
         setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
       }
-      // 刷新评分序列（当日列读的是序列里的行）
+      // 刷新历史列（读本地评分序列，不重新计算）；当日不出分，列内固定显示 --
       try {
         const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
           -SHORT_SCORE_HISTORY_DAYS
         );
-        setShortScoreSeries(
-          await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays })
-        );
+        const series = await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays });
+        // 把「当前交易日」从展示序列里摘掉（库里可能还留着旧版本写入的当日分时评分），保证当日列显示 --
+        const k = computed.scoreDayKey;
+        if (k && k.length === 8) {
+          const dashed = `${k.substring(0, 4)}-${k.substring(4, 6)}-${k.substring(6, 8)}`;
+          Object.keys(series).forEach((c) => {
+            const byDay = series[c];
+            if (byDay) {
+              delete byDay[k];
+              delete byDay[dashed];
+            }
+          });
+        }
+        setShortScoreSeries(series);
       } catch {
         // 读取失败不影响本次展示
       }
       if (!isTodayScorePausedRef.current) {
         setTodayScoreProgress(100);
         console.log(
-          `[当日评分] 完成，共 ${currentItems.length} 只（分时补全 ${computed.filled} 只、无法补全 ${computed.skipped} 只）`
+          `[当日评分] 完成，共 ${currentItems.length} 只（更新K线形态/RSI ${computed.filled} 只、未取到 ${computed.skipped} 只）`
         );
       }
     } catch (e) {
@@ -845,7 +861,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       todayScoreRunningRef.current = false;
       todayScoreDoneRef.current = 0;
     }
-  }, [todayScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays]);
+  };
 
   // ========== 训练周期评分预计算（仅训练模式） ==========
   // 把「当前股票池 × 整段训练窗口（trainStartDate ~ trainEndDate）」的短线评分一次性算完并落库，
@@ -1184,6 +1200,25 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     return (showList as any[]).filter((item: any) => !isStarOrBseCode(codeOfListItem(item)));
   }, [showList, excludeStarBse]);
 
+  /**
+   * 「当日评分」的股票池：当前列表的「过滤结果」全部股票（**不分页**）
+   *
+   * 即用户在列表上筛出来的那批：排除科创板/北交所、名字过滤、K线过滤（ftypes）、
+   * 各选股模式（龙头 / 排雷 / 择时 / 主力建仓）的结果集，以及「近 N 日出现过 ≥ 阈值分」这类评分侧过滤，
+   * 全部计入；只是不再无条件把整个板块跑一遍。
+   * 列表行可能是 code / ts_code / secid 三种形态，统一用 codeOfListItem 取回 6 位代码再与池子取交集。
+   */
+  const collectVisibleItems = useCallback((): ShortTermScoreItem[] => {
+    const base = collectCurrentItems();
+    const codes = new Set(
+      (visibleShowList as any[]).map((row) => codeOfListItem(row)).filter(Boolean)
+    );
+    return base.filter((i) => codes.has(i.code));
+  }, [collectCurrentItems, visibleShowList]);
+
+  /** 当前过滤结果的股票数：即「当日评分」实际会处理的数量（全部页），直接标在按钮上 */
+  const todayScoreCount = visibleShowList.length;
+
   return (
     <>
       <div className={classNames(styles.header, styles.actbar)}>
@@ -1283,9 +1318,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             onClick={handleTodayScore}
             loading={todayScoreLoading}
             style={{ marginLeft: 4 }}
-            title="用当日分时补全当日K线后重新评分（当日日K还没生成时使用；日K生成后再点一次会按官方日K覆盖）"
+            title="处理当前过滤结果的全部股票（不分页）：更新只依赖K线的当日K线形态与 RSI（当日K线未生成时用分时补全）。当日不计算综合分，评分列显示 --"
           >
-            {todayScoreLoading ? `当日评分中 ${todayScoreProgress}%` : '当日评分'}
+            {todayScoreLoading ? `当日评分中 ${todayScoreProgress}%` : `当日评分(${todayScoreCount})`}
           </Button>
           {displayMode === 'shortScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>

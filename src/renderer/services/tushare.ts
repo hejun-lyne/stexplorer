@@ -390,26 +390,39 @@ export async function GetTradeDatesFromTushare(year?: string): Promise<string[]>
 export async function IsTradeDay(date?: string): Promise<boolean> {
   const checkDate = date || dayjs().format('YYYY-MM-DD');
   const year = checkDate.substring(0, 4);
-  
+  const norm = (v: any) => String(v || '').replace(/-/g, '').substring(0, 8);
+  const target = norm(checkDate);
+
   // 1. 先读本地缓存
   try {
     const cached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
     if (cached?.success && cached.data?.data?.dates) {
       const dates: string[] = cached.data.data.dates;
-      return dates.includes(checkDate);
+      if (dates.some((d) => norm(d) === target)) {
+        return true;
+      }
+      // 缓存里没有这一天：只有当缓存「已覆盖到该日期之后」才能断定它不是交易日；
+      // 否则说明缓存的日历不完整（例如只存了近期一段），需要重新拉取整年
+      const maxDate = dates.reduce((m, d) => {
+        const n = norm(d);
+        return n > m ? n : m;
+      }, '');
+      if (maxDate && maxDate >= target) {
+        return false;
+      }
     }
   } catch (e) {
     // 缓存不存在，继续往下
   }
-  
-  // 2. 缓存未命中，从 Tushare 拉取全年
+
+  // 2. 缓存未命中 / 不完整，从 Tushare 拉取全年
   const dates = await GetTradeDatesFromTushare(year);
   if (dates.length === 0) {
     // 兜底：周一到周五为交易（简易判断）
     const weekday = dayjs(checkDate).day();
     return weekday !== 0 && weekday !== 6;
   }
-  
+
   // 3. 写入本地缓存（有效期一年）
   try {
     await window.contextModules.electron.sqliteWrite(TRADE_CALENDAR_TABLE, {
@@ -420,8 +433,8 @@ export async function IsTradeDay(date?: string): Promise<boolean> {
   } catch (e) {
     console.error('缓存交易日历失败:', e);
   }
-  
-  return dates.includes(checkDate);
+
+  return dates.some((d) => norm(d) === target);
 }
 
 /**
@@ -743,22 +756,61 @@ export async function GetTrendFromTushare(secid: string): Promise<{ secid: strin
       return { secid, trends: [] };
     }
     
-    const trends = result
-      .map((item: any) => ({
-        datetime: item.datetime,
-        current: item.current,
-        last: item.last,
-        vol: item.vol,
-        average: item.average || 0,
-        up: item.up !== undefined ? item.up : (item.current >= item.last ? 1 : -1),
-      }))
-      .filter((t: any) => t.current > 0);
-    
+    const trends = mapTrendItems(result);
+
     return { secid, trends };
   } catch (error) {
     logError(error, 'GetTrendFromTushare', '获取分时走势失败');
     return { secid, trends: [] };
   }
+}
+
+/** 分时原始记录 → 统一结构（python 侧已抹平腾讯/东财的字段差异） */
+function mapTrendItems(list: any[]): Stock.TrendItem[] {
+  return (list || [])
+    .map((item: any) => ({
+      datetime: item.datetime,
+      current: item.current,
+      last: item.last,
+      vol: item.vol,
+      average: item.average || 0,
+      up: item.up !== undefined ? item.up : (item.current >= item.last ? 1 : -1),
+    }))
+    .filter((t: any) => t.current > 0);
+}
+
+/**
+ * 批量获取分时（python 侧线程池并发，一次 IPC 取回整池）
+ *
+ * 常驻 python 服务是「一行一请求」串行处理的，逐只调用分时会退化成 N 次串行等待
+ * （JS 侧的 concurrency 起不到作用），因此整池取数走这个批量入口。
+ * 返回 { secid: trends }；取不到的 secid 不会出现在结果里（调用方自行逐只兜底）。
+ */
+export async function GetTrendsBatchFromTushare(secids: string[]): Promise<Record<string, Stock.TrendItem[]>> {
+  const map: Record<string, Stock.TrendItem[]> = {};
+  if (!secids || !secids.length) {
+    return map;
+  }
+  try {
+    const result = await callTushare('get_stock_trend_batch', { secids });
+    if (result?.error) {
+      console.error('批量获取分时失败:', result.error);
+      return map;
+    }
+    Object.keys(result || {}).forEach((secid) => {
+      const v = (result as any)[secid];
+      if (!Array.isArray(v)) {
+        return;
+      }
+      const trends = mapTrendItems(v);
+      if (trends.length) {
+        map[secid] = trends;
+      }
+    });
+  } catch (error) {
+    logError(error, 'GetTrendsBatchFromTushare', '批量获取分时失败');
+  }
+  return map;
 }
 
 // ==================== 板块数据 ====================

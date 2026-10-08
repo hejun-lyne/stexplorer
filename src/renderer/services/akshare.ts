@@ -224,29 +224,42 @@ export async function GetTradeDatesFromAkshare(year?: string): Promise<string[]>
  * 判断某天是否为交易日（带本地缓存）
  */
 export async function IsTradeDay(date?: string): Promise<boolean> {
-  const checkDate = date || dayjs().format('YYYYMMDD');
-  const cleanDate = checkDate.replace(/-/g, '');
-  const year = cleanDate.substring(0, 4);
-  
+  const checkDate = date || dayjs().format('YYYY-MM-DD');
+  const year = checkDate.substring(0, 4);
+  // AKShare 侧返回的是 "YYYY-MM-DD"，缓存里也可能是 "YYYYMMDD"：统一归一化后再比较
+  const norm = (v: any) => String(v || '').replace(/-/g, '').substring(0, 8);
+  const target = norm(checkDate);
+
   // 1. 先读本地缓存
   try {
     const cached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
     if (cached?.success && cached.data?.data?.dates) {
       const dates: string[] = cached.data.data.dates;
-      return dates.includes(cleanDate);
+      if (dates.some((d) => norm(d) === target)) {
+        return true;
+      }
+      // 缓存里没有这一天：只有当缓存「已覆盖到该日期之后」才能断定它不是交易日；
+      // 否则说明缓存的日历不完整（例如只存了近期一段），需要重新拉取整年
+      const maxDate = dates.reduce((m, d) => {
+        const n = norm(d);
+        return n > m ? n : m;
+      }, '');
+      if (maxDate && maxDate >= target) {
+        return false;
+      }
     }
   } catch (e) {
     // 缓存不存在，继续往下
   }
-  
-  // 2. 缓存未命中，从 AKShare 拉取全年
+
+  // 2. 缓存未命中 / 不完整，从 AKShare 拉取全年
   const dates = await GetTradeDatesFromAkshare(year);
   if (dates.length === 0) {
     // 兜底：周一到周五为交易（简易判断）
     const weekday = dayjs(checkDate).day();
     return weekday !== 0 && weekday !== 6;
   }
-  
+
   // 3. 写入本地缓存（有效期一年）
   try {
     await window.contextModules.electron.sqliteWrite(TRADE_CALENDAR_TABLE, {
@@ -257,8 +270,8 @@ export async function IsTradeDay(date?: string): Promise<boolean> {
   } catch (e) {
     console.error('缓存交易日历失败:', e);
   }
-  
-  return dates.includes(cleanDate);
+
+  return dates.some((d) => norm(d) === target);
 }
 
 /**
@@ -266,22 +279,23 @@ export async function IsTradeDay(date?: string): Promise<boolean> {
  */
 export async function FilterTradeDays(dates: string[]): Promise<string[]> {
   if (dates.length === 0) return [];
-  
+  const norm = (v: any) => String(v || '').replace(/-/g, '').substring(0, 8);
+
   // 按年份分组，减少缓存查询次数
   const yearMap: Record<string, string[]> = {};
   dates.forEach(d => {
-    const clean = d.replace(/-/g, '');
+    const clean = norm(d);
     const year = clean.substring(0, 4);
     if (!yearMap[year]) yearMap[year] = [];
     yearMap[year].push(clean);
   });
-  
+
   const tradeDays: string[] = [];
   for (const [year, yearDates] of Object.entries(yearMap)) {
     // 确保该年缓存存在
     const cached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
     let validDates: string[] = [];
-    
+
     if (cached?.success && cached.data?.data?.dates) {
       validDates = cached.data.data.dates;
     } else {
@@ -293,12 +307,14 @@ export async function FilterTradeDays(dates: string[]): Promise<string[]> {
         }, dayjs().format('YYYY-MM-DD HH:mm:ss'), year);
       }
     }
-    
+
+    // 统一归一化后再比较：上游/缓存里可能是 "YYYY-MM-DD"，也可能是 "YYYYMMDD"
+    const validSet = new Set(validDates.map((d) => norm(d)));
     yearDates.forEach(d => {
-      if (validDates.includes(d)) tradeDays.push(d);
+      if (validSet.has(d)) tradeDays.push(d);
     });
   }
-  
+
   return tradeDays;
 }
 
@@ -445,58 +461,118 @@ const STOCK_TREND_TABLE = 'stock_trend';
 
 const TRADE_CALENDAR_TUSHARE_TABLE = 'trade_calendar_tushare';
 
+/** 分词条为空时，保证跨天只解析一次交易日（分时每 6s 轮询都会调用） */
+let lastTradeDateMemo: { day: string; value: string } | null = null;
+
+/** 统一把交易日历里的日期归一化成 YYYYMMDD（缓存里可能是 YYYY-MM-DD，也可能是 YYYYMMDD） */
+function normalizeTradeDates(dates: any[]): string[] {
+  return (dates || [])
+    .map((d) => String(d || '').replace(/-/g, '').substring(0, 8))
+    .filter((d) => /^\d{8}$/.test(d))
+    .sort();
+}
+
+/** 在升序交易日里找 <= todayCompact 的最大日期 */
+function pickLastTradeDateCompact(sorted: string[], todayCompact: string): string | null {
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    if (sorted[i] <= todayCompact) {
+      return sorted[i];
+    }
+  }
+  return null;
+}
+
+function compactToDash(compact: string): string {
+  return `${compact.substring(0, 4)}-${compact.substring(4, 6)}-${compact.substring(6, 8)}`;
+}
+
+async function readTradeCalendarCache(year: string): Promise<string[]> {
+  // 1. 优先从 tushare 交易日历缓存读取（已有全年数据）
+  try {
+    const tushareCached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TUSHARE_TABLE, year);
+    if (tushareCached?.success && tushareCached.data?.data?.dates?.length) {
+      return tushareCached.data.data.dates;
+    }
+  } catch (e) { /* ignore */ }
+
+  // 2. 再尝试 akshare 自己的交易日历缓存
+  try {
+    const akshareCached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
+    if (akshareCached?.success && akshareCached.data?.data?.dates?.length) {
+      return akshareCached.data.data.dates;
+    }
+  } catch (e) { /* ignore */ }
+
+  return [];
+}
+
 /**
  * 获取今天往前的最后一个交易日（包含今天），格式 YYYY-MM-DD
  * 优先使用 tushare 已缓存的全年交易日历，避免重复请求 akshare
+ *
+ * 修复：本地交易日历可能只是一段「过时/不完整」的缓存（例如节前最后一次写入，只覆盖到 9-30）。
+ * 旧实现直接取其中的「<= 今天的最大日期」并采信，于是分时缓存的 key 会一直停在旧交易日
+ * （stock_trend: ${code}_2026-09-30），命中节前那份分时，表现为详情页分时图一直显示节前那天。
+ * 现在：当缓存最新日期早于今天时，先主动刷新整年日历再判定；刷新后仍无法确认时才退回工作日兜底。
  */
 async function getLastTradeDate(): Promise<string> {
-  const today = dayjs().format('YYYYMMDD');
+  const todayCompact = dayjs().format('YYYYMMDD');
   const todayFormatted = dayjs().format('YYYY-MM-DD');
-  const year = today.substring(0, 4);
+  const year = todayCompact.substring(0, 4);
+
+  // 同一天内复用，避免分时每 6s 轮询都去校验/刷新交易日历
+  if (lastTradeDateMemo && lastTradeDateMemo.day === todayFormatted) {
+    return lastTradeDateMemo.value;
+  }
+  const finalize = (value: string): string => {
+    lastTradeDateMemo = { day: todayFormatted, value };
+    return value;
+  };
 
   try {
-    let dates: string[] = [];
+    let sorted = normalizeTradeDates(await readTradeCalendarCache(year));
+    let last = pickLastTradeDateCompact(sorted, todayCompact);
 
-    // 1. 优先从 tushare 交易日历缓存读取（已有全年数据）
-    try {
-      const tushareCached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TUSHARE_TABLE, year);
-      if (tushareCached?.success && tushareCached.data?.data?.dates) {
-        dates = tushareCached.data.data.dates;
-      }
-    } catch (e) { /* ignore */ }
-
-    // 2. 再尝试 akshare 自己的交易日历缓存
-    if (dates.length === 0) {
+    // 缓存未覆盖到今天（最新交易日 < 今天）：缓存可能过时/不完整，主动刷新整年日历
+    if (last !== todayCompact) {
       try {
-        const akshareCached = await window.contextModules.electron.sqliteRead(TRADE_CALENDAR_TABLE, year);
-        if (akshareCached?.success && akshareCached.data?.data?.dates) {
-          dates = akshareCached.data.data.dates;
+        const refreshed = await GetTradeDatesFromAkshare(year);
+        const refreshedSorted = normalizeTradeDates(refreshed);
+        if (refreshedSorted.length > 0) {
+          sorted = refreshedSorted;
+          last = pickLastTradeDateCompact(sorted, todayCompact);
+          try {
+            await window.contextModules.electron.sqliteWrite(
+              TRADE_CALENDAR_TABLE,
+              { dates: refreshed, year, syncedAt: dayjs().format('YYYY-MM-DD HH:mm:ss') },
+              dayjs().format('YYYY-MM-DD HH:mm:ss'),
+              year
+            );
+          } catch (e) { /* ignore */ }
         }
-      } catch (e) { /* ignore */ }
-    }
-
-    // 3. 缓存都不可用，直接按周一到周五兜底
-    if (dates.length === 0) {
-      const weekday = dayjs(todayFormatted).day();
-      if (weekday === 0 || weekday === 6) {
-        // 周末，找最近的周五
-        const daysToFriday = weekday === 0 ? 2 : 1;
-        return dayjs(todayFormatted).subtract(daysToFriday, 'day').format('YYYY-MM-DD');
+      } catch (e) {
+        console.error('[akshare] 刷新交易日历失败:', e);
       }
-      return todayFormatted;
     }
 
-    // 4. 在交易日列表中找到 <= 今天的最大日期
-    const sorted = [...dates].sort();
-    for (let i = sorted.length - 1; i >= 0; i--) {
-      if (sorted[i] <= todayFormatted) {
-        return sorted[i];
+    // 只有当「今天就是交易日」或「日历已覆盖到今天之后」（可确定今天不是交易日）时才采信缓存结果
+    if (last && last <= todayCompact) {
+      const covered = sorted.length > 0 && sorted[sorted.length - 1] >= todayCompact;
+      if (last === todayCompact || covered) {
+        return finalize(compactToDash(last));
       }
     }
   } catch (e) {
     console.error('[akshare] 获取最后交易日失败:', e);
   }
-  return todayFormatted;
+
+  // 兜底：周一到周五视为交易日（与 IsTradeDay / isTradeDayOn 的兜底口径一致，宁可多算一次）
+  const weekday = dayjs(todayFormatted).day();
+  if (weekday === 0 || weekday === 6) {
+    const daysToFriday = weekday === 0 ? 2 : 1;
+    return finalize(dayjs(todayFormatted).subtract(daysToFriday, 'day').format('YYYY-MM-DD'));
+  }
+  return finalize(todayFormatted);
 }
 
 /**

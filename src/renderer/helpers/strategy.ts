@@ -687,12 +687,14 @@ export async function runBackTest(
                   dk.zd = t.current;
                 }
                 totalVol += t.vol;
-                totalAmount += t.vol * t.average;
+                // 分时 vol 单位为「手」，成交额 = 手 × 100股 × 均价（元）
+                totalAmount += t.vol * 100 * t.average;
               }
             }
             dk.cjl = totalVol;
             dk.cje = totalAmount;
-            dk.hsl = totalVol / stock.ltg;
+            // 换手率 = (成交量(手) × 100) / 流通股(股) × 100%
+            dk.hsl = stock.ltg > 0 ? ((totalVol * 100) / stock.ltg) * 100 : 0;
             return dk;
           }
           const dayK = generatedayK(currentTime, trends);
