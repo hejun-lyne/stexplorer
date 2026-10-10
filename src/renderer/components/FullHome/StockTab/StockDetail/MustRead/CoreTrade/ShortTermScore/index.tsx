@@ -577,12 +577,25 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
 3. 超卖后3日内6日线上穿24日线（金叉）→ 35分
 4. 上穿后回落至24日线附近整理（金叉待确认）→ 29分
 5. 6日线回抽24日线（接近金叉，尚未穿越）/ RSI多头排列强势区 / 非超卖反转的普通上穿 → 27分
-6. 超卖后反弹修复中（尚未金叉）→ 24分
-7. 上穿后跌回24日线下方（金叉失效）/ 反弹结构中死叉贴线震荡 → 21分
-8. 反弹结构中6日线再度跌回24日线下方，结构转弱 → 16分
-9. RSI空头排列弱势区 → 13分
-10. 持续超买钝化 → 11分（追高风险）
-11. 3日内6日线下穿24日线（死叉）→ 8分
+6. 6日线已上穿12日线、逼近24日线（金叉在即）→ 25分
+7. 跌深后修复、6日线向上逼近24日线（金叉在即）/ 超卖后反弹修复中（尚未金叉）→ 24分
+8. 上穿后跌回24日线下方（金叉失效）/ 反弹结构中死叉贴线震荡 → 21分
+9. 6日线向上逼近24日线（接近金叉，尚未穿越）→ 20分
+10. 反弹结构中6日线再度跌回24日线下方，结构转弱 / 死叉后已收复12日线（结构待修复）→ 16分
+11. RSI空头排列弱势区 / 死叉后快速收复中（结构待修复）→ 13分
+12. 持续超买钝化 → 11分（追高风险）
+13. 3日内6日线下穿24日线（死叉）→ 8分
+
+「金叉在即」（第6~9档）判定——6日线仍在24日线下方，但同时满足：
+ ① 差值已收窄到 5 以内（RSI24 − RSI6 ≤ 5）；
+ ② 当日差值继续收敛（差值比前一日更大）；
+ ③ 当日 RSI6 回升。
+按强度分三档：已收复12日线 → 25分；近10日内RSI6曾跌破35（跌深后修复）→ 24分；其余 → 20分。
+12日线只用于金叉/死叉的提前确认，不参与格局与极值判定。
+（例：600986.SH 2024-04-10 差值两天内从 −14.2 收敛到 −3.2，原判「空头排列」13分 → 24分）
+
+「死叉后快速收复」——3个交易日内死叉，但当日 RSI6 回升且与24日线差值收敛：
+ 已收复12日线 → 16分；否则 → 13分（不再一律压到死叉低分档，例：600986.SH 2024-04-17 由 8 分 → 13 分）。
 
 超买追高衰减（避免买在高点，两段式）：以上第1~6项等"偏多形态"成立时——
  · 偏高区：RSI6 > 68 起每高 1 点扣 1.5 分（到 80 累计扣 18 分）
@@ -595,7 +608,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
               placement="right"
             >
               <span>
-                RSI指标(6/24) <QuestionCircleOutlined style={{ color: 'var(--secondary-text-color)', fontSize: 12, cursor: 'help' }} />
+                RSI指标(6/12/24) <QuestionCircleOutlined style={{ color: 'var(--secondary-text-color)', fontSize: 12, cursor: 'help' }} />
               </span>
             </Tooltip>
           </Col>
@@ -608,7 +621,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         </Row>
         {rsi.available && (
           <div style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginBottom: 6 }}>
-            RSI6: {rsi.rsi6.toFixed(1)}（历史分位{(rsi.rsi6Percentile * 100).toFixed(0)}%），RSI24: {rsi.rsi24.toFixed(1)}；{rsi.pattern}
+            RSI6: {rsi.rsi6.toFixed(1)}（历史分位{(rsi.rsi6Percentile * 100).toFixed(0)}%），RSI12: {rsi.rsi12.toFixed(1)}，RSI24: {rsi.rsi24.toFixed(1)}；{rsi.pattern}
             <span style={{ marginLeft: 6 }}>（该分值仅展示，不计入个股综合分）</span>
           </div>
         )}
