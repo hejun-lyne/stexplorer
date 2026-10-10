@@ -170,6 +170,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const shortScorePoolRef = React.useRef('');
   /** 当前 stocks 列表属于哪个板块（板块切换后立刻点评分时，stocks 可能还是上一板块的列表） */
   const stocksBoardRef = React.useRef('');
+  /** 评分结果列表的来源：'score'=短线评分，'today'=当日评分（切板块后按同样方式自动重算） */
+  const shortScoreSourceRef = React.useRef<'score' | 'today'>('score');
+  /** displayMode 的最新值（切换板块的 effect 里要读「切换前」的模式，避免闭包过期） */
+  const displayModeRef = React.useRef(displayMode);
+  displayModeRef.current = displayMode;
+  /** 「启动中」锁：从进入评分函数到真正开跑之间（在等板块股票列表）不允许被重复触发 */
+  const scoreStartingRef = React.useRef(false);
 
   // 训练周期评分预计算（仅训练模式）：把训练窗口内每个交易日 × 每只股票的评分预先算好并落库
   const [precomputing, setPrecomputing] = useState(false);
@@ -264,8 +271,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     throwOnError: true,
     manual: true,
     onSuccess: (data, params) => {
+      const requestedSecid = String((params as any)?.[1] || '');
+      if (requestedSecid && requestedSecid !== secidRef.current) {
+        // 板块已经切走：丢弃上一板块的慢响应，避免把当前板块的股票列表覆盖回旧板块
+        return;
+      }
       // 记录这份列表属于哪个板块：板块切换后的请求返回前，stocks 还是上一板块的数据
-      stocksBoardRef.current = String((params as any)?.[1] || '');
+      stocksBoardRef.current = requestedSecid;
       setStocks(data.stocks as Stock.DetailItem[]);
       if (ftypes.length > 0) {
         setFiltering(true);
@@ -296,7 +308,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     throwOnError: true,
     manual: true,
     onSuccess: (data, params) => {
-      stocksBoardRef.current = String((params as any)?.[0] || '');
+      const requestedSecid = String((params as any)?.[0] || '');
+      if (requestedSecid && requestedSecid !== secidRef.current) {
+        // 板块已经切走：丢弃上一板块的慢响应
+        return;
+      }
+      stocksBoardRef.current = requestedSecid;
       setStocks(data.stocks as Stock.DetailItem[]);
       if (ftypes.length > 0) {
         setFiltering(true);
@@ -725,12 +742,15 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
 
   // ========== 短线评分 ==========
   const handleShortScore = useCallback(async () => {
-    if (shortScoreLoading) {
+    if (shortScoreLoading || scoreStartingRef.current) {
       isShortScorePausedRef.current = true;
       return;
     }
-    // 板块切换后立刻点击：先等当前板块的股票列表到位，否则会评出上一个板块的股票
-    if (!(await waitBoardStocks())) {
+    // 板块切换后立刻点击 / 切板块自动重算：先等当前板块的股票列表到位，否则会评出上一个板块的股票
+    scoreStartingRef.current = true;
+    const boardReady = await waitBoardStocks();
+    scoreStartingRef.current = false;
+    if (!boardReady) {
       message.warning('当前板块的股票列表还在加载，请稍后再点评分');
       return;
     }
@@ -740,6 +760,10 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     if (shortScoreRemainingRef.current.length === 0) {
       if (currentItems.length === 0) {
         console.log('[短线评分] 没有可评分的股票');
+        if (displayModeRef.current === 'shortScore') {
+          // 切板块后自动重算、而新板块没有可评分的股票：退回股票列表，别停在空的评分列表上
+          setDisplayMode('stocks');
+        }
         return;
       }
       setShortScoreData([]);
@@ -749,6 +773,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       shortScoreCodesRef.current = currentItems.map((i) => i.code);
       // 记录这一轮结果属于哪个板块：切换板块后（onRow / 收尾里的判断）直接丢弃这一轮结果
       shortScorePoolRef.current = secidRef.current;
+      shortScoreSourceRef.current = 'score';
       // 历史列：先取近 N 个交易日（口径与评分基准日一致），已有序列稍后一并刷新
       setShortScoreSeries({});
       try {
@@ -824,19 +849,26 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   // 注意：这里刻意不用 useCallback —— 它要引用声明在后面的 visibleShowList，
   // 普通函数在「调用时」才求值，因此不会踩到 TDZ。
   const handleTodayScore = async () => {
-    if (todayScoreLoading) {
+    if (todayScoreLoading || scoreStartingRef.current) {
       // 再次点击视为暂停：当前股票算完后停止（已算完的结果保留在列表里）
       isTodayScorePausedRef.current = true;
       return;
     }
-    // 板块切换后立刻点击：先等当前板块的股票列表到位，否则会处理上一个板块的股票
-    if (!(await waitBoardStocks())) {
+    // 板块切换后立刻点击 / 切板块自动重算：先等当前板块的股票列表到位，否则会处理上一个板块的股票
+    scoreStartingRef.current = true;
+    const boardReady = await waitBoardStocks();
+    scoreStartingRef.current = false;
+    if (!boardReady) {
       message.warning('当前板块的股票列表还在加载，请稍后再试');
       return;
     }
     const currentItems = collectVisibleItems();
     if (currentItems.length === 0) {
       console.log('[当日评分] 当前列表没有可评分的股票');
+      if (displayModeRef.current === 'shortScore') {
+        // 切板块后自动重算、而新板块没有可评分的股票：退回股票列表
+        setDisplayMode('stocks');
+      }
       return;
     }
     console.log(`[当日评分] 处理当前过滤结果共 ${currentItems.length} 只（全部页）`);
@@ -853,6 +885,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     shortScoreCodesRef.current = currentItems.map((i) => i.code);
     // 记录这一轮结果属于哪个板块：切换板块后丢弃这一轮结果
     shortScorePoolRef.current = secidRef.current;
+    shortScoreSourceRef.current = 'today';
     setShortScoreSeries({});
     setDisplayMode('shortScore');
     setCurrentPage(1);
@@ -923,6 +956,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       todayScoreDoneRef.current = 0;
     }
   };
+  // 每次渲染都更新：切板块自动重算时读它（函数内部用到 visibleShowList，必须取最新闭包）
+  const handleTodayScoreRef = React.useRef<() => void>(() => {});
+  handleTodayScoreRef.current = handleTodayScore;
 
   // ========== 训练周期评分预计算（仅训练模式） ==========
   // 把「当前股票池 × 整段训练窗口（trainStartDate ~ trainEndDate）」的短线评分一次性算完并落库，
@@ -1014,7 +1050,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     (t: BKType, s: string) => {
       if (!s) return;
       setCurrentPage(1);
-      setDisplayMode('stocks');
+      // 正在看评分结果列表时不要退回股票列表：「板块切换」的 effect 会按新板块自动重算并继续展示结果；
+      // 其它模式（股票列表/龙头/排雷/择时/主力建仓）才退回股票列表。
+      if (displayModeRef.current !== 'shortScore') {
+        setDisplayMode('stocks');
+      }
       onChangeBK(t, s);
       setTimeout(() => {
         mayGetStocks(kLineApiSourceSetting, s, 200);
@@ -1042,12 +1082,19 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setShortScoreDays([]);
   }, [trainDate, kLineApiSourceSetting]);
 
-  // 板块切换：列表展示与评分结果都属于上一个板块，必须整体重置。
+  // 板块切换：列表展示、评分结果与选股漏斗结果都属于上一个板块，必须整体重置。
   // （从「板块列表/行业」进入新板块时不会走 changeSecid，displayMode 会停在 shortScore，
   //   而 collectCurrentItems 在 shortScore 模式下会沿用上一次的股票池 —— 就会把上一个板块的股票再评一遍。）
+  // 若切换前正在看评分结果列表，则在新板块的股票列表就绪后自动按新板块重算一次，列表跟着板块走。
   useEffect(() => {
+    const targetSecid = secid;
+    /** 切换前正在展示评分结果时，记录该列表是「短线评分」还是「当日评分」算出来的 */
+    const rescoreMode = displayModeRef.current === 'shortScore' ? shortScoreSourceRef.current : '';
     setCurrentPage(1);
-    setDisplayMode('stocks');
+    if (!rescoreMode) {
+      // 不在评分列表里：退回股票列表
+      setDisplayMode('stocks');
+    }
     // 正在跑的那一轮先停掉（结果不再写入列表，由下面的清理清空）
     isShortScorePausedRef.current = true;
     isTodayScorePausedRef.current = true;
@@ -1080,6 +1127,40 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setMainInDisplayCount(0);
     setMainInProgress(0);
     mainInIndexRef.current = 0;
+
+    if (!rescoreMode) {
+      return;
+    }
+    // 自动重算：等「上一轮收尾」+「新板块股票列表就绪」后再触发一次
+    // （评分函数内部还会再等一次板块就绪，这里主要是避免上一轮还没结束时被当成「暂停」而空跑）
+    let canceled = false;
+    const startedAt = Date.now();
+    const trigger = () => {
+      if (canceled || secidRef.current !== targetSecid) {
+        return;
+      }
+      const busy = isShortScoreRunningRef.current || todayScoreRunningRef.current || scoreStartingRef.current;
+      const boardReady = stocksBoardRef.current === targetSecid;
+      if (busy || !boardReady) {
+        if (Date.now() - startedAt < 15000) {
+          setTimeout(trigger, 200);
+        } else {
+          // 等不到就退回股票列表，避免停在空的评分列表上
+          setDisplayMode('stocks');
+        }
+        return;
+      }
+      console.log(`[短线评分] 板块切换 → 自动按新板块重算（${rescoreMode === 'today' ? '当日评分' : '短线评分'}）`);
+      if (rescoreMode === 'today') {
+        handleTodayScoreRef.current();
+      } else {
+        handleShortScoreRef.current();
+      }
+    };
+    setTimeout(trigger, 0);
+    return () => {
+      canceled = true;
+    };
   }, [secid]);
 
   // 训练日切换（训练工具栏或列表里的「下一天」）→ 若正在展示「短线评分」结果列表，自动按新训练日重算。
