@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination } from 'antd';
+import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination, message } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -163,6 +163,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const isTodayScorePausedRef = React.useRef(false);
   const todayScoreRunningRef = React.useRef(false);
   const todayScoreDoneRef = React.useRef(0);
+  // 板块身份：评分结果与股票池都绑定板块，切换板块后必须整体重来
+  const secidRef = React.useRef(secid);
+  secidRef.current = secid;
+  /** 上一次评分结果所属的板块（用于判断能否沿用上一次的股票池） */
+  const shortScorePoolRef = React.useRef('');
+  /** 当前 stocks 列表属于哪个板块（板块切换后立刻点评分时，stocks 可能还是上一板块的列表） */
+  const stocksBoardRef = React.useRef('');
 
   // 训练周期评分预计算（仅训练模式）：把训练窗口内每个交易日 × 每只股票的评分预先算好并落库
   const [precomputing, setPrecomputing] = useState(false);
@@ -256,7 +263,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const { run: runGetStocks } = useRequest(Services.Stock.GetBankuaiStocksFromDataSource, {
     throwOnError: true,
     manual: true,
-    onSuccess: (data) => {
+    onSuccess: (data, params) => {
+      // 记录这份列表属于哪个板块：板块切换后的请求返回前，stocks 还是上一板块的数据
+      stocksBoardRef.current = String((params as any)?.[1] || '');
       setStocks(data.stocks as Stock.DetailItem[]);
       if (ftypes.length > 0) {
         setFiltering(true);
@@ -286,7 +295,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const { run: runGetIndustryStocks } = useRequest(GetIndustryStocksFromTushare, {
     throwOnError: true,
     manual: true,
-    onSuccess: (data) => {
+    onSuccess: (data, params) => {
+      stocksBoardRef.current = String((params as any)?.[0] || '');
       setStocks(data.stocks as Stock.DetailItem[]);
       if (ftypes.length > 0) {
         setFiltering(true);
@@ -659,10 +669,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         return { code, name: lookupName(code), hybk: lookupHybk(code) };
       });
     }
-    if (displayMode === 'shortScore' && shortScoreCodesRef.current.length) {
-      // 评分结果展示中再次评分：沿用上一次的股票池。
+    if (displayMode === 'shortScore' && shortScoreCodesRef.current.length && shortScorePoolRef.current === secid) {
+      // 评分结果展示中再次评分：沿用上一次的股票池（仅限同一个板块）。
       // （不这样做会退回「当前板块全部股票」，与「预计算训练评分」覆盖的股票池不一致，
       //   多出来的股票只能现算，表现为「预计算过了、再点短线评分仍然很慢」。）
+      // 板块已经切换时必须放弃沿用：否则会把上一个板块的股票当成当前板块再评一遍。
       return shortScoreCodesRef.current.map((code) => {
         const s = stocks.find((x) => x.code === code) as any;
         return {
@@ -679,7 +690,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       circMv: (s as any).lt ? (s as any).lt * 1e8 : undefined,
       hybk: lookupHybk(s.code),
     }));
-  }, [stocks, poolStocks, stockConfigsMapping, displayMode, mainInData, signalData, riskData, leaderData, leaderDisplayCount]);
+  }, [stocks, poolStocks, stockConfigsMapping, displayMode, mainInData, signalData, riskData, leaderData, leaderDisplayCount, secid]);
 
   /**
    * 评分池：在「当前股票池」基础上按「排除科创板+北交所」过滤
@@ -693,10 +704,34 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     return list.filter((i) => !isStarOrBseCode(i.code));
   }, [collectCurrentItemsRaw, excludeStarBse]);
 
+  /**
+   * 等当前板块的股票列表加载完成
+   *
+   * 板块切换后立刻点「短线评分 / 当日评分」时，stocks 还是上一板块的列表（请求在途或被节流），
+   * 直接用它就会评出「上一个板块的股票」；这里等到当前板块的列表到位再开跑。
+   * @returns 是否已就绪（超时返回 false，调用方提示用户稍后再试）
+   */
+  const waitBoardStocks = useCallback(async (timeoutMs = 15000) => {
+    const deadline = Date.now() + timeoutMs;
+    if (stocksBoardRef.current !== secidRef.current) {
+      console.log('[板块] 板块股票列表仍在加载，等就绪后再开始评分...');
+    }
+    while (stocksBoardRef.current !== secidRef.current && Date.now() < deadline) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return stocksBoardRef.current === secidRef.current;
+  }, []);
+
   // ========== 短线评分 ==========
   const handleShortScore = useCallback(async () => {
     if (shortScoreLoading) {
       isShortScorePausedRef.current = true;
+      return;
+    }
+    // 板块切换后立刻点击：先等当前板块的股票列表到位，否则会评出上一个板块的股票
+    if (!(await waitBoardStocks())) {
+      message.warning('当前板块的股票列表还在加载，请稍后再点评分');
       return;
     }
     const currentItems = collectCurrentItems();
@@ -712,6 +747,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       shortScoreTotalRef.current = currentItems.length;
       shortScoreRemainingRef.current = [...currentItems];
       shortScoreCodesRef.current = currentItems.map((i) => i.code);
+      // 记录这一轮结果属于哪个板块：切换板块后（onRow / 收尾里的判断）直接丢弃这一轮结果
+      shortScorePoolRef.current = secidRef.current;
       // 历史列：先取近 N 个交易日（口径与评分基准日一致），已有序列稍后一并刷新
       setShortScoreSeries({});
       try {
@@ -738,24 +775,32 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           if (idx >= 0) {
             shortScoreRemainingRef.current.splice(idx, 1);
           }
+          if (shortScorePoolRef.current !== secidRef.current) {
+            // 板块已切换：这一轮是上一个板块的结果，不再写入列表
+            return;
+          }
           setShortScoreData((prev) => [...prev, row]);
           setShortScoreProgress(Math.round(((shortScoreTotalRef.current - shortScoreRemainingRef.current.length) / shortScoreTotalRef.current) * 100));
         },
       });
+      // 板块已切换时，历史列/序列属于上一个板块，不再回写
+      const sameBoard = shortScorePoolRef.current === secidRef.current;
       // 历史列交易日：优先用评分流程内部（已按训练日收敛）的交易日，避免单独取数失败导致历史列消失
-      if (computed.recentDays.length) {
+      if (sameBoard && computed.recentDays.length) {
         setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
       }
       // 计算完成（或暂停）后刷新评分序列，用于渲染「近 N 日评分」历史列。
       // 只取历史列需要的交易日：整套训练窗口的序列（股票数 × 交易日数）可能有几十 MB，
       // 全量传回渲染进程会明显拖慢点击。
       try {
-        const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
-          -SHORT_SCORE_HISTORY_DAYS
-        );
-        setShortScoreSeries(
-          await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays })
-        );
+        if (sameBoard) {
+          const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
+            -SHORT_SCORE_HISTORY_DAYS
+          );
+          setShortScoreSeries(
+            await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays })
+          );
+        }
       } catch {
         // 读取失败不影响本次展示
       }
@@ -769,7 +814,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       setShortScoreLoading(false);
       isShortScoreRunningRef.current = false;
     }
-  }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays]);
+  }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays, waitBoardStocks]);
 
   // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
   // 盘中（或收盘后数据源还没生成当日日K）时，短线评分拿不到基准日的日K，当日列只显示 --。
@@ -782,6 +827,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     if (todayScoreLoading) {
       // 再次点击视为暂停：当前股票算完后停止（已算完的结果保留在列表里）
       isTodayScorePausedRef.current = true;
+      return;
+    }
+    // 板块切换后立刻点击：先等当前板块的股票列表到位，否则会处理上一个板块的股票
+    if (!(await waitBoardStocks())) {
+      message.warning('当前板块的股票列表还在加载，请稍后再试');
       return;
     }
     const currentItems = collectVisibleItems();
@@ -801,6 +851,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     shortScoreTotalRef.current = currentItems.length;
     shortScoreRemainingRef.current = [];
     shortScoreCodesRef.current = currentItems.map((i) => i.code);
+    // 记录这一轮结果属于哪个板块：切换板块后丢弃这一轮结果
+    shortScorePoolRef.current = secidRef.current;
     setShortScoreSeries({});
     setDisplayMode('shortScore');
     setCurrentPage(1);
@@ -817,16 +869,25 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         historyDays: SHORT_SCORE_HISTORY_DAYS,
         shouldStop: () => isTodayScorePausedRef.current,
         onRow: (row) => {
+          if (shortScorePoolRef.current !== secidRef.current) {
+            // 板块已切换：这一轮是上一个板块的结果，不再写入列表
+            return;
+          }
           todayScoreDoneRef.current += 1;
           setShortScoreData((prev) => [...prev, row]);
           setTodayScoreProgress(Math.round((todayScoreDoneRef.current / currentItems.length) * 100));
         },
       });
+      // 板块已切换时，历史列/序列属于上一个板块，不再回写
+      const sameBoard = shortScorePoolRef.current === secidRef.current;
       // 历史列交易日：用交易日历给出的最近交易日（含当日），保证当日列一定在
-      if (computed.recentDays.length) {
+      if (sameBoard && computed.recentDays.length) {
         setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
       }
       // 刷新历史列（读本地评分序列，不重新计算）；当日不出分，列内固定显示 --
+      if (!sameBoard) {
+        return;
+      }
       try {
         const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
           -SHORT_SCORE_HISTORY_DAYS
@@ -874,6 +935,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
     if (!ontrain || (!trainDate && !trainEndDate)) {
       console.log('[预计算] 仅训练模式下可用');
+      return;
+    }
+    // 板块切换后立刻点击：先等当前板块的股票列表到位，否则会预计算上一个板块的股票池
+    if (!(await waitBoardStocks())) {
+      message.warning('当前板块的股票列表还在加载，请稍后再试');
       return;
     }
     const items = collectCurrentItems();
@@ -942,7 +1008,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     } finally {
       setPrecomputing(false);
     }
-  }, [precomputing, ontrain, trainDate, trainStartDate, trainEndDate, kLineApiSourceSetting, collectCurrentItems]);
+  }, [precomputing, ontrain, trainDate, trainStartDate, trainEndDate, kLineApiSourceSetting, collectCurrentItems, waitBoardStocks]);
 
   const changeSecid = useCallback(
     (t: BKType, s: string) => {
@@ -975,6 +1041,46 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setShortScoreSeries({});
     setShortScoreDays([]);
   }, [trainDate, kLineApiSourceSetting]);
+
+  // 板块切换：列表展示与评分结果都属于上一个板块，必须整体重置。
+  // （从「板块列表/行业」进入新板块时不会走 changeSecid，displayMode 会停在 shortScore，
+  //   而 collectCurrentItems 在 shortScore 模式下会沿用上一次的股票池 —— 就会把上一个板块的股票再评一遍。）
+  useEffect(() => {
+    setCurrentPage(1);
+    setDisplayMode('stocks');
+    // 正在跑的那一轮先停掉（结果不再写入列表，由下面的清理清空）
+    isShortScorePausedRef.current = true;
+    isTodayScorePausedRef.current = true;
+    isLeaderPausedRef.current = true;
+    isRiskPausedRef.current = true;
+    isSignalPausedRef.current = true;
+    isMainInPausedRef.current = true;
+    setShortScoreData([]);
+    setShortScoreProgress(0);
+    setTodayScoreProgress(0);
+    shortScoreRemainingRef.current = [];
+    shortScoreCodesRef.current = [];
+    shortScorePoolRef.current = '';
+    setShortScoreSeries({});
+    setShortScoreDays([]);
+    // 其余漏斗步骤的结果同样属于上一个板块（否则续跑会接着旧板块的进度往下显示）
+    setLeaderData([]);
+    setLeaderDisplayCount(0);
+    setLeaderProgress(0);
+    leaderIndexRef.current = 0;
+    setRiskData([]);
+    setRiskDisplayCount(0);
+    setRiskProgress(0);
+    riskIndexRef.current = 0;
+    setSignalData([]);
+    setSignalDisplayCount(0);
+    setSignalProgress(0);
+    signalIndexRef.current = 0;
+    setMainInData([]);
+    setMainInDisplayCount(0);
+    setMainInProgress(0);
+    mainInIndexRef.current = 0;
+  }, [secid]);
 
   // 训练日切换（训练工具栏或列表里的「下一天」）→ 若正在展示「短线评分」结果列表，自动按新训练日重算。
   // 用 ref 持有最新的 handleShortScore，避免把它写进依赖导致「评分状态变化 → effect 重跑」的循环。
