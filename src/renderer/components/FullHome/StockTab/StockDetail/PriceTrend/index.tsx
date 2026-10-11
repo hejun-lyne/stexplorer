@@ -35,6 +35,7 @@ import styles from './index.scss';
 import { Tag, Switch, Input, Select, Slider, Form } from 'antd';
 import { batch, useDispatch, useSelector } from 'react-redux';
 import { GetKlinesAndFlows } from '@/helpers/stock';
+import { getPreloadedDailyKline } from '@/helpers/klinePreload';
 import { Stock } from '@/types/stock';
 import { Button } from 'antd';
 const { makeWorkerExec } = window.contextModules.electron;
@@ -1821,18 +1822,30 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const [maPeriodType, setMAPeriodType] = useState(MAPeriodType.Medium);
     const [techType, setTechType] = useState(TechIndicatorType.RSI);
     const [fractal, setFractal] = useState(false);
-    const [klineData, setKLineData] = useState({
-      count: DefaultKTypes.map((_) => 250),
-      bkklines: {},
-      klines: DefaultKTypes.map((_) => [] as Stock.KLineItem[]),
-      chans: DefaultKTypes.map((_) => [] as Stock.ChanItem[]),
-      clines: DefaultKTypes.map((_) => [] as Stock.ChanStokeItem[]),
-      shortMAS: DefaultKTypes.map((_) => DefaultMATypes.map((_) => [] as number[])),
-      mediumMAS: DefaultKTypes.map((_) => DefaultMATypes.map((_) => [] as number[])),
-      longMAS: DefaultKTypes.map((_) => DefaultMATypes.map((_) => [] as number[])),
-      jax: DefaultKTypes.map((_) => [[], []]),
-      dgwy: DefaultKTypes.map((_) => [[], [], []]),
-      choumas: DefaultKTypes.map((_) => [] as Stock.ChouMaItem[]),
+    const [klineData, setKLineData] = useState(() => {
+      const klines = DefaultKTypes.map((_) => [] as Stock.KLineItem[]);
+      // 默认展示日K（训练 / 回测模式）时，直接用打开股票时后台预取好的日K，
+      // 挂载即可画图，不用再等一次取数往返。
+      const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
+      if (typeIndex === dayIndex) {
+        const preloaded = getPreloadedDailyKline(secid);
+        if (preloaded && preloaded.length) {
+          klines[dayIndex] = preloaded;
+        }
+      }
+      return {
+        count: DefaultKTypes.map((_) => 250),
+        bkklines: {},
+        klines,
+        chans: DefaultKTypes.map((_) => [] as Stock.ChanItem[]),
+        clines: DefaultKTypes.map((_) => [] as Stock.ChanStokeItem[]),
+        shortMAS: DefaultKTypes.map((_) => DefaultMATypes.map((_) => [] as number[])),
+        mediumMAS: DefaultKTypes.map((_) => DefaultMATypes.map((_) => [] as number[])),
+        longMAS: DefaultKTypes.map((_) => DefaultMATypes.map((_) => [] as number[])),
+        jax: DefaultKTypes.map((_) => [[], []]),
+        dgwy: DefaultKTypes.map((_) => [[], [], []]),
+        choumas: DefaultKTypes.map((_) => [] as Stock.ChouMaItem[]),
+      };
     });
     // 使用 ref 保存最新的 klineData，避免 useThrottleFn 闭包过期问题
     const klineDataRef = useRef(klineData);
@@ -2119,6 +2132,23 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         }
       }
     }, [trainMode]);
+
+    // 打开股票时后台预取的日K：默认展示日K（训练 / 回测模式）时，挂载即用预取数据画图。
+    // 随后的正常取数流程仍会再跑一遍，保证数据是最新的；这里只是让首帧就有日K。
+    const preloadAppliedRef = useRef(false);
+    useEffect(() => {
+      if (preloadAppliedRef.current) {
+        return;
+      }
+      preloadAppliedRef.current = true;
+      const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
+      const ks = klineDataRef.current.klines[dayIndex];
+      if (!ks || !ks.length) {
+        return;
+      }
+      handeKline({ ks, kt: KLineType.Day });
+      flushHandeKline();
+    }, [handeKline, flushHandeKline]);
 
     // 训练模式：分时图展示训练日期的历史分时（当日分时属于未来数据，已被数据层过滤掉）
     const { run: runGetTrainTrends } = useRequest(Services.Stock.requestDealDay, {

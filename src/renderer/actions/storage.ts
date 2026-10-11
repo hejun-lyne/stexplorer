@@ -14,7 +14,7 @@ import { syncRemoteBooksAction } from './note';
 import { syncRemoteSettingAction } from './setting';
 import { syncRemoteStrategyGroupsAction } from './strategy';
 import { syncRemoteTrainingAction } from './training';
-import { syncRemoteTrainArchivesAction, syncRemoteTrainProgressAction } from './train';
+import { restoreTrainCursorAction, syncRemoteTrainArchivesAction, syncRemoteTrainProgressAction } from './train';
 
 export const SYNC_LOGIN_INFO = 'SYNC_LOGIN_INFO';
 export const SYNC_PROFILE = 'SYNC_PROFILE';
@@ -56,11 +56,12 @@ export function switchStorageTypeAction(type: 'github' | 'sqlite' | 'local'): Th
             dispatch(syncRemoteTradingsAction());
             dispatch(syncRemoteTrainingsAction());
             dispatch(syncRemoteTrainArchivesAction());
-            dispatch(syncRemoteTrainProgressAction());
             dispatch(syncRemoteBooksAction());
             dispatch(syncRemoteStrategyGroupsAction());
-            dispatch(syncRemoteSettingAction());
           });
+          await dispatch(syncRemoteSettingAction());
+          await dispatch(syncRemoteTrainProgressAction());
+          dispatch(restoreTrainCursorAction());
         }
       } else if (type === 'github') {
         const st = Helpers.Storage.StorageHelper.InitGithubStorage();
@@ -72,11 +73,12 @@ export function switchStorageTypeAction(type: 'github' | 'sqlite' | 'local'): Th
             dispatch(syncRemoteTradingsAction());
             dispatch(syncRemoteTrainingsAction());
             dispatch(syncRemoteTrainArchivesAction());
-            dispatch(syncRemoteTrainProgressAction());
             dispatch(syncRemoteBooksAction());
             dispatch(syncRemoteStrategyGroupsAction());
-            dispatch(syncRemoteSettingAction());
           });
+          await dispatch(syncRemoteSettingAction());
+          await dispatch(syncRemoteTrainProgressAction());
+          dispatch(restoreTrainCursorAction());
         }
       }
     } catch (error) {
@@ -167,16 +169,22 @@ export function renewStorageAction(): ThunkAction {
       dispatch({ type: SYNC_STORAGE, payload: st });
       
       if (st) {
-        dispatch(syncRemoteFavorSitesAction());
-        dispatch(syncRemoteTrainingAction());
-        dispatch(syncRemoteStocksAction());
-        dispatch(syncRemoteTradingsAction());
-        dispatch(syncRemoteTrainingsAction());
-        dispatch(syncRemoteTrainArchivesAction());
-        dispatch(syncRemoteTrainProgressAction());
-        dispatch(syncRemoteBooksAction());
-        dispatch(syncRemoteStrategyGroupsAction());
-        dispatch(syncRemoteSettingAction());
+        batch(() => {
+          dispatch(syncRemoteFavorSitesAction());
+          dispatch(syncRemoteTrainingAction());
+          dispatch(syncRemoteStocksAction());
+          dispatch(syncRemoteTradingsAction());
+          dispatch(syncRemoteTrainingsAction());
+          dispatch(syncRemoteTrainArchivesAction());
+          dispatch(syncRemoteBooksAction());
+          dispatch(syncRemoteStrategyGroupsAction());
+        });
+        // 「设置 → 训练进度 → 校正训练游标」必须按顺序：
+        // 训练推进时 trainDate 不落盘，需等设置/进度都加载完后，用进度里的 currentDate
+        // 恢复游标，才能实现「下次打开应用从上次的交易日继续」，而不是从头开始。
+        await dispatch(syncRemoteSettingAction());
+        await dispatch(syncRemoteTrainProgressAction());
+        dispatch(restoreTrainCursorAction());
       }
     } catch (error) {
       console.log('更新storage信息出错', error);

@@ -11,7 +11,21 @@ import styles from './index.scss';
 import { batch, useDispatch } from 'react-redux';
 import { syncStockOnDetailedAction } from '@/actions/stock';
 import { appendReferAction } from '@/actions/note';
-import { StockMarketType } from '@/utils/enums';
+import { KLineType, StockMarketType } from '@/utils/enums';
+import * as Helpers from '@/helpers';
+import * as Services from '@/services';
+import { preloadDailyKline } from '@/helpers/klinePreload';
+
+/** 打开股票时后台预取的日K条数（与详情页 PriceTrend 的默认条数一致，保证命中同一份缓存） */
+const PRELOAD_DAY_KLINE_COUNT = 250;
+
+/**
+ * 后台新增标签页时的「短暂激活」时长（ms）
+ *
+ * 详情页需要在可见状态下完成挂载与尺寸量测，因此打开后台标签页时先切过去一下再切回来。
+ * 时间要足够让 React 提交 DOM、跑完 useEffect 量测（约 1~2 帧），又不能太长以免明显闪屏。
+ */
+const TEMP_ACTIVATE_MS = 120;
 
 export interface FullHomeProps { }
 
@@ -72,9 +86,18 @@ const FullHome: React.FC<FullHomeProps> = () => {
   const [kview, setKView] = useState(false);
   const dispatch = useDispatch();
   // 打开详情
-  // activate=false 时仅新增/更新详情标签页，但不自动切换过去（仍停留在当前页面）
+  // activate=false 时不把界面停在详情页：新增标签页后短暂激活一下（让它以正确尺寸挂载渲染），
+  // 随后自动切回原来的页面
   const openStock = useCallback((secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType, activate = true) => {
     const tab = homeCaches.stockTabs.find((s) => s.tid === secid);
+    const isNewTab = !tab;
+    // 板块 / 指数 / 期货走的是别的详情页，不需要日K
+    const stockType = Helpers.Stock.GetStockType(secid);
+    const willShowStockDetail =
+      type !== StockMarketType.Future &&
+      stockType !== StockMarketType.Zindex &&
+      stockType !== StockMarketType.Quotation &&
+      stockType !== StockMarketType.USZindex;
     if (!tab) {
       homeCaches.stockTabs.push({
         tid: secid,
@@ -85,19 +108,48 @@ const FullHome: React.FC<FullHomeProps> = () => {
         type: type || StockMarketType.AB,
       });
       dispatch(syncStockOnDetailedAction(secid, true));
+      // 打开股票时后台预取日K线（与详情页同一份缓存）：详情页 K 线组件挂载时可直接画图，
+      // 不用再等一次取数往返。
+      if (willShowStockDetail) {
+        preloadDailyKline(secid, Services.Stock.GetKFromSetting(secid, KLineType.Day, PRELOAD_DAY_KLINE_COUNT));
+      }
     } else if (backtestDate) {
       // [新增] 从回测打开同一股票时更新回测日期
       tab.backtestDate = backtestDate;
     }
-    // 用新数组引用触发渲染，保证 activate=false（不切换 tab）时新增的标签页也能立刻出现
+    // 用新数组引用触发渲染，保证新增的标签页能立刻出现
     setStockTabs([...homeCaches.stockTabs]);
-    if (activate && !kview) {
+    if (kview) {
+      // 全盘视图下不渲染详情面板，无需切换
+      return;
+    }
+    if (activate) {
       homeCaches.activeTab = {
         hists: homeCaches.activeTab.hists.concat([homeCaches.activeTab.current]),
         lastSecid: secid,
         current: secid,
       };
       setActiveTabid(homeCaches.activeTab);
+      return;
+    }
+    // activate=false（后台新增标签页、不切换过去）：先把新标签页「短暂激活」一下，
+    // 让它以正确的容器尺寸完成挂载与量测（若在隐藏状态下挂载，容器尺寸是 0，
+    // 详情页的分栏高度 / 图表宽度会被量成 0 而塌陷），随后再切回原来的页面。
+    // 这样该标签页已挂载完毕（图表也已按正确尺寸渲染），用户之后点开即见，无需再等。
+    if (isNewTab && willShowStockDetail) {
+      const prevCurrent = homeCaches.activeTab.current;
+      const prevLastSecid = homeCaches.activeTab.lastSecid;
+      // 临时切到新标签页（不写入 hists，避免污染前进/后退历史）
+      homeCaches.activeTab = { hists: homeCaches.activeTab.hists, lastSecid: secid, current: secid };
+      setActiveTabid({ ...homeCaches.activeTab });
+      setTimeout(() => {
+        // 用户已经自己切走了就不要抢回来
+        if (homeCaches.activeTab.current !== secid) {
+          return;
+        }
+        homeCaches.activeTab = { hists: homeCaches.activeTab.hists, lastSecid: prevLastSecid, current: prevCurrent };
+        setActiveTabid({ ...homeCaches.activeTab });
+      }, TEMP_ACTIVATE_MS);
     }
   }, [kview]);
   const openTag = useCallback((name: string, markettype: StockMarketType) => {

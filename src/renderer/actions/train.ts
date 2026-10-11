@@ -75,7 +75,7 @@ export function syncRemoteTrainProgressAction(): ThunkAction {
       if (!storage) {
         throw new Error('storage未初始化');
       }
-      storage
+      return storage
         .ReadRemoteTrainProgress()
         .then((content) => {
           if (content && content.lastModified >= progressModified) {
@@ -110,6 +110,7 @@ export function syncRemoteTrainProgressAction(): ThunkAction {
         });
     } catch (error) {
       console.log('同步训练进度出错', error);
+      return Promise.resolve();
     }
   };
 }
@@ -179,6 +180,26 @@ export function resumeTrainAction(): ThunkAction {
         trainDate: progress.currentDate,
       })
     );
+  };
+}
+
+/**
+ * 启动时用「未完成训练进度」校正训练游标（trainDate）。
+ *
+ * 训练按天推进时 setTrainCurrentDateAction 只更新内存、不落盘，所以重新打开应用后
+ * 设置里的 trainDate 是旧值（通常是开始日），需要按 progress.currentDate 恢复到上次的交易日。
+ * 这里只恢复游标，其它训练配置（窗口/资金/佣金）以设置为准，避免覆盖用户刚改过的配置。
+ */
+export function restoreTrainCursorAction(): ThunkAction {
+  return (dispatch, getState) => {
+    const {
+      train: { progress },
+      setting: { systemSetting },
+    } = getState();
+    if (!systemSetting.ontrain) return;
+    if (!progress || !progress.currentDate) return;
+    if (progress.currentDate === systemSetting.trainDate) return;
+    dispatch(setSystemSettingAction({ ...systemSetting, trainDate: progress.currentDate }));
   };
 }
 

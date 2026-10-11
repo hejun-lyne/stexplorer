@@ -11,6 +11,7 @@ import { syncRemoteBooksAction } from './note';
 import { syncRemoteSettingAction } from './setting';
 import { syncRemoteStrategyGroupsAction } from './strategy';
 import { syncRemoteTrainingAction } from './training';
+import { restoreTrainCursorAction, syncRemoteTrainProgressAction } from './train';
 
 export const SYNC_LOGIN_INFO = 'SYNC_LOGIN_INFO';
 export const SYNC_PROFILE = 'SYNC_PROFILE';
@@ -88,14 +89,19 @@ export function renewStorageAction(): ThunkAction {
       dispatch({ type: SYNC_STORAGE, payload: st });
       
       if (st) {
-        dispatch(syncRemoteFavorSitesAction());
-        dispatch(syncRemoteTrainingAction());
-        // dispatch(syncRemoteStocksAction());
-        dispatch(syncRemoteTradingsAction());
-        dispatch(syncRemoteTrainingsAction());
-        dispatch(syncRemoteBooksAction());
-        dispatch(syncRemoteStrategyGroupsAction());
-        dispatch(syncRemoteSettingAction());
+        batch(() => {
+          dispatch(syncRemoteFavorSitesAction());
+          dispatch(syncRemoteTrainingAction());
+          // dispatch(syncRemoteStocksAction());
+          dispatch(syncRemoteTradingsAction());
+          dispatch(syncRemoteTrainingsAction());
+          dispatch(syncRemoteBooksAction());
+          dispatch(syncRemoteStrategyGroupsAction());
+        });
+        // 设置 → 训练进度 → 校正训练游标：保证打开应用后从上次的交易日继续训练
+        await dispatch(syncRemoteSettingAction());
+        await dispatch(syncRemoteTrainProgressAction());
+        dispatch(restoreTrainCursorAction());
       }
     } catch (error) {
       console.log('更新storage信息出错', error);

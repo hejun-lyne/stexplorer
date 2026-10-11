@@ -260,6 +260,7 @@ const StockTab: React.FC<StockTabProps> = React.memo(
                 })}
                 {stockTabs.map((tab) => {
                   const st = stocksMapping[tab.tid];
+                  const stockTabType = Helpers.Stock.GetStockType(tab.tid);
                   return (
                     <Tabs.TabPane
                       tab={
@@ -288,9 +289,9 @@ const StockTab: React.FC<StockTabProps> = React.memo(
                           onChangeUpdate={onStockChange}
                           onOpenUrl={onNewSite}
                         />
-                      ) : Helpers.Stock.GetStockType(tab.tid) == StockMarketType.Zindex ||
-                        Helpers.Stock.GetStockType(tab.tid) == StockMarketType.Quotation ||
-                        Helpers.Stock.GetStockType(tab.tid) == StockMarketType.USZindex ? (
+                      ) : stockTabType == StockMarketType.Zindex ||
+                        stockTabType == StockMarketType.Quotation ||
+                        stockTabType == StockMarketType.USZindex ? (
                         <BKDetail
                           active={activeTabid === tab.tid}
                           secid={tab.tid}
