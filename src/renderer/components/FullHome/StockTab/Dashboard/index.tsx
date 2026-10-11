@@ -14,10 +14,11 @@ import MarketMonitor from './MarketMonitor';
 import { Button } from 'antd';
 import { VerticalAlignBottomOutlined, VerticalAlignTopOutlined } from '@ant-design/icons';
 import { syncRemoteStocksAction } from '@/actions/stock';
+import { StockMarketType } from '@/utils/enums';
 
 export interface DashboardProps {
   settings: System.MonitorSetting;
-  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType, activate?: boolean) => void;
 }
 
 const Dashboard: React.FC<DashboardProps> = React.memo(({ settings, onOpenStock }) => {

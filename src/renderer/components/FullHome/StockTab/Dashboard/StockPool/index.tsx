@@ -2,7 +2,7 @@ import React from 'react';
 import { batch, useSelector } from 'react-redux';
 import { Col, Row, Tabs } from 'antd';
 import styles from './index.scss';
-import { BKType, StrategyType, StrategyTypeNames } from '@/utils/enums';
+import { BKType, StrategyType, StrategyTypeNames, StockMarketType } from '@/utils/enums';
 import BKList from './BKList';
 import { useCallback } from 'react';
 import { useState } from 'react';
@@ -23,7 +23,7 @@ import Backtest from './Backtest';
 import * as Services from '@/services';
 
 export interface StockPoolProps {
-  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string) => void;
+  onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType, activate?: boolean) => void;
 }
 const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
   const [activeKey, setActiveKey] = useState('stocks');
@@ -195,7 +195,8 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
             industries={industries}
             gainians={gainians}
             onChangeBK={changeBK}
-            onOpenStock={onOpenStock}
+            // 打开股票详情时只新增标签页，不自动切换到详情页（停留在 STList 页面）
+            onOpenStock={(s, n) => onOpenStock(s, n, undefined, undefined, undefined, undefined, false)}
             active={activeKey === 'stocks'}
           />
         </Tabs.TabPane>

@@ -94,7 +94,7 @@ export interface StockTabProps {
   onNoteChange: (tid: string, title?: string, changed?: boolean) => void;
   onStrategyChange: (tid: string, title?: string, changed?: boolean) => void;
   onNewSite: (url: string) => void;
-  onNewStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType) => void;
+  onNewStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType, activate?: boolean) => void;
   onAppendRefer: (tab: NoteTabId, url: string, text: string) => void;
   activeTabid: string | undefined;
 }

@@ -72,7 +72,8 @@ const FullHome: React.FC<FullHomeProps> = () => {
   const [kview, setKView] = useState(false);
   const dispatch = useDispatch();
   // 打开详情
-  const openStock = useCallback((secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType) => {
+  // activate=false 时仅新增/更新详情标签页，但不自动切换过去（仍停留在当前页面）
+  const openStock = useCallback((secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType, activate = true) => {
     const tab = homeCaches.stockTabs.find((s) => s.tid === secid);
     if (!tab) {
       homeCaches.stockTabs.push({
@@ -88,8 +89,9 @@ const FullHome: React.FC<FullHomeProps> = () => {
       // [新增] 从回测打开同一股票时更新回测日期
       tab.backtestDate = backtestDate;
     }
-    setStockTabs(homeCaches.stockTabs);
-    if (!kview) {
+    // 用新数组引用触发渲染，保证 activate=false（不切换 tab）时新增的标签页也能立刻出现
+    setStockTabs([...homeCaches.stockTabs]);
+    if (activate && !kview) {
       homeCaches.activeTab = {
         hists: homeCaches.activeTab.hists.concat([homeCaches.activeTab.current]),
         lastSecid: secid,
