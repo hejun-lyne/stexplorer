@@ -104,7 +104,7 @@ export const SHORT_TERM_SCORE_CONFIG = {
   // 不用固定值（如 30/35）：不同股票 RSI6 的"跌不深/跌得深"差别很大
   // （例：300990.SZ 近一年 RSI6 局部低点中位数 ≈36.8，很少跌破 35；600519.SH 则常跌到 20 附近）。
   // 做法：取近 rsiDipLevelLookback 日 RSI6 的局部低点（典型反弹位）中位数，加容差后夹在 [floor, cap]。
-  rsiDipLevelLookback: 250, // 计算深跌水平的回看天数
+  rsiDipLevelLookback: 90, // 计算深跌水平的回看天数
   rsiDipLevelTroughWindow: 3, // 局部低点判定半径：i±k 内最小即为低点
   rsiDipLevelMaxRsi: 55, // 只把 RSI6 ≤ 该值的局部低点计入（排除高位回落形成的低点）
   rsiDipLevelTolerance: 2, // 深跌判定容差：RSI6 ≤ 该股低点水平 + 容差

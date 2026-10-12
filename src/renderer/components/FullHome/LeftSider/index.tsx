@@ -15,7 +15,8 @@ import styles from '../index.scss';
 import { useContextMenu } from '@/utils/hooks';
 import * as Utils from '@/utils';
 import * as Enums from '@/utils/enums';
-import { DeleteOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
+import classnames from 'classnames';
+import { DeleteOutlined, DownOutlined, MenuFoldOutlined, MenuUnfoldOutlined, RightOutlined } from '@ant-design/icons';
 
 export const stockTypesConfig = [
   { name: '指数', code: Enums.StockMarketType.Zindex },
@@ -43,6 +44,8 @@ const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, op
   const dispatch = useDispatch();
   /** 训练归档 */
   const archives = useSelector((state: StoreState) => state.train.archives);
+  /** 训练归档列表收起/展开 */
+  const [archivesCollapsed, setArchivesCollapsed] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [showSearchDrawer, setShowSearchDrawer] = useState(false);
   const [showSettingDrawer, setShowSettingDrawer] = useState(false);
@@ -106,44 +109,55 @@ const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, op
           <ReferSites filterText={filterText} onOpenSite={openSite} onAddSiteTag={openSiteTagDrawer} />
         </div>
         <div className={styles.category}>
-          <div className={styles.categoryHeader}>
+          <div
+            className={classnames(styles.categoryHeader, styles.archiveHeader)}
+            onClick={() => setArchivesCollapsed((v) => !v)}
+            title={archivesCollapsed ? '展开训练归档' : '收起训练归档'}
+          >
             <span>训练归档</span>
-            <span>{archives.length}</span>
+            <span className={styles.archiveCount}>
+              {archives.length}
+              {archivesCollapsed ? <RightOutlined /> : <DownOutlined />}
+            </span>
           </div>
-          {archives.length === 0 && <div className={styles.archiveEmpty}>暂无训练归档</div>}
-          {archives.map((archive) => (
-            <div
-              key={archive.id}
-              className={styles.archiveItem}
-              title={`${archive.startDate} ~ ${archive.endDate}`}
-              onClick={() => openTrainArchive(archive)}
-            >
-              <div className={styles.archiveTitle}>
-                {archive.name || archive.secid}
-                <span className={Utils.GetValueColor(Number(archive.totalReturn) || 0).textClass}>
-                  {' '}
-                  {(Number(archive.totalReturn) || 0) >= 0 ? '+' : ''}
-                  {((Number(archive.totalReturn) || 0) * 100).toFixed(2)}%
-                </span>
-              </div>
-              <div className={styles.archiveSub}>
-                {archive.startDate} ~ {archive.endDate} ｜ 夏普 {(Number(archive.sharpeRatio) || 0).toFixed(2)} ｜ 回撤{' '}
-                {((Number(archive.maxDrawdown) || 0) * 100).toFixed(2)}%
-              </div>
-              <Popconfirm
-                title="删除该训练归档？"
-                okText="删除"
-                cancelText="取消"
-                onConfirm={() => dispatch(removeTrainArchiveAction(archive.id))}
-              >
-                <DeleteOutlined
-                  className={styles.archiveDel}
-                  title="删除归档"
-                  onClick={(e) => e.stopPropagation()}
-                />
-              </Popconfirm>
-            </div>
-          ))}
+          {!archivesCollapsed && (
+            <>
+              {archives.length === 0 && <div className={styles.archiveEmpty}>暂无训练归档</div>}
+              {archives.map((archive) => (
+                <div
+                  key={archive.id}
+                  className={styles.archiveItem}
+                  title={`${archive.startDate} ~ ${archive.endDate}`}
+                  onClick={() => openTrainArchive(archive)}
+                >
+                  <div className={styles.archiveTitle}>
+                    {archive.name || archive.secid}
+                    <span className={Utils.GetValueColor(Number(archive.totalReturn) || 0).textClass}>
+                      {' '}
+                      {(Number(archive.totalReturn) || 0) >= 0 ? '+' : ''}
+                      {((Number(archive.totalReturn) || 0) * 100).toFixed(2)}%
+                    </span>
+                  </div>
+                  <div className={styles.archiveSub}>
+                    {archive.startDate} ~ {archive.endDate} ｜ 夏普 {(Number(archive.sharpeRatio) || 0).toFixed(2)} ｜ 回撤{' '}
+                    {((Number(archive.maxDrawdown) || 0) * 100).toFixed(2)}%
+                  </div>
+                  <Popconfirm
+                    title="删除该训练归档？"
+                    okText="删除"
+                    cancelText="取消"
+                    onConfirm={() => dispatch(removeTrainArchiveAction(archive.id))}
+                  >
+                    <DeleteOutlined
+                      className={styles.archiveDel}
+                      title="删除归档"
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </Popconfirm>
+                </div>
+              ))}
+            </>
+          )}
         </div>
         <Collapse defaultActiveKey={stockTypesConfig.map((type) => type.code)} bordered={false}>
           {stockTypesConfig.map((type) => (

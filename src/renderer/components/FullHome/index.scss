@@ -141,6 +141,19 @@
     }
   }
 }
+// 训练归档分组头：可点击收起/展开
+.archiveHeader {
+  cursor: pointer;
+  user-select: none;
+  &:hover {
+    color: var(--main-text-color);
+  }
+}
+.archiveCount {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .mainTab {
   background-color: var(--nav-background-color);
 }
