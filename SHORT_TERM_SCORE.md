@@ -92,7 +92,13 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 **第一步：定"格局"**（回看 `rsiStateLookback(60)` 日）
 
 - **真实超买**：`RSI6 ≥ 80`（或 `≥ 72` 且处 95% 以上历史分位）**且** `RSI6 − RSI24 ≥ 10`
-- **真实超卖**：`RSI6 ≤ 30` **且** `RSI6 − RSI24 ≤ −10`
+- **真实超卖**：`RSI6 ≤ 该股「深跌口径」` **且** `RSI6 − RSI24 ≤ −10`（深跌口径见下，逐股动态）
+
+**深跌口径（逐股动态，替代固定的 30/35）**：取近 `rsiDipLevelLookback(250)` 日 RSI6 的局部低点
+（`rsiDipLevelTroughWindow(3)`：i±3 内最小；且 `≤ rsiDipLevelMaxRsi(55)`，排除高位回落）的**中位数**
+= 该股"典型反弹位"，加 `rsiDipLevelTolerance(2)` 后夹在 [`rsiDipLevelFloor(30)`, `rsiDipLevelCap(42)`]。
+实测：300990.SZ ≈38.5（很少跌破 35 → 回落到 33 就算它的深跌）、603259.SH ≈34、600519.SH/000001.SZ ≈31（被下限兜住）。
+「真实超卖」「跌深后修复 / 修复中」都用这个口径（差值仍需 ≤ −10 双重确认），界面明细行会显示当前口径值。
 - 谁更靠后决定格局：
   - 最近是**超买** → 才可能判定「超买后回踩」
   - 最近是**超卖** → 其后走势一律归「超卖后反抽」（即使中途冲高再回落），不会被误判成超买回踩
@@ -102,11 +108,11 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 - 金叉/死叉只在 `rsiCrossFreshDays(3)` 个交易日内有效，过期改按当前均线排列判定
 - 「超卖后金叉」额外要求：**从上穿日往回倒推 `rsiOversoldCrossDays(5)` 日内出现过真实超卖状态**，否则只是普通上穿（不加分）
 - **「金叉在即」前瞻档**：6 日线仍在 24 日线下方，但同时满足 —— ① 差值收窄到 `rsiApproachGap(5)` 以内；② 当日差值继续收敛；③ 当日 RSI6 回升。
-  三档强度：**已收复 12 日线 → 25 分**；近 `rsiApproachRepairDays(10)` 日内 RSI6 曾跌破 `rsiApproachDipRsi(35)`（跌深后修复）→ 24 分；其余 → 20 分。
+  三档强度：**已收复 12 日线 → 25 分**；近 `rsiApproachRepairDays(10)` 日内 RSI6 曾跌破该股「深跌口径」（跌深后修复）→ 24 分；其余 → 20 分。
   没有这一档时，这类"两天内从 −14 收敛到 −3"的转折前夜会被一律判成「空头排列弱势区」13 分（如 600986.SH 2024-04-10）。
 - **「死叉后快速收复」**：3 个交易日内死叉，但当日 RSI6 回升且与 24 日线差值收敛 → **已收复 12 日线 16 分 / 否则 13 分**（不再一律压到死叉低分档）。
   例：600986.SH 2024-04-17（死叉 2 日后 RSI6 由 32.4 回到 43.6）由 8 分 → 13 分。
-- **「跌深后修复中」**：近 `rsiApproachRepairDays(10)` 日内 RSI6 曾跌破 `rsiApproachDipRsi(35)`，当日 RSI6 回升 ≥ `rsiApproachReboundJump(5)` 且差值收敛，但离 24 日线仍 > `rsiApproachGap(5)`（还不到"金叉在即"）→ **16 分**。
+- **「跌深后修复中」**：近 `rsiApproachRepairDays(10)` 日内 RSI6 曾跌破该股「深跌口径」，当日 RSI6 回升 ≥ `rsiApproachReboundJump(5)` 且差值收敛，但离 24 日线仍 > `rsiApproachGap(5)`（还不到"金叉在即"）→ **16 分**。
   例：300990.SZ 2026-10-12（RSI6 由 33.1 回到 42.1，差值 −17.5 → −9.6）由「空头排列」13 分 → 16 分。
   注意：这里不等于"真实超卖"——真实超卖要求 `RSI6 ≤ 30 且差值 ≤ −10` 双重确认，该股最低只到 33.1，因此走的是"超买后回落修复"路径。
 
@@ -272,7 +278,7 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 3. **板块/相对强度评分**：板块短期趋势（含「位置接近反转点 / 已偏离反转点」标注）、个股相对强度（10 日超额）、板块环境分（含择时位置与下调分数）、个股与板块关系、近 10 日涨幅对比
 4. **个股表现评分（量能20 + 资金60；RSI 仅计算与展示，不计入加权）**：逐项分数/满分 + 进度条 + 说明行
    - 量能：`同类市值显著活跃（5日换手率为同类2.08倍），量能放大（1.88倍）；距放量启动3日｜自启动+2.2%`
-   - RSI：`RSI6: 44.4（历史分位46%），RSI12: 45.0，RSI24: 45.6；超卖反弹后6日线回抽24日线（接近金叉）`（该分值仅展示，不计入个股综合分）
+   - RSI：`RSI6: 44.4（历史分位46%），RSI12: 45.0，RSI24: 45.6，深跌口径:38.5；超卖反弹后6日线回抽24日线（接近金叉）`（该分值仅展示，不计入个股综合分）
    - 资金：`主力20日: xx｜散户20日: xx｜形态说明`
 
 每张卡片标题旁都有「评分规则」Tooltip，规则与本文一致。
@@ -324,7 +330,9 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 | RSI | `rsiPullbackMaxDays` | 25 | 超买后回踩的有效天数 |
 | RSI | `rsiCrossFreshDays` | 3 | 金叉/死叉时效 |
 | RSI | `rsiOversoldCrossDays` | 5 | 上穿前回看超卖的窗口 |
-| RSI | `rsiApproachGap` / `rsiApproachRepairDays` / `rsiApproachDipRsi` | 5 / 10 / 35 | 「金叉在即」的差值阈值 / 跌深修复窗口 / 跌深阈值 |
+| RSI | `rsiApproachGap` / `rsiApproachRepairDays` | 5 / 10 | 「金叉在即」的差值阈值 / 跌深修复窗口 |
+| RSI | `rsiDipLevelLookback` / `rsiDipLevelTroughWindow` / `rsiDipLevelMaxRsi` | 250 / 3 / 55 | 深跌口径：回看天数 / 局部低点半径 / 计入低点的 RSI6 上限 |
+| RSI | `rsiDipLevelTolerance` / `rsiDipLevelFloor` / `rsiDipLevelCap` | 2 / 30 / 42 | 深跌口径：容差 / 阈值下限 / 阈值上限 |
 | RSI | `rsiApproachReboundJump` | 5 | 「跌深后修复中」要求当日 RSI6 回升的最小幅度 |
 | RSI | `rsiBreakSpread` / `rsiPullbackBreakSpread` | 3 / 8 | 贴近 24 线容差 / 回踩破位阈值 |
 | RSI | `rsiOverboughtPenaltyStart` | 68 | 偏多形态下 RSI6 高于该值开始按超买追高下调（偏高区） |

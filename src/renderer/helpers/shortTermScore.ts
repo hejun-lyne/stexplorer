@@ -99,8 +99,17 @@ export const SHORT_TERM_SCORE_CONFIG = {
   rsiOversoldCrossDays: 5, // "超卖后金叉"额外要求：从上穿日往回倒推该天数内须出现过真实超卖状态（否则只是普通交叉）
   rsiApproachGap: 5, // 「接近金叉」判定：6日线低于24日线的差值在该范围内，且当日仍在向上收敛
   rsiApproachRepairDays: 10, // 「跌深后修复」判定窗口（日）
-  rsiApproachDipRsi: 35, // 「跌深后修复」判定：窗口内 RSI6 曾跌破该值
   rsiApproachReboundJump: 5, // 「跌深后修复中」判定：当日 RSI6 回升幅度达到该值（尚未逼近24日线时的中间档）
+  // ---- 深跌口径（逐股动态）----
+  // 不用固定值（如 30/35）：不同股票 RSI6 的"跌不深/跌得深"差别很大
+  // （例：300990.SZ 近一年 RSI6 局部低点中位数 ≈36.8，很少跌破 35；600519.SH 则常跌到 20 附近）。
+  // 做法：取近 rsiDipLevelLookback 日 RSI6 的局部低点（典型反弹位）中位数，加容差后夹在 [floor, cap]。
+  rsiDipLevelLookback: 250, // 计算深跌水平的回看天数
+  rsiDipLevelTroughWindow: 3, // 局部低点判定半径：i±k 内最小即为低点
+  rsiDipLevelMaxRsi: 55, // 只把 RSI6 ≤ 该值的局部低点计入（排除高位回落形成的低点）
+  rsiDipLevelTolerance: 2, // 深跌判定容差：RSI6 ≤ 该股低点水平 + 容差
+  rsiDipLevelFloor: 30, // 深跌阈值下限（= rsiOversold，不低于绝对超卖口径）
+  rsiDipLevelCap: 42, // 深跌阈值上限（避免对"跌不深"的股票把口径抬得过高）
   rsiBreakSpread: 3, // 判定"贴近24日线"的容差（RSI6 - RSI24）
   rsiPullbackBreakSpread: 8, // 回踩过程中允许的最大跌破幅度：超过则认为已破位，不算回踩
   // 超买追高衰减：偏多形态（金叉/上穿/接近金叉/回踩/修复/多头排列）成立，但 RSI6 已偏高时下调，避免买在高点
@@ -630,6 +639,7 @@ export interface RsiScoreResult {
   score: number; // 0~40（= stockSubMax.rsi）；权重为 0，仅计算与展示，不参与个股综合分
   max: number;
   rsi12: number; // 中周期线（6/12/24 中的 12），用于金叉提前确认与展示
+  rsiDipLevel: number; // 该股自己的「深跌口径」：RSI6 ≤ 该值视为深跌（近 250 日局部低点中位数 + 容差，夹在 [30,42]）
   available: boolean;
   pattern: string; // 命中情形
   rsi6: number;
@@ -666,7 +676,17 @@ export function scoreStockRsi(
   const max = cfg.stockSubMax.rsi;
   // 形态基础分（原 30 分制 × max/30 取整，保持各形态相对高低不变）
   const s = (v: number) => Math.round((v * max) / 30);
-  const empty: RsiScoreResult = { score: 0, max, available: false, pattern: '', rsi6: 0, rsi12: 0, rsi24: 0, rsi6Percentile: 0 };
+  const empty: RsiScoreResult = {
+    score: 0,
+    max,
+    available: false,
+    pattern: '',
+    rsi6: 0,
+    rsi12: 0,
+    rsi24: 0,
+    rsi6Percentile: 0,
+    rsiDipLevel: 0,
+  };
   if (!stockKlines || stockKlines.length < cfg.rsiLong + 30) {
     return { ...empty, pattern: 'K线数据不足' };
   }
@@ -703,12 +723,40 @@ export function scoreStockRsi(
 
   const spreadAt = (i: number) => rsi6s[i] - rsi24s[i];
 
+  // ---- 深跌口径（逐股动态）----
+  // 取近 rsiDipLevelLookback 日内 RSI6 的局部低点（该股"典型反弹位"）中位数，加容差后夹在 [floor, cap]：
+  // 例：300990.SZ（低点中位 ≈36.8）→ 口径 ≈38.8；600519.SH（低点中位 ≈32.3）→ ≈34.3；
+  //     常年跌到 20 附近的股票则被 floor(30) 兜住，仍按绝对超卖口径。
+  const dipThreshold = (() => {
+    const half = cfg.rsiDipLevelTroughWindow;
+    const from = Math.max(start + half, n - cfg.rsiDipLevelLookback);
+    const vals: number[] = [];
+    for (let i = from; i < n - half; i++) {
+      if (rsi6s[i] > cfg.rsiDipLevelMaxRsi) continue;
+      let isTrough = true;
+      for (let j = i - half; j <= i + half; j++) {
+        if (rsi6s[j] < rsi6s[i]) {
+          isTrough = false;
+          break;
+        }
+      }
+      if (isTrough) vals.push(rsi6s[i]);
+    }
+    if (!vals.length) {
+      return cfg.rsiDipLevelFloor;
+    }
+    vals.sort((a, b) => a - b);
+    const median = vals[Math.floor(vals.length / 2)];
+    return clamp(median + cfg.rsiDipLevelTolerance, cfg.rsiDipLevelFloor, cfg.rsiDipLevelCap);
+  })();
+
   // 真实极值状态：绝对值越界 + 与 24 日线拉开差值。单纯与 24 日线贴合的是正常波动，不算超买/超卖。
   const isOverboughtState = (i: number) =>
     (rsi6s[i] >= cfg.rsiOverbought ||
       (rsi6s[i] >= cfg.rsiOverboughtRelaxed && percentileOf(rsi6s[i]) >= cfg.rsiOverboughtPercentile)) &&
     spreadAt(i) >= cfg.rsiExtremeSpread;
-  const isOversoldState = (i: number) => rsi6s[i] <= cfg.rsiOversold && spreadAt(i) <= -cfg.rsiExtremeSpread;
+  // 超卖（深跌）用逐股动态口径 dipThreshold（≥ rsiOversold），差值仍需 ≤ -rsiExtremeSpread 双重确认
+  const isOversoldState = (i: number) => rsi6s[i] <= dipThreshold && spreadAt(i) <= -cfg.rsiExtremeSpread;
 
   // ---- 最近一次真实超买/超卖状态 ----
   const lookbackStart = Math.max(start, n - cfg.rsiStateLookback);
@@ -792,10 +840,10 @@ export function scoreStockRsi(
     spread >= -cfg.rsiApproachGap &&
     spread > spreadAt(n - 2) &&
     rsi6 > rsi6s[n - 2];
-  // 跌深修复：近 rsiApproachRepairDays 日内 RSI6 曾跌破 rsiApproachDipRsi（修复力度强于普通逼近）
+  // 跌深修复：近 rsiApproachRepairDays 日内 RSI6 曾跌破该股自己的深跌口径（修复力度强于普通逼近）
   const recentDeepDip = rsi6s
     .slice(Math.max(start, n - cfg.rsiApproachRepairDays))
-    .some((v) => v <= cfg.rsiApproachDipRsi);
+    .some((v) => v <= dipThreshold);
 
   // 持续超买钝化：连续5日 RSI6 > 80 且与24日线差值大
   const last5 = rsi6s.slice(-5);
@@ -923,7 +971,7 @@ export function scoreStockRsi(
         : `｜RSI6=${rsi6.toFixed(0)} 偏高，下调${overboughtCut.toFixed(0)}分`;
   }
 
-  return { score, max, available: true, pattern, rsi6, rsi12, rsi24, rsi6Percentile };
+  return { score, max, available: true, pattern, rsi6, rsi12, rsi24, rsi6Percentile, rsiDipLevel: dipThreshold };
 }
 
 // ==================== 个股-资金指标 ====================
