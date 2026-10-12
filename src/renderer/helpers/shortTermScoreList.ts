@@ -8,11 +8,12 @@ import { BuildDailyKFromTrends } from './stock';
 import dayjs from 'dayjs';
 
 /**
- * 评分行结构版本：新增/变更展示字段时递增。
+ * 评分行结构版本：新增/变更展示字段或评分口径时递增。
  * `pickScoreRow` 只认版本一致的缓存行，旧版本行会被视为未命中并重新计算，
- * 避免新增字段（如K线形态、是否放量、当日分时补全标记）在旧缓存上永远显示为空。
+ * 避免新增字段（如K线形态、是否放量、当日分时补全标记）在旧缓存上永远显示为空，
+ * 也避免评分口径调整（如资金维度窗口 20 日 → 5 日）后继续用旧口径的分数。
  */
-export const SCORE_ROW_VERSION = 5;
+export const SCORE_ROW_VERSION = 6;
 
 /** 短线评分列表输入项 */
 export interface ShortTermScoreItem {
@@ -1157,6 +1158,15 @@ interface ComputeOptions {
   onRow?: (row: ShortTermScoreRow, item: ShortTermScoreItem, done: number, total: number) => void;
   /** 历史列需要的交易日数量（仅「当日评分」使用：交易日历取最近 N 个交易日） */
   historyDays?: number;
+  /**
+   * 近 N 个交易日里有缺失的评分行时，顺带补算并写回序列（0 / 不传 = 不补）
+   *
+   * 列表的「近 N 日评分」历史列直接读评分序列，缺哪天就显示 `--`；
+   * 打开这个选项后，执行一次短线评分会把最近 N 个交易日里缺的 (股票 × 交易日) 一并补齐。
+   */
+  backfillDays?: number;
+  /** 补算进度回调（补算是「股票 × 交易日」维度，与当日出分的进度分开回报） */
+  onBackfill?: (info: { done: number; total: number; day: string }) => void;
 }
 
 /**
@@ -1168,6 +1178,9 @@ interface ComputeOptions {
  * - 未命中的才取数计算，算完合并回各自的序列，之后（含训练日推进后的回看）直接命中。
  *
  * 公共数据（指数K线 / 涨跌比 / 市值档统计）只准备一次，个股数据并发拉取并逐只回调，支持中途暂停。
+ *
+ * options.backfillDays > 0 时，当日出分结束后还会补算「最近 N 个交易日」里缺失的评分行
+ * （列表「近 N 日评分」历史列的缺口），补算复用同一个 ctx，不会再重复取数。
  */
 export interface ComputeRowsResult {
   rows: ShortTermScoreRow[];
@@ -1180,8 +1193,179 @@ export interface ComputeRowsResult {
 /** 每只股票评分所需的日K根数（与单只取数口径一致） */
 const SCORE_KLINES_PER_STOCK = 250;
 
+/** 一次补算的 (股票 × 交易日) 上限：股票池很大时避免一次补太多，超出部分下次再补 */
+const BACKFILL_MAX_ROWS = 4000;
+/** 每补算多少个交易日落盘一次（控制单次写入的 payload 大小） */
+const BACKFILL_FLUSH_DAYS = 5;
+
+/**
+ * 补算「近 N 个交易日」里缺失的 (股票 × 交易日) 评分行并写回评分序列
+ *
+ * 与常规评分共用同一个 ctx（日K / 资金 / 板块 / 指数 / 涨跌比 / 市值档统计都在里面缓存），
+ * 所以对同一批股票只在内存里逐日切片重算，不会重复取数；已写库的行不会再算。
+ */
+async function backfillScores(params: {
+  items: ShortTermScoreItem[];
+  ctx: ScoreSharedContext;
+  source: FundApiType;
+  /** 需要覆盖的交易日（YYYYMMDD，升序，含基准日） */
+  days: string[];
+  shouldStop?: () => boolean;
+  onProgress?: (info: { done: number; total: number; day: string }) => void;
+}): Promise<{ filled: number; skipped: number; truncated: boolean }> {
+  const { items, ctx, source, days, shouldStop, onProgress } = params;
+  const targets = [...new Set(days)].filter(Boolean).sort();
+  if (!targets.length || !items.length) {
+    return { filled: 0, skipped: 0, truncated: false };
+  }
+  const codes = items.map((i) => i.code);
+  // 先看这些交易日已经有哪些行（只认当前版本），缺的才补
+  let existing: ShortTermScoreSeries = {};
+  try {
+    existing = await loadScoreSeries(codes, source, { dates: targets });
+  } catch {
+    existing = {};
+  }
+  const missing: { item: ShortTermScoreItem; dayKey: string }[] = [];
+  items.forEach((item) => {
+    targets.forEach((dayKey) => {
+      if (!pickScoreRow(existing[item.code], dayKey)) {
+        missing.push({ item, dayKey });
+      }
+    });
+  });
+  if (!missing.length) {
+    console.log(`[短线评分] 近 ${targets.length} 个交易日的评分已完整，无需补算`);
+    return { filled: 0, skipped: 0, truncated: false };
+  }
+  const truncated = missing.length > BACKFILL_MAX_ROWS;
+  const work = truncated ? missing.slice(0, BACKFILL_MAX_ROWS) : missing;
+  console.log(
+    `[短线评分] 近 ${targets.length} 个交易日有 ${missing.length} 条评分缺失，开始补算` +
+      (truncated ? `（本次先补 ${work.length} 条，其余下次继续）` : '')
+  );
+
+  // 「基准日尚未上市」的股票：在其上市前的交易日写一条跳过行（确定性结论，写库后不再重试）
+  let listDates: Record<string, string> = {};
+  try {
+    listDates = await Services.Tushare.GetStockListDatesFromTushare([...new Set(work.map((w) => w.item.code))]);
+  } catch {
+    listDates = {};
+  }
+
+  // ---- 公共数据：把补算区间需要的「涨跌比 / 市值档成交统计」一次性取回 ----
+  // 大盘维度每天都要用「该日 + 前 marketDays 天」的涨跌比；ensureUpRatio 只覆盖最近 marketDays 天，
+  // 补历史时要把更早的日期也补上，否则那些天的大盘维度会被当成数据缺失（补出来的分与当时算的不一致）。
+  await ensureIndexKlines(ctx);
+  const indexDays = [
+    ...new Set(
+      INDEX_SECIDS.flatMap((s) =>
+        (ctx.indexKlinesMap[s] || []).map((k) => String(k?.date || '').replace(/-/g, '').substring(0, 8))
+      )
+    ),
+  ]
+    .filter(Boolean)
+    .sort();
+  const needRatioDays = new Set<string>();
+  targets.forEach((d) => {
+    indexDays
+      .filter((x) => x <= d)
+      .slice(-Score.SHORT_TERM_SCORE_CONFIG.marketDays)
+      .forEach((x) => needRatioDays.add(x));
+  });
+  await ensureUpRatio(ctx);
+  const missingRatioDays = [...needRatioDays].filter((d) => !ctx.upRatioMap || ctx.upRatioMap[d] === undefined);
+  if (missingRatioDays.length) {
+    try {
+      const more = await Services.Tushare.GetUpRatioFromTushare(missingRatioDays);
+      ctx.upRatioMap = { ...(ctx.upRatioMap || {}), ...(more || {}) };
+    } catch {
+      // 取不到时按维度缺失处理
+    }
+  }
+  // 市值档成交统计：按日批量取（历史日期一般已有缓存），失败时仍由 ensureMarketStats 逐日兜底
+  const missingStatDays = targets.filter((d) => ctx.marketStatsMap[d] === undefined);
+  if (missingStatDays.length) {
+    try {
+      const stats = await Services.Tushare.GetMarketActivityStatsBatchFromTushare(missingStatDays);
+      missingStatDays.forEach((d) => {
+        ctx.marketStatsMap[d] = stats?.[d] ?? null;
+      });
+    } catch {
+      // 忽略：ensureMarketStats 会逐日兜底
+    }
+  }
+
+  // 按交易日分组（同一交易日的公共数据只取一次），逐日补算
+  const byDay = new Map<string, ShortTermScoreItem[]>();
+  work.forEach(({ item, dayKey }) => {
+    const list = byDay.get(dayKey) || [];
+    list.push(item);
+    byDay.set(dayKey, list);
+  });
+
+  let filled = 0;
+  let skipped = 0;
+  let doneCount = 0;
+  let buffer: ShortTermScoreSeries = {};
+  let dayIndex = 0;
+  for (const dayKey of [...byDay.keys()].sort()) {
+    dayIndex += 1;
+    if (shouldStop?.()) {
+      break;
+    }
+    const day = `${dayKey.substring(0, 4)}-${dayKey.substring(4, 6)}-${dayKey.substring(6, 8)}`;
+    for (const item of byDay.get(dayKey) || []) {
+      if (shouldStop?.()) {
+        break;
+      }
+      doneCount += 1;
+      try {
+        if (isListedOnDay(listDates[item.code], dayKey) === false) {
+          buffer[item.code] = {
+            ...(buffer[item.code] || {}),
+            [dayKey]: notListedShortTermScoreRow(item.code, item.name, listDates[item.code] || '', dayKey),
+          };
+          skipped += 1;
+        } else {
+          // eslint-disable-next-line no-await-in-loop
+          const inputs = await buildStockScoreInputs(ctx, item, day);
+          const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay: day, ...inputs });
+          if (row.pending) {
+            // 该交易日停牌 / 日K未覆盖到该日：不写缓存，下次运行还会再试
+            skipped += 1;
+          } else {
+            buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
+            filled += 1;
+          }
+        }
+      } catch {
+        skipped += 1;
+      }
+      try {
+        onProgress?.({ done: doneCount, total: work.length, day });
+      } catch {
+        // 回调异常不影响主流程
+      }
+    }
+    if (dayIndex % BACKFILL_FLUSH_DAYS === 0 && Object.keys(buffer).length) {
+      // eslint-disable-next-line no-await-in-loop
+      await saveScoreSeries(buffer, source);
+      buffer = {};
+    }
+    // 让出主线程，避免长时间阻塞 UI
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (Object.keys(buffer).length) {
+    await saveScoreSeries(buffer, source);
+  }
+  console.log(`[短线评分] 历史补算完成：补入 ${filled} 条、数据未就绪跳过 ${skipped} 条`);
+  return { filled, skipped, truncated };
+}
+
 export async function computeShortTermScoreRows(items: ShortTermScoreItem[], options: ComputeOptions): Promise<ComputeRowsResult> {
-  const { source, concurrency = 3, shouldStop, onRow } = options;
+  const { source, concurrency = 3, shouldStop, onRow, backfillDays = 0, onBackfill } = options;
   const results: ShortTermScoreRow[] = [];
   if (!items || items.length === 0) {
     return { rows: results, scoreDayKey: '', recentDays: [] };
@@ -1204,6 +1388,30 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
    * 直接复用它作为列表历史列的交易日，避免再单独取一次数（单独取数失败会让历史列整体消失）。
    */
   const collectRecentDays = (): string[] => recentDaysOnOrBefore(ctx, scoreDayKey);
+
+  /**
+   * 当日出分结束后补齐「近 N 个交易日」的历史缺口（命中缓存提前返回时同样要补）
+   *
+   * 列表的历史列直接读评分序列，缺哪天就显示 --：命中缓存的日子本身不需要重算，
+   * 但缺的日子必须补，否则「明明点了评分，历史列还是空的」。
+   */
+  const runBackfill = async (): Promise<void> => {
+    if (!scoreDayKey || backfillDays <= 0) {
+      return;
+    }
+    try {
+      await backfillScores({
+        items,
+        ctx,
+        source,
+        days: collectRecentDays().slice(-backfillDays),
+        shouldStop,
+        onProgress: onBackfill,
+      });
+    } catch (e: any) {
+      console.warn('[短线评分] 历史补算失败（不影响当日出分）:', e?.message || e);
+    }
+  };
 
   /** 用评分序列填充（未命中的进入 pending） */
   const fillFromSeries = (series: ShortTermScoreSeries) => {
@@ -1231,6 +1439,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     fillFromSeries(await loadScoreSeries(codes, source, { dates: [scoreDayKey] }));
     if (!pending.length) {
       console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
+      await runBackfill();
       return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
     }
     console.log(`[短线评分] 基准日 ${scoreDayKey}：序列命中 ${total - pending.length} 只，需现算 ${pending.length} 只`);
@@ -1256,6 +1465,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       fillFromSeries(await loadScoreSeries(codes, source, { dates: [scoreDayKey] }));
       if (!pending.length) {
         console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
+        await runBackfill();
         return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
       }
       console.log(`[短线评分] 基准日 ${scoreDayKey}：序列命中 ${total - pending.length} 只，需现算 ${pending.length} 只`);
@@ -1365,6 +1575,9 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       console.log(`[短线评分] 其中 ${pendingCount} 只数据未就绪（日K不足/未覆盖基准日），本次不写缓存，下次重试`);
     }
   }
+
+  // ---- 近 N 个交易日的历史评分补算 ----
+  await runBackfill();
   return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
 }
 

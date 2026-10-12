@@ -581,7 +581,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
 7. 跌深后修复、6日线向上逼近24日线（金叉在即）/ 超卖后反弹修复中（尚未金叉）→ 24分
 8. 上穿后跌回24日线下方（金叉失效）/ 反弹结构中死叉贴线震荡 → 21分
 9. 6日线向上逼近24日线（接近金叉，尚未穿越）→ 20分
-10. 反弹结构中6日线再度跌回24日线下方，结构转弱 / 死叉后已收复12日线（结构待修复）→ 16分
+10. 跌深后修复中（RSI6 快速回升，尚未逼近24日线）/ 反弹结构中6日线再度跌回24日线下方，结构转弱 / 死叉后已收复12日线（结构待修复）→ 16分
 11. RSI空头排列弱势区 / 死叉后快速收复中（结构待修复）→ 13分
 12. 持续超买钝化 → 11分（追高风险）
 13. 3日内6日线下穿24日线（死叉）→ 8分
@@ -593,6 +593,9 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
 按强度分三档：已收复12日线 → 25分；近10日内RSI6曾跌破35（跌深后修复）→ 24分；其余 → 20分。
 12日线只用于金叉/死叉的提前确认，不参与格局与极值判定。
 （例：600986.SH 2024-04-10 差值两天内从 −14.2 收敛到 −3.2，原判「空头排列」13分 → 24分）
+
+「跌深后修复中」（第10档）——近10日内RSI6曾跌破35，当日RSI6回升 ≥5 且差值收敛，但离24日线仍 >5（还不到"金叉在即"）→ 16分。
+（例：300990.SZ 2026-10-12 RSI6 由 33.1 回到 42.1，差值 −17.5 → −9.6，原判「空头排列」13分 → 16分）
 
 「死叉后快速收复」——3个交易日内死叉，但当日 RSI6 回升且与24日线差值收敛：
  已收复12日线 → 16分；否则 → 13分（不再一律压到死叉低分档，例：600986.SH 2024-04-17 由 8 分 → 13 分）。
@@ -631,7 +634,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             <Tooltip
               title={
                 <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
-                  {`基于主力/散户20日累计净流入曲线（与资金流向图同源），满分30；按「是否处在趋势转折点」排队：
+                  {`基于主力/散户近${Score.SHORT_TERM_SCORE_CONFIG.moneyWindow}日累计净流入曲线（与资金流向图同源），满分30；按「是否处在趋势转折点」排队：
 完美微笑曲线(U型)上穿散户线且站上0轴 → 20~30分 ★（当日金叉最高，随天数衰减）
 近期上穿散户线（形态未识别为U型）→ 12~22分（站上0轴更高）
 微笑曲线（资金回流）但尚未上穿 → 15分（转折前夜，等待确认）
@@ -644,7 +647,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
               placement="right"
             >
               <span>
-                资金指标(20日) <QuestionCircleOutlined style={{ color: 'var(--secondary-text-color)', fontSize: 12, cursor: 'help' }} />
+                资金指标({Score.SHORT_TERM_SCORE_CONFIG.moneyWindow}日) <QuestionCircleOutlined style={{ color: 'var(--secondary-text-color)', fontSize: 12, cursor: 'help' }} />
               </span>
             </Tooltip>
           </Col>
@@ -657,9 +660,11 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         </Row>
         {money.available && (
           <div style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>
-            主力20日: <span className={Utils.GetValueColor(money.main20).textClass}>{formatAmount(money.main20)}</span>
+            主力{Score.SHORT_TERM_SCORE_CONFIG.moneyWindow}日:{' '}
+            <span className={Utils.GetValueColor(money.mainSum).textClass}>{formatAmount(money.mainSum)}</span>
             <span style={{ margin: '0 6px' }}>|</span>
-            散户20日: <span className={Utils.GetValueColor(money.retail20).textClass}>{formatAmount(money.retail20)}</span>
+            散户{Score.SHORT_TERM_SCORE_CONFIG.moneyWindow}日:{' '}
+            <span className={Utils.GetValueColor(money.retailSum).textClass}>{formatAmount(money.retailSum)}</span>
             <span style={{ margin: '0 6px' }}>|</span>
             {money.note}
           </div>

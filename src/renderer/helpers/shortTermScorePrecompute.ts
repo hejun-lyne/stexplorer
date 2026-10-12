@@ -50,7 +50,7 @@ const STOCK_KLINES_PER_DAY = 250;
 const INDEX_KLINES_PER_DAY = 60;
 /** 每个交易日评分所需的板块K线根数（板块维度取近 20 日） */
 const BOARD_KLINES_PER_DAY = 60;
-/** 每个交易日评分所需的资金明细天数（20日累计 + 30日形态识别，留缓冲） */
+/** 每个交易日评分所需的资金明细天数（主力/散户累计窗口 + moneyShapeDays 形态识别，留缓冲） */
 const MONEY_DAYS_PER_DAY = 60;
 /** 每计算多少个交易日落盘一次（兼顾中断安全与写入次数） */
 const FLUSH_EVERY_DAYS = 20;

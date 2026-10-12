@@ -100,6 +100,7 @@ export const SHORT_TERM_SCORE_CONFIG = {
   rsiApproachGap: 5, // 「接近金叉」判定：6日线低于24日线的差值在该范围内，且当日仍在向上收敛
   rsiApproachRepairDays: 10, // 「跌深后修复」判定窗口（日）
   rsiApproachDipRsi: 35, // 「跌深后修复」判定：窗口内 RSI6 曾跌破该值
+  rsiApproachReboundJump: 5, // 「跌深后修复中」判定：当日 RSI6 回升幅度达到该值（尚未逼近24日线时的中间档）
   rsiBreakSpread: 3, // 判定"贴近24日线"的容差（RSI6 - RSI24）
   rsiPullbackBreakSpread: 8, // 回踩过程中允许的最大跌破幅度：超过则认为已破位，不算回踩
   // 超买追高衰减：偏多形态（金叉/上穿/接近金叉/回踩/修复/多头排列）成立，但 RSI6 已偏高时下调，避免买在高点
@@ -108,7 +109,9 @@ export const SHORT_TERM_SCORE_CONFIG = {
   rsiOverboughtSteepPerPoint: 2.5, // 进入超买区（RSI6 ≥ rsiOverbought）后每高 1 点扣的分数（陡增）
   rsiOverboughtFloor: 10, // 超买追高下调后的最低分
   // ---- 个股-资金 ----
-  moneyWindow: 20, // 主力/散户累计净流入窗口（日）
+  // 主力/散户累计净流入窗口（日）：从 20 日改为 5 日 —— 20 日累计对近期资金变化太滞后，
+  // 等它拐头往往已经错过趋势转折点；5 日累计更早反映回流拐点（形态/金叉仍在 30 日窗口内识别，抑制噪声）。
+  moneyWindow: 5,
   moneyShapeDays: 30, // 微笑/悲伤曲线形态识别窗口（日）
   moneyCrossRecentDays: 5, // 交叉检测窗口（日）
   moneyCrossDecay: 0.8, // 交叉时效衰减系数：刚交叉 1.0，每过一日乘一次（3日后约 0.5）
@@ -890,6 +893,16 @@ export function scoreStockRsi(
       score = applyOverbought(s(15));
       pattern = '6日线向上逼近24日线（接近金叉，尚未穿越）';
     }
+  } else if (
+    recentDeepDip &&
+    rsi6 < rsi24 &&
+    rsi6 - rsi6s[n - 2] >= cfg.rsiApproachReboundJump &&
+    spread > spreadAt(n - 2)
+  ) {
+    // 深跌后正在快速修复：RSI6 当日明显回升、与24日线差值收敛，但离24日线还远（未到"金叉在即"）
+    // 例：300990.SZ 2026-10-12 RSI6 由 33.1 回到 42.1，差值由 −17.5 收敛到 −9.6
+    score = applyOverbought(s(12));
+    pattern = '跌深后修复中（RSI6 快速回升，尚未逼近24日线）';
   } else if (persistentOverbought) {
     score = s(8);
     pattern = '持续超买钝化，追高风险大';
@@ -925,9 +938,9 @@ export interface MoneyScoreResult {
   shapeDesc: string;
   cross: 'up' | 'down' | null; // 近期主力线上穿/下穿散户线
   crossDaysAgo: number | null;
-  aboveZero: boolean; // 主力20日累计线是否在0轴上方
-  main20: number; // 最新主力20日累计净流入（元）
-  retail20: number; // 最新散户20日累计净流入（元）
+  aboveZero: boolean; // 主力累计线（近 moneyWindow 日）是否在0轴上方
+  mainSum: number; // 最新主力「近 moneyWindow 日」累计净流入（元）
+  retailSum: number; // 最新散户「近 moneyWindow 日」累计净流入（元）
   note: string;
 }
 
@@ -939,7 +952,11 @@ const SHAPE_DESC: Record<MoneyShape, string> = {
 };
 
 /**
- * 资金指标（20日）：基于主力/散户 N 日累计净流入曲线识别形态，目标是筛出**趋势转折点**。
+ * 资金指标：基于主力/散户「近 moneyWindow 日」（默认 5 日）累计净流入曲线识别形态，
+ * 目标是筛出**趋势转折点**。
+ *
+ * 累计窗口从 20 日改为 5 日：20 日累计滞后太强，等它拐头时往往已错过转折买点；
+ * 形态（U 型 / 倒U 型）与位置分仍在近 moneyShapeDays 日窗口内判断，避免短窗口带来的噪声。
  *
  * 评分取向（短线以资金为重）：
  * 1) 最高分给「完美微笑曲线金叉」：主力线走出 U 型（先流出后回流）**且** 近期上穿散户线，
@@ -968,8 +985,8 @@ export function scoreStockMoney(
     cross: null,
     crossDaysAgo: null,
     aboveZero: false,
-    main20: 0,
-    retail20: 0,
+    mainSum: 0,
+    retailSum: 0,
     note: '资金流向数据不足',
   };
   const mainArr = detailMain || [];
@@ -978,19 +995,19 @@ export function scoreStockMoney(
   if (len < cfg.moneyWindow + cfg.moneyShapeDays) {
     return empty;
   }
-  const main20 = rollingSum(mainArr.slice(0, len), cfg.moneyWindow);
-  const retail20 = rollingSum(retailArr.slice(0, len), cfg.moneyWindow);
+  const mainSum = rollingSum(mainArr.slice(0, len), cfg.moneyWindow);
+  const retailSum = rollingSum(retailArr.slice(0, len), cfg.moneyWindow);
 
   // 有效区间（两者都非 null）
   const validIdx: number[] = [];
   for (let i = 0; i < len; i++) {
-    if (main20[i] !== null && retail20[i] !== null) validIdx.push(i);
+    if (mainSum[i] !== null && retailSum[i] !== null) validIdx.push(i);
   }
   if (validIdx.length < cfg.moneyShapeDays) {
     return empty;
   }
-  const mainSeries = validIdx.map((i) => main20[i] as number);
-  const retailSeries = validIdx.map((i) => retail20[i] as number);
+  const mainSeries = validIdx.map((i) => mainSum[i] as number);
+  const retailSeries = validIdx.map((i) => retailSum[i] as number);
   const last = mainSeries.length - 1;
   const mainLast = mainSeries[last];
   const retailLast = retailSeries[last];
@@ -1064,10 +1081,10 @@ export function scoreStockMoney(
     score = highPos ? s(7) : s(13);
     note = highPos
       ? `主力资金已持续流入（区间位置${(posInRange * 100).toFixed(0)}%），非转折点，谨防追高`
-      : '主力20日净流入为正且强于散户（已过转折点，无新金叉）';
+      : `主力${cfg.moneyWindow}日净流入为正且强于散户（已过转折点，无新金叉）`;
   } else if (aboveZero) {
     score = s(9);
-    note = '主力20日净流入为正，但弱于散户（资金分歧）';
+    note = `主力${cfg.moneyWindow}日净流入为正，但弱于散户（资金分歧）`;
   } else if (shape === 'sad' && cross === 'down') {
     // 悲伤曲线死叉：越新鲜惩罚越重，随时间衰减回升到形态分
     score = s(6) - (aboveZero ? s(2) : s(4)) * downFresh;
@@ -1093,8 +1110,8 @@ export function scoreStockMoney(
     cross,
     crossDaysAgo,
     aboveZero,
-    main20: mainLast,
-    retail20: retailLast,
+    mainSum: mainLast,
+    retailSum: retailLast,
     note,
   };
 }

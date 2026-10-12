@@ -154,6 +154,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   // 「近 N 日评分」历史列：交易日列表 + 每只股票的评分序列
   const [shortScoreDays, setShortScoreDays] = useState<string[]>([]);
   const [shortScoreSeries, setShortScoreSeries] = useState<ShortTermScoreSeries>({});
+  /** 历史缺口补算进度：执行短线评分时顺带补齐近 N 个交易日缺的评分 */
+  const [shortScoreBackfill, setShortScoreBackfill] = useState<{ done: number; total: number } | null>(null);
   // 过滤：仅保留「近 N 个交易日出现过 ≥ 阈值分」的股票（阈值可填写，默认 60）
   const [shortScoreFilterEnabled, setShortScoreFilterEnabled] = useState(false);
   const [shortScoreFilterScore, setShortScoreFilterScore] = useState(60);
@@ -768,6 +770,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       }
       setShortScoreData([]);
       setShortScoreProgress(0);
+      setShortScoreBackfill(null);
       shortScoreTotalRef.current = currentItems.length;
       shortScoreRemainingRef.current = [...currentItems];
       shortScoreCodesRef.current = currentItems.map((i) => i.code);
@@ -794,6 +797,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         source: kLineApiSourceSetting,
         concurrency: 3,
         shouldStop: () => isShortScorePausedRef.current,
+        // 近 N 个交易日的历史列有缺口时顺带补算（列表缺哪天补哪天）
+        backfillDays: SHORT_SCORE_HISTORY_DAYS,
+        onBackfill: ({ done: bdone, total: btotal }) => {
+          if (shortScorePoolRef.current !== secidRef.current) {
+            return;
+          }
+          setShortScoreBackfill({ done: bdone, total: btotal });
+        },
         onRow: (row, item) => {
           // 从剩余队列中移除已完成的（支持暂停后恢复）
           const idx = shortScoreRemainingRef.current.findIndex((x) => x.code === item.code);
@@ -879,6 +890,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setShortScoreData([]);
     setShortScoreProgress(0);
     setTodayScoreProgress(0);
+    setShortScoreBackfill(null);
     setTodayScoreLoading(true);
     shortScoreTotalRef.current = currentItems.length;
     shortScoreRemainingRef.current = [];
@@ -1077,6 +1089,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setShortScoreData([]);
     setShortScoreProgress(0);
     setTodayScoreProgress(0);
+    setShortScoreBackfill(null);
     shortScoreRemainingRef.current = [];
     setShortScoreSeries({});
     setShortScoreDays([]);
@@ -1105,6 +1118,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setShortScoreData([]);
     setShortScoreProgress(0);
     setTodayScoreProgress(0);
+    setShortScoreBackfill(null);
     shortScoreRemainingRef.current = [];
     shortScoreCodesRef.current = [];
     shortScorePoolRef.current = '';
@@ -1498,7 +1512,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             loading={shortScoreLoading}
             style={{ marginLeft: 4 }}
           >
-            {shortScoreLoading ? `评分中 ${shortScoreProgress}%` : '短线评分'}
+            {shortScoreLoading
+              ? shortScoreBackfill
+                ? `补全历史 ${Math.round((shortScoreBackfill.done / Math.max(1, shortScoreBackfill.total)) * 100)}%`
+                : `评分中 ${shortScoreProgress}%`
+              : '短线评分'}
           </Button>
           <Button
             size="small"
