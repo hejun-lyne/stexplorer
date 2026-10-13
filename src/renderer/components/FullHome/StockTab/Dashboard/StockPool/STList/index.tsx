@@ -159,6 +159,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   // 过滤：仅保留「近 N 个交易日出现过 ≥ 阈值分」的股票（阈值可填写，默认 60）
   const [shortScoreFilterEnabled, setShortScoreFilterEnabled] = useState(false);
   const [shortScoreFilterScore, setShortScoreFilterScore] = useState(60);
+  // RSI 评分阈值过滤：仅显示 RSI 评分「大于」阈值的股票（RSI 满分 40）
+  const [shortScoreRsiFilterEnabled, setShortScoreRsiFilterEnabled] = useState(false);
+  const [shortScoreRsiFilterScore, setShortScoreRsiFilterScore] = useState(30);
   // 当日评分（用当日分时补全当日K线后重新评分）
   const [todayScoreLoading, setTodayScoreLoading] = useState(false);
   const [todayScoreProgress, setTodayScoreProgress] = useState(0);
@@ -1436,6 +1439,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           });
         });
       }
+      // RSI 评分阈值过滤：仅保留 RSI 评分「大于」阈值的股票
+      if (shortScoreRsiFilterEnabled) {
+        const rsiThreshold = Number(shortScoreRsiFilterScore);
+        list = list.filter((s: any) => s.rsiScore != null && s.rsiScore > rsiThreshold);
+      }
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
         list.sort((a: any, b: any) => {
@@ -1458,7 +1466,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreSeries, shortScoreDisplayDays]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreSeries, shortScoreDisplayDays]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」过滤（对所有展示模式生效）
@@ -1629,6 +1637,31 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 value={shortScoreFilterScore}
                 onChange={(v) => {
                   setShortScoreFilterScore(typeof v === 'number' ? v : 60);
+                  setCurrentPage(1);
+                }}
+                style={{ width: 56 }}
+              />
+              <span>分</span>
+            </span>
+          )}
+          {displayMode === 'shortScore' && (
+            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <Checkbox
+                checked={shortScoreRsiFilterEnabled}
+                onChange={(e) => {
+                  setShortScoreRsiFilterEnabled(e.target.checked);
+                  setCurrentPage(1);
+                }}
+              />
+              <span>RSI评分&gt;</span>
+              <InputNumber
+                size="small"
+                min={0}
+                max={40}
+                step={5}
+                value={shortScoreRsiFilterScore}
+                onChange={(v) => {
+                  setShortScoreRsiFilterScore(typeof v === 'number' ? v : 30);
                   setCurrentPage(1);
                 }}
                 style={{ width: 56 }}
