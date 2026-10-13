@@ -7,7 +7,7 @@ import * as Utils from '@/utils';
 import * as Helpers from '@/helpers';
 import { useState } from 'react';
 import { Stock } from '@/types/stock';
-import { useRequest, useThrottleFn } from 'ahooks';
+import { useRequest } from 'ahooks';
 import { useCallback } from 'react';
 import {
   GetIndustryStocksFromTushare,
@@ -165,10 +165,20 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const isTodayScorePausedRef = React.useRef(false);
   const todayScoreRunningRef = React.useRef(false);
   const todayScoreDoneRef = React.useRef(0);
-  // 板块身份：评分结果与股票池都绑定板块，切换板块后必须整体重来
-  const secidRef = React.useRef(secid);
-  secidRef.current = secid;
-  /** 上一次评分结果所属的板块（用于判断能否沿用上一次的股票池） */
+  // 多板块选择：短线评分可同时选择多个板块
+  const [selectedSecids, setSelectedSecids] = useState<string[]>([]);
+  const selectedSecidsRef = React.useRef<string[]>([]);
+  selectedSecidsRef.current = selectedSecids;
+  /** 已选板块的组合签名（排序后拼接）：作为「板块身份」，替代单板块的 secid */
+  const boardsKey = React.useMemo(() => [...selectedSecids].sort().join(','), [selectedSecids]);
+  const boardsKeyRef = React.useRef('');
+  boardsKeyRef.current = boardsKey;
+  /** 每个板块的成分股缓存：secid -> stocks（多板块合并前各自独立保存） */
+  const boardStocksCacheRef = React.useRef<Record<string, Stock.DetailItem[]>>({});
+  /** 每只股票所属的「已选板块」secid 列表（code -> secid[]），用于结果列表标记所属板块 */
+  const [stockBoardSecidsMap, setStockBoardSecidsMap] = useState<Record<string, string[]>>({});
+  // 板块身份：评分结果与股票池都绑定「已选板块组合」，切换板块后必须整体重来
+  /** 上一次评分结果所属的板块组合（用于判断能否沿用上一次的股票池） */
   const shortScorePoolRef = React.useRef('');
   /** 当前 stocks 列表属于哪个板块（板块切换后立刻点评分时，stocks 可能还是上一板块的列表） */
   const stocksBoardRef = React.useRef('');
@@ -274,18 +284,19 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     manual: true,
     onSuccess: (data, params) => {
       const requestedSecid = String((params as any)?.[1] || '');
-      if (requestedSecid && requestedSecid !== secidRef.current) {
-        // 板块已经切走：丢弃上一板块的慢响应，避免把当前板块的股票列表覆盖回旧板块
+      if (!requestedSecid) {
         return;
       }
-      // 记录这份列表属于哪个板块：板块切换后的请求返回前，stocks 还是上一板块的数据
-      stocksBoardRef.current = requestedSecid;
-      setStocks(data.stocks as Stock.DetailItem[]);
+      // 多板块：先把该板块的列表存入缓存（即便它已被取消勾选，也留作再次勾选时秒回）
+      boardStocksCacheRef.current[requestedSecid] = data.stocks as Stock.DetailItem[];
+      if (selectedSecidsRef.current.indexOf(requestedSecid) === -1) {
+        // 该板块已不在当前选择中：只缓存，不参与合并
+        return;
+      }
+      const merged = rebuildStocksFromBoards();
       if (ftypes.length > 0) {
         setFiltering(true);
-        const base = excludeStarBse
-          ? (data.stocks as Stock.DetailItem[]).filter((s) => !isStarOrBseCode(s.code))
-          : (data.stocks as Stock.DetailItem[]);
+        const base = excludeStarBse ? merged.filter((s) => !isStarOrBseCode(s.code)) : merged;
         runFilterStocks(
           base.map((s) => s.secid),
           ftypes,
@@ -311,44 +322,86 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     manual: true,
     onSuccess: (data, params) => {
       const requestedSecid = String((params as any)?.[0] || '');
-      if (requestedSecid && requestedSecid !== secidRef.current) {
-        // 板块已经切走：丢弃上一板块的慢响应
+      if (!requestedSecid) {
         return;
       }
-      stocksBoardRef.current = requestedSecid;
-      setStocks(data.stocks as Stock.DetailItem[]);
+      // 多板块：先把该板块的列表存入缓存
+      boardStocksCacheRef.current[requestedSecid] = data.stocks as Stock.DetailItem[];
+      if (selectedSecidsRef.current.indexOf(requestedSecid) === -1) {
+        return;
+      }
+      const merged = rebuildStocksFromBoards();
       if (ftypes.length > 0) {
         setFiltering(true);
-        const base = excludeStarBse
-          ? (data.stocks as any[]).filter((s: any) => !isStarOrBseCode(String(s?.code || s?.secid || '').split('.').pop() || ''))
-          : (data.stocks as any[]);
+        const base = excludeStarBse ? merged.filter((s) => !isStarOrBseCode(s.code)) : merged;
         runFilterStocks(
-          base.map((s: any) => s.secid),
+          base.map((s) => s.secid),
           ftypes,
           fdays
         );
       }
     },
   });
-  const { run: mayGetStocks } = useThrottleFn(
-    (source: number, secid: string, ps: number) => {
-      if (secid.length > 0) {
-        if (isSWIndustryCode(secid)) {
+
+  /** 拉取指定板块的成分股（多板块时逐板块各发一次请求，避免节流把中间板块吞掉） */
+  const loadBoardsStocks = useCallback(
+    (secids: string[]) => {
+      secids.forEach((s) => {
+        if (!s) {
+          return;
+        }
+        if (isSWIndustryCode(s)) {
           // 申万二级行业代码，使用 Tushare index_member 接口
-          runGetIndustryStocks(secid);
+          runGetIndustryStocks(s);
         } else {
           // 东财/同花顺板块代码，走原有逻辑
-          runGetStocks(source, secid, ps);
+          runGetStocks(kLineApiSourceSetting, s, 200);
         }
-      }
+      });
     },
-    {
-      wait: 2000,
-    }
+    [kLineApiSourceSetting, runGetIndustryStocks, runGetStocks]
   );
+
+  /** 已选板块的成分股是否都已就绪（缓存里都有） */
+  const boardsReady = useCallback(() => {
+    const secids = selectedSecidsRef.current;
+    return secids.length > 0 && secids.every((s) => boardStocksCacheRef.current[s] !== undefined);
+  }, []);
+
+  /** 用各板块缓存的成分股重建「合并股票列表」与「股票→所属板块」映射 */
+  const rebuildStocksFromBoards = useCallback(() => {
+    const secids = selectedSecidsRef.current;
+    const merged: Stock.DetailItem[] = [];
+    const seen = new Set<string>();
+    const membership: Record<string, string[]> = {};
+    secids.forEach((secid) => {
+      const list = boardStocksCacheRef.current[secid];
+      if (!list) {
+        return;
+      }
+      list.forEach((s) => {
+        const code = s.code;
+        if (!membership[code]) {
+          membership[code] = [];
+        }
+        if (membership[code].indexOf(secid) === -1) {
+          membership[code].push(secid);
+        }
+        if (!seen.has(code)) {
+          seen.add(code);
+          merged.push(s);
+        }
+      });
+    });
+    setStockBoardSecidsMap(membership);
+    setStocks(merged);
+    stocksBoardRef.current = boardsKeyRef.current;
+    return merged;
+  }, []);
+
   useWorkDayTimeToDo(
     () => {
-      mayGetStocks(kLineApiSourceSetting, secid, 200);
+      loadBoardsStocks(selectedSecidsRef.current);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
   );
@@ -362,7 +415,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       isLeaderPausedRef.current = true;
       return;
     }
-    if (!secid) {
+    // 龙头识别按「单个板块」进行：多板块时取第一个选中板块
+    const primarySecid = selectedSecidsRef.current[0] || secid;
+    if (!primarySecid) {
       console.log('[龙头股] 请先选择一个板块/行业');
       return;
     }
@@ -382,7 +437,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     try {
       const today = dayjs().format('YYYYMMDD');
       // 如果是申万行业代码，直接传入；否则需要查找映射（简化处理：先尝试直接传入）
-      const industryCode = isSWIndustryCode(secid) ? secid.split('.').pop() || secid : secid;
+      const industryCode = isSWIndustryCode(primarySecid) ? primarySecid.split('.').pop() || primarySecid : primarySecid;
       console.log(`[龙头股] 开始识别 ${industryCode} 的龙头...`);
 
       const result = await GetIndustryLeadersFromTushare(industryCode, today, 20);
@@ -688,11 +743,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         return { code, name: lookupName(code), hybk: lookupHybk(code) };
       });
     }
-    if (displayMode === 'shortScore' && shortScoreCodesRef.current.length && shortScorePoolRef.current === secid) {
-      // 评分结果展示中再次评分：沿用上一次的股票池（仅限同一个板块）。
+    if (displayMode === 'shortScore' && shortScoreCodesRef.current.length && shortScorePoolRef.current === boardsKeyRef.current) {
+      // 评分结果展示中再次评分：沿用上一次的股票池（仅限同一组板块）。
       // （不这样做会退回「当前板块全部股票」，与「预计算训练评分」覆盖的股票池不一致，
       //   多出来的股票只能现算，表现为「预计算过了、再点短线评分仍然很慢」。）
-      // 板块已经切换时必须放弃沿用：否则会把上一个板块的股票当成当前板块再评一遍。
+      // 板块组合已经变化时必须放弃沿用：否则会把上一组板块的股票当成当前板块再评一遍。
       return shortScoreCodesRef.current.map((code) => {
         const s = stocks.find((x) => x.code === code) as any;
         return {
@@ -709,7 +764,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       circMv: (s as any).lt ? (s as any).lt * 1e8 : undefined,
       hybk: lookupHybk(s.code),
     }));
-  }, [stocks, poolStocks, stockConfigsMapping, displayMode, mainInData, signalData, riskData, leaderData, leaderDisplayCount, secid]);
+  }, [stocks, poolStocks, stockConfigsMapping, displayMode, mainInData, signalData, riskData, leaderData, leaderDisplayCount]);
 
   /**
    * 评分池：在「当前股票池」基础上按「排除科创板+北交所」过滤
@@ -724,23 +779,23 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   }, [collectCurrentItemsRaw, excludeStarBse]);
 
   /**
-   * 等当前板块的股票列表加载完成
+   * 等「已选板块」的股票列表全部加载完成
    *
-   * 板块切换后立刻点「短线评分 / 当日评分」时，stocks 还是上一板块的列表（请求在途或被节流），
-   * 直接用它就会评出「上一个板块的股票」；这里等到当前板块的列表到位再开跑。
+   * 板块切换 / 增删板块后立刻点「短线评分 / 当日评分」时，部分板块的列表还在请求中，
+   * 直接用它就会漏评或评出上一组板块的股票；这里等到全部就绪再开跑。
    * @returns 是否已就绪（超时返回 false，调用方提示用户稍后再试）
    */
   const waitBoardStocks = useCallback(async (timeoutMs = 15000) => {
     const deadline = Date.now() + timeoutMs;
-    if (stocksBoardRef.current !== secidRef.current) {
+    if (!boardsReady()) {
       console.log('[板块] 板块股票列表仍在加载，等就绪后再开始评分...');
     }
-    while (stocksBoardRef.current !== secidRef.current && Date.now() < deadline) {
+    while (!boardsReady() && Date.now() < deadline) {
       // eslint-disable-next-line no-await-in-loop
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    return stocksBoardRef.current === secidRef.current;
-  }, []);
+    return boardsReady();
+  }, [boardsReady]);
 
   // ========== 短线评分 ==========
   const handleShortScore = useCallback(async () => {
@@ -748,12 +803,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       isShortScorePausedRef.current = true;
       return;
     }
-    // 板块切换后立刻点击 / 切板块自动重算：先等当前板块的股票列表到位，否则会评出上一个板块的股票
+    if (!selectedSecidsRef.current.length) {
+      message.warning('请先选择板块');
+      return;
+    }
+    // 板块切换/增删后立刻点击：先等已选板块的股票列表到位，否则会漏评或评出上一组板块的股票
     scoreStartingRef.current = true;
     const boardReady = await waitBoardStocks();
     scoreStartingRef.current = false;
     if (!boardReady) {
-      message.warning('当前板块的股票列表还在加载，请稍后再点评分');
+      message.warning('板块的股票列表还在加载，请稍后再点评分');
       return;
     }
     const currentItems = collectCurrentItems();
@@ -774,8 +833,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       shortScoreTotalRef.current = currentItems.length;
       shortScoreRemainingRef.current = [...currentItems];
       shortScoreCodesRef.current = currentItems.map((i) => i.code);
-      // 记录这一轮结果属于哪个板块：切换板块后（onRow / 收尾里的判断）直接丢弃这一轮结果
-      shortScorePoolRef.current = secidRef.current;
+      // 记录这一轮结果属于哪组板块：切换板块后（onRow / 收尾里的判断）直接丢弃这一轮结果
+      shortScorePoolRef.current = boardsKeyRef.current;
       shortScoreSourceRef.current = 'score';
       // 历史列：先取近 N 个交易日（口径与评分基准日一致），已有序列稍后一并刷新
       setShortScoreSeries({});
@@ -800,7 +859,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         // 近 N 个交易日的历史列有缺口时顺带补算（列表缺哪天补哪天）
         backfillDays: SHORT_SCORE_HISTORY_DAYS,
         onBackfill: ({ done: bdone, total: btotal }) => {
-          if (shortScorePoolRef.current !== secidRef.current) {
+          if (shortScorePoolRef.current !== boardsKeyRef.current) {
             return;
           }
           setShortScoreBackfill({ done: bdone, total: btotal });
@@ -811,16 +870,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           if (idx >= 0) {
             shortScoreRemainingRef.current.splice(idx, 1);
           }
-          if (shortScorePoolRef.current !== secidRef.current) {
-            // 板块已切换：这一轮是上一个板块的结果，不再写入列表
+          if (shortScorePoolRef.current !== boardsKeyRef.current) {
+            // 板块已切换：这一轮是上一组板块的结果，不再写入列表
             return;
           }
           setShortScoreData((prev) => [...prev, row]);
           setShortScoreProgress(Math.round(((shortScoreTotalRef.current - shortScoreRemainingRef.current.length) / shortScoreTotalRef.current) * 100));
         },
       });
-      // 板块已切换时，历史列/序列属于上一个板块，不再回写
-      const sameBoard = shortScorePoolRef.current === secidRef.current;
+      // 板块已切换时，历史列/序列属于上一组板块，不再回写
+      const sameBoard = shortScorePoolRef.current === boardsKeyRef.current;
       // 历史列交易日：优先用评分流程内部（已按训练日收敛）的交易日，避免单独取数失败导致历史列消失
       if (sameBoard && computed.recentDays.length) {
         setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
@@ -865,12 +924,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       isTodayScorePausedRef.current = true;
       return;
     }
-    // 板块切换后立刻点击 / 切板块自动重算：先等当前板块的股票列表到位，否则会处理上一个板块的股票
+    if (!selectedSecidsRef.current.length) {
+      message.warning('请先选择板块');
+      return;
+    }
+    // 板块切换/增删后立刻点击：先等已选板块的股票列表到位，否则会处理上一组板块的股票
     scoreStartingRef.current = true;
     const boardReady = await waitBoardStocks();
     scoreStartingRef.current = false;
     if (!boardReady) {
-      message.warning('当前板块的股票列表还在加载，请稍后再试');
+      message.warning('板块的股票列表还在加载，请稍后再试');
       return;
     }
     const currentItems = collectVisibleItems();
@@ -895,8 +958,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     shortScoreTotalRef.current = currentItems.length;
     shortScoreRemainingRef.current = [];
     shortScoreCodesRef.current = currentItems.map((i) => i.code);
-    // 记录这一轮结果属于哪个板块：切换板块后丢弃这一轮结果
-    shortScorePoolRef.current = secidRef.current;
+    // 记录这一轮结果属于哪组板块：切换板块后丢弃这一轮结果
+    shortScorePoolRef.current = boardsKeyRef.current;
     shortScoreSourceRef.current = 'today';
     setShortScoreSeries({});
     setDisplayMode('shortScore');
@@ -914,8 +977,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         historyDays: SHORT_SCORE_HISTORY_DAYS,
         shouldStop: () => isTodayScorePausedRef.current,
         onRow: (row) => {
-          if (shortScorePoolRef.current !== secidRef.current) {
-            // 板块已切换：这一轮是上一个板块的结果，不再写入列表
+          if (shortScorePoolRef.current !== boardsKeyRef.current) {
+            // 板块已切换：这一轮是上一组板块的结果，不再写入列表
             return;
           }
           todayScoreDoneRef.current += 1;
@@ -923,8 +986,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           setTodayScoreProgress(Math.round((todayScoreDoneRef.current / currentItems.length) * 100));
         },
       });
-      // 板块已切换时，历史列/序列属于上一个板块，不再回写
-      const sameBoard = shortScorePoolRef.current === secidRef.current;
+      // 板块已切换时，历史列/序列属于上一组板块，不再回写
+      const sameBoard = shortScorePoolRef.current === boardsKeyRef.current;
       // 历史列交易日：用交易日历给出的最近交易日（含当日），保证当日列一定在
       if (sameBoard && computed.recentDays.length) {
         setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
@@ -1058,28 +1121,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     }
   }, [precomputing, ontrain, trainDate, trainStartDate, trainEndDate, kLineApiSourceSetting, collectCurrentItems, waitBoardStocks]);
 
-  const changeSecid = useCallback(
-    (t: BKType, s: string) => {
-      if (!s) return;
-      setCurrentPage(1);
-      // 正在看评分结果列表时不要退回股票列表：「板块切换」的 effect 会按新板块自动重算并继续展示结果；
-      // 其它模式（股票列表/龙头/排雷/择时/主力建仓）才退回股票列表。
-      if (displayModeRef.current !== 'shortScore') {
-        setDisplayMode('stocks');
-      }
-      onChangeBK(t, s);
-      setTimeout(() => {
-        mayGetStocks(kLineApiSourceSetting, s, 200);
-      }, 0);
-    },
-    [secid, kLineApiSourceSetting, mayGetStocks]
-  );
-
+  // 外部（板块列表 / 行业入口）指定了单个板块 → 同步为「单选」；多选由下拉框直接维护
   useEffect(() => {
-    if (secid) {
-      mayGetStocks(kLineApiSourceSetting, secid, 200);
+    if (!secid) {
+      return;
     }
-  }, [secid, kLineApiSourceSetting]);
+    setSelectedSecids([secid]);
+  }, [secid]);
 
   // 评分基准日随训练日/数据源变化：旧结果是上一交易日（或上一数据源）算的，直接展示会误导，需清空重算
   useEffect(() => {
@@ -1095,13 +1143,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setShortScoreDays([]);
   }, [trainDate, kLineApiSourceSetting]);
 
-  // 板块切换：列表展示、评分结果与选股漏斗结果都属于上一个板块，必须整体重置。
-  // （从「板块列表/行业」进入新板块时不会走 changeSecid，displayMode 会停在 shortScore，
-  //   而 collectCurrentItems 在 shortScore 模式下会沿用上一次的股票池 —— 就会把上一个板块的股票再评一遍。）
-  // 若切换前正在看评分结果列表，则在新板块的股票列表就绪后自动按新板块重算一次，列表跟着板块走。
+  // 板块选择变化（含增删板块）：列表展示、评分结果与选股漏斗结果都属于上一组板块，必须整体重置。
+  // （从「板块列表/行业」进入新板块时 displayMode 可能停在 shortScore，
+  //   而 collectCurrentItems 在 shortScore 模式下会沿用上一次的股票池 —— 就会把上一组板块的股票再评一遍。）
+  // 若变化前正在看评分结果列表，则在新板块组合的股票列表就绪后自动按新组合重算一次，列表跟着板块走。
   useEffect(() => {
-    const targetSecid = secid;
-    /** 切换前正在展示评分结果时，记录该列表是「短线评分」还是「当日评分」算出来的 */
+    const targetKey = boardsKey;
+    const targetSecids = selectedSecidsRef.current;
+    /** 变化前正在展示评分结果时，记录该列表是「短线评分」还是「当日评分」算出来的 */
     const rescoreMode = displayModeRef.current === 'shortScore' ? shortScoreSourceRef.current : '';
     setCurrentPage(1);
     if (!rescoreMode) {
@@ -1124,7 +1173,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     shortScorePoolRef.current = '';
     setShortScoreSeries({});
     setShortScoreDays([]);
-    // 其余漏斗步骤的结果同样属于上一个板块（否则续跑会接着旧板块的进度往下显示）
+    // 其余漏斗步骤的结果同样属于上一组板块（否则续跑会接着旧板块的进度往下显示）
     setLeaderData([]);
     setLeaderDisplayCount(0);
     setLeaderProgress(0);
@@ -1142,20 +1191,39 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setMainInProgress(0);
     mainInIndexRef.current = 0;
 
+    // 清理已移除板块的成分股缓存，重建合并列表，并拉取尚未缓存的板块
+    Object.keys(boardStocksCacheRef.current).forEach((k) => {
+      if (targetSecids.indexOf(k) === -1) {
+        delete boardStocksCacheRef.current[k];
+      }
+    });
+    rebuildStocksFromBoards();
+    const missing = targetSecids.filter((s) => boardStocksCacheRef.current[s] === undefined);
+    if (missing.length) {
+      loadBoardsStocks(missing);
+    }
+    if (!targetKey) {
+      // 未选板块：清空合并列表与所属板块映射，并退回股票列表
+      setStocks([]);
+      setStockBoardSecidsMap({});
+      stocksBoardRef.current = '';
+      setDisplayMode('stocks');
+      return;
+    }
+
     if (!rescoreMode) {
       return;
     }
-    // 自动重算：等「上一轮收尾」+「新板块股票列表就绪」后再触发一次
+    // 自动重算：等「上一轮收尾」+「新板块组合的股票列表就绪」后再触发一次
     // （评分函数内部还会再等一次板块就绪，这里主要是避免上一轮还没结束时被当成「暂停」而空跑）
     let canceled = false;
     const startedAt = Date.now();
     const trigger = () => {
-      if (canceled || secidRef.current !== targetSecid) {
+      if (canceled || boardsKeyRef.current !== targetKey) {
         return;
       }
       const busy = isShortScoreRunningRef.current || todayScoreRunningRef.current || scoreStartingRef.current;
-      const boardReady = stocksBoardRef.current === targetSecid;
-      if (busy || !boardReady) {
+      if (busy || !boardsReady()) {
         if (Date.now() - startedAt < 15000) {
           setTimeout(trigger, 200);
         } else {
@@ -1164,7 +1232,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         }
         return;
       }
-      console.log(`[短线评分] 板块切换 → 自动按新板块重算（${rescoreMode === 'today' ? '当日评分' : '短线评分'}）`);
+      console.log(`[短线评分] 板块变化 → 自动按新板块组合重算（${rescoreMode === 'today' ? '当日评分' : '短线评分'}）`);
       if (rescoreMode === 'today') {
         handleTodayScoreRef.current();
       } else {
@@ -1175,7 +1243,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     return () => {
       canceled = true;
     };
-  }, [secid]);
+    // 依赖只保留 boardsKey：其余为 ref / 稳定 useCallback，加入依赖会导致无关重跑
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardsKey]);
 
   // 训练日切换（训练工具栏或列表里的「下一天」）→ 若正在展示「短线评分」结果列表，自动按新训练日重算。
   // 用 ref 持有最新的 handleShortScore，避免把它写进依赖导致「评分状态变化 → effect 重跑」的循环。
@@ -1420,38 +1490,52 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   /** 当前过滤结果的股票数：即「当日评分」实际会处理的数量（全部页），直接标在按钮上 */
   const todayScoreCount = visibleShowList.length;
 
+  /** 板块 secid -> 名称（用于下拉展示与结果列表标记所属板块） */
+  const boardNameMap = React.useMemo(() => {
+    const m: Record<string, string> = {};
+    [...industries, ...gainians].forEach((i) => {
+      m[i.secid] = i.name;
+    });
+    return m;
+  }, [industries, gainians]);
+  const boardLabel = useCallback((s: string) => boardNameMap[s] || s, [boardNameMap]);
+
   return (
     <>
       <div className={classNames(styles.header, styles.actbar)}>
         <div>
           <Select
             value={bktype}
-            onSelect={(v) => changeSecid(v, v === BKType.Industry ? industries[0].secid : gainians[0].secid)}
+            onSelect={(v) => {
+              if (v === bktype) {
+                return;
+              }
+              // 切换板块类型：清空已选板块（行业与概念板块不通用）
+              setSelectedSecids([]);
+              onChangeBK(v, '');
+            }}
             style={{ marginRight: 10 }}
           >
             <Select.Option value={BKType.Industry}>行业板块</Select.Option>
             <Select.Option value={BKType.Gainian}>概念板块</Select.Option>
           </Select>
-          {bktype === BKType.Industry && (
-            <Select value={secid} onSelect={(v) => changeSecid(BKType.Industry, v)} style={{ width: 120 }}>
-              <Select.Option value="">未选择</Select.Option>
-              {industries.map((i) => (
-                <Select.Option value={i.secid} key={i.code}>
-                  {i.name}
-                </Select.Option>
-              ))}
-            </Select>
-          )}
-          {bktype === BKType.Gainian && (
-            <Select value={secid} onSelect={(v) => changeSecid(BKType.Gainian, v)}>
-              <Select.Option value="">未选择</Select.Option>
-              {gainians.map((i) => (
-                <Select.Option value={i.secid} key={i.code}>
-                  {i.name}
-                </Select.Option>
-              ))}
-            </Select>
-          )}
+          <Select
+            mode="multiple"
+            value={selectedSecids}
+            onChange={(v) => setSelectedSecids(v as string[])}
+            style={{ minWidth: 220, maxWidth: 460 }}
+            placeholder={bktype === BKType.Industry ? '选择行业板块（可多选）' : '选择概念板块（可多选）'}
+            showSearch
+            optionFilterProp="children"
+            maxTagCount="responsive"
+            allowClear
+          >
+            {(bktype === BKType.Industry ? industries : gainians).map((i) => (
+              <Select.Option value={i.secid} key={i.code}>
+                {i.name}
+              </Select.Option>
+            ))}
+          </Select>
         </div>
         <div>
           <Input size="small" placeholder="名字过滤" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} style={{ width: 100, marginRight: 8 }} />
@@ -1889,7 +1973,34 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                   const secid = s.code.startsWith('6') ? `1.${s.code}` : `0.${s.code}`;
                   onOpenStock(secid, s.name || s.code);
                 }}>
-                  <span style={{ color: '#1890ff' }}>{s.name || s.code}</span>
+                  <div
+                    title={s.name || s.code}
+                    style={{ color: '#1890ff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  >
+                    {s.name || s.code}
+                  </div>
+                  {(() => {
+                    // 标记该股票所属的已选板块（可能同时属于多个）
+                    const bs = (stockBoardSecidsMap[s.code] || []).map(boardLabel);
+                    if (!bs.length) {
+                      return null;
+                    }
+                    return (
+                      <div
+                        title={`所属板块：${bs.join('、')}`}
+                        style={{
+                          fontSize: 10,
+                          lineHeight: 1.1,
+                          color: 'var(--secondary-text-color)',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
+                        {bs.join('、')}
+                      </div>
+                    );
+                  })()}
                 </Col>
                 <Col
                   span={2}
