@@ -162,6 +162,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   // RSI 评分阈值过滤：仅显示 RSI 评分「大于」阈值的股票（RSI 满分 40）
   const [shortScoreRsiFilterEnabled, setShortScoreRsiFilterEnabled] = useState(false);
   const [shortScoreRsiFilterScore, setShortScoreRsiFilterScore] = useState(30);
+  // 是否显示「评分基准日尚未上市」的股票：默认隐藏（训练回看历史日时，当前成分股里常含大量当时还没上市的新股，
+  // 它们没有分数、又排在列表最前面，会把第一页占满）
+  const [shortScoreShowNotListed, setShortScoreShowNotListed] = useState(false);
   // 当日评分（用当日分时补全当日K线后重新评分）
   const [todayScoreLoading, setTodayScoreLoading] = useState(false);
   const [todayScoreProgress, setTodayScoreProgress] = useState(0);
@@ -1422,6 +1425,10 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
 
     if (displayMode === 'shortScore') {
       let list = [...shortScoreData];
+      // 默认隐藏「评分基准日尚未上市」的股票（可用「显示未上市」开关恢复）
+      if (!shortScoreShowNotListed) {
+        list = list.filter((s: any) => !s.notListed);
+      }
       // 过滤：近 N 个交易日出现过 ≥ 阈值分（当日分 + 历史列序列任一命中即可）
       if (shortScoreFilterEnabled) {
         const threshold = Number(shortScoreFilterScore);
@@ -1466,7 +1473,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreSeries, shortScoreDisplayDays]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, shortScoreDisplayDays]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」过滤（对所有展示模式生效）
@@ -1667,6 +1674,19 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 style={{ width: 56 }}
               />
               <span>分</span>
+            </span>
+          )}
+          {displayMode === 'shortScore' && (
+            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <Checkbox
+                checked={shortScoreShowNotListed}
+                onChange={(e) => {
+                  setShortScoreShowNotListed(e.target.checked);
+                  setCurrentPage(1);
+                }}
+                title="训练回看历史日时，当前成分股里包含当时还没上市的新股；默认隐藏它们，勾选后可查看"
+              />
+              <span>显示未上市</span>
             </span>
           )}
           {ontrain && displayMode === 'shortScore' && (

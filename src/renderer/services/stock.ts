@@ -915,10 +915,22 @@ export async function GetKFromDataSource(
         } else {
           // 先按训练日期裁剪再取最后 N 条，保证取到的条数不被未来数据挤掉
           const cuted = ignoreTrain ? ks : TrainFilter.CutKlines(ks);
-          if (limit && limit > 0 && cuted.length > limit) {
-            return { ks: cuted.slice(-limit), kt: code };
+          // 训练模式下关键校验：缓存可能只含「训练日之后」的近期数据（由非训练会话写入），
+          // 按训练日裁剪后会变成空数组。若不校验而直接返回，调用方（短线评分 / 详情页 / 基准日归位）
+          // 会以为拿到了数据、实际得到空数组，表现为「基准日归位失败 → 全部股票拿不到K线 → RSI/K线形态全是 --」。
+          // 因此训练模式下必须确认裁剪后仍有数据、且能覆盖到训练日附近，否则走下面的请求分支按训练窗口补历史。
+          const trainToDate = TrainFilter.GetTrainToDate();
+          const trainCovered =
+            ignoreTrain ||
+            !trainToDate ||
+            (cuted.length > 0 &&
+              cuted[cuted.length - 1].date >= dayjs(trainToDate).subtract(10, 'day').format('YYYY-MM-DD'));
+          if (trainCovered) {
+            if (limit && limit > 0 && cuted.length > limit) {
+              return { ks: cuted.slice(-limit), kt: code };
+            }
+            return { ks: cuted, kt: code };
           }
-          return { ks: cuted, kt: code };
         }
       }
     }
