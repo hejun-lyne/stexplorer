@@ -38,6 +38,14 @@ import { setTrainCurrentDateAction, writeTrainProgressAction } from '@/actions/t
 /** 短线评分列表「近 N 日评分」历史列展示的交易日数量 */
 const SHORT_SCORE_HISTORY_DAYS = 15;
 
+/**
+ * 「K线形态」列的排序键
+ *
+ * 该列的排序不是单一数值：先阳线后阴线（阳线在前），同为阳/阴时再按K线实体大小。
+ * 因此它在 showList 里有专门的比较逻辑，不走通用的数值排序。
+ */
+const KLINE_SHAPE_SORT_KEY = 'klineShape';
+
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
   { label: KFilterTypeNames[KFilterType.FLYX], value: KFilterType.FLYX },
@@ -1332,7 +1340,20 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const updateSortType = useCallback((key: string) => {
     setSortTypes((prev) => {
       const currentType = prev[key] || 0;
-      const nextType = currentType === 0 ? 1 : currentType === 1 ? 2 : 0;
+      // K线形态列：常用顺序是「阳线在前、实体大在前」，所以第一次点击直接给降序（2），
+      // 再点一次给升序（1），第三次取消；其余列沿用「升序 → 降序 → 取消」
+      const nextType =
+        key === KLINE_SHAPE_SORT_KEY
+          ? currentType === 0
+            ? 2
+            : currentType === 2
+            ? 1
+            : 0
+          : currentType === 0
+          ? 1
+          : currentType === 1
+          ? 2
+          : 0;
       // 只保留当前点击列的排序状态，其他列重置
       if (nextType === 0) {
         return {};
@@ -1453,13 +1474,30 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       }
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
-        list.sort((a: any, b: any) => {
-          const left = Number(a[keys[0]]) || 0;
-          const right = Number(b[keys[0]]) || 0;
-          if (left === right) return 0;
-          const t = sortTypes[keys[0]];
-          return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
-        });
+        if (keys[0] === KLINE_SHAPE_SORT_KEY) {
+          // K线形态排序：先阳线后阴线（阳线大于阴线），同为阳/阴时再按K线实体大小
+          // （实体 / 近期平均实体，越大实体越大）。降序=阳线在前且实体大的在前。
+          const t = sortTypes[KLINE_SHAPE_SORT_KEY];
+          list.sort((a: any, b: any) => {
+            const leftYin = a.klineYin ? 1 : 0;
+            const rightYin = b.klineYin ? 1 : 0;
+            if (leftYin !== rightYin) {
+              return t === 2 ? leftYin - rightYin : rightYin - leftYin;
+            }
+            const left = Number(a.klineSize) || 0;
+            const right = Number(b.klineSize) || 0;
+            if (left === right) return 0;
+            return t === 2 ? right - left : left - right;
+          });
+        } else {
+          list.sort((a: any, b: any) => {
+            const left = Number(a[keys[0]]) || 0;
+            const right = Number(b[keys[0]]) || 0;
+            if (left === right) return 0;
+            const t = sortTypes[keys[0]];
+            return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+          });
+        }
       }
       return list as any;
     }
@@ -1822,8 +1860,26 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
-          <Col span={3} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）">
+          <Col
+            span={3}
+            title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。排序：先阳线后阴线，再按K线实体大小"
+          >
             K线形态
+            <Button
+              size="small"
+              type="text"
+              icon={
+                sortTypes[KLINE_SHAPE_SORT_KEY] == 1 ? (
+                  <CaretUpOutlined />
+                ) : sortTypes[KLINE_SHAPE_SORT_KEY] == 2 ? (
+                  <CaretDownOutlined />
+                ) : (
+                  <CaretRightOutlined />
+                )
+              }
+              className={styles.sortbtn}
+              onClick={() => updateSortType(KLINE_SHAPE_SORT_KEY)}
+            />
           </Col>
           <Col span={2}>
             放量
@@ -2068,7 +2124,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 <Col
                   span={3}
                   style={{ fontSize: 12 }}
-                  title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${s.intraday ? '｜当日K线由分时补全' : ''}${s.error ? `｜${s.error}` : ''}`}
+                  title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${
+                    s.klineSize != null ? `｜实体 ${s.klineSize.toFixed(2)}倍平均` : ''
+                  }${s.intraday ? '｜当日K线由分时补全' : ''}${s.error ? `｜${s.error}` : ''}`}
                 >
                   {s.klineShape ? (
                     <span className={Utils.GetValueColor(s.klineYin ? -1 : 1).textClass}>{s.klineShape}</span>

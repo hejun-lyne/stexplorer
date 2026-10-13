@@ -13,7 +13,7 @@ import dayjs from 'dayjs';
  * 避免新增字段（如K线形态、是否放量、当日分时补全标记）在旧缓存上永远显示为空，
  * 也避免评分口径调整（如资金维度窗口 20 日 → 5 日）后继续用旧口径的分数。
  */
-export const SCORE_ROW_VERSION = 6;
+export const SCORE_ROW_VERSION = 7;
 
 /** 短线评分列表输入项 */
 export interface ShortTermScoreItem {
@@ -44,6 +44,8 @@ export interface ShortTermScoreRow {
   klineShape?: string;
   /** 最新交易日K线是否阴线（true=阴线，false=阳线；无数据时 undefined） */
   klineYin?: boolean;
+  /** 最新交易日K线实体大小（实体 / 近期平均实体，1=平均；越大实体越大。用于列表排序） */
+  klineSize?: number;
   /** 最新交易日是否放量 */
   volumeExpanded?: boolean;
   /** 行结构版本（用于淘汰旧缓存行，见 SCORE_ROW_VERSION） */
@@ -79,6 +81,8 @@ export function buildShortTermScoreRow(params: {
   klineShape?: string;
   /** 最新交易日K线是否阴线 */
   klineYin?: boolean;
+  /** 最新交易日K线实体大小（实体 / 近期平均实体） */
+  klineSize?: number;
   /** 最新交易日是否放量 */
   volumeExpanded?: boolean;
   /** 当日K线由分时合成（「当日评分」） */
@@ -86,7 +90,7 @@ export function buildShortTermScoreRow(params: {
   /** 评分失败原因（有值时该行不会写入缓存，便于下次重算） */
   error?: string;
 }): ShortTermScoreRow {
-  const { code, name, overall, market, sector, stock, volume, rsi, money, klineShape, klineYin, volumeExpanded, intraday, error } = params;
+  const { code, name, overall, market, sector, stock, volume, rsi, money, klineShape, klineYin, klineSize, volumeExpanded, intraday, error } = params;
   const row: ShortTermScoreRow = {
     code,
     name: name || code,
@@ -105,6 +109,7 @@ export function buildShortTermScoreRow(params: {
     moneyNote: money.note,
     klineShape: klineShape || '',
     klineYin,
+    klineSize,
     volumeExpanded: !!volumeExpanded,
     intraday: !!intraday,
     v: SCORE_ROW_VERSION,
@@ -146,9 +151,9 @@ export const VOLUME_EXPAND_RATIO = 1.5;
  * @param klines 已按评分基准日截断的日K
  * @param expectDay 评分基准日：若提供，则要求最后一根K线的日期与之相同，
  *                  否则说明数据没到当天（停牌/取数失败回退到旧缓存），不做判定，避免把旧交易日的形态与阴阳当成当日的
- * @returns name=形态名称，yin=是否阴线（收发阴）；数据不足/未到当日/识别失败返回 null
+ * @returns name=形态名称，yin=是否阴线（收发阴），size=实体大小（实体/近期平均实体）；数据不足/未到当日/识别失败返回 null
  */
-export function describeLatestKlineShape(klines: Stock.KLineItem[], expectDay?: string): { name: string; yin: boolean } | null {
+export function describeLatestKlineShape(klines: Stock.KLineItem[], expectDay?: string): { name: string; yin: boolean; size: number } | null {
   if (!klines || klines.length <= 40) {
     return null;
   }
@@ -162,7 +167,7 @@ export function describeLatestKlineShape(klines: Stock.KLineItem[], expectDay?: 
     if (!desc) {
       return null;
     }
-    return { name: SingleKLineShapeNames[desc.sshapeType] || '', yin: !!desc.yin };
+    return { name: SingleKLineShapeNames[desc.sshapeType] || '', yin: !!desc.yin, size: Number(desc.size) || 0 };
   } catch {
     return null;
   }
@@ -375,6 +380,7 @@ export function computeShortTermScoreForDate(params: {
     money,
     klineShape: latestShape?.name || '',
     klineYin: latestShape?.yin,
+    klineSize: latestShape?.size,
     volumeExpanded: isLatestVolumeExpanded(klines),
     intraday,
   });
@@ -1673,7 +1679,7 @@ export async function computeTodayScoreRows(
   const klineOnlyRow = (
     item: ShortTermScoreItem,
     info?: {
-      shape: { name: string; yin: boolean } | null;
+      shape: { name: string; yin: boolean; size: number } | null;
       intraday: boolean;
       volumeExpanded: boolean;
       rsi: Score.RsiScoreResult;
@@ -1684,6 +1690,7 @@ export async function computeTodayScoreRows(
     row.intraday = !!info?.intraday;
     row.klineShape = info?.shape?.name || '';
     row.klineYin = info?.shape?.yin;
+    row.klineSize = info?.shape?.size;
     row.volumeExpanded = info?.volumeExpanded;
     if (info?.rsi) {
       // RSI 只依赖K线：当日K线（可能是分时补全的）就绪时同样可算可展示；数据不足时留空显示 --
