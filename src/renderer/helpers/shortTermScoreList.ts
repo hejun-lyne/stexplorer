@@ -658,9 +658,14 @@ export async function ensureMarketStats(ctx: ScoreSharedContext, dayKey: string)
 /** 板块名称清洗（去掉名字里附带的 BK 代码） */
 const cleanBoardName = (name: string) => String(name || '').replace(/[，,]\s*BK\d+\s*$/i, '').trim();
 
-/** 东财所属板块（按 secid 缓存，避免同一只股票在多个交易日里重复请求） */
+/**
+ * 东财所属板块（按 secid 缓存，避免同一只股票在多个交易日里重复请求）
+ *
+ * 注意缓存判定用 `!== undefined` 而不是真值判断：取数失败 / 真的没有板块时会缓存空数组，
+ * 若按真值判断，每只股票都会再打一次接口（训练回看历史日期时，同一批股票会重复请求同一个 secid）。
+ */
 async function getBankuais(ctx: ScoreSharedContext, secid: string): Promise<any[]> {
-  if (ctx.bankuaiMap[secid]) {
+  if (ctx.bankuaiMap[secid] !== undefined) {
     return ctx.bankuaiMap[secid];
   }
   try {
@@ -672,9 +677,15 @@ async function getBankuais(ctx: ScoreSharedContext, secid: string): Promise<any[
   return ctx.bankuaiMap[secid];
 }
 
-/** 板块日K（真实数据，不用成分股合成值；按板块代码缓存） */
+/**
+ * 板块日K（真实数据，不用成分股合成值；按板块代码缓存）
+ *
+ * 空结果同样要缓存（`!== undefined`）：回看历史日期时，很多板块在训练日还没成立，
+ * 取数为空是确定性结论；若按真值判断，每只候选到该板块的股票都会重复请求一次
+ * （python 侧还会打印「板块K线缓存范围不足」，看起来像在无意义的反复重试）。
+ */
 async function getBoardKlines(ctx: ScoreSharedContext, boardCode: string): Promise<Stock.KLineItem[]> {
-  if (ctx.boardKlinesMap[boardCode]) {
+  if (ctx.boardKlinesMap[boardCode] !== undefined) {
     return ctx.boardKlinesMap[boardCode];
   }
   try {
@@ -685,22 +696,21 @@ async function getBoardKlines(ctx: ScoreSharedContext, boardCode: string): Promi
   return ctx.boardKlinesMap[boardCode];
 }
 
-/** 板块名称 -> 代码（按名称缓存） */
+/** 板块名称 -> 代码（按名称缓存；解析不到时也缓存空串，避免同一名称反复解析） */
 async function resolveBoardCode(ctx: ScoreSharedContext, name: string): Promise<string> {
   const key = cleanBoardName(name);
   if (!key) {
     return '';
   }
-  if (ctx.boardCodeMap[key]) {
+  if (ctx.boardCodeMap[key] !== undefined) {
     return ctx.boardCodeMap[key];
   }
   try {
     const code = await Services.Stock.ResolveBoardCodeByName(key, ctx.source);
-    if (code) {
-      ctx.boardCodeMap[key] = code;
-    }
-    return code || '';
+    ctx.boardCodeMap[key] = code || '';
+    return ctx.boardCodeMap[key];
   } catch {
+    ctx.boardCodeMap[key] = '';
     return '';
   }
 }
@@ -738,6 +748,10 @@ function boardLastDateOnOrBefore(ctx: ScoreSharedContext, boardCode: string, ks:
  *
  * 与个股详情页口径完全一致：候选取前 10 个，逐个按名称解析代码，
  * 并取「基准日附近仍有真实行情」的第一个；板块自身数据缺失时该维度不参与评分。
+ *
+ * 训练回看历史日期时，候选板块里常有一批「当时还没成立」的新板块（取不到基准日之前的K线）：
+ * 这类板块直接跳过、换下一个候选（不再对它反复重试），实在没有「附近有行情」的候选时，
+ * 退而选「离基准日最近、且基准日之前行情足够算分」的那个。
  */
 export async function resolveBoards(
   ctx: ScoreSharedContext,
@@ -763,18 +777,42 @@ export async function resolveBoards(
       }
     });
 
+    /**
+     * 候选板块里「最接近基准日、且基准日及之前确有行情」的那个
+     *
+     * 训练回看历史日期时，很多候选板块（尤其新建的概念板块）在训练日还不存在，
+     * 这类板块取不到基准日之前的K线，用于评分只会让板块维度缺失；
+     * 因此优先用「基准日附近有行情」的候选，其次退而用「有行情但离基准日较远」的候选，
+     * 避免最后落到一个当时根本不存在的板块上。
+     */
+    let fallback: { code: string; name: string; last: string } | null = null;
+    // 板块评分所需的最少K线根数：凑不够的话评分仍会判成「板块K线数据不足」，兜底也没意义
+    const minBars = Score.SHORT_TERM_SCORE_CONFIG.sectorDays + 1;
+
     for (const c of candidates.slice(0, BOARD_CANDIDATE_LIMIT)) {
       const resolved = (await resolveBoardCode(ctx, c.name)) || c.code;
       const ks = await getBoardKlines(ctx, resolved);
       const last = boardLastDateOnOrBefore(ctx, resolved, ks, referenceDate);
+      if (!last) {
+        // 板块在基准日及之前没有任何行情（板块当时尚未成立）→ 换下一个候选
+        continue;
+      }
       const near =
-        !!last &&
-        (!referenceDate ||
-          Math.abs((new Date(toDay(referenceDate)).getTime() - new Date(last).getTime()) / 86400000) <= BOARD_NEAR_DAYS);
+        !referenceDate ||
+        Math.abs((new Date(toDay(referenceDate)).getTime() - new Date(last).getTime()) / 86400000) <= BOARD_NEAR_DAYS;
       if (near) {
         choice.board = { code: resolved, name: cleanBoardName(c.name) || c.name };
         break;
       }
+      const refDay = toDay(referenceDate);
+      const barsBefore = refDay ? ks.filter((k) => k?.date && toDay(k.date) <= refDay).length : ks.length;
+      if (barsBefore >= minBars && (!fallback || last > fallback.last)) {
+        fallback = { code: resolved, name: cleanBoardName(c.name) || c.name, last };
+      }
+    }
+    if (!choice.board && fallback) {
+      // 没有「附近有行情」的候选时，用最接近基准日、至少要真实存在的那个板块
+      choice.board = { code: fallback.code, name: fallback.name };
     }
     if (!choice.board) {
       if (hybk) {

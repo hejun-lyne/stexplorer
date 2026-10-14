@@ -1786,6 +1786,24 @@ class TushareAPI:
             # 需要覆盖的历史长度：至少能支撑评分用的近 20 日均线（留足缓冲）
             need_start = _parse_date_str((target_dt - timedelta(days=120)).strftime('%Y%m%d'))
 
+            # ---- 「板块在目标日还不存在」的负缓存 ----
+            # 板块（BKxxxx.DC）的 dc_daily 数据有明确起点（板块成立 / 首条行情）。训练模式回看更早的
+            # 交易日时（如 2024 年的训练日），无论重拉多少次都拿不到更早的数据，表现为每次调用都
+            # 打印「板块K线缓存范围不足 ... 重新拉取」并白打一次接口。这里记住「已探测过的起点 +
+            # 该板块已知最早行情日」，当需求起点更早且已被探测覆盖时，直接判定该板块当时不存在。
+            probe_key = f"board_kline_probe_{ts_code}_{period}"
+            probe = read_cache(probe_key, max_age_hours=168 * 12)  # 最长缓存 12 周
+            if not isinstance(probe, dict):
+                probe = {}
+            known_earliest = _parse_date_str(str(probe.get('earliest', '') or ''))
+            probed_start = _parse_date_str(str(probe.get('probed_start', '') or ''))
+            board_absent_at_target = bool(
+                known_earliest is not None
+                and need_start is not None
+                and known_earliest > need_start
+                and (probed_start is None or probed_start <= need_start)
+            )
+
             cached_df = read_cache(cache_key, max_age_hours=168 * 4)  # 最长缓存 4 周
             cache_valid = False
             if cached_df is not None and isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
@@ -1795,10 +1813,19 @@ class TushareAPI:
                 cache_min_date = _parse_date_str(cache_min_date_str)
                 if cache_max_date is not None and expected_last is not None:
                     covers_end = cache_max_date >= expected_last
-                    covers_start = cache_min_date is not None and (need_start is None or cache_min_date <= need_start)
+                    # 起点缺口「不可能补齐」时按已覆盖处理，不再为它重拉
+                    covers_start = board_absent_at_target or (
+                        cache_min_date is not None and (need_start is None or cache_min_date <= need_start)
+                    )
                     if covers_end and covers_start:
                         cache_valid = True
-                        print(f"[板块K线缓存命中] {ts_code} 缓存区间={cache_min_date_str}~{cache_max_date_str} 覆盖需求={expected_last_str}")
+                        if board_absent_at_target:
+                            print(
+                                f"[板块K线] {ts_code} 已知最早行情={probe.get('earliest')}，"
+                                f"需求起点={need_start} 更早（板块在目标日尚未成立），跳过重拉"
+                            )
+                        else:
+                            print(f"[板块K线缓存命中] {ts_code} 缓存区间={cache_min_date_str}~{cache_max_date_str} 覆盖需求={expected_last_str}")
                     elif not covers_end:
                         print(f"[板块K线缓存过期] {ts_code} 缓存最新={cache_max_date_str} < 需求={expected_last_str}，重新拉取")
                     else:
@@ -1807,7 +1834,9 @@ class TushareAPI:
             # 缓存可能是「多段拼接」的（每次各取 [target-2年, target]，不同时点取到的时间段并不连续）。
             # 只比较 min/max 会把有洞的缓存判成命中，裁剪后就只剩残缺的一段（表现为某些交易日板块维度缺失），
             # 因此还要检查「目标日附近」是否真的有K线；没有就重新拉取并把缺口合并进来。
-            if cache_valid and expected_last is not None:
+            # 注：已知「板块在目标日尚未成立」时跳过该检查 —— 那时附近本来就不可能有K线，
+            # 再判成「有洞」会退化成每次都重拉。
+            if cache_valid and expected_last is not None and not board_absent_at_target:
                 window_from = _parse_date_str((target_dt - timedelta(days=45)).strftime('%Y%m%d'))
                 try:
                     hit_in_window = 0
@@ -1871,6 +1900,27 @@ class TushareAPI:
                             write_cache(cache_key, df)
                 except Exception as e:
                     debug_info["daily_query_error"] = str(e)
+
+            # 记录「该板块已知最早行情」+「本次探测到的起点」：下次回看同样（或更早）的历史时，
+            # 可直接判定「板块当时尚未成立」并跳过重拉（见上面的负缓存说明）。
+            # 只在接口正常返回（df 是 DataFrame，哪怕为空）时记录：接口异常/超时不能被当成
+            # 「板块没有更早的数据」，否则会错误地长期跳过重拉。
+            if isinstance(df, pd.DataFrame):
+                try:
+                    probe_min = ''
+                    if not df.empty:
+                        probe_min = str(df['trade_date'].min())
+                    elif isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+                        # 区间查询为空（该板块在探测区间内没有任何行情）：用缓存里的最早行情作为下界
+                        probe_min = str(cached_df['trade_date'].min())
+                    prev_earliest = str(probe.get('earliest', '') or '')
+                    prev_probed = str(probe.get('probed_start', '') or '')
+                    merged_earliest = min([x for x in (prev_earliest, probe_min) if x]) if (prev_earliest or probe_min) else ''
+                    merged_probed = min([x for x in (prev_probed, start_date) if x]) if (prev_probed or start_date) else ''
+                    if merged_earliest != prev_earliest or merged_probed != prev_probed:
+                        write_cache(probe_key, {'earliest': merged_earliest, 'probed_start': merged_probed})
+                except Exception:
+                    pass
 
             if isinstance(df, dict) and df.get("error"):
                 return {"error": df.get("error"), "debug": debug_info}
