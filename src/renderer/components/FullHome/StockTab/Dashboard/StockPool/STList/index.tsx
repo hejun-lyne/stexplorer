@@ -35,7 +35,7 @@ import {
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
 import { setTrainCurrentDateAction, writeTrainProgressAction } from '@/actions/train';
 
-/** 短线评分列表「近 N 日评分」历史列展示的交易日数量 */
+/** 短线评分列表「近 N 日评分」历史列展示的交易日数量（仅影响展示列数，过滤窗口另有其天数） */
 const SHORT_SCORE_HISTORY_DAYS = 15;
 
 /**
@@ -164,15 +164,34 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [shortScoreSeries, setShortScoreSeries] = useState<ShortTermScoreSeries>({});
   /** 历史缺口补算进度：执行短线评分时顺带补齐近 N 个交易日缺的评分 */
   const [shortScoreBackfill, setShortScoreBackfill] = useState<{ done: number; total: number } | null>(null);
-  // 过滤：仅保留「近 N 个交易日出现过 ≥ 阈值分」的股票（阈值可填写，默认 60）
+  // 过滤：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的股票
+  // （阈值分、天数都可填写，默认：3 天前 / 近 15 日 / ≥ 60 分）
   const [shortScoreFilterEnabled, setShortScoreFilterEnabled] = useState(false);
   const [shortScoreFilterScore, setShortScoreFilterScore] = useState(60);
+  /** 过滤窗口的回溯起点：从「N 天前」开始往前数（即窗口不含最近 N 个交易日） */
+  const [shortScoreFilterBeforeDays, setShortScoreFilterBeforeDays] = useState(3);
+  /** 过滤窗口的长度：近 M 个交易日 */
+  const [shortScoreFilterWindowDays, setShortScoreFilterWindowDays] = useState(15);
   // RSI 评分阈值过滤：仅显示 RSI 评分「大于」阈值的股票（RSI 满分 40）
   const [shortScoreRsiFilterEnabled, setShortScoreRsiFilterEnabled] = useState(false);
   const [shortScoreRsiFilterScore, setShortScoreRsiFilterScore] = useState(30);
   // 是否显示「评分基准日尚未上市」的股票：默认隐藏（训练回看历史日时，当前成分股里常含大量当时还没上市的新股，
   // 它们没有分数、又排在列表最前面，会把第一页占满）
   const [shortScoreShowNotListed, setShortScoreShowNotListed] = useState(false);
+  /**
+   * 短线评分需要加载的交易日数量
+   *
+   * 「近 N 日评分」历史列固定展示 SHORT_SCORE_HISTORY_DAYS 日；而过滤窗口是「N 天前的近 M 日」，
+   * 最远要追溯到「N 天前」再往前 M 日，因此取两者较大值，保证过滤窗口用到的评分都已经读进来。
+   */
+  const shortScoreHistoryDays = React.useMemo(
+    () =>
+      Math.max(
+        SHORT_SCORE_HISTORY_DAYS,
+        Math.max(0, Number(shortScoreFilterBeforeDays) || 0) + Math.max(1, Number(shortScoreFilterWindowDays) || 0)
+      ),
+    [shortScoreFilterBeforeDays, shortScoreFilterWindowDays]
+  );
   // 当日评分（用当日分时补全当日K线后重新评分）
   const [todayScoreLoading, setTodayScoreLoading] = useState(false);
   const [todayScoreProgress, setTodayScoreProgress] = useState(0);
@@ -853,7 +872,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       // 历史列：先取近 N 个交易日（口径与评分基准日一致），已有序列稍后一并刷新
       setShortScoreSeries({});
       try {
-        setShortScoreDays(await resolveRecentTradingDays(kLineApiSourceSetting, SHORT_SCORE_HISTORY_DAYS));
+        setShortScoreDays(await resolveRecentTradingDays(kLineApiSourceSetting, shortScoreHistoryDays));
       } catch {
         setShortScoreDays([]);
       }
@@ -871,7 +890,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         concurrency: 3,
         shouldStop: () => isShortScorePausedRef.current,
         // 近 N 个交易日的历史列有缺口时顺带补算（列表缺哪天补哪天）
-        backfillDays: SHORT_SCORE_HISTORY_DAYS,
+        backfillDays: shortScoreHistoryDays,
         onBackfill: ({ done: bdone, total: btotal }) => {
           if (shortScorePoolRef.current !== boardsKeyRef.current) {
             return;
@@ -896,15 +915,15 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       const sameBoard = shortScorePoolRef.current === boardsKeyRef.current;
       // 历史列交易日：优先用评分流程内部（已按训练日收敛）的交易日，避免单独取数失败导致历史列消失
       if (sameBoard && computed.recentDays.length) {
-        setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
+        setShortScoreDays(computed.recentDays.slice(-shortScoreHistoryDays));
       }
-      // 计算完成（或暂停）后刷新评分序列，用于渲染「近 N 日评分」历史列。
-      // 只取历史列需要的交易日：整套训练窗口的序列（股票数 × 交易日数）可能有几十 MB，
+      // 计算完成（或暂停）后刷新评分序列，用于渲染「近 N 日评分」历史列与过滤窗口。
+      // 只取历史列/过滤窗口需要的交易日：整套训练窗口的序列（股票数 × 交易日数）可能有几十 MB，
       // 全量传回渲染进程会明显拖慢点击。
       try {
         if (sameBoard) {
           const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
-            -SHORT_SCORE_HISTORY_DAYS
+            -shortScoreHistoryDays
           );
           setShortScoreSeries(
             await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays })
@@ -923,7 +942,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       setShortScoreLoading(false);
       isShortScoreRunningRef.current = false;
     }
-  }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays, waitBoardStocks]);
+  }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays, shortScoreHistoryDays, waitBoardStocks]);
 
   // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
   // 盘中（或收盘后数据源还没生成当日日K）时，短线评分拿不到基准日的日K，当日列只显示 --。
@@ -979,7 +998,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     setDisplayMode('shortScore');
     setCurrentPage(1);
     try {
-      setShortScoreDays(await resolveRecentTradingDays(kLineApiSourceSetting, SHORT_SCORE_HISTORY_DAYS));
+      setShortScoreDays(await resolveRecentTradingDays(kLineApiSourceSetting, shortScoreHistoryDays));
     } catch {
       setShortScoreDays([]);
     }
@@ -988,7 +1007,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       const computed = await computeTodayScoreRows(currentItems, {
         source: kLineApiSourceSetting,
         concurrency: 6,
-        historyDays: SHORT_SCORE_HISTORY_DAYS,
+        historyDays: shortScoreHistoryDays,
         shouldStop: () => isTodayScorePausedRef.current,
         onRow: (row) => {
           if (shortScorePoolRef.current !== boardsKeyRef.current) {
@@ -1004,7 +1023,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       const sameBoard = shortScorePoolRef.current === boardsKeyRef.current;
       // 历史列交易日：用交易日历给出的最近交易日（含当日），保证当日列一定在
       if (sameBoard && computed.recentDays.length) {
-        setShortScoreDays(computed.recentDays.slice(-SHORT_SCORE_HISTORY_DAYS));
+        setShortScoreDays(computed.recentDays.slice(-shortScoreHistoryDays));
       }
       // 刷新历史列（读本地评分序列，不重新计算）；当日不出分，列内固定显示 --
       if (!sameBoard) {
@@ -1012,7 +1031,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       }
       try {
         const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
-          -SHORT_SCORE_HISTORY_DAYS
+          -shortScoreHistoryDays
         );
         const series = await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays });
         // 把「当前交易日」从展示序列里摘掉（库里可能还留着旧版本写入的当日分时评分），保证当日列显示 --
@@ -1362,10 +1381,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     });
   }, []);
 
-  // 「近 N 日评分」列实际展示的交易日：
+  // 评分序列里可用的交易日（升序）：
   // 优先用评分流程返回的交易日（已按训练日收敛）；若为空则退回评分序列里已存在的交易日
   // （训练模式下以训练日为上限，避免读到预计算写入的未来交易日），保证有数据时历史列不消失。
-  const shortScoreDisplayDays = React.useMemo(() => {
+  // 这些天既用于渲染历史列，也用于计算「N 天前的近 M 日」过滤窗口。
+  const shortScoreFilterDays = React.useMemo(() => {
     if (shortScoreDays.length) {
       return shortScoreDays;
     }
@@ -1379,8 +1399,26 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         }
       });
     });
-    return [...set].sort().slice(-SHORT_SCORE_HISTORY_DAYS);
-  }, [shortScoreDays, shortScoreSeries, ontrain, trainDate]);
+    return [...set].sort().slice(-shortScoreHistoryDays);
+  }, [shortScoreDays, shortScoreSeries, ontrain, trainDate, shortScoreHistoryDays]);
+
+  // 「近 N 日评分」列实际展示的交易日：固定取最近的 SHORT_SCORE_HISTORY_DAYS 个交易日
+  const shortScoreDisplayDays = React.useMemo(
+    () => shortScoreFilterDays.slice(-SHORT_SCORE_HISTORY_DAYS),
+    [shortScoreFilterDays]
+  );
+
+  /**
+   * 「N 天前的近 M 日」过滤窗口内的交易日
+   *
+   * 语义：从「N 天前」这个交易日开始往前数 M 个交易日（即窗口不含最近 N 个交易日）。
+   * 交易日列表按升序排列，所以先切掉末尾的 N 天，再取剩余的末尾 M 天。
+   */
+  const shortScoreFilterWindowDayList = React.useMemo(() => {
+    const beforeDays = Math.max(0, Math.floor(Number(shortScoreFilterBeforeDays) || 0));
+    const windowDays = Math.max(1, Math.floor(Number(shortScoreFilterWindowDays) || 0));
+    return shortScoreFilterDays.slice(0, Math.max(0, shortScoreFilterDays.length - beforeDays)).slice(-windowDays);
+  }, [shortScoreFilterDays, shortScoreFilterBeforeDays, shortScoreFilterWindowDays]);
 
   // 使用 useMemo 在 render 阶段计算 showList，避免 useLayoutEffect 中 setState 导致的无限循环
   const showList = React.useMemo(() => {
@@ -1450,18 +1488,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       if (!shortScoreShowNotListed) {
         list = list.filter((s: any) => !s.notListed);
       }
-      // 过滤：近 N 个交易日出现过 ≥ 阈值分（当日分 + 历史列序列任一命中即可）
-      if (shortScoreFilterEnabled) {
+      // 过滤：N 天前的近 M 个交易日出现过 ≥ 阈值分
+      // 窗口只落在「N 天前」及其之前（不含最近 N 个交易日）；窗口内无可用交易日时不过滤，避免误清空列表
+      if (shortScoreFilterEnabled && shortScoreFilterWindowDayList.length) {
         const threshold = Number(shortScoreFilterScore);
+        // 回溯 0 天时窗口含基准日当天，额外认「当日综合分」，避免序列里缺当日行时漏掉
+        const includeTodayScore = Math.max(0, Math.floor(Number(shortScoreFilterBeforeDays) || 0)) === 0;
         list = list.filter((s: any) => {
-          if (s.total != null && s.total >= threshold) {
+          if (includeTodayScore && s.total != null && s.total >= threshold) {
             return true;
           }
           const series = shortScoreSeries?.[s.code];
           if (!series) {
             return false;
           }
-          return shortScoreDisplayDays.some((d) => {
+          return shortScoreFilterWindowDayList.some((d) => {
             const v = series[d]?.total;
             return v != null && v >= threshold;
           });
@@ -1511,7 +1552,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, shortScoreDisplayDays]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, shortScoreDisplayDays]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」过滤（对所有展示模式生效）
@@ -1528,7 +1569,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
    * 「当日评分」的股票池：当前列表的「过滤结果」全部股票（**不分页**）
    *
    * 即用户在列表上筛出来的那批：排除科创板/北交所、名字过滤、K线过滤（ftypes）、
-   * 各选股模式（龙头 / 排雷 / 择时 / 主力建仓）的结果集，以及「近 N 日出现过 ≥ 阈值分」这类评分侧过滤，
+   * 各选股模式（龙头 / 排雷 / 择时 / 主力建仓）的结果集，以及「N 天前的近 M 日出现过 ≥ 阈值分」这类评分侧过滤，
    * 全部计入；只是不再无条件把整个板块跑一遍。
    * 列表行可能是 code / ts_code / secid 三种形态，统一用 codeOfListItem 取回 6 位代码再与池子取交集。
    */
@@ -1673,7 +1714,32 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                   setCurrentPage(1);
                 }}
               />
-              <span>近{SHORT_SCORE_HISTORY_DAYS}日出现过≥</span>
+              <InputNumber
+                size="small"
+                min={0}
+                max={250}
+                value={shortScoreFilterBeforeDays}
+                onChange={(v) => {
+                  setShortScoreFilterBeforeDays(typeof v === 'number' ? v : 3);
+                  setCurrentPage(1);
+                }}
+                style={{ width: 52 }}
+                title="从多少个交易日前开始回溯（窗口不含最近这么多个交易日）"
+              />
+              <span>天前近</span>
+              <InputNumber
+                size="small"
+                min={1}
+                max={250}
+                value={shortScoreFilterWindowDays}
+                onChange={(v) => {
+                  setShortScoreFilterWindowDays(typeof v === 'number' ? v : 15);
+                  setCurrentPage(1);
+                }}
+                style={{ width: 52 }}
+                title="过滤窗口长度（交易日数量）"
+              />
+              <span>日出现过≥</span>
               <InputNumber
                 size="small"
                 min={0}
