@@ -1927,7 +1927,14 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
           <Col
-            span={3}
+            span={2}
+            title="RSI 评分逻辑识别出的形态：金叉/死叉、超卖后金叉、超买后回踩、接近金叉、多头/空头排列等"
+            style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          >
+            RSI形态识别
+          </Col>
+          <Col
+            span={2}
             title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。排序：先阳线后阴线，再按K线实体大小"
           >
             K线形态
@@ -1947,7 +1954,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
               onClick={() => updateSortType(KLINE_SHAPE_SORT_KEY)}
             />
           </Col>
-          <Col span={2}>
+          <Col span={1} title="最新交易日是否放量">
             放量
             <Button size="small" type="text" icon={sortTypes.volumeExpanded == 1 ? <CaretUpOutlined /> : sortTypes.volumeExpanded == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('volumeExpanded')} />
           </Col>
@@ -2179,7 +2186,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 </Col>
                 <Col
                   span={2}
-                  title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
+                  title={s.error || undefined}
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
                   {/* RSI 列只展示 RSI 分值：数据未就绪的说明放到悬停提示，不再把「数据未覆盖到」占满 RSI 单元格 */}
@@ -2188,7 +2195,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                   </span>
                 </Col>
                 <Col
-                  span={3}
+                  span={2}
+                  title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
+                  style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                >
+                  {/* RSI 形态：来自 RSI 评分逻辑的形态识别结果（金叉/死叉/超卖后金叉/超买后回踩…），空值显示占位 */}
+                  {s.rsiPattern ? (
+                    s.rsiPattern
+                  ) : s.notListed ? (
+                    <span style={{ color: 'var(--reverse-text-color)' }}>未上市</span>
+                  ) : (
+                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
+                  )}
+                </Col>
+                <Col
+                  span={2}
                   style={{ fontSize: 12 }}
                   title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${
                     s.klineSize != null ? `｜实体 ${s.klineSize.toFixed(2)}倍平均` : ''
@@ -2203,7 +2224,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                     '--'
                   )}
                 </Col>
-                <Col span={2} title={s.volumeExpanded == null ? '无数据' : s.volumeExpanded ? '最新交易日放量' : '最新交易日未放量'}>
+                <Col span={1} title={s.volumeExpanded == null ? '无数据' : s.volumeExpanded ? '最新交易日放量' : '最新交易日未放量'}>
                   {s.volumeExpanded == null ? (
                     <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
                   ) : s.volumeExpanded ? (
