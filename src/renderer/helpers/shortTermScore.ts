@@ -871,75 +871,75 @@ export function scoreStockRsi(
   if (pullback) {
     const stabilized = rsi6s[n - 1] >= rsi6s[n - 2];
     score = applyOverbought(stabilized ? s(30) : s(26));
-    pattern = stabilized ? '超买后回踩24日线企稳（最佳买点）' : '超买后回落，6日线临近24日线（回踩中）';
+    pattern = stabilized ? '超买后回踩24日线企稳(买点)' : '超买回落中(6日线贴近24日线)';
   } else if (hasFreshCross && freshCrossIsUp && crossFromOversold) {
     // 超卖后金叉：上穿紧跟在最近一次真实超卖之后（时效窗口内），才是超卖反转买点
     if (spread >= 0) {
       score = applyOverbought(s(26));
-      pattern = `超卖后${crossAgo}6日线上穿24日线（金叉）`;
+      pattern = `超卖后${crossAgo}金叉`;
     } else if (spread >= -cfg.rsiBreakSpread) {
       score = applyOverbought(s(22));
-      pattern = '超卖后上穿24日线后回落至线附近整理（金叉待确认）';
+      pattern = '超卖金叉待确认';
     } else {
       score = applyOverbought(s(16));
-      pattern = '超卖后上穿24日线后已跌回24日线下方（金叉失效）';
+      pattern = '超卖金叉失效';
     }
   } else if (hasFreshCross && freshCrossIsUp) {
     // 近3日内上穿，但距最近一次真实超卖已超过时效窗口（区间反复缠绕）→ 不按超卖后金叉加分
     if (spread >= -cfg.rsiBreakSpread) {
       score = applyOverbought(s(20));
-      pattern = '近3日内6日线上穿24日线（非超卖反转，不加分）';
+      pattern = '3日内金叉(非超卖反转)';
     } else {
       score = applyOverbought(s(12));
-      pattern = '近3日内6日线上穿24日线后跌回24日线下方（上穿失效）';
+      pattern = '3日内金叉失效';
     }
   } else if (reboundRegime && approachingCross) {
     // 时效内无新交叉，但6日线在24日线下方向上收敛 → 等待金叉
     score = applyOverbought(s(20));
-    pattern = '超卖反弹后6日线回抽24日线（接近金叉）';
+    pattern = '超卖反弹(接近金叉)';
   } else if (hasFreshCross && !freshCrossIsUp) {
     // 时效窗口内的死叉：金叉结构已被破坏
     if (crossDownFromOversold) {
       // 直接把 RSI6 打进超卖区的死叉：短线已进入超卖，等待企稳信号
       score = s(12);
-      pattern = `超卖后${crossAgo}6日线下穿24日线，RSI6已进入超卖区（死叉，等待企稳）`;
+      pattern = `超卖后${crossAgo}死叉(等待企稳)`;
     } else if (reboundRegime) {
       score = spread >= -cfg.rsiBreakSpread ? s(16) : s(12);
       pattern =
         spread >= -cfg.rsiBreakSpread
-          ? `反弹结构中${crossAgo}6日线下穿24日线，在24日线下方震荡（死叉）`
-          : '反弹结构中6日线再度跌回24日线下方，结构转弱';
+          ? `反弹中${crossAgo}死叉`
+          : '反弹后再度跌破24日线(转弱)';
     } else {
       // 普通死叉：若已在快速收复（RSI6 当日回升且与24日线差值收敛），不再一直压在死叉低分档
       const recovering = rsi6 > rsi6s[n - 2] && spread > spreadAt(n - 2);
       if (recovering && aboveMid) {
         score = applyOverbought(s(12));
-        pattern = `${crossAgo}6日线下穿24日线，已收复12日线（结构待修复）`;
+        pattern = `${crossAgo}死叉(已收复12日线)`;
       } else if (recovering) {
         score = applyOverbought(s(10));
-        pattern = `${crossAgo}6日线下穿24日线，快速收复中（结构待修复）`;
+        pattern = `${crossAgo}死叉(快速收复中)`;
       } else {
         score = spread >= -cfg.rsiBreakSpread ? s(8) : s(6);
-        pattern = `${crossAgo}6日线下穿24日线，在24日线下方震荡（死叉）`;
+        pattern = `${crossAgo}死叉`;
       }
     }
   } else if (reboundRegime && rsi6 < rsi24 && rsi6 >= rsi6s[n - 2] && rsi6 - troughAfterOversold > 5) {
     // 超卖后反弹修复中：RSI6 已显著脱离超卖谷底且当日回升，但尚未上穿24日线
     score = applyOverbought(s(18));
-    pattern = '超卖后反弹修复中（尚未金叉）';
+    pattern = '超卖后修复中(未金叉)';
   } else if (approachingCrossWide) {
     // 6日线仍低于24日线、但当日继续向上收敛且差值已很近 → 金叉在即
     // （超买后深跌修复 / 普通回调后重新走强都算；比"空头排列弱势区"更能反映真实状态）
     if (aboveMid) {
       // 已收复12日线、只差24日线：金叉提前确认（强于单纯的"逼近"）
       score = applyOverbought(s(19));
-      pattern = '6日线已上穿12日线、逼近24日线（金叉在即）';
+      pattern = '上穿12日线、逼近24日线(金叉在即)';
     } else if (recentDeepDip) {
       score = applyOverbought(s(18));
-      pattern = '跌深后修复，6日线向上逼近24日线（金叉在即）';
+      pattern = '跌深修复、逼近24日线(金叉在即)';
     } else {
       score = applyOverbought(s(15));
-      pattern = '6日线向上逼近24日线（接近金叉，尚未穿越）';
+      pattern = '逼近24日线(接近金叉)';
     }
   } else if (
     recentDeepDip &&
@@ -950,25 +950,25 @@ export function scoreStockRsi(
     // 深跌后正在快速修复：RSI6 当日明显回升、与24日线差值收敛，但离24日线还远（未到"金叉在即"）
     // 例：300990.SZ 2026-10-12 RSI6 由 33.1 回到 42.1，差值由 −17.5 收敛到 −9.6
     score = applyOverbought(s(12));
-    pattern = '跌深后修复中（RSI6 快速回升，尚未逼近24日线）';
+    pattern = '跌深修复中(RSI6快速回升)';
   } else if (persistentOverbought) {
     score = s(8);
-    pattern = '持续超买钝化，追高风险大';
+    pattern = '持续超买钝化(追高风险)';
   } else if (rsi6 > rsi24) {
     // 交叉已过时效（或从未出现）：按当前均线排列判定，不再算作金叉
     score = applyOverbought(s(20));
-    pattern = lastCrossUpIdx >= 0 ? 'RSI多头排列，处于强势区（金叉时效已过）' : 'RSI多头排列，处于强势区';
+    pattern = lastCrossUpIdx >= 0 ? '多头排列强势区(金叉时效已过)' : '多头排列强势区';
   } else {
     score = s(10);
-    pattern = 'RSI空头排列，处于弱势区';
+    pattern = '空头排列弱势区';
   }
 
   // 偏多形态但位置偏高（超买追高）时，在形态后补充下调说明
   if (overboughtCut >= 1) {
     pattern +=
       rsi6 >= cfg.rsiOverbought
-        ? `｜RSI6=${rsi6.toFixed(0)} 已进入超买区，追高下调${overboughtCut.toFixed(0)}分`
-        : `｜RSI6=${rsi6.toFixed(0)} 偏高，下调${overboughtCut.toFixed(0)}分`;
+        ? `｜RSI6=${rsi6.toFixed(0)}超买，下调${overboughtCut.toFixed(0)}分`
+        : `｜RSI6=${rsi6.toFixed(0)}偏高，下调${overboughtCut.toFixed(0)}分`;
   }
 
   return { score, max, available: true, pattern, rsi6, rsi12, rsi24, rsi6Percentile, rsiDipLevel: dipThreshold };

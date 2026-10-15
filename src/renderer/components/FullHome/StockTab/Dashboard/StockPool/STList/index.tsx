@@ -746,7 +746,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
 
   // ========== 当前股票池（沿用选股漏斗：优先取上一步的有效结果） ==========
   // 短线评分与「训练周期评分预计算」共用，保证预计算覆盖的正是当前要评分的这批股票
-  const collectCurrentItemsRaw = useCallback((): ShortTermScoreItem[] => {
+  const collectCurrentItemsRaw = useCallback((options?: { ignoreReuse?: boolean }): ShortTermScoreItem[] => {
     const lookupName = (code: string) => stocks.find((s) => s.code === code)?.name || '';
     const lookupHybk = (code: string) => {
       const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
@@ -776,7 +776,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         return { code, name: lookupName(code), hybk: lookupHybk(code) };
       });
     }
-    if (displayMode === 'shortScore' && shortScoreCodesRef.current.length && shortScorePoolRef.current === boardsKeyRef.current) {
+    if (
+      !options?.ignoreReuse &&
+      displayMode === 'shortScore' &&
+      shortScoreCodesRef.current.length &&
+      shortScorePoolRef.current === boardsKeyRef.current
+    ) {
       // 评分结果展示中再次评分：沿用上一次的股票池（仅限同一组板块）。
       // （不这样做会退回「当前板块全部股票」，与「预计算训练评分」覆盖的股票池不一致，
       //   多出来的股票只能现算，表现为「预计算过了、再点短线评分仍然很慢」。）
@@ -803,8 +808,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
    * 评分池：在「当前股票池」基础上按「排除科创板+北交所」过滤
    * （短线评分与训练周期预计算都用它，保证预计算覆盖的正是要评分的这批股票）
    */
-  const collectCurrentItems = useCallback((): ShortTermScoreItem[] => {
-    const list = collectCurrentItemsRaw();
+  const collectCurrentItems = useCallback((options?: { ignoreReuse?: boolean }): ShortTermScoreItem[] => {
+    const list = collectCurrentItemsRaw(options);
     if (!excludeStarBse) {
       return list;
     }
@@ -969,6 +974,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       message.warning('板块的股票列表还在加载，请稍后再试');
       return;
     }
+    // 评分池永远取「整个板块池」（忽略沿用）：被展示类过滤（RSI评分过滤 / 短线评分过滤）裁剪过的池子
+    // 一旦写进 shortScoreCodesRef，后续「短线评分」也会沿用被裁剪的池子，列表就永久缩窄、取消勾选也恢复不了。
+    const baseItems = collectCurrentItems({ ignoreReuse: true });
     const currentItems = collectVisibleItems();
     if (currentItems.length === 0) {
       console.log('[当日评分] 当前列表没有可评分的股票');
@@ -983,14 +991,13 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     isTodayScorePausedRef.current = false;
     todayScoreRunningRef.current = true;
     todayScoreDoneRef.current = 0;
-    setShortScoreData([]);
     setShortScoreProgress(0);
     setTodayScoreProgress(0);
     setShortScoreBackfill(null);
     setTodayScoreLoading(true);
     shortScoreTotalRef.current = currentItems.length;
     shortScoreRemainingRef.current = [];
-    shortScoreCodesRef.current = currentItems.map((i) => i.code);
+    shortScoreCodesRef.current = baseItems.map((i) => i.code);
     // 记录这一轮结果属于哪组板块：切换板块后丢弃这一轮结果
     shortScorePoolRef.current = boardsKeyRef.current;
     shortScoreSourceRef.current = 'today';
@@ -1015,7 +1022,17 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
             return;
           }
           todayScoreDoneRef.current += 1;
-          setShortScoreData((prev) => [...prev, row]);
+          // 按股票「覆盖更新」而不是整体替换列表：只改本次处理到的股票，
+          // 被展示类过滤挡住的股票保留原有行，取消勾选过滤后能立刻恢复完整列表。
+          setShortScoreData((prev) => {
+            const idx = prev.findIndex((r) => r.code === row.code);
+            if (idx === -1) {
+              return [...prev, row];
+            }
+            const next = prev.slice();
+            next[idx] = row;
+            return next;
+          });
           setTodayScoreProgress(Math.round((todayScoreDoneRef.current / currentItems.length) * 100));
         },
       });
@@ -1922,12 +1939,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       ) : displayMode === 'shortScore' ? (
         <Row className={styles.header}>
           <Col span={2}>股票名称</Col>
-          <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
+          <Col span={1} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
           <Col
-            span={2}
+            span={3}
             title="RSI 评分逻辑识别出的形态：金叉/死叉、超卖后金叉、超买后回踩、接近金叉、多头/空头排列等"
             style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
           >
@@ -2185,7 +2202,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                   })()}
                 </Col>
                 <Col
-                  span={2}
+                  span={1}
                   title={s.error || undefined}
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
@@ -2195,7 +2212,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                   </span>
                 </Col>
                 <Col
-                  span={2}
+                  span={3}
                   title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
                   style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
