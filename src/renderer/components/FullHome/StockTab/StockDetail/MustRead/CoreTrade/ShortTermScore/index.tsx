@@ -684,12 +684,13 @@ const ScoreDetailCards = ({
             <Tooltip
               title={
                 <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
-                  {`基于主力/散户近${Score.SHORT_TERM_SCORE_CONFIG.moneyWindow}日累计净流入曲线（与资金流向图同源），满分30；按「是否处在趋势转折点」排队：
+                  {`基于主力/散户近${Score.SHORT_TERM_SCORE_CONFIG.moneyWindow}日累计净流入曲线（与资金流向图同源），满分30；以「主力资金趋势」为主，散户强弱仅作小幅修正（-${Score.SHORT_TERM_SCORE_CONFIG.moneyRetailDivergePenalty}）：
 完美微笑曲线(U型)上穿散户线且站上0轴 → 20~30分 ★（当日金叉最高，随天数衰减）
 近期上穿散户线（形态未识别为U型）→ 12~22分（站上0轴更高）
 微笑曲线（资金回流）但尚未上穿 → 15分（转折前夜，等待确认）
-主力净流入为正且强于散户、但近期无金叉 → 13分；若资金已在区间高位(≥72%) → 7分（已过转折点，谨防追高）
-主力净流入为正但弱于散户（资金分歧）→ 9分
+主力累计净流入为正且趋势向上：刚转正(近${Score.SHORT_TERM_SCORE_CONFIG.moneyZeroTurnDays}日内上穿0轴) → 18分 ★；否则 16分，已在区间高位(≥72%) → 15分
+主力累计净流入为正但趋势走平/回落：主力强于散户 → 13分（已在区间高位 → 7分，谨防追高）；弱于散户 → 11分（已在区间高位 → 9分）
+散户净流入强于主力仅小幅下调(-${Score.SHORT_TERM_SCORE_CONFIG.moneyRetailDivergePenalty})，不再作为"资金分歧"大幅减分
 方向不明 → 11分
 倒U型 → 6分；倒U型下穿散户线且在0轴下方 → 最低分（最差）`}
                 </div>

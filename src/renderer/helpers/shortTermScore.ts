@@ -78,8 +78,8 @@ export const SHORT_TERM_SCORE_CONFIG = {
   mvSmallBound: 50e8, // 小盘上限（元）
   mvMidBound: 200e8, // 中盘上限（元）
   // 量能择时位置（与板块同逻辑：刚温和放量分最高，过热/已走远则下调）
-  volRatioAllow: 2, // 横向活跃度倍数容忍值（默认换手率口径：5日均换手率/同档均值），超出部分每1倍扣6分
-  volRiseAllow: 8, // 自放量启动日以来涨幅容忍(%)，超出部分每1%扣1.5分
+  volRatioAllow: 10, // 横向活跃度倍数容忍值（默认换手率口径：5日均换手率/同档均值），超出部分每1倍扣6分
+  volRiseAllow: 50, // 自放量启动日以来涨幅容忍(%)，超出部分每1%扣1.5分
   volStartRatio: 1.3, // 放量启动判定：5日均量 / 20日均量 ≥ 该倍数
   volStartLookback: 20, // 放量启动日回看窗口(日)
   volFreshDays: 5, // 距放量启动日天数容忍(日)，超出部分每日扣1分
@@ -120,11 +120,15 @@ export const SHORT_TERM_SCORE_CONFIG = {
   // ---- 个股-资金 ----
   // 主力/散户累计净流入窗口（日）：从 20 日改为 5 日 —— 20 日累计对近期资金变化太滞后，
   // 等它拐头往往已经错过趋势转折点；5 日累计更早反映回流拐点（形态/金叉仍在 30 日窗口内识别，抑制噪声）。
-  moneyWindow: 5,
+  moneyWindow: 20,
   moneyShapeDays: 30, // 微笑/悲伤曲线形态识别窗口（日）
   moneyCrossRecentDays: 5, // 交叉检测窗口（日）
   moneyCrossDecay: 0.8, // 交叉时效衰减系数：刚交叉 1.0，每过一日乘一次（3日后约 0.5）
   moneyHighPosThreshold: 0.72, // 主力资金「位置已高」阈值：区间相对位置 ≥ 该值 视为已持续流入（非转折点）
+  // 主力资金「趋势」判定：资金部分以主力自身趋势为主，散户强弱只作小幅修正
+  moneyTrendDays: 5, // 趋势判定窗口（日）：当前主力累计线与 N 日前比较，判断上升/走平回落
+  moneyZeroTurnDays: 10, // 「转正」判定窗口（日）：近 N 日内主力累计线由 0 轴下方上穿 0 轴视为刚转正
+  moneyRetailDivergePenalty: 1, // 主力为正但弱于散户时的小幅下调（30分制）：散户只作轻微修正，不再因此大幅减分
   // ---- 综合权重 ----
   // 板块权重从 0.3 下调到 0.2：板块强弱是环境因素，若权重过高会导致高评分股票过度集中在当前强势板块
   weights: { stock: 0.6, sector: 0.2, market: 0.2 },
@@ -987,6 +991,9 @@ export interface MoneyScoreResult {
   cross: 'up' | 'down' | null; // 近期主力线上穿/下穿散户线
   crossDaysAgo: number | null;
   aboveZero: boolean; // 主力累计线（近 moneyWindow 日）是否在0轴上方
+  trendUp: boolean; // 主力累计线近 moneyTrendDays 日是否趋势向上（主力自身趋势，评分主依据）
+  zeroTurn: boolean; // 主力累计线是否在近 moneyZeroTurnDays 日内刚由 0 轴下方上穿 0 轴（转正）
+  retailStronger: boolean; // 散户累计净流入是否强于主力（仅作小幅修正，不再大幅减分）
   mainSum: number; // 最新主力「近 moneyWindow 日」累计净流入（元）
   retailSum: number; // 最新散户「近 moneyWindow 日」累计净流入（元）
   note: string;
@@ -1011,9 +1018,12 @@ const SHAPE_DESC: Record<MoneyShape, string> = {
  *    站上 0 轴更优；越新鲜越接近满分（衰减后回落到该档下限）。
  * 2) 次高给「近期上穿散户线」（形态未被判定为 U 型，但同样是资金转折信号）。
  * 3) U 型但还没上穿 → 转折前夜，等待确认。
- * 4) 已在 0 轴上方且强于散户、但近期**没有**金叉 → 资金已持续流入（趋势中后段），
- *    按主力线在近窗口内的**相对位置**降分：位置越高越接近区间顶部，越要避免追高
- *    （这样高分不会再集中落在"已经处于趋势高位"的股票上）。
+ * 4) 已在 0 轴上方、但近期**没有**金叉 → 以**主力自身趋势**为主：
+ *    - 刚转正（近 moneyZeroTurnDays 日内上穿 0 轴）且趋势向上 → 接近转折点，给高分；
+ *    - 趋势向上（未刚转正）→ 较高分；已在区间高位(≥moneyHighPosThreshold)时略降，避免追高；
+ *    - 趋势走平/回落 → 中低分（位置越高越接近区间顶部，越要避免追高）。
+ *    散户强于主力只做小幅下调（moneyRetailDivergePenalty），**不再**因"资金分歧"大幅减分
+ *    —— 短线的关键是主力资金趋势，散户流入多寡不应主导评分。
  * 5) 倒 U 型 / 下穿散户线 / 0 轴下方 → 低位分。
  */
 export function scoreStockMoney(
@@ -1033,6 +1043,9 @@ export function scoreStockMoney(
     cross: null,
     crossDaysAgo: null,
     aboveZero: false,
+    trendUp: false,
+    zeroTurn: false,
+    retailStronger: false,
     mainSum: 0,
     retailSum: 0,
     note: '资金流向数据不足',
@@ -1108,6 +1121,22 @@ export function scoreStockMoney(
   const posInRange = winMax > winMin ? clamp((mainLast - winMin) / (winMax - winMin), 0, 1) : 0.5;
   const highPos = posInRange >= cfg.moneyHighPosThreshold;
 
+  // ---- 主力自身趋势（资金部分以主力趋势为主，散户强弱只作小幅修正）----
+  // 趋势：当前主力累计线与 moneyTrendDays 日前比较
+  const trendIdx = Math.max(0, last - cfg.moneyTrendDays);
+  const trendUp = mainLast > mainSeries[trendIdx];
+  // 转正：主力累计线在近 moneyZeroTurnDays 日内由 0 轴下方上穿 0 轴
+  let zeroTurn = false;
+  for (let i = last; i > Math.max(0, last - cfg.moneyZeroTurnDays); i--) {
+    if (mainSeries[i - 1] <= 0 && mainSeries[i] > 0) {
+      zeroTurn = true;
+      break;
+    }
+  }
+  const retailStronger = mainLast <= retailLast;
+  // 散户强于主力只做轻微下调（不再作为"资金分歧"直接大幅减分）
+  const retailAdj = retailStronger ? cfg.moneyRetailDivergePenalty : 0;
+
   let score: number;
   let note: string;
   if (shape === 'smile' && cross === 'up') {
@@ -1124,15 +1153,35 @@ export function scoreStockMoney(
     // U型但还没上穿：转折前夜，等待确认
     score = s(15);
     note = '主力线走出微笑曲线（资金回流），等待上穿散户线确认';
-  } else if (aboveZero && mainLast > retailLast) {
-    // 已站上0轴且强于散户，但近期没有金叉：资金已持续流入（趋势中后段），位置越高越要避免追高
-    score = highPos ? s(7) : s(13);
-    note = highPos
-      ? `主力资金已持续流入（区间位置${(posInRange * 100).toFixed(0)}%），非转折点，谨防追高`
-      : `主力${cfg.moneyWindow}日净流入为正且强于散户（已过转折点，无新金叉）`;
   } else if (aboveZero) {
-    score = s(9);
-    note = `主力${cfg.moneyWindow}日净流入为正，但弱于散户（资金分歧）`;
+    // 主力已站上0轴、但近期没有金叉：以「主力自身趋势」为主，散户强弱只作小幅修正
+    // （旧逻辑把"主力为正但弱于散户"直接压到 9 分，忽略了主力正在转正上升的趋势）
+    if (trendUp) {
+      if (zeroTurn) {
+        // 刚转正 + 趋势向上：接近资金转折点，给高分
+        score = s(18) - retailAdj;
+        note = `主力${cfg.moneyWindow}日累计净流入刚转正且趋势向上${
+          retailStronger ? '（散户净流入更多，小幅下调）' : '，强于散户'
+        }`;
+      } else {
+        score = (highPos ? s(15) : s(16)) - retailAdj;
+        note = highPos
+          ? `主力${cfg.moneyWindow}日净流入为正且趋势向上（区间位置${(posInRange * 100).toFixed(0)}%，已处中后段）`
+          : `主力${cfg.moneyWindow}日净流入为正且趋势向上${retailStronger ? '（散户净流入更多，小幅下调）' : '，强于散户'}`;
+      }
+    } else if (mainLast > retailLast) {
+      // 趋势走平/回落，但主力仍强于散户：维持原口径（已在区间高位则谨防追高）
+      score = highPos ? s(7) : s(13);
+      note = highPos
+        ? `主力资金已持续流入（区间位置${(posInRange * 100).toFixed(0)}%），趋势走平/回落，谨防追高`
+        : `主力${cfg.moneyWindow}日净流入为正且强于散户，但趋势走平/回落（已过转折点，无新金叉）`;
+    } else {
+      // 趋势走平/回落且弱于散户：散户只带来小幅差异（旧版固定压到 9 分）
+      score = highPos ? s(9) : s(11);
+      note = `主力${cfg.moneyWindow}日净流入为正但弱于散户${
+        highPos ? `（区间位置${(posInRange * 100).toFixed(0)}%）` : ''
+      }，趋势走平/回落`;
+    }
   } else if (shape === 'sad' && cross === 'down') {
     // 悲伤曲线死叉：越新鲜惩罚越重，随时间衰减回升到形态分
     score = s(6) - (aboveZero ? s(2) : s(4)) * downFresh;
@@ -1158,6 +1207,9 @@ export function scoreStockMoney(
     cross,
     crossDaysAgo,
     aboveZero,
+    trendUp,
+    zeroTurn,
+    retailStronger,
     mainSum: mainLast,
     retailSum: retailLast,
     note,
