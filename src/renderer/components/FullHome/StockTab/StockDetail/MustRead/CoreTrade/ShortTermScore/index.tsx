@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Col, Collapse, Row, Spin, Tooltip } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
 import { useSelector } from 'react-redux';
@@ -23,6 +23,24 @@ export interface ShortTermScoreProps {
   /** 流通市值（元），来自主力建仓分析结果 */
   circMv?: number;
 }
+
+/** 「近 N 个交易日评分」历史条展示的交易日数量 */
+const RECENT_SCORE_DAYS = 20;
+
+/** 详情页评分入口的返回类型（去掉 null） */
+type ScoreComputeResult = NonNullable<Awaited<ReturnType<typeof ScoreList.computeStockScoreForCode>>>;
+
+/** YYYYMMDD -> YYYY-MM-DD（非法输入原样返回） */
+const formatDay = (day?: string) =>
+  day && /^\d{8}$/.test(day) ? `${day.substring(0, 4)}-${day.substring(4, 6)}-${day.substring(6, 8)}` : day || '--';
+
+/** 卡片容器样式（三张明细卡 / 评分行卡共用） */
+const cardStyle: React.CSSProperties = {
+  padding: '12px 16px',
+  borderRadius: 8,
+  backgroundColor: 'var(--card-background-color)',
+  border: '1px solid var(--border-color)',
+};
 
 /** 格式化金额（元 -> 亿/万） */
 const formatAmount = (val: number) => {
@@ -51,222 +69,261 @@ const ScoreBar = ({ value, max }: { value: number; max: number }) => (
   </div>
 );
 
-const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyFlow, circMv }) => {
-  const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
-  const indexName = code.startsWith('6') ? '上证指数' : code.startsWith('3') ? '创业板指' : '深证成指';
-
-  // 用户在板块页手动设置的活跃板块（优先）
-  const hybk = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]?.hybk);
-  // K线数据源设置（与主图同源，走多源兜底 + sqlite 缓存）
-  const { kLineApiSourceSetting, ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
-  // 训练模式：按训练日期区分请求缓存，并在训练日期变化时重新取数（评分必须基于训练日期为止的数据）
-  const trainKey = ontrain && trainDate ? trainDate : 'live';
-
-  // ---- 评分（与 STList 批量评分 / 训练周期预计算共用同一套取数与评分逻辑）----
-  // 默认「以缓存为准」：先按基准日在评分序列里取点，命中就直接展示缓存行
-  // （与列表点「短线评分」看到的是同一行数据，天然一致）；
-  // 未命中才现算，算完写回序列。想看逐日明细时可点「重新计算明细」强制现算。
-  const [scoreData, setScoreData] = useState<Awaited<ReturnType<typeof ScoreList.computeStockScoreForCode>> | null>(
-    null
-  );
-  const [scoreError, setScoreError] = useState<string | null>(null);
-  const [cachedScore, setCachedScore] = useState<{ row: ScoreList.ShortTermScoreRow; day: string } | null>(null);
-  const [forceLive, setForceLive] = useState(false);
-  const { run: runScore, loading: scoreLoading } = useRequest(
-    async () => {
-      const r = await ScoreList.computeStockScoreForCode({
-        code,
-        source: kLineApiSourceSetting,
-        // 训练模式下按训练日期取数（评分必须基于训练日期为止的数据）
-        date: ontrain && trainDate ? trainDate : undefined,
-        circMv,
-        moneyFlow,
-        hybk: hybk || null,
-      });
-      if (!r || !r.detail) {
-        // 抛错而不是返回空结果，避免空结果被 cacheKey 缓存导致重试失效
-        throw new Error(r?.row?.error || '未获取到日K数据');
-      }
-      return r;
-    },
-    {
-      manual: true,
-      cacheKey: `ShortTermScore/${code}/${kLineApiSourceSetting}/${trainKey}`,
-      onSuccess: (r) => {
-        setScoreError(null);
-        setScoreData(r);
-      },
-      onError: (e) => setScoreError(e?.message || '请求失败'),
-      throwOnError: false,
-    }
-  );
-
-  useEffect(() => {
-    setScoreData(null);
-    setScoreError(null);
-    setCachedScore(null);
-    let canceled = false;
-    (async () => {
-      // 先看缓存（同一基准日的评分行），命中就不再取数计算
-      if (!forceLive) {
-        const hit = await ScoreList.getCachedScoreRow({
-          code,
-          source: kLineApiSourceSetting,
-          date: ontrain && trainDate ? trainDate : undefined,
-        });
-        if (canceled) {
-          return;
-        }
-        if (hit) {
-          setCachedScore(hit);
-          return;
-        }
-      }
-      if (!canceled) {
-        runScore();
-      }
-    })();
-    return () => {
-      canceled = true;
-    };
-  }, [code, kLineApiSourceSetting, trainKey, circMv, moneyFlow, forceLive]);
-
-  const dklines = scoreData?.klines || null;
-  const result = scoreData?.detail || null;
-  // 大盘评分对比基准名称：市值风格板块优先，缺失时回退所属指数（由评分内核决定）
-  const marketBaselineName = scoreData?.baselineName || indexName;
-
-  // ---- 缓存命中：直接展示缓存行（与列表「短线评分」同一份数据）----
-  if (cachedScore && !scoreData) {
-    const r = cachedScore.row;
-    const dims = [
-      { label: '个股表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.stock, score: r.stockScore },
-      { label: '板块表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.sector, score: r.sectorScore },
-      { label: '大盘表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.market, score: r.marketScore },
-    ];
-    const dayText = cachedScore.day
-      ? `${cachedScore.day.substring(0, 4)}-${cachedScore.day.substring(4, 6)}-${cachedScore.day.substring(6, 8)}`
-      : '';
-    return (
-      <div>
-        <div
-          style={{
-            padding: '12px 16px',
-            borderRadius: 8,
-            backgroundColor: 'var(--card-background-color)',
-            border: '1px solid var(--border-color)',
-          }}
-        >
-          <Row className={styles.rowheader} style={{ marginBottom: 12 }}>
-            <Col span={16}>短线综合评分（评分基准日 {dayText || '--'}）</Col>
-            <Col span={8} style={{ textAlign: 'right' }}>
-              <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>与列表「短线评分」同一份缓存</span>
-            </Col>
-          </Row>
-          <Row style={{ marginBottom: 8, alignItems: 'center' }}>
-            <Col span={6}>综合评分</Col>
-            <Col span={6}>
-              <span style={{ fontSize: 28, fontWeight: 'bold', color: Score.scoreColor(r.total ?? 0) }}>
-                {(r.total ?? 0).toFixed(1)}
-              </span>
-              <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}> / 100</span>
-            </Col>
-            <Col span={6}>评级 / 建议</Col>
-            <Col span={6}>
-              <span
-                style={{
-                  fontSize: 20,
-                  fontWeight: 'bold',
-                  marginRight: 8,
-                  color: Score.scoreColor(r.total ?? 0),
-                }}
-              >
-                {r.grade || '--'}
-              </span>
-              <span style={{ fontSize: 12 }}>{r.advice || '--'}</span>
-            </Col>
-          </Row>
-          {dims.map((dim) => (
-            <Row key={dim.label} style={{ marginBottom: 6, fontSize: 13, alignItems: 'center' }}>
-              <Col span={6}>
-                {dim.label}
-                <span style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}>
-                  权重{(dim.weight * 100).toFixed(0)}%
-                </span>
-              </Col>
-              <Col span={4} className={dim.score == null ? '' : Utils.GetValueColor(dim.score - 50).textClass}>
-                {dim.score == null ? '--' : dim.score.toFixed(1)}
-              </Col>
-              <Col span={14}>
-                {dim.score == null ? (
-                  <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>数据不足（未参与加权）</span>
-                ) : (
-                  <ScoreBar value={dim.score} max={100} />
-                )}
-              </Col>
-            </Row>
-          ))}
-          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>
-            {r.summary}
-            {r.rsiPattern ? `｜RSI：${r.rsiPattern}` : ''}
-            {r.moneyNote ? `｜资金：${r.moneyNote}` : ''}
-            {r.sectorTrend ? `｜板块：${r.sectorTrend}` : ''}
+/**
+ * 「近 N 个交易日评分」历史条
+ *
+ * 数据源与列表「短线评分」的历史列完全一致（评分序列），因此这里看到的分数
+ * 就是从列表点进来时的同一份缓存；点击某个交易日即可切换到该交易日的明细。
+ */
+const DayScoreStrip = ({
+  days,
+  series,
+  viewDay,
+  baseDayKey,
+  loadingDay,
+  onSelect,
+  onBackToBase,
+}: {
+  days: string[];
+  series: Record<string, ScoreList.ShortTermScoreRow>;
+  viewDay: string;
+  baseDayKey: string;
+  /** 正在按需计算明细的交易日（用于在条上提示进度） */
+  loadingDay: string;
+  onSelect: (day: string) => void;
+  onBackToBase: () => void;
+}) => (
+  <div style={cardStyle}>
+    <Row className={styles.rowheader} style={{ marginBottom: 6 }}>
+      <Col span={16}>近 {days.length} 个交易日评分（点击交易日可查看当日明细）</Col>
+      <Col span={8} style={{ textAlign: 'right' }}>
+        <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>
+          当前查看 {formatDay(viewDay)}
+          {viewDay && viewDay === baseDayKey ? '（评分基准日）' : ''}
+        </span>
+        {viewDay && baseDayKey && viewDay !== baseDayKey ? (
+          <Button size="small" type="link" style={{ padding: '0 0 0 6px' }} onClick={onBackToBase}>
+            回到基准日
+          </Button>
+        ) : null}
+      </Col>
+    </Row>
+    <div style={{ display: 'flex', gap: 2, overflowX: 'auto', paddingBottom: 2 }}>
+      {days.map((d) => {
+        const row = series[d];
+        const v = row && row.total != null ? row.total : null;
+        const isActive = d === viewDay;
+        const isBase = !!baseDayKey && d === baseDayKey;
+        const isLoading = loadingDay === d;
+        const note = row
+          ? row.notListed
+            ? '（评分基准日尚未上市）'
+            : row.pending
+              ? '（数据未就绪）'
+              : row.intraday
+                ? '（当日K线由分时补全）'
+                : ''
+          : '（无评分缓存）';
+        return (
+          <div
+            key={d}
+            onClick={() => onSelect(d)}
+            title={`${formatDay(d)}：${v == null ? '--' : v.toFixed(1)} ${row?.grade || ''}${note}${
+              isBase ? '｜评分基准日' : ''
+            }${isLoading ? '｜正在计算该交易日明细…' : ''}`}
+            style={{
+              flex: '0 0 auto',
+              minWidth: 48,
+              padding: '4px 4px',
+              textAlign: 'center',
+              cursor: 'pointer',
+              borderRadius: 6,
+              border: `1px solid ${isActive ? '#1890ff' : isBase ? 'var(--border-color)' : 'transparent'}`,
+              backgroundColor: isActive ? 'rgba(24,144,255,0.12)' : 'transparent',
+            }}
+          >
+            <div style={{ fontSize: 10, color: 'var(--secondary-text-color)' }}>
+              {`${d.substring(4, 6)}-${d.substring(6, 8)}`}
+            </div>
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 'bold',
+                color: v == null ? 'var(--reverse-text-color)' : Score.scoreColor(v),
+              }}
+            >
+              {v == null ? '--' : v.toFixed(0)}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--secondary-text-color)' }}>{row?.grade || '\u00a0'}</div>
           </div>
-          {r.error ? (
-            <div style={{ marginTop: 6, fontSize: 12, color: '#ff4d4f' }}>{r.error}（该交易日按 0 分计入缓存）</div>
-          ) : null}
-          <div style={{ marginTop: 10 }}>
-            <Button size="small" onClick={() => setForceLive(true)} loading={scoreLoading}>
-              重新计算明细
-            </Button>
-            <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--secondary-text-color)' }}>
-              重新计算会现取数据、展开逐日明细，并覆盖该交易日的缓存
+        );
+      })}
+    </div>
+  </div>
+);
+
+/**
+ * 评分行卡（只有序列里的评分行、没有完整明细时展示）
+ *
+ * 内容与列表「短线评分」的一行完全对应：综合分 / 评级 / 各维度分 / 评语。
+ */
+const RowSummaryCard = ({
+  row,
+  day,
+  note,
+  hint,
+  computeText,
+  onComputeDetail,
+  computing,
+  error,
+}: {
+  row: ScoreList.ShortTermScoreRow;
+  day: string;
+  note?: string;
+  hint?: string;
+  computeText?: string;
+  onComputeDetail?: () => void;
+  computing?: boolean;
+  error?: string;
+}) => {
+  const dims = [
+    { label: '个股表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.stock, score: row.stockScore },
+    { label: '板块表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.sector, score: row.sectorScore },
+    { label: '大盘表现', weight: Score.SHORT_TERM_SCORE_CONFIG.weights.market, score: row.marketScore },
+  ];
+  return (
+    <div style={cardStyle}>
+      <Row className={styles.rowheader} style={{ marginBottom: 12 }}>
+        <Col span={16}>短线综合评分（评分基准日 {formatDay(day)}）</Col>
+        <Col span={8} style={{ textAlign: 'right' }}>
+          <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>{note || '与列表「短线评分」同一份缓存'}</span>
+        </Col>
+      </Row>
+      <Row style={{ marginBottom: 8, alignItems: 'center' }}>
+        <Col span={6}>综合评分</Col>
+        <Col span={6}>
+          <span style={{ fontSize: 28, fontWeight: 'bold', color: Score.scoreColor(row.total ?? 0) }}>
+            {row.total == null ? '--' : (row.total ?? 0).toFixed(1)}
+          </span>
+          <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}> / 100</span>
+        </Col>
+        <Col span={6}>评级 / 建议</Col>
+        <Col span={6}>
+          <span
+            style={{
+              fontSize: 20,
+              fontWeight: 'bold',
+              marginRight: 8,
+              color: Score.scoreColor(row.total ?? 0),
+            }}
+          >
+            {row.grade || '--'}
+          </span>
+          <span style={{ fontSize: 12 }}>{row.advice || '--'}</span>
+        </Col>
+      </Row>
+      {dims.map((dim) => (
+        <Row key={dim.label} style={{ marginBottom: 6, fontSize: 13, alignItems: 'center' }}>
+          <Col span={6}>
+            {dim.label}
+            <span style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}>
+              权重{(dim.weight * 100).toFixed(0)}%
             </span>
-          </div>
+          </Col>
+          <Col span={4} className={dim.score == null ? '' : Utils.GetValueColor(dim.score - 50).textClass}>
+            {dim.score == null ? '--' : dim.score.toFixed(1)}
+          </Col>
+          <Col span={14}>
+            {dim.score == null ? (
+              <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>数据不足（未参与加权）</span>
+            ) : (
+              <ScoreBar value={dim.score} max={100} />
+            )}
+          </Col>
+        </Row>
+      ))}
+      <div style={{ marginTop: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+        {row.summary}
+        {row.rsiPattern ? `｜RSI：${row.rsiPattern}` : ''}
+        {row.moneyNote ? `｜资金：${row.moneyNote}` : ''}
+        {row.sectorTrend ? `｜板块：${row.sectorTrend}` : ''}
+      </div>
+      {row.klineShape ? (
+        <div style={{ marginTop: 4, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+          最新交易日K线：{row.klineShape}
+          {`（${row.klineYin ? '阴线' : '阳线'}）`}
+          {row.klineSize != null ? `｜实体 ${row.klineSize.toFixed(2)}倍平均` : ''}
+          {row.volumeExpanded ? '｜放量' : ''}
+          {row.intraday ? '｜当日K线由分时补全' : ''}
         </div>
-      </div>
-    );
-  }
-
-  if (scoreLoading && !dklines) {
-    return (
-      <div style={{ textAlign: 'center', padding: 40 }}>
-        <Spin /> 短线评分数据加载中...
-      </div>
-    );
-  }
-  if (!result) {
-    return (
-      <div style={{ textAlign: 'center', padding: 40, color: 'var(--secondary-text-color)' }}>
-        <div style={{ marginBottom: 12 }}>
-          {scoreError
-            ? `评分失败（${scoreError}），请检查K线数据源设置或稍后重试`
-            : dklines && dklines.length < 30
-              ? `日K数据不足（${dklines.length}条，至少需要30条），无法计算短线评分`
-              : '暂无日K数据，无法计算短线评分'}
+      ) : null}
+      {row.notListed ? (
+        <div style={{ marginTop: 6, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+          评分基准日尚未上市{row.listDate ? `（上市日期 ${formatDay(row.listDate)}）` : ''}：不计分、不取数
         </div>
-        <Button size="small" onClick={() => runScore()}>
-          重试
-        </Button>
-      </div>
-    );
-  }
+      ) : null}
+      {row.pending ? (
+        <div style={{ marginTop: 6, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+          {row.error || '当日数据尚未就绪，未写入缓存'}
+        </div>
+      ) : null}
+      {row.error && !row.pending ? (
+        <div style={{ marginTop: 6, fontSize: 12, color: '#ff4d4f' }}>{row.error}（该交易日按 0 分计入缓存）</div>
+      ) : null}
+      {onComputeDetail ? (
+        <div style={{ marginTop: 10 }}>
+          <Button size="small" onClick={onComputeDetail} loading={computing}>
+            {computeText || '现取数计算该交易日明细'}
+          </Button>
+          <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--secondary-text-color)' }}>
+            {hint || '现取数展开逐日明细，并覆盖该交易日的缓存'}
+          </span>
+        </div>
+      ) : null}
+      {error ? <div style={{ marginTop: 6, fontSize: 12, color: '#ff4d4f' }}>明细计算失败：{error}</div> : null}
+    </div>
+  );
+};
 
-  const { overall, market, sector, stock, volume, rsi, money } = result;
+/**
+ * 完整评分明细卡（综合评分 / 大盘 / 板块 / 个股三部分）
+ *
+ * 基准日与历史交易日的明细渲染完全共用这一个组件，只是传入的明细、K线与基准日不同。
+ */
+const ScoreDetailCards = ({
+  detail,
+  klines,
+  baselineName,
+  scoreDayKey,
+  trainText,
+  moneyFlow,
+  showMoneyChart,
+  onRecompute,
+  recomputeLoading,
+  recomputeHint,
+}: {
+  detail: ScoreList.ShortTermScoreDetail;
+  klines?: ScoreComputeResult['klines'];
+  baselineName: string;
+  scoreDayKey: string;
+  trainText?: string;
+  moneyFlow?: ShortTermScoreProps['moneyFlow'];
+  showMoneyChart?: boolean;
+  onRecompute?: () => void;
+  recomputeLoading?: boolean;
+  recomputeHint?: string;
+}) => {
+  const { overall, market, sector, stock, volume, rsi, money } = detail;
 
   return (
     <div>
       {/* ==================== 综合评分卡 ==================== */}
-      <div
-        style={{
-          padding: '12px 16px',
-          borderRadius: 8,
-          backgroundColor: 'var(--card-background-color)',
-          border: '1px solid var(--border-color)',
-        }}
-      >
+      <div style={cardStyle}>
         <Row className={styles.rowheader} style={{ marginBottom: 12 }}>
-          <Col span={20}>短线综合评分（参考周期：近期交易日，侧重短线交易）</Col>
+          <Col span={20}>
+            短线综合评分（评分基准日 {formatDay(scoreDayKey)}
+            {trainText || ''}｜参考周期：近期交易日，侧重短线交易）
+          </Col>
           <Col span={4} style={{ textAlign: 'right' }}>
             <Tooltip
               title={
@@ -309,12 +366,12 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
           </Col>
         </Row>
         {/* 评分数据截止：训练模式下即为训练日期，便于一眼核对评分是否使用了未来数据 */}
-        {dklines && dklines.length > 0 && (
+        {klines && klines.length > 0 && (
           <Row style={{ marginBottom: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>
             <Col span={6}>数据截止</Col>
             <Col span={18}>
-              {dklines[dklines.length - 1].date}
-              {ontrain && trainDate ? `（训练日 ${trainDate}）` : ''}
+              {klines[klines.length - 1].date}
+              {trainText || ''}
             </Col>
           </Row>
         )}
@@ -340,20 +397,22 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
           {overall.summary}
           {overall.degraded.length > 0 && <span style={{ marginLeft: 8 }}>（{overall.degraded.join('；')}）</span>}
         </div>
+        {onRecompute ? (
+          <div style={{ marginTop: 10 }}>
+            <Button size="small" onClick={onRecompute} loading={recomputeLoading}>
+              重新计算明细
+            </Button>
+            <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--secondary-text-color)' }}>
+              {recomputeHint || '重新计算会现取数据、展开逐日明细，并覆盖该交易日的缓存'}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       {/* ==================== 大盘表现明细 ==================== */}
-      <div
-        style={{
-          marginTop: 12,
-          padding: '12px 16px',
-          borderRadius: 8,
-          backgroundColor: 'var(--card-background-color)',
-          border: '1px solid var(--border-color)',
-        }}
-      >
+      <div style={{ ...cardStyle, marginTop: 12 }}>
         <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
-          <Col span={20}>大盘表现评分（涨跌比 + 相对{marketBaselineName}表现，时间衰减加权）</Col>
+          <Col span={20}>大盘表现评分（涨跌比 + 相对{baselineName}表现，时间衰减加权）</Col>
           <Col span={4} style={{ textAlign: 'right' }}>
             <span style={{ fontSize: 16, fontWeight: 'bold', color: Score.scoreColor(market.score) }}>
               {market.available ? market.score.toFixed(1) : '--'}
@@ -368,7 +427,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   个股收跌 → 低分(15~30)；个股上涨 → 与对比基准比较，跑赢加分
 上涨占比<${(Score.SHORT_TERM_SCORE_CONFIG.marketUpRatioThreshold * 100).toFixed(0)}%（偏弱日）：
   个股上涨 → 超预期(80~88)；个股下跌 → 与对比基准比较，抗跌加分
-对比基准为同类市值风格板块（${marketBaselineName}），缺失时回退所属指数。
+对比基准为同类市值风格板块（${baselineName}），缺失时回退所属指数。
 最后按时间衰减加权平均（越近权重越高）。`}
             </div>
           }
@@ -384,7 +443,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
               <Row className={styles.rowheader} style={{ marginBottom: 4 }}>
                 <Col span={5}>日期</Col>
                 <Col span={4}>上涨占比</Col>
-                <Col span={5}>{marketBaselineName}</Col>
+                <Col span={5}>{baselineName}</Col>
                 <Col span={5}>个股涨幅</Col>
                 <Col span={5}>当日得分</Col>
               </Row>
@@ -412,15 +471,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
       </div>
 
       {/* ==================== 板块表现明细 ==================== */}
-      <div
-        style={{
-          marginTop: 12,
-          padding: '12px 16px',
-          borderRadius: 8,
-          backgroundColor: 'var(--card-background-color)',
-          border: '1px solid var(--border-color)',
-        }}
-      >
+      <div style={{ ...cardStyle, marginTop: 12 }}>
         <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
           <Col span={20}>板块/相对强度评分（{sector.boardName || '未识别板块'}）</Col>
           <Col span={4} style={{ textAlign: 'right' }}>
@@ -495,15 +546,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
       </div>
 
       {/* ==================== 个股表现明细 ==================== */}
-      <div
-        style={{
-          marginTop: 12,
-          padding: '12px 16px',
-          borderRadius: 8,
-          backgroundColor: 'var(--card-background-color)',
-          border: '1px solid var(--border-color)',
-        }}
-      >
+      <div style={{ ...cardStyle, marginTop: 12 }}>
         <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
           <Col span={20}>个股表现评分（量能20 + 资金60；RSI 仅计算与展示，不计入加权）</Col>
           <Col span={4} style={{ textAlign: 'right' }}>
@@ -676,8 +719,8 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
             {money.note}
           </div>
         )}
-        {/* 资金流向趋势图（与资金流向 Tab 同源数据） */}
-        {moneyFlow?.detail_dates?.length ? (
+        {/* 资金流向趋势图（与资金流向 Tab 同源数据；查看历史交易日时不展示，避免与当日明细混淆） */}
+        {showMoneyChart && moneyFlow?.detail_dates?.length ? (
           <MoneyFlowChart
             detailMain={moneyFlow.detail_main || []}
             detailRetail={moneyFlow.detail_retail || []}
@@ -686,6 +729,332 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
           />
         ) : null}
       </div>
+    </div>
+  );
+};
+
+const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyFlow, circMv }) => {
+  const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
+  const indexName = code.startsWith('6') ? '上证指数' : code.startsWith('3') ? '创业板指' : '深证成指';
+
+  // 用户在板块页手动设置的活跃板块（优先）
+  const hybk = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]?.hybk);
+  // K线数据源设置（与主图同源，走多源兜底 + sqlite 缓存）
+  const { kLineApiSourceSetting, ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
+  // 训练模式：按训练日期区分请求缓存，并在训练日期变化时重新取数（评分必须基于训练日期为止的数据）
+  const trainKey = ontrain && trainDate ? trainDate : 'live';
+
+  // ---- 评分（与 STList 批量评分 / 训练周期预计算共用同一套取数与评分逻辑）----
+  // 默认「以缓存为准」：先按基准日在评分序列里取点，命中就直接展示缓存行
+  // （与列表点「短线评分」看到的是同一行数据，天然一致）；
+  // 未命中才现算，算完写回序列。想看逐日明细时可点「重新计算明细」强制现算。
+  const [scoreData, setScoreData] = useState<ScoreComputeResult | null>(null);
+  const [scoreError, setScoreError] = useState<string | null>(null);
+  const [cachedScore, setCachedScore] = useState<{ row: ScoreList.ShortTermScoreRow; day: string } | null>(null);
+  const [forceLive, setForceLive] = useState(false);
+  const { run: runScore, loading: scoreLoading } = useRequest(
+    async () => {
+      const r = await ScoreList.computeStockScoreForCode({
+        code,
+        source: kLineApiSourceSetting,
+        // 训练模式下按训练日期取数（评分必须基于训练日期为止的数据）
+        date: ontrain && trainDate ? trainDate : undefined,
+        circMv,
+        moneyFlow,
+        hybk: hybk || null,
+      });
+      if (!r || !r.detail) {
+        // 抛错而不是返回空结果，避免空结果被 cacheKey 缓存导致重试失效
+        throw new Error(r?.row?.error || '未获取到日K数据');
+      }
+      return r;
+    },
+    {
+      manual: true,
+      cacheKey: `ShortTermScore/${code}/${kLineApiSourceSetting}/${trainKey}`,
+      onSuccess: (r) => {
+        setScoreError(null);
+        setScoreData(r);
+      },
+      onError: (e) => setScoreError(e?.message || '请求失败'),
+      throwOnError: false,
+    }
+  );
+
+  useEffect(() => {
+    setScoreData(null);
+    setScoreError(null);
+    setCachedScore(null);
+    let canceled = false;
+    (async () => {
+      // 先看缓存（同一基准日的评分行），命中就不再取数计算
+      if (!forceLive) {
+        const hit = await ScoreList.getCachedScoreRow({
+          code,
+          source: kLineApiSourceSetting,
+          date: ontrain && trainDate ? trainDate : undefined,
+        });
+        if (canceled) {
+          return;
+        }
+        if (hit) {
+          setCachedScore(hit);
+          return;
+        }
+      }
+      if (!canceled) {
+        runScore();
+      }
+    })();
+    return () => {
+      canceled = true;
+    };
+  }, [code, kLineApiSourceSetting, trainKey, circMv, moneyFlow, forceLive]);
+
+  // ---- 「近 N 个交易日评分」历史条：交易日列表 + 该股评分序列 ----
+  const [recentDays, setRecentDays] = useState<string[]>([]);
+  const [series, setSeries] = useState<Record<string, ScoreList.ShortTermScoreRow>>({});
+  // 选中的交易日（空串 = 跟随评分基准日）
+  const [selectedDay, setSelectedDay] = useState('');
+  // 按需现算的历史交易日明细（交易日 -> 完整明细结果）
+  const [dayDetails, setDayDetails] = useState<Record<string, ScoreComputeResult>>({});
+  /** 正在按需计算明细的交易日（同时也是并发开关：同一时刻只算一个交易日） */
+  const [dayDetailLoadingDay, setDayDetailLoadingDay] = useState('');
+  /** 历史交易日明细计算失败原因（交易日 -> 原因；有值时不自动重算，需手动点按钮） */
+  const [dayDetailErrors, setDayDetailErrors] = useState<Record<string, string>>({});
+
+  const baseDayKey = scoreData?.scoreDayKey || cachedScore?.day || '';
+  const viewDay = selectedDay || baseDayKey;
+  // 当前「股票 + 数据源 + 训练日」身份：异步回写前用它比对，避免切换标的后把旧结果写到新标的上
+  const identityRef = useRef('');
+  identityRef.current = `${code}/${kLineApiSourceSetting}/${trainKey}`;
+
+  // 切换股票 / 训练日 / 数据源：重置历史条的选择与按需计算结果
+  useEffect(() => {
+    setRecentDays([]);
+    setSeries({});
+    setSelectedDay('');
+    setDayDetails({});
+    setDayDetailErrors({});
+    setDayDetailLoadingDay('');
+  }, [code, kLineApiSourceSetting, trainKey]);
+
+  // 加载近 N 个交易日 + 该股在这些交易日的评分序列（与列表「近 N 日评分」同一份缓存）
+  useEffect(() => {
+    let canceled = false;
+    (async () => {
+      let days: string[] = [];
+      try {
+        days = await ScoreList.resolveRecentTradingDays(kLineApiSourceSetting, RECENT_SCORE_DAYS);
+      } catch {
+        days = [];
+      }
+      // 基准日若不在最近 N 个交易日里（如上游回退到更早的交易日），补进来，保证基准日始终可选
+      if (baseDayKey && !days.includes(baseDayKey)) {
+        days = [...days, baseDayKey].sort().slice(-RECENT_SCORE_DAYS);
+      }
+      if (canceled) {
+        return;
+      }
+      setRecentDays(days);
+      if (!days.length) {
+        setSeries({});
+        return;
+      }
+      try {
+        const s = await ScoreList.loadScoreSeries([code], kLineApiSourceSetting, { dates: days });
+        if (!canceled) {
+          setSeries(s?.[code] || {});
+        }
+      } catch {
+        // 读取失败不影响主流程（历史条按无评分展示）
+      }
+    })();
+    return () => {
+      canceled = true;
+    };
+  }, [code, kLineApiSourceSetting, trainKey, baseDayKey]);
+
+  /**
+   * 现取数计算某个交易日的完整明细
+   *
+   * 与基准日评分同一套入口（computeStockScoreForCode + 按该交易日截断的取数），
+   * 算完会写回评分序列，因此该交易日的缓存同时被补齐/刷新。
+   */
+  const startDayDetail = async (day: string) => {
+    if (!day || dayDetailLoadingDay) {
+      return;
+    }
+    setDayDetailLoadingDay(day);
+    setDayDetailErrors((prev) => {
+      const next = { ...prev };
+      delete next[day];
+      return next;
+    });
+    // 记录发起时的身份（股票/数据源/训练日）：期间切换了标的就丢弃这次结果
+    const runIdentity = identityRef.current;
+    try {
+      const r = await ScoreList.computeStockScoreForCode({
+        code,
+        source: kLineApiSourceSetting,
+        date: day,
+        circMv,
+        moneyFlow,
+        hybk: hybk || null,
+      });
+      if (identityRef.current !== runIdentity) {
+        return;
+      }
+      if (!r || !r.detail) {
+        throw new Error(r?.row?.error || '未获取到该交易日的日K数据');
+      }
+      setDayDetails((prev) => ({ ...prev, [day]: r }));
+      // 同步历史条上的分数（现算的这行就是写回序列的那行）
+      setSeries((prev) => ({ ...prev, [r.scoreDayKey || day]: r.row }));
+    } catch (e: any) {
+      if (identityRef.current === runIdentity) {
+        setDayDetailErrors((prev) => ({ ...prev, [day]: e?.message || '计算失败' }));
+      }
+    } finally {
+      setDayDetailLoadingDay((prev) => (prev === day ? '' : prev));
+    }
+  };
+
+  // 选中历史交易日且序列里有该日评分行时，自动现算一次完整明细（每只股票每个交易日只自动算一次）
+  useEffect(() => {
+    const day = viewDay;
+    if (!baseDayKey || !day || day === baseDayKey) {
+      return;
+    }
+    if (dayDetails[day] || dayDetailErrors[day] || dayDetailLoadingDay) {
+      return;
+    }
+    if (!series[day]) {
+      // 该交易日没有评分缓存：不自动取数（可能是非交易日/未评分），需手动点「现取数计算」
+      return;
+    }
+    void startDayDetail(day);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseDayKey, viewDay, dayDetails, dayDetailErrors, dayDetailLoadingDay, series]);
+
+  // 历史条展示的交易日：不超过评分基准日（基准日之后的行属于未来数据，不展示）
+  const displayDays = useMemo(
+    () => (baseDayKey ? recentDays.filter((d) => d <= baseDayKey) : recentDays),
+    [recentDays, baseDayKey]
+  );
+
+  const dklines = scoreData?.klines || null;
+  const result = scoreData?.detail || null;
+  // 大盘评分对比基准名称：市值风格板块优先，缺失时回退所属指数（由评分内核决定）
+  const marketBaselineName = scoreData?.baselineName || indexName;
+  const trainText = ontrain && trainDate ? `（训练日 ${trainDate}）` : '';
+
+  const activeRow = viewDay ? series[viewDay] : undefined;
+  const activeDetail = viewDay
+    ? viewDay === baseDayKey
+      ? result
+      : dayDetails[viewDay]?.detail || null
+    : null;
+
+  const strip =
+    displayDays.length > 0 ? (
+      <DayScoreStrip
+        days={displayDays}
+        series={series}
+        viewDay={viewDay}
+        baseDayKey={baseDayKey}
+        loadingDay={dayDetailLoadingDay}
+        onSelect={(d) => setSelectedDay(d)}
+        onBackToBase={() => setSelectedDay('')}
+      />
+    ) : null;
+
+  let content: React.ReactNode;
+
+  if (activeDetail) {
+    // ① 有完整明细：基准日（现算/命中缓存后现算）或历史交易日（按需现算）
+    const isBase = viewDay === baseDayKey;
+    const dayResult = isBase ? scoreData : dayDetails[viewDay];
+    content = (
+      <ScoreDetailCards
+        detail={activeDetail}
+        klines={dayResult?.klines}
+        baselineName={isBase ? marketBaselineName : dayResult?.baselineName || indexName}
+        scoreDayKey={viewDay}
+        trainText={isBase ? trainText : ''}
+        moneyFlow={moneyFlow}
+        showMoneyChart={isBase}
+        onRecompute={() => (isBase ? setForceLive(true) : void startDayDetail(viewDay))}
+        recomputeLoading={isBase ? scoreLoading : dayDetailLoadingDay === viewDay}
+        recomputeHint={
+          isBase ? '重新计算会现取数据、展开逐日明细，并覆盖该交易日的缓存' : '重新按该交易日取数，覆盖该交易日的缓存'
+        }
+      />
+    );
+  } else if (activeRow) {
+    // ② 只有评分行（列表缓存）：先展示行摘要，历史交易日会自动现算明细
+    const isBase = viewDay === baseDayKey;
+    content = (
+      <RowSummaryCard
+        row={activeRow}
+        day={viewDay}
+        note={isBase ? '与列表「短线评分」同一份缓存' : '取自评分序列缓存（与列表历史列一致）'}
+        computeText={isBase ? '重新计算明细' : undefined}
+        hint={isBase ? '重新计算会现取数据、展开逐日明细，并覆盖该交易日的缓存' : undefined}
+        onComputeDetail={isBase ? () => setForceLive(true) : () => void startDayDetail(viewDay)}
+        computing={isBase ? scoreLoading : dayDetailLoadingDay === viewDay}
+        error={dayDetailErrors[viewDay]}
+      />
+    );
+  } else if (!viewDay || viewDay === baseDayKey) {
+    // ③ 基准日还没结果：加载中 / 取数失败 / 数据不足
+    if (scoreLoading) {
+      content = (
+        <div style={{ textAlign: 'center', padding: 40 }}>
+          <Spin /> 短线评分数据加载中...
+        </div>
+      );
+    } else {
+      content = (
+        <div style={{ textAlign: 'center', padding: 40, color: 'var(--secondary-text-color)' }}>
+          <div style={{ marginBottom: 12 }}>
+            {scoreError
+              ? `评分失败（${scoreError}），请检查K线数据源设置或稍后重试`
+              : dklines && dklines.length < 30
+                ? `日K数据不足（${dklines.length}条，至少需要30条），无法计算短线评分`
+                : '暂无日K数据，无法计算短线评分'}
+          </div>
+          <Button size="small" onClick={() => runScore()}>
+            重试
+          </Button>
+        </div>
+      );
+    }
+  } else if (dayDetailLoadingDay === viewDay) {
+    content = (
+      <div style={{ ...cardStyle, textAlign: 'center', padding: 24 }}>
+        <Spin /> 正在按 {formatDay(viewDay)} 取数计算明细...
+      </div>
+    );
+  } else {
+    // ④ 历史交易日没有评分缓存：手动现算
+    content = (
+      <div style={{ ...cardStyle, fontSize: 12, color: 'var(--secondary-text-color)' }}>
+        <div style={{ marginBottom: 8 }}>{formatDay(viewDay)} 没有评分记录（可能当日未评分或数据不足）。</div>
+        <Button size="small" onClick={() => void startDayDetail(viewDay)}>
+          现取数计算该交易日明细
+        </Button>
+        {dayDetailErrors[viewDay] ? (
+          <div style={{ marginTop: 6, color: '#ff4d4f' }}>计算失败：{dayDetailErrors[viewDay]}</div>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {strip}
+      <div style={{ marginTop: strip ? 12 : 0 }}>{content}</div>
     </div>
   );
 });
