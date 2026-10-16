@@ -26,7 +26,8 @@ import {
  * 无有效数据的股票（日K不足 / 取数失败）同样按 0 分写入序列，这样点击短线评分不会因为它们
  * 每次都重新尝试取数；确实需要重算时，删掉对应的 `short_term_score_series_*` 缓存键再跑一次即可。
  *
- * 训练窗口是已知的历史区间，因此这里一次把**整段窗口（trainStartDate ~ trainEndDate）**算完：
+ * 训练窗口是已知的历史区间，因此这里一次把**整段窗口（trainStartDate ~ trainEndDate）**算完，
+ * 并默认再往前覆盖 `historyDays` 个交易日（列表「近 N 日评分」历史列/过滤窗口需要，见 PrecomputeOptions.historyDays）：
  * 取数按窗口末日（`ignoreTrain` 绕过训练日期收敛，原始数据不进入界面，渲染层出口仍按训练日截断），
  * 但每只股票在每个交易日的评分只用「该交易日及之前」的K线/资金明细切片计算，
  * 所以第 D 天算出的分数，与训练日推进到 D 时现算的结果完全一致；界面也只在训练日到达 D 后才读该日结果。
@@ -61,6 +62,15 @@ export interface PrecomputeOptions {
   startDate: string;
   /** 训练窗口截止日（YYYY-MM-DD）：训练结束时才会到的最晚交易日，评分会覆盖到该日 */
   endDate: string;
+  /**
+   * 窗口起点再往前额外覆盖的交易日数（默认 0）。
+   *
+   * 列表「近 N 日评分」历史列/过滤窗口是按「评分基准日往前 N 个交易日」读取的：
+   * 训练日刚推进到窗口开头时，这 N 天会跨到 trainStartDate 之前；若预计算只算训练窗口，
+   * 那几天就没缓存，点「短线评分」必然触发一次补算（表现为「预计算跑完了还要重算」）。
+   * 把列表的历史窗口天数传进来，预计算会一并覆盖这些「窗口之前」的交易日。
+   */
+  historyDays?: number;
   source: FundApiType;
   /** 返回 true 时中断预计算（已算完的交易日已写入缓存） */
   shouldStop?: () => boolean;
@@ -138,9 +148,13 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   const secids = codes.map(secidOf);
   const indexSecids = ['1.000001', '0.399001', '0.399006'];
 
-  // ---- 1. 交易日历：三大指数日K的日期并集，限制在训练窗口 [startDate 的归位日, endDate] 内 ----
+  // ---- 1. 交易日历：三大指数日K的日期并集，限制在 [startDate 再往前 historyDays 个交易日, endDate] 内 ----
+  // historyDays：列表「近 N 日评分」历史列/过滤窗口的交易日数。
+  // 训练日刚推进到训练窗口开头时，这 N 天会跨到 trainStartDate 之前，必须一并覆盖，
+  // 否则点「短线评分」时这些天必然未命中 → 触发补算（「预计算跑完了还要重算」）。
+  const historyDays = Math.max(0, Number(options.historyDays) || 0);
   const windowDays = Math.max(0, dayjs(endDate).diff(dayjs(startDate || endDate), 'day'));
-  const indexLimit = Math.ceil(windowDays / 2) + INDEX_KLINES_PER_DAY + 20;
+  const indexLimit = Math.ceil(windowDays / 2) + INDEX_KLINES_PER_DAY + 20 + historyDays;
   onProgress?.(0, 0, '拉取指数日K...');
   const indexKlinesMap = await Services.Tushare.BatchGetKFromTushare(indexSecids, endDate, indexLimit, KLineType.Day, {
     ignoreTrain: true,
@@ -156,9 +170,10 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   });
   const allDays = [...dateSet].sort();
   // 窗口起点若非交易日（如 2024-01-01 元旦），其评分基准日会归位到上一个交易日，
-  // 因此往前多覆盖一个交易日，避免训练第一天必然未命中缓存。
+  // 因此往前多覆盖一个交易日（historyDays 为 0 时退化为 1），避免训练第一天必然未命中缓存。
   const firstIdx = startDate ? allDays.findIndex((d) => d >= startDate) : 0;
-  const days = allDays.slice(firstIdx > 0 ? firstIdx - 1 : 0);
+  const backDays = Math.max(1, historyDays);
+  const days = allDays.slice(firstIdx > 0 ? Math.max(0, firstIdx - backDays) : 0);
   result.totalDates = days.length;
   result.days = days;
   if (!days.length || shouldStop?.()) {

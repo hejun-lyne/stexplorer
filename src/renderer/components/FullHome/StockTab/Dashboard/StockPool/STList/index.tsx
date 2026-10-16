@@ -1119,6 +1119,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         startDate: trainStartDate || '',
         // 整段训练窗口：只有推进到最后一天才会用到窗口末日，提前算好避免每天等待
         endDate: trainEndDate || trainDate,
+        // 列表「近 N 日评分」历史列/过滤窗口按「基准日往前 N 个交易日」读取，
+        // 训练日刚到窗口开头时会跨到 trainStartDate 之前 —— 一并覆盖，避免点「短线评分」时补算。
+        historyDays: shortScoreHistoryDays,
         source: kLineApiSourceSetting,
         // 点击「预计算训练评分」= 忽略已有评分缓存、整段窗口重新计算（暂停后再次点击同样重头算）
         ignoreCache: true,
@@ -1169,7 +1172,17 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     } finally {
       setPrecomputing(false);
     }
-  }, [precomputing, ontrain, trainDate, trainStartDate, trainEndDate, kLineApiSourceSetting, collectCurrentItems, waitBoardStocks]);
+  }, [
+    precomputing,
+    ontrain,
+    trainDate,
+    trainStartDate,
+    trainEndDate,
+    kLineApiSourceSetting,
+    shortScoreHistoryDays,
+    collectCurrentItems,
+    waitBoardStocks,
+  ]);
 
   // 外部（板块列表 / 行业入口）指定了单个板块 → 同步为「单选」；多选由下拉框直接维护
   useEffect(() => {
