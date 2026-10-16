@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './index.scss';
-import { Button, Input, InputNumber, Modal, Select, Tag, message } from 'antd';
+import { Button, Input, InputNumber, Modal, Select, Switch, Tag, Tooltip, message } from 'antd';
 import { ColumnWidthOutlined, HeartFilled, HeartOutlined, PlusOutlined } from '@ant-design/icons';
 import { batch, useDispatch, useSelector } from 'react-redux';
 import moment from 'moment';
@@ -65,9 +65,12 @@ export interface TrainBarProps {
   removeStock: () => void;
   /** 是否显示模拟持仓、成本、盈亏与买卖操作（个股训练） */
   showTrade?: boolean;
+  /** 忽略训练：当前标的的数据展示与更新不受训练模式影响 */
+  ignoreTrain?: boolean;
+  onIgnoreTrainChange?: (checked: boolean) => void;
 }
 
-const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeStock, showTrade = false }) => {
+const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeStock, showTrade = false, ignoreTrain = false, onIgnoreTrainChange }) => {
   const dispatch = useDispatch();
   const config = useSelector((state: StoreState) => state.stock.stockConfigsMapping[secid]);
   const stock = useSelector((state: StoreState) => state.stock.stocksMapping[secid]);
@@ -680,6 +683,12 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         </div>
       )}
       <div className={styles.row}>
+        <div className={styles.item}>
+          <Tooltip title="打开后：仅当前标的的数据展示与更新不受训练模式影响（其它标的仍严格按训练日期过滤）">
+            <span className={styles.label}>忽略训练</span>
+          </Tooltip>
+          <Switch size="small" checked={ignoreTrain} onChange={onIgnoreTrainChange} />
+        </div>
         <div className={styles.item}>
           {config ? (
             <Button className={styles.btn} type="text" icon={<HeartFilled />} onClick={removeStock} size="small">

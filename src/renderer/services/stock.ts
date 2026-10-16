@@ -168,15 +168,17 @@ export async function SearchFromEastmoney(keyword: string) {
 }
 
 export async function GetTrendFromEastmoney(secid: string, zs?: number) {
+  // 详情页「忽略训练」：该股票取真实最新分时，不做训练日截断
+  const ignoreTrain = TrainFilter.IsIgnoreTrain(secid);
   if (usePythonDataSource()) {
     const source = getCurrentDataSource();
     // 训练模式：python 数据源的分时同样按当前训练日期截断
     if (source === Enums.FundApiType.Tushare) {
       const r = await TushareAPI.GetTrendFromTushare(secid);
-      return { ...r, trends: TrainFilter.CutTrends(r.trends) };
+      return { ...r, trends: ignoreTrain ? r.trends : TrainFilter.CutTrends(r.trends) };
     }
     const r = await AkshareAPI.GetTrendFromAkshare(secid);
-    return { ...r, trends: TrainFilter.CutTrends(r.trends) };
+    return { ...r, trends: ignoreTrain ? r.trends : TrainFilter.CutTrends(r.trends) };
   }
   
   try {
@@ -231,7 +233,7 @@ export async function GetTrendFromEastmoney(secid: string, zs?: number) {
       .filter((t) => t.current > 0);
     return {
       secid,
-      trends: TrainFilter.CutTrends(trends),
+      trends: ignoreTrain ? trends : TrainFilter.CutTrends(trends),
     };
   } catch (error) {
     logRequestError(error, 'http://push2his.eastmoney.com/api/qt/stock/trends2/get');
@@ -306,7 +308,7 @@ export async function GetFlowTrendFromEastmoney(secid: string) {
     });
     return {
       secid,
-      ffTrends: TrainFilter.CutFlowTrends(trends),
+      ffTrends: TrainFilter.IsIgnoreTrain(secid) ? trends : TrainFilter.CutFlowTrends(trends),
     };
   } catch (error) {
     logRequestError(error, 'https://push2.eastmoney.com/api/qt/stock/fflow/kline/get');
@@ -812,8 +814,9 @@ export async function GetKFromDataSource(
   options?: { allowSynthesis?: boolean; ignoreTrain?: boolean; endDate?: string }
 ) {
   // ignoreTrain：本次取数绕过训练过滤（按调用生效，非全局开关），
-  // 仅供训练会话自身的「日历类」数据使用（如训练窗口的交易日列表）
-  const ignoreTrain = !!options?.ignoreTrain;
+  // 仅供训练会话自身的「日历类」数据使用（如训练窗口的交易日列表）；
+  // 另外，详情页对当前股票打开的「忽略训练」开关也会按 secid 命中这里。
+  const ignoreTrain = !!options?.ignoreTrain || TrainFilter.IsIgnoreTrain(secid);
   // 注：options.allowSynthesis 已废弃（成分股合成会并发拉几十只成分股K线、把 app 拖死，已彻底移除）。
   // 参数保留仅为兼容既有调用方；周/月线缺失时统一改用「日K合成」。
 
@@ -1217,7 +1220,8 @@ export async function GetKFromEastmoney(secid: string, code: number, limit?: num
     // 训练模式：请求必须以训练日期为终点。
     // 否则接口只返回「最新 N 根」（end=20500101），出来后再按训练日期截断就会变成空数组
     //（板块/指数/分钟K线在训练模式下走东财时都会踩到，表现为「K线数据不足」）。
-    const trainToDate = TrainFilter.GetTrainToDate();
+    // 详情页「忽略训练」开着的股票取真实最新数据，不收敛终点。
+    const trainToDate = TrainFilter.IsIgnoreTrain(secid) ? undefined : TrainFilter.GetTrainToDate();
     const endParam: number | string = trainToDate ? trainToDate.replace(/-/g, '') : 20500101;
     const isUnlimited = limit == -1;
     const searchParams = isUnlimited
@@ -1384,7 +1388,7 @@ export async function GetFlowKFromEastmoney(secid: string, limit?: number) {
       klines.push(cur);
       prev = cur;
     });
-    return TrainFilter.CutFlowDlines(klines);
+    return TrainFilter.IsIgnoreTrain(secid) ? klines : TrainFilter.CutFlowDlines(klines);
   } catch (error) {
     logRequestError(error, 'https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get');
     return [];
@@ -4757,11 +4761,13 @@ export async function GetDetailFromDataSource(source: Enums.FundApiType, secid: 
 }
 
 export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: string) {
+  // 详情页「忽略训练」：该股票取真实最新分时，不做训练日截断
+  const ignoreTrain = TrainFilter.IsIgnoreTrain(secid);
   // 港股（含港股指数）通过 akshare 后端获取
   const stockType = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
   if (stockType === Enums.StockMarketType.HK) {
     const r = await AkshareAPI.GetTrendFromAkshare(secid);
-    return { ...r, trends: TrainFilter.CutTrends(r.trends) };
+    return { ...r, trends: ignoreTrain ? r.trends : TrainFilter.CutTrends(r.trends) };
   }
   if (source === Enums.FundApiType.Eastmoney) {
     return GetTrendFromEastmoney(secid);
@@ -4771,7 +4777,7 @@ export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: s
   // }
   // 默认使用 Akshare
   const r = await AkshareAPI.GetTrendFromAkshare(secid);
-  return { ...r, trends: TrainFilter.CutTrends(r.trends) };
+  return { ...r, trends: ignoreTrain ? r.trends : TrainFilter.CutTrends(r.trends) };
 }
 
 export async function FromDataSource(source: Enums.FundApiType, secid: string) {

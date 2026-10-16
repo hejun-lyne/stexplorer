@@ -295,8 +295,10 @@ async function callTushare(
 ): Promise<any> {
   try {
     const token = store.getState().setting?.systemSetting?.tushareTokenSetting || '';
+    // 详情页「忽略训练」：本次请求的单只股票命中登记时，同样绕过训练过滤
+    const ignoreTrain = !!options?.ignoreTrain || TrainFilter.IsIgnoreTrain(TrainFilter.PickSingleSecid(params));
     // 训练模式：收敛日期入参，避免 python 使用训练日期之后的数据计算指标
-    const trainParams = options?.ignoreTrain ? params : capTrainParams(method, params);
+    const trainParams = ignoreTrain ? params : capTrainParams(method, params);
     const args = [method, '--params', JSON.stringify(trainParams)];
     if (token) {
       args.push('--token', token);
@@ -308,7 +310,7 @@ async function callTushare(
     // 训练模式：把当前训练日期作为全局数据截止日期传给 python 脚本，
     // 使所有「默认取当天」的接口以及 python 内部互相调用都以训练日期为终点
     // ignoreTrain 时不传训练日期，python 才会返回完整区间（例如训练窗口的交易日历）
-    const asOfDate = options?.ignoreTrain ? undefined : TrainFilter.GetTrainToDate();
+    const asOfDate = ignoreTrain ? undefined : TrainFilter.GetTrainToDate();
     if (asOfDate) {
       args.push('--as-of-date', asOfDate);
     }
@@ -320,7 +322,7 @@ async function callTushare(
         const line = (result[i] as string).trim();
         if (line.startsWith('{') || line.startsWith('[')) {
           // 训练模式：裁剪返回的时间序列数据（ignoreTrain 时保持原样）
-          const parsed = options?.ignoreTrain ? JSON.parse(line) : cutTrainResult(method, JSON.parse(line));
+          const parsed = ignoreTrain ? JSON.parse(line) : cutTrainResult(method, JSON.parse(line));
           // 结果为空 / 报错时，把 python 打印的诊断信息带到渲染进程控制台，便于直接定位原因
           const isEmptyResult = Array.isArray(parsed)
             ? parsed.length === 0

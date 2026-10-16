@@ -59,6 +59,8 @@ export interface PriceTrendProps {
   zs: number;
   useSina?: boolean;
   trainMode?: boolean;
+  /** 忽略训练：当前标的不受训练模式影响，展示与更新走真实最新数据 */
+  ignoreTrain?: boolean;
   activePeriod?: Stock.PeriodMarkItem;
   toDate?: string;
   onTimelineDate?: string;
@@ -1511,6 +1513,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     secid,
     zs,
     trainMode,
+    ignoreTrain = false,
     activePeriod,
     toDate,
     firstQSAppear,
@@ -1530,11 +1533,15 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const config = useSelector((state: StoreState) => state.stock.stockConfigsMapping[secid]);
     const backtestMarks = useSelector((state: StoreState) => state.stock.backtestMarks[secid]);
     const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
+    // 忽略训练（详情页开关，按 secid 生效）：当前标的按「非训练」口径取数与展示真实最新数据
+    const trainView = trainMode && !ignoreTrain;
+    const trainActive = ontrain && !ignoreTrain;
     // 训练模式：时序类请求的缓存按训练日期区分（ahooks 的 cacheKey 缓存不含日期会返回旧数据）
-    const trainCacheSuffix = ontrain && trainDate ? `/${trainDate}` : '/live';
+    // 忽略训练时用 '/live' 缓存键，即真实最新数据那份缓存
+    const trainCacheSuffix = trainActive && trainDate ? `/${trainDate}` : '/live';
     const isStock = Helpers.Stock.GetStockType(secid) == StockMarketType.AB;
     // 回测 / 训练模式下默认展示日K线（分时属于未来数据，训练模式下需要额外请求训练日历史分时）
-    const [typeIndex, setTypeIndex] = useState(backtestDate || (ontrain && trainDate) ? DefaultKTypes.indexOf(KLineType.Day) : 0);
+    const [typeIndex, setTypeIndex] = useState(backtestDate || (trainActive && trainDate) ? DefaultKTypes.indexOf(KLineType.Day) : 0);
     const { darkMode } = useHomeContext();
     const variableColors = Utils.getVariablesColor(CONST.VARIABLES);
     const increaseColor = variableColors['--increase-color'];
@@ -1853,10 +1860,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     // [新增] 根据回测日期计算应该展示到哪一个交易日（前一个交易日）
     const dayKlines = klineData.klines[DefaultKTypes.indexOf(KLineType.Day)];
     // 训练模式：显示层再兜底截断一次，避免上层缓存/已加载数据中残留训练日期之后的K线
-    const effectiveToDate = trainMode ? toDate || trainDate || undefined : toDate;
+    //（忽略训练时不截断，直接展示到真实最新）
+    const effectiveToDate = trainView ? toDate || trainDate || undefined : toDate;
     const displayToDate = useMemo(
-      () => calcDisplayToDate(trainMode, effectiveToDate, backtestDate, dayKlines),
-      [trainMode, effectiveToDate, backtestDate, dayKlines]
+      () => calcDisplayToDate(trainView, effectiveToDate, backtestDate, dayKlines),
+      [trainView, effectiveToDate, backtestDate, dayKlines]
     );
     // 图表实际展示的K线（训练/回测模式下按截止日期截断），供图上的「最新」等信息使用
     const displayKlines = useMemo(
@@ -2006,7 +2014,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const { run: updateKLineOption, flush: flushKLineOption } = useThrottleFn(
       (kIndex: number, data: any) => {
         const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
-        const _displayToDate = calcDisplayToDate(trainMode, effectiveToDate, backtestDate, data.klines[dayIndex]);
+        const _displayToDate = calcDisplayToDate(trainView, effectiveToDate, backtestDate, data.klines[dayIndex]);
         let bkks = [];
         if (currentBK && data.bkklines[currentBK] && data.bkklines[currentBK][kIndex]) {
           bkks = data.bkklines[currentBK][kIndex];
@@ -2123,7 +2131,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     );
 
     useEffect(() => {
-      if (trainMode) {
+      if (trainView) {
         // 训练模式默认展示日K线（分时是训练日当天的数据，需额外请求历史分时且信息量不如日K）
         // 注：这里不再预取 30 分钟K线——分钟级数据源已不可用，且它只服务于旧版模拟盘取价
         const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
@@ -2131,7 +2139,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           changeTypeIndex(dayIndex);
         }
       }
-    }, [trainMode]);
+    }, [trainView]);
 
     // 打开股票时后台预取的日K：默认展示日K（训练 / 回测模式）时，挂载即用预取数据画图。
     // 随后的正常取数流程仍会再跑一遍，保证数据是最新的；这里只是让首帧就有日K。
@@ -2182,18 +2190,14 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       cacheKey: `requestDealDay/train/${secid}/${trainDate || 'live'}`,
     });
 
-    // 训练模式：进入训练 / 训练日期推进后重新取数
-    // 数据层已按当前训练日期截断，只有重新请求才能用「训练窗口内」的数据替换掉本地已加载的数据
-    const trainRefreshRef = useRef({ mode: false, date: '' });
+    // 训练模式：进入训练 / 训练日期推进 / 「忽略训练」开关切换后重新取数
+    // 数据层已按当前训练日期截断（忽略训练时按真实最新取），只有重新请求才能换掉本地已加载的数据
+    const trainRefreshRef = useRef({ mode: false, date: '', ignore: false });
     useEffect(() => {
-      if (!ontrain || !trainDate) {
-        trainRefreshRef.current = { mode: false, date: '' };
-        return;
-      }
+      const on = trainActive && !!trainDate;
       const prev = trainRefreshRef.current;
-      const justEnabled = !prev.mode;
-      const needRefresh = justEnabled || prev.date !== trainDate;
-      trainRefreshRef.current = { mode: true, date: trainDate };
+      const needRefresh = prev.mode !== on || prev.ignore !== ignoreTrain || (on && prev.date !== trainDate);
+      trainRefreshRef.current = { mode: on, date: trainDate || '', ignore: ignoreTrain };
       if (!needRefresh) {
         return;
       }
@@ -2209,17 +2213,23 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         }
         fetchKline(kLineApiSourceSetting, secid, t, klineData.count[i]);
       });
-      if (typeIndex === 0) {
-        runGetTrainTrends(secid, trainDate.replace(/-/g, ''));
+      if (typeIndex === 0 && on) {
+        runGetTrainTrends(secid, (trainDate as string).replace(/-/g, ''));
       }
-    }, [ontrain, trainDate]);
+    }, [trainActive, trainDate, ignoreTrain]);
 
-    // 训练模式下切到分时图时，加载训练日期的历史分时
+    // 训练模式下切到分时图时，加载训练日期的历史分时；「忽略训练」时改为真实当日分时
     useEffect(() => {
-      if (ontrain && trainDate && typeIndex === 0) {
-        runGetTrainTrends(secid, trainDate.replace(/-/g, ''));
+      if (typeIndex !== 0) {
+        return;
       }
-    }, [typeIndex]);
+      if (trainActive && trainDate) {
+        runGetTrainTrends(secid, trainDate.replace(/-/g, ''));
+      } else if (ignoreTrain && !requestTrends) {
+        setRequestTrends(true);
+        runGetTrends(kLineApiSourceSetting, secid);
+      }
+    }, [typeIndex, trainActive, ignoreTrain]);
 
     useEffect(() => {
       // [回测] 需要日线数据来计算 displayToDate（回测日期的前一个交易日）

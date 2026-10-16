@@ -11,6 +11,8 @@ import { useSelector } from 'react-redux';
 
 export interface RealTimeProps {
   stock: Stock.DetailItem;
+  /** 忽略训练：展示真实最新行情，不用训练日K推导 */
+  ignoreTrain?: boolean;
 }
 
 /**
@@ -50,7 +52,7 @@ function buildTrainDetail(stock: Stock.DetailItem, klines: Stock.KLineItem[], tr
   };
 }
 
-const RealTime: React.FC<RealTimeProps> = React.memo(({ stock }) => {
+const RealTime: React.FC<RealTimeProps> = React.memo(({ stock, ignoreTrain = false }) => {
   const stocks = useSelector((store: StoreState) => store.stock.stocksMapping[stock.secid]);
   const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
   /** 训练日的日K（优先取 redux，缺失时自行取一次，走磁盘缓存代价很低） */
@@ -61,7 +63,8 @@ const RealTime: React.FC<RealTimeProps> = React.memo(({ stock }) => {
   const reduxDayCount = reduxDayKlines.length;
 
   useEffect(() => {
-    if (!ontrain || !trainDate || !stock.secid) {
+    // 忽略训练：不需要训练日K，直接用真实行情
+    if (ignoreTrain || !ontrain || !trainDate || !stock.secid) {
       setTrainKlines([]);
       return;
     }
@@ -80,14 +83,14 @@ const RealTime: React.FC<RealTimeProps> = React.memo(({ stock }) => {
     return () => {
       mounted = false;
     };
-  }, [ontrain, trainDate, stock.secid, reduxDayCount]);
+  }, [ignoreTrain, ontrain, trainDate, stock.secid, reduxDayCount]);
 
   const data = useMemo(() => {
-    if (ontrain && trainDate) {
+    if (!ignoreTrain && ontrain && trainDate) {
       return buildTrainDetail(stock, trainKlines, trainDate);
     }
     return stock || stocks?.detail || {};
-  }, [ontrain, trainDate, stock, trainKlines, stocks]);
+  }, [ignoreTrain, ontrain, trainDate, stock, trainKlines, stocks]);
 
   return (
     <PureCard>

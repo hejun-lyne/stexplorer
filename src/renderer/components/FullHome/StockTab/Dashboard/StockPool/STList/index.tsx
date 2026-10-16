@@ -41,10 +41,57 @@ const SHORT_SCORE_HISTORY_DAYS = 15;
 /**
  * 「K线形态」列的排序键
  *
- * 该列的排序不是单一数值：先阳线后阴线（阳线在前），同为阳/阴时再按K线实体大小。
+ * 该列的排序不是单一数值：先阳线后阴线（阳线在前），同为阳/阴时再按形态优先级
+ * （见 klineShapeWeight），形态也相同时按K线实体大小兜底。
  * 因此它在 showList 里有专门的比较逻辑，不走通用的数值排序。
  */
 const KLINE_SHAPE_SORT_KEY = 'klineShape';
+
+/** 阳线形态排序优先级（越靠前越优先） */
+const KLINE_SHAPE_ORDER_YANG = [
+  '铁锤线',
+  '倒宝剑线',
+  '十字星',
+  '螺旋桨',
+  '纺锤线',
+  '地线宝宝',
+  '中海绵宝宝',
+  '大海绵宝宝',
+  '天线宝宝',
+  '倒铁锤线',
+  '宝剑线',
+];
+
+/** 阴线形态排序优先级（越靠前越优先） */
+const KLINE_SHAPE_ORDER_YIN = [
+  '倒宝剑线',
+  '十字星',
+  '铁锤线',
+  '螺旋桨',
+  '纺锤线',
+  '宝剑线',
+  '倒铁锤线',
+  '地线宝宝',
+  '天线宝宝',
+  '中海绵宝宝',
+  '大海绵宝宝',
+];
+
+/**
+ * K线形态排序权重（越大越靠前）
+ *
+ * 阳线整体大于阴线；同为阳/阴时按各自的形态优先级表（上面的顺序即优先级）；
+ * 形态未识别（空 / 未知）的统一排最后。
+ */
+const klineShapeWeight = (shape?: string, yin?: boolean): number => {
+  const list = yin ? KLINE_SHAPE_ORDER_YIN : KLINE_SHAPE_ORDER_YANG;
+  const idx = list.indexOf(String(shape || ''));
+  if (idx < 0) {
+    return 0; // 未识别形态：排在所有已识别形态之后
+  }
+  // 阳线权重从 100 起、阴线从 50 起，各组内按优先级递减；这样阳线整体大于阴线，两者都大于未识别形态（0）
+  return (yin ? 50 : 100) - idx;
+};
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -177,7 +224,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const [shortScoreFilterEnabled, setShortScoreFilterEnabled] = useState(false);
   const [shortScoreFilterScore, setShortScoreFilterScore] = useState(60);
   /** 过滤窗口的回溯起点：从「N 天前」开始往前数（即窗口不含最近 N 个交易日） */
-  const [shortScoreFilterBeforeDays, setShortScoreFilterBeforeDays] = useState(3);
+  const [shortScoreFilterBeforeDays, setShortScoreFilterBeforeDays] = useState(5);
   /** 过滤窗口的长度：近 M 个交易日 */
   const [shortScoreFilterWindowDays, setShortScoreFilterWindowDays] = useState(15);
   // RSI 评分阈值过滤：仅显示 RSI 评分「大于」阈值的股票（RSI 满分 40）
@@ -1410,7 +1457,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   const updateSortType = useCallback((key: string) => {
     setSortTypes((prev) => {
       const currentType = prev[key] || 0;
-      // K线形态列：常用顺序是「阳线在前、实体大在前」，所以第一次点击直接给降序（2），
+      // K线形态列：常用顺序是「阳线在前、形态优先级高的在前」，所以第一次点击直接给降序（2），
       // 再点一次给升序（1），第三次取消；其余列沿用「升序 → 降序 → 取消」
       const nextType =
         key === KLINE_SHAPE_SORT_KEY
@@ -1567,19 +1614,21 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
         if (keys[0] === KLINE_SHAPE_SORT_KEY) {
-          // K线形态排序：先阳线后阴线（阳线大于阴线），同为阳/阴时再按K线实体大小
-          // （实体 / 近期平均实体，越大实体越大）。降序=阳线在前且实体大的在前。
+          // K线形态排序：先阳线后阴线（阳线大于阴线），同为阳/阴时按形态优先级
+          // （阳线：铁锤线 > 倒宝剑线 > 十字星 > …；阴线：倒宝剑线 > 十字星 > 铁锤线 > …，见 klineShapeWeight），
+          // 形态也相同时再按K线实体大小（实体 / 近期平均实体，越大实体越大）兜底。
+          // 降序=阳线在前、形态优先级高的在前。
           const t = sortTypes[KLINE_SHAPE_SORT_KEY];
           list.sort((a: any, b: any) => {
-            const leftYin = a.klineYin ? 1 : 0;
-            const rightYin = b.klineYin ? 1 : 0;
-            if (leftYin !== rightYin) {
-              return t === 2 ? leftYin - rightYin : rightYin - leftYin;
+            const left = klineShapeWeight(a.klineShape, a.klineYin);
+            const right = klineShapeWeight(b.klineShape, b.klineYin);
+            if (left !== right) {
+              return t === 2 ? right - left : left - right;
             }
-            const left = Number(a.klineSize) || 0;
-            const right = Number(b.klineSize) || 0;
-            if (left === right) return 0;
-            return t === 2 ? right - left : left - right;
+            const leftSize = Number(a.klineSize) || 0;
+            const rightSize = Number(b.klineSize) || 0;
+            if (leftSize === rightSize) return 0;
+            return t === 2 ? rightSize - leftSize : leftSize - rightSize;
           });
         } else {
           list.sort((a: any, b: any) => {
@@ -2019,7 +2068,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           </Col>
           <Col
             span={2}
-            title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。排序：先阳线后阴线，再按K线实体大小"
+            title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；形态相同再按K线实体大小"
           >
             K线形态
             <Button

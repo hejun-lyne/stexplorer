@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Badge, Row, Tabs } from 'antd';
 import * as Helpers from '@/helpers';
 import SplitPane from 'react-split-pane';
@@ -32,6 +32,7 @@ import Guba from './MustRead/GuBa';
 import KimiAnalysis from './KimiAnalysis';
 import Holdings from './Holdings';
 import * as Utils from '@/utils';
+import * as TrainFilter from '@/utils/trainFilter';
 import BacktestAnalysis from './BacktestAnalysis';
 import TrainBar from './TrainBar';
 
@@ -54,11 +55,18 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
   const [klines, setKLines] = useState<Stock.KLineItem[] | null>(null);
   const [trends, setTrends] = useState<Stock.TrendItem[]>([]);
   const { kLineApiSourceSetting, ontrain } = useSelector((state: StoreState) => state.setting.systemSetting);
+  /**
+   * 忽略训练：只对当前标的生效。
+   * 打开后按 secid 登记到 TrainFilter，取数（K线/分时/资金流）与写入 store 前的
+   * 训练截断都会跳过，展示与更新走真实最新数据；其它标的仍严格受训练日期约束。
+   */
+  const [ignoreTrain, setIgnoreTrain] = useState(false);
   const { run: runGetDetail } = useRequest(() => Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid), {
     throwOnError: true,
     manual: true,
     onSuccess: (d) => (d ? setDetails(d) : undefined),
-    cacheKey: `GetStockDetail/${secid}`,
+    // 忽略训练时用独立缓存键，避免命中训练日期下取到的 as-of 详情
+    cacheKey: `GetStockDetail/${secid}${ignoreTrain ? '/ignore' : ''}`,
   });
   const updateTrendData = useCallback((t: Stock.TrendItem[]) => {
     setTrends(t);
@@ -126,6 +134,29 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
     }
   }, [secid, hasConfig]);
 
+  // 「忽略训练」开关：只在本页签可见时登记，避免影响其它标的与后台取数
+  // 必须用 layoutEffect：子组件（RealTime / PriceTrend）的取数都在 passive effect 里，
+  // 父组件的 passive effect 反而更晚执行，会造成这一帧仍按训练口径取数
+  useLayoutEffect(() => {
+    TrainFilter.SetIgnoreTrain(secid, ignoreTrain && active);
+  }, [secid, ignoreTrain, active]);
+
+  // 卸载 / 切换标的时注销（依赖变化时不能在这里清，否则会把上面刚登记的开关抹掉）
+  useEffect(() => {
+    const registeredSecid = secid;
+    return () => TrainFilter.SetIgnoreTrain(registeredSecid, false);
+  }, [secid]);
+
+  // 开关切换后重新取一次详情（打开取真实最新，关闭回到训练日口径）；首帧不重复请求
+  const ignoreTrainInitRef = useRef(ignoreTrain);
+  useEffect(() => {
+    if (ignoreTrainInitRef.current === ignoreTrain) {
+      return;
+    }
+    ignoreTrainInitRef.current = ignoreTrain;
+    runGetDetail();
+  }, [ignoreTrain, runGetDetail]);
+
   const dispatch = useDispatch();
   const addStock = useCallback(() => {
     dispatch(addStockAction(tDetail, Helpers.Stock.GetStockType(secid)));
@@ -166,7 +197,14 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
     // 训练条会换行、高度自适应：外层纵向 flex，内容区撑满剩余高度（不再按固定条高算高度）
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ flex: '0 0 auto' }}>
-        <TrainBar secid={secid} removeStock={removeStock} addStock={addStock} showTrade={true} />
+        <TrainBar
+          secid={secid}
+          removeStock={removeStock}
+          addStock={addStock}
+          showTrade={true}
+          ignoreTrain={ignoreTrain}
+          onIgnoreTrainChange={setIgnoreTrain}
+        />
       </div>
       <Row
         className={styles.container}
@@ -188,7 +226,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
             }}
           >
             <div className={styles.left}>
-              <RealTime stock={nDetails} />
+              <RealTime stock={nDetails} ignoreTrain={ignoreTrain} />
               <BanKuai secid={nDetails.secid} active={active} openBankuai={onOpenStock} />
               <TradeRecord showSeats={true} stock={nDetails} active={active} />
             </div>
@@ -212,6 +250,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
                   active={active}
                   zs={nDetails.zs}
                   trainMode={ontrain}
+                  ignoreTrain={ignoreTrain}
                   activePeriod={activePeriod}
                   backtestDate={backtestDate}
                   firstQSAppear={firstQSAppear}

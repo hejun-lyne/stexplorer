@@ -1064,7 +1064,9 @@ export function UpdateStockData(
   }
   // 训练模式：写入 store 之前统一按当前训练日期截断
   // 该出口是 redux 中所有时序数据的唯一入口（含实时推送），保证任何面板都不会出现未来数据
-  if (TrainFilter.IsTrainFilterOn()) {
+  // 例外：详情页对当前股票打开「忽略训练」时，该股票走真实最新数据（其它股票不受影响）
+  const ignoreTrain = TrainFilter.IsIgnoreTrain(secid);
+  if (!ignoreTrain && TrainFilter.IsTrainFilterOn()) {
     trends = TrainFilter.CutTrends(trends);
     tflows = TrainFilter.CutFlowTrends(tflows);
     klines = TrainFilter.CutKlines(klines);
@@ -1104,7 +1106,7 @@ export function UpdateStockData(
   if (dflows) {
     data.dflows = dflows;
   }
-  if (TrainFilter.IsTrainFilterOn()) {
+  if (!ignoreTrain && TrainFilter.IsTrainFilterOn()) {
     // prev 中可能残留训练开始前写入的未来数据，统一再截断一次
     data.trends = TrainFilter.CutTrends(data.trends);
     data.tflows = TrainFilter.CutFlowTrends(data.tflows);
@@ -1113,7 +1115,9 @@ export function UpdateStockData(
   if (klines) {
     // 合并数据
     const ktype = klines[0].type;
-    data.klines[ktype] = TrainFilter.CutKlines(MergeKlines(data.klines[ktype], klines));
+    data.klines[ktype] = ignoreTrain
+      ? MergeKlines(data.klines[ktype], klines)
+      : TrainFilter.CutKlines(MergeKlines(data.klines[ktype], klines));
     // 更新其他数据
     // 计算k线状态
     const kstates = ComputeKState(klines);
@@ -1597,7 +1601,9 @@ export async function GetKlinesAndFlows(secid: string, type: Enums.KLineType, co
   // 训练模式：redux 里存的往往是「进训练之前（非训练模式）」取回的最新K线，最后日期＝今天。
   // 这类数据一旦被复用，组件按训练日过滤后就会变成空数组，因此必须视为不可用、重新取数
   //（取数层会按训练日期截止并裁剪，python 侧也以训练日期为终点）。
-  const trainOn = TrainFilter.IsTrainFilterOn();
+  // 详情页「忽略训练」：这只股票按「非训练」口径取数（要真实最新，不能被训练日当成今天）
+  const ignoreTrain = TrainFilter.IsIgnoreTrain(secid);
+  const trainOn = !ignoreTrain && TrainFilter.IsTrainFilterOn();
   const trainToDate = TrainFilter.GetTrainToDate();
   const cachedKlines = st && st.klines[type] && st.klines[type].length ? st.klines[type] : undefined;
   const cachedKlinesUsable =
@@ -1644,8 +1650,12 @@ export async function GetKlinesAndFlows(secid: string, type: Enums.KLineType, co
     return undefined;
   }
   const collectors = [
-    // 复用旧数据时也要按当前训练日期裁剪，避免把训练日之后的数据带进图表
-    needMakeReq ? () => getKlines(secid, type, count) : TrainFilter.CutKlines(st.klines[type]),
+    // 复用旧数据时也要按当前训练日期裁剪，避免把训练日之后的数据带进图表（「忽略训练」的股票不裁剪）
+    needMakeReq
+      ? () => getKlines(secid, type, count)
+      : ignoreTrain
+        ? st.klines[type]
+        : TrainFilter.CutKlines(st.klines[type]),
     needMakeReq ? () => getDFlows(secid) : st.dflows,
     context,
   ];

@@ -38,7 +38,54 @@ export function IsTrainFilterOn() {
  * 它是全局状态，一旦与并发请求重叠，就会把「正在取数的其它请求」的过滤一起关掉
  * （或把训练日期永久清掉）。需要绕过过滤的取数（如训练窗口的交易日历）
  * 请改用「按调用」的 `ignoreTrain` 选项，见 Services.Stock.GetKFromSetting。
+ *
+ * 详情页的「忽略训练」开关走的是下面的 **按股票(secid) 登记**：开关只对当前这一只
+ * 股票生效，取数与写入 store 前的截断都会跳过训练过滤，其它股票不受任何影响
+ * （避免重蹈全局开关导致训练数据泄漏的覆辙）。
  */
+
+/** secid 归一化：'1.600000' / '600000' / '1.600000.SH' 统一成 6 位代码（小写去空格） */
+function normalizeSecidForIgnore(secid?: string | number | null): string {
+  const raw = String(secid ?? '').trim();
+  if (!raw) {
+    return '';
+  }
+  return raw.split('.').pop()!.trim().toLowerCase();
+}
+
+/** 「忽略训练」的股票集合（详情页开关打开时登记当前股票） */
+const ignoreTrainSecids = new Set<string>();
+
+/** 登记 / 取消某只股票「忽略训练」（传空 secid 或 on=false 即取消） */
+export function SetIgnoreTrain(secid?: string | number | null, on = true) {
+  const key = normalizeSecidForIgnore(secid);
+  if (!key) {
+    return;
+  }
+  if (on) {
+    ignoreTrainSecids.add(key);
+  } else {
+    ignoreTrainSecids.delete(key);
+  }
+}
+
+/** 该股票是否处于「忽略训练」状态（未登记即 false） */
+export function IsIgnoreTrain(secid?: string | number | null) {
+  const key = normalizeSecidForIgnore(secid);
+  return !!key && ignoreTrainSecids.has(key);
+}
+
+/** 从接口参数里推断出「单只股票」的 secid：批量请求（secids 数组）不参与忽略，避免整批绕过过滤 */
+export function PickSingleSecid(params?: Record<string, any> | null): string {
+  if (!params) {
+    return '';
+  }
+  const single = params.secid ?? params.ts_code ?? params.code;
+  if (single == null || Array.isArray(single)) {
+    return '';
+  }
+  return String(single);
+}
 
 /** 时间戳是否晚于当前训练日期（按天比较，训练日期当天的数据全部保留） */
 export function IsAfterTrainDate(date?: string) {
