@@ -93,6 +93,14 @@ const codeOfListItem = (item: any): string => {
   return '';
 };
 
+/** 取列表行的名称：各展示模式的字段可能叫 name / stockName */
+const nameOfListItem = (item: any): string => {
+  if (!item) {
+    return '';
+  }
+  return String(item.name ?? item.stockName ?? '');
+};
+
 export interface STListProps {
   industries: Stock.BanKuaiItem[];
   gainians: Stock.BanKuaiItem[];
@@ -322,6 +330,16 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       }
       // 多板块：先把该板块的列表存入缓存（即便它已被取消勾选，也留作再次勾选时秒回）
       boardStocksCacheRef.current[requestedSecid] = data.stocks as Stock.DetailItem[];
+      // 板块成分股接口按「涨跌幅」排序并且只取前 N 条（东财源），
+      // 返回条数小于真实成分股数时，股票列表与评分池都只是「涨幅靠前的子集」，会随行情漂移。
+      const total = Number((data as any)?.total) || 0;
+      const got = (data?.stocks || []).length;
+      if (total && got && got < total) {
+        console.warn(
+          `[板块] ${requestedSecid} 成分股被截断：本次只取到 ${got}/${total} 只` +
+            `（按涨跌幅排序取前 N），列表成员可能随行情变化`
+        );
+      }
       if (selectedSecidsRef.current.indexOf(requestedSecid) === -1) {
         // 该板块已不在当前选择中：只缓存，不参与合并
         return;
@@ -853,7 +871,9 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       message.warning('板块的股票列表还在加载，请稍后再点评分');
       return;
     }
-    const currentItems = collectCurrentItems();
+    // 评分池永远取「当前板块池」（忽略沿用）：板块成分股列表每 6 秒会随行情刷新，
+    // 沿用上一轮快照会把新出现在列表里的股票永久排除在评分结果之外（列表里有、评分结果里没有）。
+    const currentItems = collectCurrentItems({ ignoreReuse: true });
 
     // 暂停后恢复：继续处理剩余未评分项；全新开始：重置
     if (shortScoreRemainingRef.current.length === 0) {
@@ -1103,7 +1123,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       message.warning('当前板块的股票列表还在加载，请稍后再试');
       return;
     }
-    const items = collectCurrentItems();
+    // 同「短线评分」：预计算也要覆盖当前完整板块池，不能沿用旧快照
+    const items = collectCurrentItems({ ignoreReuse: true });
     if (!items.length) {
       console.log('[预计算] 没有可预计算的股票');
       return;
@@ -1573,10 +1594,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       return list as any;
     }
 
-    let list = filterStocks.filter((s) => {
-      if (nameFilter && !s.name.includes(nameFilter)) return false;
-      return true;
-    });
+    // 名字过滤统一在 visibleShowList 里做（对所有展示模式生效）
+    let list = [...filterStocks];
     const keys = Object.keys(sortTypes);
     if (keys.length === 1) {
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
@@ -1585,15 +1604,50 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, shortScoreDisplayDays]);
 
   /**
-   * 实际渲染的列表：按「排除科创板+北交所」过滤（对所有展示模式生效）
+   * 实际渲染的列表：按「排除科创板+北交所」和「名字过滤」过滤（对所有展示模式生效）
    * 分页 total 同样用它，保证页码与可见行数一致。
    */
   const visibleShowList = React.useMemo(() => {
-    if (!excludeStarBse) {
-      return showList as any[];
+    let list = showList as any[];
+    if (excludeStarBse) {
+      list = list.filter((item: any) => !isStarOrBseCode(codeOfListItem(item)));
     }
-    return (showList as any[]).filter((item: any) => !isStarOrBseCode(codeOfListItem(item)));
-  }, [showList, excludeStarBse]);
+    // 名字过滤：对所有展示模式（含短线评分结果列表）统一生效
+    const kw = nameFilter.trim();
+    if (kw) {
+      list = list.filter((item: any) => nameOfListItem(item).includes(kw));
+    }
+    return list;
+  }, [showList, excludeStarBse, nameFilter]);
+
+  /**
+   * 列表诊断日志：点「短线评分」后仍找不到某只股票时，用它定位是哪一层把行过滤掉的
+   * （评分池完整、结果行都在，但展示层又少了一半时，看这行日志即可）
+   */
+  useEffect(() => {
+    if (displayMode !== 'shortScore' || shortScoreLoading || todayScoreLoading) {
+      return;
+    }
+    const rows = shortScoreData as any[];
+    const notListedRows = rows.filter((r) => r.notListed).length;
+    const starBseRows = rows.filter((r) => isStarOrBseCode(codeOfListItem(r))).length;
+    console.log(
+      `[短线评分] 列表诊断：评分行 ${rows.length} 行（未上市 ${notListedRows}、科创/北交 ${starBseRows}），` +
+        `当前展示 ${visibleShowList.length} 行；排除科创北交=${excludeStarBse} 显示未上市=${shortScoreShowNotListed}` +
+        ` 评分过滤=${shortScoreFilterEnabled} RSI过滤=${shortScoreRsiFilterEnabled} 名字过滤="${nameFilter}"`
+    );
+  }, [
+    displayMode,
+    shortScoreData,
+    visibleShowList,
+    shortScoreLoading,
+    todayScoreLoading,
+    excludeStarBse,
+    shortScoreShowNotListed,
+    shortScoreFilterEnabled,
+    shortScoreRsiFilterEnabled,
+    nameFilter,
+  ]);
 
   /**
    * 「当日评分」的股票池：当前列表的「过滤结果」全部股票（**不分页**）

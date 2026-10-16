@@ -1460,7 +1460,10 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   /** 用评分序列填充（未命中的进入 pending） */
   const fillFromSeries = (series: ShortTermScoreSeries) => {
     pending.length = 0;
-    items.forEach((item) => {
+    // 必须遍历 items 的快照：调用方（列表组件）会在 onRow 里从它传入的那个数组
+    // （即 items 本身）中 splice 掉已完成的股票，边遍历边删会跳过后续元素，
+    // 表现为「评分池 845 只、结果列表只有 423 只」。
+    [...items].forEach((item) => {
       const hit = pickScoreRow(series[item.code], scoreDayKey);
       if (hit?.row && typeof hit.row === 'object') {
         // 名字以调用方股票池为准（缓存行可能只存了代码）
