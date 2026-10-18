@@ -793,6 +793,11 @@ export async function UpdateStockDetails() {
       stock: { stockConfigs, stocksLoading, stocksMapping, maMonitors, chanMonitors, gMonitors },
     } = store.getState();
 
+    // 非交易时段行情不会再变化：不再请求东财/新浪详情接口，
+    // 价格等实时字段由已有的长链接推送（MultiStockDetailPush）继续补齐
+    if (!Utils.JudgeWorkDayTime(new Date().getTime())) {
+      return;
+    }
     if (stocksLoading) {
       return;
     }
@@ -1067,10 +1072,21 @@ export function UpdateStockData(
   // 例外：详情页对当前股票打开「忽略训练」时，该股票走真实最新数据（其它股票不受影响）
   const ignoreTrain = TrainFilter.IsIgnoreTrain(secid);
   if (!ignoreTrain && TrainFilter.IsTrainFilterOn()) {
-    trends = TrainFilter.CutTrends(trends);
-    tflows = TrainFilter.CutFlowTrends(tflows);
-    klines = TrainFilter.CutKlines(klines);
-    dflows = TrainFilter.CutFlowDlines(dflows);
+    // Cut* 对 undefined 会返回空数组，必须判空后再裁剪：
+    // 否则「只更新详情」时 klines 会被替换成 []，下面 klines[0].type 会抛 TypeError，
+    // trends/dflows 也会被空数组覆盖掉已有数据
+    if (trends) {
+      trends = TrainFilter.CutTrends(trends);
+    }
+    if (tflows) {
+      tflows = TrainFilter.CutFlowTrends(tflows);
+    }
+    if (klines) {
+      klines = TrainFilter.CutKlines(klines);
+    }
+    if (dflows) {
+      dflows = TrainFilter.CutFlowDlines(dflows);
+    }
   }
   if (detail) {
     data.detail = detail;
@@ -1112,7 +1128,7 @@ export function UpdateStockData(
     data.tflows = TrainFilter.CutFlowTrends(data.tflows);
     data.dflows = TrainFilter.CutFlowDlines(data.dflows);
   }
-  if (klines) {
+  if (klines && klines.length) {
     // 合并数据
     const ktype = klines[0].type;
     data.klines[ktype] = ignoreTrain
