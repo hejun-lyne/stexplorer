@@ -156,13 +156,19 @@ function getAxisPointer() {
     ],
   };
 }
-function getxAxis(data: string[], showChouma = false) {
+/**
+ * @param data 类目数据
+ * @param showChouma 是否显示筹码轴
+ * @param bandGap K线图设为 true：类目轴按「带宽」布局，首尾 K 线各内缩半个槽位，
+ *                避免最后一根 K 线的影线压在右侧 y 轴上（分时图保持 false，折线要贴边）
+ */
+function getxAxis(data: string[], showChouma = false, bandGap = false) {
   const axises = [
     // 价格时间轴
     {
       type: 'category',
       scale: true,
-      boundaryGap: false,
+      boundaryGap: bandGap,
       splitLine: {
         show: false,
       },
@@ -180,7 +186,7 @@ function getxAxis(data: string[], showChouma = false) {
     {
       type: 'category',
       scale: true,
-      boundaryGap: false,
+      boundaryGap: bandGap,
       axisLine: {
         onZero: false,
         show: false,
@@ -196,7 +202,7 @@ function getxAxis(data: string[], showChouma = false) {
     {
       type: 'category',
       scale: true,
-      boundaryGap: false,
+      boundaryGap: bandGap,
       axisLine: {
         onZero: false,
         show: false,
@@ -1171,7 +1177,8 @@ function setupClineChart(
   options.grid = getGridOption();
   options.axisPointer = getAxisPointer();
   options.visualMap = getVisualMap(2);
-  options.xAxis = getxAxis(dates);
+  // 缠论K线同理：右侧留出半个槽位，避免最后一根K线影线压到右侧 y 轴
+  options.xAxis = getxAxis(dates, false, true);
   options.yAxis = getyAxis(darkMode);
   options.series = [
     getKSeries(values, [], []), 
@@ -1228,7 +1235,8 @@ function setupKlineChart(
   options.grid = getGridOption(true, showChouma);
   options.axisPointer = getAxisPointer();
   options.visualMap = getVisualMap(2);
-  options.xAxis = getxAxis(dates, showChouma);
+  // K线图：首尾各留半个类目槽位，最后一日的上下影线不再压到右侧 y 轴
+  options.xAxis = getxAxis(dates, showChouma, true);
   const showBK = bkks && bkks.length > 0;
   options.yAxis = getyAxis(darkMode, chouma ? chouma.steps : undefined, showChouma);
   if (!showChouma) {

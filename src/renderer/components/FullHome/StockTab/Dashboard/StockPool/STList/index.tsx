@@ -42,7 +42,7 @@ const SHORT_SCORE_HISTORY_DAYS = 15;
  * 「K线形态」列的排序键
  *
  * 该列的排序不是单一数值：先阳线后阴线（阳线在前），同为阳/阴时再按形态优先级
- * （见 klineShapeWeight），形态也相同时按K线实体大小兜底。
+ * （见 klineShapeWeight）；同一形态内按「下影 - 上影」从小到大，再按K线实体大小兜底。
  * 因此它在 showList 里有专门的比较逻辑，不走通用的数值排序。
  */
 const KLINE_SHAPE_SORT_KEY = 'klineShape';
@@ -1615,15 +1615,23 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       if (keys.length === 1) {
         if (keys[0] === KLINE_SHAPE_SORT_KEY) {
           // K线形态排序：先阳线后阴线（阳线大于阴线），同为阳/阴时按形态优先级
-          // （阳线：铁锤线 > 倒宝剑线 > 十字星 > …；阴线：倒宝剑线 > 十字星 > 铁锤线 > …，见 klineShapeWeight），
-          // 形态也相同时再按K线实体大小（实体 / 近期平均实体，越大实体越大）兜底。
-          // 降序=阳线在前、形态优先级高的在前。
+          // （阳线：铁锤线 > 倒宝剑线 > 十字星 > …；阴线：倒宝剑线 > 十字星 > 铁锤线 > …，见 klineShapeWeight）。
+          // 同一形态内：有上下影线时按「下影线长度 - 上影线长度」从小到大（越低越靠前），
+          // 仍相同再按K线实体大小（实体 / 近期平均实体，越大实体越大）兜底。
+          // 降序=阳线在前、形态优先级高的在前、同形态内（下影-上影）小的在前。
           const t = sortTypes[KLINE_SHAPE_SORT_KEY];
+          const shadowDiff = (r: any) => (Number(r.klineLowerShadow) || 0) - (Number(r.klineUpperShadow) || 0);
           list.sort((a: any, b: any) => {
             const left = klineShapeWeight(a.klineShape, a.klineYin);
             const right = klineShapeWeight(b.klineShape, b.klineYin);
             if (left !== right) {
               return t === 2 ? right - left : left - right;
+            }
+            // 同一形态：下影 - 上影，越低越靠前（无上下影线时两者都是 0，自然交给实体大小兜底）
+            const leftShadow = shadowDiff(a);
+            const rightShadow = shadowDiff(b);
+            if (leftShadow !== rightShadow) {
+              return t === 2 ? leftShadow - rightShadow : rightShadow - leftShadow;
             }
             const leftSize = Number(a.klineSize) || 0;
             const rightSize = Number(b.klineSize) || 0;
@@ -2068,7 +2076,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           </Col>
           <Col
             span={2}
-            title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；形态相同再按K线实体大小"
+            title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小"
           >
             K线形态
             <Button
@@ -2346,6 +2354,12 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                   style={{ fontSize: 12 }}
                   title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${
                     s.klineSize != null ? `｜实体 ${s.klineSize.toFixed(2)}倍平均` : ''
+                  }${
+                    s.klineUpperShadow != null && s.klineLowerShadow != null
+                      ? `｜影线 上${s.klineUpperShadow.toFixed(2)}/下${s.klineLowerShadow.toFixed(2)}（差 ${(
+                          s.klineLowerShadow - s.klineUpperShadow
+                        ).toFixed(2)}）`
+                      : ''
                   }${s.intraday ? '｜当日K线由分时补全' : ''}${s.error ? `｜${s.error}` : ''}`}
                 >
                   {s.klineShape ? (
