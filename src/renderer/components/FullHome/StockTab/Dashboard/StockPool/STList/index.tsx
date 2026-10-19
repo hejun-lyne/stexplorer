@@ -17,7 +17,7 @@ import {
   MainInFilterStocksFromTushare,
 } from '@/services/tushare';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
-import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
+import { BKType, KFilterType, KFilterTypeNames, SingleKLineShapeNames } from '@/utils/enums';
 import classNames from 'classnames';
 import { batch, useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
@@ -92,6 +92,20 @@ const klineShapeWeight = (shape?: string, yin?: boolean): number => {
   // 阳线权重从 100 起、阴线从 50 起，各组内按优先级递减；这样阳线整体大于阴线，两者都大于未识别形态（0）
   return (yin ? 50 : 100) - idx;
 };
+
+/**
+ * 「K线形态」筛选项
+ *
+ * 先按排序优先级表（阳线、阴线）给出顺序，再补上优先级表里没有的形态
+ * （目前是「小海绵宝宝」，保证筛选器覆盖所有可识别形态）。
+ */
+const KLINE_SHAPE_FILTER_OPTIONS = Array.from(
+  new Set([
+    ...KLINE_SHAPE_ORDER_YANG,
+    ...KLINE_SHAPE_ORDER_YIN,
+    ...Object.values(SingleKLineShapeNames).filter((name) => name && name !== '未知'),
+  ])
+).map((name) => ({ label: name, value: name }));
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -233,6 +247,8 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
   // 是否显示「评分基准日尚未上市」的股票：默认隐藏（训练回看历史日时，当前成分股里常含大量当时还没上市的新股，
   // 它们没有分数、又排在列表最前面，会把第一页占满）
   const [shortScoreShowNotListed, setShortScoreShowNotListed] = useState(false);
+  // K线形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；同一形态名不区分阴阳）
+  const [shortScoreKlineShapes, setShortScoreKlineShapes] = useState<string[]>([]);
   /**
    * 短线评分需要加载的交易日数量
    *
@@ -1611,6 +1627,11 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
         const rsiThreshold = Number(shortScoreRsiFilterScore);
         list = list.filter((s: any) => s.rsiScore != null && s.rsiScore > rsiThreshold);
       }
+      // K线形态筛选：仅保留所选形态的股票（空=不过滤）
+      if (shortScoreKlineShapes.length) {
+        const shapeSet = new Set(shortScoreKlineShapes);
+        list = list.filter((s: any) => shapeSet.has(String(s.klineShape || '')));
+      }
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
         if (keys[0] === KLINE_SHAPE_SORT_KEY) {
@@ -1658,7 +1679,7 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, shortScoreDisplayDays]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreKlineShapes, shortScoreSeries, shortScoreDisplayDays]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」和「名字过滤」过滤（对所有展示模式生效）
@@ -1932,6 +1953,26 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
                 title="训练回看历史日时，当前成分股里包含当时还没上市的新股；默认隐藏它们，勾选后可查看"
               />
               <span>显示未上市</span>
+            </span>
+          )}
+          {displayMode === 'shortScore' && (
+            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span>K线形态</span>
+              <Select
+                size="small"
+                mode="multiple"
+                allowClear
+                placeholder="全部"
+                value={shortScoreKlineShapes}
+                onChange={(v) => {
+                  setShortScoreKlineShapes((v as string[]) || []);
+                  setCurrentPage(1);
+                }}
+                options={KLINE_SHAPE_FILTER_OPTIONS}
+                maxTagCount="responsive"
+                style={{ minWidth: 140, maxWidth: 260 }}
+                title="只显示所选K线形态的股票（可多选，不区分阳线/阴线；留空显示全部）"
+              />
             </span>
           )}
           {ontrain && displayMode === 'shortScore' && (
