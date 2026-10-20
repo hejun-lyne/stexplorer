@@ -147,6 +147,61 @@ export function writeTrainProgressAction(progress: Train.Progress): ThunkAction 
   };
 }
 
+/**
+ * 推进/保存训练日（训练工具栏与股票池列表的「下一天」共用）
+ *
+ * 一次操作同时落盘两处，保证「下次启动从上次的交易日继续」：
+ * 1. 训练日写入系统设置（store/setting.json）：重启后数据层会直接按这一天截断，
+ *    即使训练进度文件写入失败，游标也不会退回训练开始日；
+ * 2. 训练进度（交易窗口 / 交易日列表 / 资金 / 佣金）写入 store/train_progress.json，
+ *    供「继续上一次训练」与启动时的 `restoreTrainCursorAction` 使用。
+ */
+export function saveTrainDayAction(params: {
+  /** 要保存到的训练日（YYYY-MM-DD），为空时不做任何事 */
+  date: string;
+  secid?: string;
+  name?: string;
+  startDate?: string;
+  endDate?: string;
+  /** 训练窗口内的交易日列表（升序） */
+  days?: string[];
+  initialCapital?: number;
+  commissionRate?: number;
+}): ThunkAction {
+  return (dispatch, getState) => {
+    const { date } = params;
+    if (!date) {
+      return;
+    }
+    const {
+      setting: { systemSetting },
+      train: { progress },
+    } = getState();
+    const prev = (progress || {}) as Train.Progress;
+    const days = params.days && params.days.length ? params.days : prev.days || [];
+    // 1) 训练日 + 训练开关落盘
+    dispatch(setSystemSettingAction({ ...systemSetting, ontrain: true, trainDate: date }));
+    // 2) 训练进度落盘
+    dispatch(
+      writeTrainProgressAction({
+        secid: params.secid || prev.secid || '',
+        name: params.name || prev.name || '',
+        startDate: params.startDate || prev.startDate || days[0] || '',
+        endDate: params.endDate || prev.endDate || '',
+        currentDate: date,
+        total: days.length || prev.total || 0,
+        days,
+        initialCapital: Number(params.initialCapital) || prev.initialCapital || 0,
+        commissionRate:
+          params.commissionRate != null && Number.isFinite(Number(params.commissionRate))
+            ? Number(params.commissionRate)
+            : prev.commissionRate || 0,
+        savedAt: moment(new Date()).format('YYYY-MM-DD HH:mm:ss'),
+      })
+    );
+  };
+}
+
 /** 清除未完成训练进度 */
 export function clearTrainProgressAction(): ThunkAction {
   return (dispatch) => {
@@ -186,8 +241,10 @@ export function resumeTrainAction(): ThunkAction {
 /**
  * 启动时用「未完成训练进度」校正训练游标（trainDate）。
  *
- * 训练按天推进时 setTrainCurrentDateAction 只更新内存、不落盘，所以重新打开应用后
- * 设置里的 trainDate 是旧值（通常是开始日），需要按 progress.currentDate 恢复到上次的交易日。
+ * 训练日现在会随每次「下一天」写入系统设置（见 saveTrainDayAction），正常重启后
+ * 设置里的 trainDate 已经是上次的交易日；这里兼容两种情况：
+ * - 设置里的训练日落后（旧版本只写了进度文件）→ 用进度里的 currentDate 补上；
+ * - 设置里的训练日更靠后（进度文件写入失败 / 被旧数据覆盖）→ 保留设置里的值，不能倒退。
  * 这里只恢复游标，其它训练配置（窗口/资金/佣金）以设置为准，避免覆盖用户刚改过的配置。
  */
 export function restoreTrainCursorAction(): ThunkAction {
@@ -198,8 +255,12 @@ export function restoreTrainCursorAction(): ThunkAction {
     } = getState();
     if (!systemSetting.ontrain) return;
     if (!progress || !progress.currentDate) return;
-    if (progress.currentDate === systemSetting.trainDate) return;
-    dispatch(setSystemSettingAction({ ...systemSetting, trainDate: progress.currentDate }));
+    const current = String(systemSetting.trainDate || '');
+    const fromProgress = String(progress.currentDate);
+    if (fromProgress === current) return;
+    // 只往前恢复：设置里的训练日更靠后时说明它比进度文件新，直接用会倒退训练进度
+    if (current && fromProgress <= current) return;
+    dispatch(setSystemSettingAction({ ...systemSetting, trainDate: fromProgress }));
   };
 }
 

@@ -81,6 +81,12 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
   const [kimiApiKey, setKimiApiKey] = useState(kimiApiKeySetting);
 
   function onSave() {
+    // 训练中保存其它设置时，保留当前训练日（游标）：
+    // 直接写回开始日会让按天推进的进度丢失，重启后也会退回训练第一天
+    const keptTrainDate =
+      systemSetting.trainDate && systemSetting.trainDate >= trainStart && systemSetting.trainDate <= trainEnd
+        ? systemSetting.trainDate
+        : '';
     dispatch(
       setSystemSettingAction({
         fundApiTypeSetting: fundApiType,
@@ -95,7 +101,7 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
         autoFreshSetting: autoFresh,
         freshDelaySetting: freshDelay || defaultSystemSetting.freshDelaySetting,
         ontrain: istrain,
-        trainDate: istrain ? trainStart : '',
+        trainDate: istrain ? keptTrainDate || trainStart : '',
         trainStartDate: trainStart,
         trainEndDate: trainEnd,
         kLineApiSourceSetting: kLineApiSource,

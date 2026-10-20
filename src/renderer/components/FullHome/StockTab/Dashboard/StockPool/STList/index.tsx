@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination, message } from 'antd';
+import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination, Modal, message } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -33,7 +33,7 @@ import {
   ShortTermScoreSeries,
 } from '@/helpers/shortTermScoreList';
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
-import { setTrainCurrentDateAction, writeTrainProgressAction } from '@/actions/train';
+import { saveTrainDayAction } from '@/actions/train';
 
 /** 短线评分列表「近 N 日评分」历史列展示的交易日数量（仅影响展示列数，过滤窗口另有其天数） */
 const SHORT_SCORE_HISTORY_DAYS = 15;
@@ -169,10 +169,21 @@ export interface STListProps {
   secid: string;
   onChangeBK: (t: BKType, s: string) => void;
   onOpenStock: (secid: string, name: string) => void;
+  /** 打开股票并直接切换到详情页（持仓弹窗里点击股票时用；列表行仍用 onOpenStock 后台开标签页） */
+  onOpenStockFocus?: (secid: string, name: string) => void;
   active: boolean;
 }
 
-const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, onChangeBK, onOpenStock, active }) => {
+const STList: React.FC<STListProps> = ({
+  industries,
+  gainians,
+  bktype,
+  secid,
+  onChangeBK,
+  onOpenStock,
+  onOpenStockFocus,
+  active,
+}) => {
   const [pageSize, setPageSize] = useState(20);
   const [currentPage, setCurrentPage] = useState(1);
   const [fdays, setFdays] = useState(8);
@@ -344,22 +355,30 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     if (!nextTrainDay) {
       return;
     }
-    dispatch(setTrainCurrentDateAction(nextTrainDay));
-    // 与训练工具栏一致：每推进一个交易日落盘一次进度（刷新/重启后可继续）
+    // 与训练工具栏一致：推进一个交易日就落盘一次「训练日 + 训练进度」，
+    // 关闭/重启应用后会从这一天继续（见 saveTrainDayAction / restoreTrainCursorAction）
+    // 进度里还没有标的时（第一次从列表推进），用当前选中的板块补上，便于「继续上一次训练」时识别
+    const progressSecid = trainProgress?.secid || selectedSecids[0] || secid || '';
+    const progressName =
+      trainProgress?.name || [...industries, ...gainians].find((i) => i.secid === progressSecid)?.name || '';
     dispatch(
-      writeTrainProgressAction({
-        ...(trainProgress || ({} as Train.Progress)),
-        secid: trainProgress?.secid || '',
-        name: trainProgress?.name || '',
+      saveTrainDayAction({
+        date: nextTrainDay,
+        secid: progressSecid,
+        name: progressName,
         startDate: trainStartDate || trainProgress?.startDate || '',
         endDate: trainEndDate || trainProgress?.endDate || '',
-        currentDate: nextTrainDay,
-        total: trainCalendarDays.length,
         days: trainCalendarDays,
         initialCapital: Number(initialCapital) || trainProgress?.initialCapital || 0,
-        commissionRate: Number(commissionRate) || trainProgress?.commissionRate || 0,
-        savedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+        commissionRate:
+          commissionRate != null && Number.isFinite(Number(commissionRate))
+            ? Number(commissionRate)
+            : trainProgress?.commissionRate,
       })
+    );
+    const idx = trainCalendarDays.indexOf(nextTrainDay);
+    message.success(
+      `已保存训练进度：${nextTrainDay}（${idx + 1}/${trainCalendarDays.length} 个交易日），下次启动从此日继续`
     );
   }, [
     nextTrainDay,
@@ -370,7 +389,110 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
     trainCalendarDays,
     initialCapital,
     commissionRate,
+    selectedSecids,
+    secid,
+    industries,
+    gainians,
   ]);
+
+  // ========== 当前持仓（训练共享账户，仅训练模式） ==========
+  // 持仓来自各标的的模拟买卖点（t='train'），与详情页训练工具栏用同一套回放口径，
+  // 因此这里的持仓/可用资金与个股详情页看到的一致。
+  const [holdingsOpen, setHoldingsOpen] = useState(false);
+  const [holdingsLoading, setHoldingsLoading] = useState(false);
+  const [holdingCloses, setHoldingCloses] = useState<Record<string, Record<string, number>>>({});
+
+  const trainAccount = React.useMemo<Helpers.TrainAccount.TrainAccountResult>(() => {
+    if (!ontrain) {
+      return { cash: 0, realized: 0, positions: [] };
+    }
+    return Helpers.TrainAccount.ComputeTrainAccount({
+      configs: Object.values(stockConfigsMapping || {}),
+      startDate: trainStartDate || '',
+      currentDay: trainDate || '',
+      initialCapital: Number(initialCapital) || 0,
+      commissionRate: commissionRate != null ? Number(commissionRate) : undefined,
+    });
+  }, [ontrain, stockConfigsMapping, trainStartDate, trainDate, initialCapital, commissionRate]);
+
+  /** 持仓标的的 secid 列表（逗号拼接，作为取收盘价的依赖） */
+  const holdingSecidsKey = React.useMemo(
+    () => trainAccount.positions.map((p) => p.secid).join(','),
+    [trainAccount]
+  );
+
+  // 打开持仓弹窗后按训练日取各标的的收盘价（数据层已按训练日期截断，不含未来数据）
+  useEffect(() => {
+    if (!holdingsOpen || !ontrain) {
+      return;
+    }
+    const secids = holdingSecidsKey ? holdingSecidsKey.split(',') : [];
+    if (!secids.length) {
+      setHoldingCloses({});
+      return;
+    }
+    let mounted = true;
+    setHoldingsLoading(true);
+    Promise.all(
+      secids.map(async (sid) => {
+        try {
+          return [sid, await Helpers.Stock.GetTrainDayCloses(sid)] as [string, Record<string, number>];
+        } catch {
+          return [sid, {}] as [string, Record<string, number>];
+        }
+      })
+    ).then((pairs) => {
+      if (!mounted) {
+        return;
+      }
+      const m: Record<string, Record<string, number>> = {};
+      pairs.forEach(([sid, closes]) => {
+        m[sid] = closes;
+      });
+      setHoldingCloses(m);
+      setHoldingsLoading(false);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [holdingsOpen, ontrain, holdingSecidsKey, trainDate]);
+
+  /** 持仓明细行：训练日收盘价估值（当日停牌时退回最近一个交易日收盘价） */
+  const holdingRows = React.useMemo(() => {
+    const rows = trainAccount.positions.map((p) => {
+      const { day, close } = Helpers.TrainAccount.LastCloseOnOrBefore(holdingCloses[p.secid], trainDate || '');
+      const hasPrice = close > 0;
+      const price = hasPrice ? close : p.costPrice;
+      const marketValue = p.shares * price;
+      const profit = hasPrice ? (price - p.costPrice) * p.shares : 0;
+      const profitRatio = hasPrice && p.costPrice > 0 ? ((price - p.costPrice) / p.costPrice) * 100 : 0;
+      return { ...p, close, closeDay: day, hasPrice, price, marketValue, profit, profitRatio };
+    });
+    rows.sort((a, b) => b.marketValue - a.marketValue);
+    return rows;
+  }, [trainAccount, holdingCloses, trainDate]);
+
+  const holdingSummary = React.useMemo(() => {
+    const marketValue = holdingRows.reduce((s, r) => s + r.marketValue, 0);
+    const cost = holdingRows.reduce((s, r) => s + r.costAmount, 0);
+    const profit = holdingRows.reduce((s, r) => s + r.profit, 0);
+    return {
+      marketValue,
+      cost,
+      profit,
+      profitRatio: cost > 0 ? (profit / cost) * 100 : 0,
+      totalAssets: trainAccount.cash + marketValue,
+    };
+  }, [holdingRows, trainAccount.cash]);
+
+  /** 点击持仓行：关闭弹窗并打开对应股票详情（持仓入口是明确的「打开」动作，直接切到详情页） */
+  const openHoldingStock = useCallback(
+    (sid: string, name: string) => {
+      setHoldingsOpen(false);
+      (onOpenStockFocus || onOpenStock)(sid, name);
+    },
+    [onOpenStock, onOpenStockFocus]
+  );
 
   const { run: runFilterStocks } = useRequest(Helpers.Stock.FilterMultiKlines, {
     throwOnError: true,
@@ -1975,17 +2097,32 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
               />
             </span>
           )}
-          {ontrain && displayMode === 'shortScore' && (
+          {ontrain && (
             <span style={{ marginLeft: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>训练日</span>
               <span style={{ fontSize: 12, fontWeight: 'bold' }}>{trainDate || '--'}</span>
-              <Button size="small" disabled={!nextTrainDay || shortScoreLoading} onClick={handleNextTrainDay}>
+              <Button
+                size="small"
+                disabled={!nextTrainDay || shortScoreLoading || todayScoreLoading}
+                onClick={handleNextTrainDay}
+                title="推进到下一个交易日，并把训练日与训练进度落盘（下次启动从此日继续）"
+              >
                 下一天
               </Button>
               {trainFinished && (
                 <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>（已到窗口最后一天）</span>
               )}
             </span>
+          )}
+          {ontrain && (
+            <Button
+              size="small"
+              onClick={() => setHoldingsOpen(true)}
+              style={{ marginLeft: 4 }}
+              title="查看当前训练持仓（共享账户，按训练日收盘价估值），点击股票名称可打开对应详情"
+            >
+              {`当前持仓(${holdingRows.length})`}
+            </Button>
           )}
           {ontrain && (
             <Button
@@ -2565,6 +2702,110 @@ const STList: React.FC<STListProps> = ({ industries, gainians, bktype, secid, on
           style={{ padding: '10px 0', textAlign: 'center' }}
         />
       </div>
+      <Modal
+        title={`当前持仓（训练日 ${trainDate || '--'}）`}
+        visible={holdingsOpen}
+        onCancel={() => setHoldingsOpen(false)}
+        footer={null}
+        width={880}
+        destroyOnClose
+      >
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 16,
+            fontSize: 12,
+            padding: '2px 10px 10px',
+            color: 'var(--hint-color)',
+          }}
+        >
+          <span>
+            可用资金：
+            <span style={{ fontWeight: 'bold', color: 'var(--primary-text-color)' }}>{formatMoneyFlow(trainAccount.cash)}</span>
+          </span>
+          <span>
+            持仓市值：
+            <span style={{ fontWeight: 'bold', color: 'var(--primary-text-color)' }}>{formatMoneyFlow(holdingSummary.marketValue)}</span>
+          </span>
+          <span>
+            总资产：
+            <span style={{ fontWeight: 'bold', color: 'var(--primary-text-color)' }}>{formatMoneyFlow(holdingSummary.totalAssets)}</span>
+          </span>
+          <span>
+            持仓盈亏：
+            <span className={Utils.GetValueColor(holdingSummary.profit).textClass} style={{ fontWeight: 'bold' }}>
+              {`${holdingSummary.profit >= 0 ? '+' : ''}${holdingSummary.profit.toFixed(2)}（${
+                holdingSummary.profitRatio >= 0 ? '+' : ''
+              }${holdingSummary.profitRatio.toFixed(2)}%）`}
+            </span>
+          </span>
+          <span>
+            已实现盈亏：
+            <span className={Utils.GetValueColor(trainAccount.realized).textClass} style={{ fontWeight: 'bold' }}>
+              {`${trainAccount.realized >= 0 ? '+' : ''}${trainAccount.realized.toFixed(2)}`}
+            </span>
+          </span>
+          {holdingsLoading && <span>行情加载中...</span>}
+        </div>
+        <Row className={styles.rowheader}>
+          <Col span={4}>股票名称</Col>
+          <Col span={3}>持仓股数</Col>
+          <Col span={3}>成本价</Col>
+          <Col span={3}>现价</Col>
+          <Col span={4}>浮动盈亏</Col>
+          <Col span={3}>仓位占比</Col>
+          <Col span={4}>最近买入</Col>
+        </Row>
+        <div style={{ maxHeight: 420, overflowY: 'auto' }}>
+          {holdingRows.length === 0 && (
+            <div className={styles.hint} style={{ padding: '20px', textAlign: 'center' }}>
+              当前无持仓：在个股详情页用训练工具栏买入后，这里会显示持仓（训练账户为所有标的共享）
+            </div>
+          )}
+          {holdingRows.map((r) => (
+            <Row key={r.secid} className={styles.row}>
+              <Col span={4} style={{ cursor: 'pointer' }} onClick={() => openHoldingStock(r.secid, r.name)}>
+                <span style={{ color: '#1890ff' }}>{r.name || r.secid}</span>
+              </Col>
+              <Col span={3}>{r.shares}</Col>
+              <Col span={3}>{r.costPrice.toFixed(2)}</Col>
+              <Col span={3} title={r.closeDay && r.closeDay !== trainDate ? `按 ${r.closeDay} 收盘价估值（当日无行情）` : undefined}>
+                {r.hasPrice ? r.close.toFixed(2) : '--'}
+              </Col>
+              <Col span={4} className={r.hasPrice ? Utils.GetValueColor(r.profit).textClass : undefined}>
+                {r.hasPrice
+                  ? `${r.profit >= 0 ? '+' : ''}${r.profit.toFixed(2)}（${r.profitRatio >= 0 ? '+' : ''}${r.profitRatio.toFixed(2)}%）`
+                  : '--'}
+              </Col>
+              <Col span={3}>
+                {holdingSummary.marketValue > 0
+                  ? `${((r.marketValue / holdingSummary.marketValue) * 100).toFixed(2)}%`
+                  : '--'}
+              </Col>
+              <Col span={4}>{r.lastBuyDate || '--'}</Col>
+            </Row>
+          ))}
+          {holdingRows.length > 0 && (
+            <Row className={styles.row} style={{ fontWeight: 'bold', borderTop: '1px solid var(--main-border-color)', marginTop: 10 }}>
+              <Col span={4}>合计</Col>
+              <Col span={3}>{holdingRows.reduce((s, r) => s + r.shares, 0)}</Col>
+              <Col span={3}>--</Col>
+              <Col span={3}>--</Col>
+              <Col span={4} className={Utils.GetValueColor(holdingSummary.profit).textClass}>
+                {`${holdingSummary.profit >= 0 ? '+' : ''}${holdingSummary.profit.toFixed(2)}（${
+                  holdingSummary.profitRatio >= 0 ? '+' : ''
+                }${holdingSummary.profitRatio.toFixed(2)}%）`}
+              </Col>
+              <Col span={3}>100.00%</Col>
+              <Col span={4}>--</Col>
+            </Row>
+          )}
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--hint-color)', padding: '8px 10px 0' }}>
+          点击股票名称可打开对应详情；训练账户为所有标的共享（资金共用），持仓与个股详情页训练工具栏一致
+        </div>
+      </Modal>
     </>
   );
 };

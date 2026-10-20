@@ -8,3 +8,4 @@ export * as Baidu from './baidu';
 export * as Python from './python';
 export * as Tech from './tech';
 export * as TrainSettle from './trainSettle';
+export * as TrainAccount from './trainAccount';

@@ -197,6 +197,8 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
             onChangeBK={changeBK}
             // 打开股票详情时只新增标签页，不自动切换到详情页（停留在 STList 页面）
             onOpenStock={(s, n) => onOpenStock(s, n, undefined, undefined, undefined, undefined, false)}
+            // 持仓弹窗里的「打开股票」是明确动作：直接切到该标的详情页
+            onOpenStockFocus={(s, n) => onOpenStock(s, n, undefined, undefined, undefined, undefined, true)}
             active={activeKey === 'stocks'}
           />
         </Tabs.TabPane>

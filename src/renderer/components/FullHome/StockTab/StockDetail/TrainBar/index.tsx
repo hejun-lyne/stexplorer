@@ -20,11 +20,10 @@ import {
 import {
   addTrainArchiveAction,
   clearTrainProgressAction,
-  setTrainCurrentDateAction,
+  saveTrainDayAction,
   setTrainDaysAction,
   stopTrainAction,
   TRAIN_TYPE,
-  writeTrainProgressAction,
 } from '@/actions/train';
 import { MarkType } from '@/utils/enums';
 import * as Utils from '@/utils';
@@ -128,24 +127,22 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     };
   }, [ontrain, secid, startDate, endDate, currentDaysKey, daysKey, days.length, stockName]);
 
-  /** 每次推进（或校正）训练日期后写入进度，避免中途退出丢失进度 */
+  /** 每次推进（或校正）训练日期后落盘「训练日 + 训练进度」，避免中途退出丢失进度 */
   const saveProgress = useCallback(
     (date: string) => {
       if (!date) {
         return;
       }
       dispatch(
-        writeTrainProgressAction({
+        saveTrainDayAction({
+          date,
           secid,
           name: stockName,
           startDate: startDate || (days.length ? days[0] : ''),
           endDate,
-          currentDate: date,
-          total: days.length,
           days,
           initialCapital: capital,
           commissionRate: commission,
-          savedAt: moment().format('YYYY-MM-DD HH:mm:ss'),
         })
       );
     },
@@ -169,7 +166,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     if (target === currentDay) {
       return;
     }
-    dispatch(setTrainCurrentDateAction(target));
+    // saveProgress 内部会把训练日一并写入系统设置（落盘），无需再单独 setTrainCurrentDateAction
     saveProgress(target);
   }, [ontrain, days, currentDay, saveProgress]);
 
@@ -367,9 +364,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     if (!nextDay) {
       return;
     }
-    // 按交易日推进（days 已跳过非交易日）
-    dispatch(setTrainCurrentDateAction(nextDay));
-    // 每推进一天落盘一次进度
+    // 按交易日推进（days 已跳过非交易日），同时落盘训练日与进度
     saveProgress(nextDay);
     if (days[days.length - 1] === nextDay) {
       message.info('已推进到训练结束日期，请进行结算归档');
