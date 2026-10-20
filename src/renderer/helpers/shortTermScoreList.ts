@@ -305,10 +305,14 @@ function sliceKlines(ks: Stock.KLineItem[] | undefined, date: string, keep: numb
   if (!ks || !Array.isArray(ks) || !ks.length) {
     return [];
   }
-  if (!date) {
+  // 关键：date 有两种写法（YYYYMMDD / YYYY-MM-DD），必须先统一成 YYYY-MM-DD 再比较。
+  // 否则 `'2026-10-08' <= '20261019'` 恒为真（'-' < '1'），等于不截断，
+  // 导致「按历史交易日算分」时拿到的始终是最新K线（含未来数据）而误判为「未覆盖到该交易日」。
+  const target = date ? toDay(date) : '';
+  if (!target) {
     return ks.length > keep ? ks.slice(-keep) : ks;
   }
-  const cut = ks.filter((k) => toDay(k.date) <= date);
+  const cut = ks.filter((k) => toDay(k.date) <= target);
   return cut.length > keep ? cut.slice(-keep) : cut;
 }
 
@@ -326,9 +330,11 @@ function sliceMoneyTo(mf: any, date: string, keep: number): { detailMain: number
   if (!main.length) {
     return { detailMain: [], detailRetail: [] };
   }
+  // 同 sliceKlines：date 可能是 YYYYMMDD 或 YYYY-MM-DD，统一成 YYYY-MM-DD 再比较
+  const target = date ? toDay(date) : '';
   const keepIdx: number[] = [];
   dates.forEach((d, i) => {
-    if (!d || !date || toDay(d) <= date) {
+    if (!d || !target || toDay(d) <= target) {
       keepIdx.push(i);
     }
   });
@@ -1904,11 +1910,13 @@ export async function computeStockScoreForCode(params: {
     }
   }
 
-  const inputs = await buildStockScoreInputs(ctx, item, scoreDayKey, { moneyFlow });
-  const { row, detail } = computeShortTermScoreForDate({ code, name, scoreDay: scoreDayKey, ...inputs });
+  // 评分基准日统一成 YYYY-MM-DD 再进评分内核：与列表批量评分/预计算的口径一致
+  // （YYYYMMDD 与 YYYY-MM-DD 混用会让「按日截断」的字符串比较失效，见 sliceKlines 注释）
+  const scoreDay = scoreDayKey ? `${scoreDayKey.substring(0, 4)}-${scoreDayKey.substring(4, 6)}-${scoreDayKey.substring(6, 8)}` : '';
+  const inputs = await buildStockScoreInputs(ctx, item, scoreDay, { moneyFlow });
+  const { row, detail } = computeShortTermScoreForDate({ code, name, scoreDay, ...inputs });
   const lastDate = inputs.klines.length ? toDay(inputs.klines[inputs.klines.length - 1].date) : '';
   const dayKey = scoreDayKey || lastDate.replace(/-/g, '');
-  const scoreDay = dayKey ? `${dayKey.substring(0, 4)}-${dayKey.substring(4, 6)}-${dayKey.substring(6, 8)}` : '';
 
   // 把该交易日的结果写回这只股票的评分序列，供列表直接命中；
   // 数据未就绪（pending）时不写缓存，下次运行会重新取数计算。

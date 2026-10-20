@@ -78,20 +78,38 @@ const ScoreBar = ({ value, max }: { value: number; max: number }) => (
 const DayScoreStrip = ({
   days,
   series,
+  errors,
   viewDay,
   baseDayKey,
   loadingDay,
+  missingCount,
+  failedCount,
+  computingMissing,
+  computingProgress,
   onSelect,
   onBackToBase,
+  onComputeMissing,
 }: {
   days: string[];
   series: Record<string, ScoreList.ShortTermScoreRow>;
+  /** 各交易日的计算失败原因（交易日 -> 原因） */
+  errors: Record<string, string>;
   viewDay: string;
   baseDayKey: string;
   /** 正在按需计算明细的交易日（用于在条上提示进度） */
   loadingDay: string;
+  /** 还没有评分缓存（且未现算）的交易日数量 */
+  missingCount: number;
+  /** 缺失交易日里已尝试取数、但计算失败的数量 */
+  failedCount: number;
+  /** 是否正在批量补算缺失交易日 */
+  computingMissing: boolean;
+  /** 批量补算进度 */
+  computingProgress: { done: number; total: number } | null;
   onSelect: (day: string) => void;
   onBackToBase: () => void;
+  /** 没有评分缓存的交易日：发起计算 */
+  onComputeMissing: () => void;
 }) => (
   <div style={cardStyle}>
     <Row className={styles.rowheader} style={{ marginBottom: 6 }}>
@@ -130,7 +148,9 @@ const DayScoreStrip = ({
             onClick={() => onSelect(d)}
             title={`${formatDay(d)}：${v == null ? '--' : v.toFixed(1)} ${row?.grade || ''}${note}${
               isBase ? '｜评分基准日' : ''
-            }${isLoading ? '｜正在计算该交易日明细…' : ''}`}
+            }${isLoading ? '｜正在计算该交易日明细…' : ''}${
+              dayDetailErrors[d] ? `｜计算失败：${dayDetailErrors[d]}` : ''
+            }`}
             style={{
               flex: '0 0 auto',
               minWidth: 48,
@@ -159,6 +179,27 @@ const DayScoreStrip = ({
         );
       })}
     </div>
+    {/* 没有评分缓存的交易日：给出一键补算入口（逐日现取数计算并写回评分序列） */}
+    {missingCount > 0 || computingMissing ? (
+      <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>
+          {computingMissing && computingProgress
+            ? `正在逐日补算 ${computingProgress.done}/${computingProgress.total}...`
+            : `有 ${missingCount} 个交易日没有评分缓存${
+                failedCount > 0 ? `，其中 ${failedCount} 个计算失败（悬停单元格可看原因）` : ''
+              }`}
+        </span>
+        <Button
+          size="small"
+          style={{ marginLeft: 8 }}
+          loading={computingMissing}
+          disabled={computingMissing}
+          onClick={onComputeMissing}
+        >
+          计算缺失的交易日
+        </Button>
+      </div>
+    ) : null}
   </div>
 );
 
@@ -175,6 +216,7 @@ const RowSummaryCard = ({
   computeText,
   onComputeDetail,
   computing,
+  computeDisabled,
   error,
 }: {
   row: ScoreList.ShortTermScoreRow;
@@ -184,6 +226,7 @@ const RowSummaryCard = ({
   computeText?: string;
   onComputeDetail?: () => void;
   computing?: boolean;
+  computeDisabled?: boolean;
   error?: string;
 }) => {
   const dims = [
@@ -272,7 +315,7 @@ const RowSummaryCard = ({
       ) : null}
       {onComputeDetail ? (
         <div style={{ marginTop: 10 }}>
-          <Button size="small" onClick={onComputeDetail} loading={computing}>
+          <Button size="small" onClick={onComputeDetail} loading={computing} disabled={computeDisabled}>
             {computeText || '现取数计算该交易日明细'}
           </Button>
           <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--secondary-text-color)' }}>
@@ -300,6 +343,7 @@ const ScoreDetailCards = ({
   showMoneyChart,
   onRecompute,
   recomputeLoading,
+  recomputeDisabled,
   recomputeHint,
 }: {
   detail: ScoreList.ShortTermScoreDetail;
@@ -311,6 +355,7 @@ const ScoreDetailCards = ({
   showMoneyChart?: boolean;
   onRecompute?: () => void;
   recomputeLoading?: boolean;
+  recomputeDisabled?: boolean;
   recomputeHint?: string;
 }) => {
   const { overall, market, sector, stock, volume, rsi, money } = detail;
@@ -399,7 +444,7 @@ const ScoreDetailCards = ({
         </div>
         {onRecompute ? (
           <div style={{ marginTop: 10 }}>
-            <Button size="small" onClick={onRecompute} loading={recomputeLoading}>
+            <Button size="small" onClick={onRecompute} loading={recomputeLoading} disabled={recomputeDisabled}>
               重新计算明细
             </Button>
             <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--secondary-text-color)' }}>
@@ -823,6 +868,10 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   const [dayDetailLoadingDay, setDayDetailLoadingDay] = useState('');
   /** 历史交易日明细计算失败原因（交易日 -> 原因；有值时不自动重算，需手动点按钮） */
   const [dayDetailErrors, setDayDetailErrors] = useState<Record<string, string>>({});
+  /** 是否正在批量补算「没有评分缓存」的交易日 */
+  const [batchComputing, setBatchComputing] = useState(false);
+  /** 批量补算进度 */
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
 
   const baseDayKey = scoreData?.scoreDayKey || cachedScore?.day || '';
   const viewDay = selectedDay || baseDayKey;
@@ -838,6 +887,8 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     setDayDetails({});
     setDayDetailErrors({});
     setDayDetailLoadingDay('');
+    setBatchComputing(false);
+    setBatchProgress(null);
   }, [code, kLineApiSourceSetting, trainKey]);
 
   // 加载近 N 个交易日 + 该股在这些交易日的评分序列（与列表「近 N 日评分」同一份缓存）
@@ -877,13 +928,38 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   }, [code, kLineApiSourceSetting, trainKey, baseDayKey]);
 
   /**
-   * 现取数计算某个交易日的完整明细
+   * 现取数计算某个交易日的完整明细（单日点击 / 批量补算共用，不含 loading 状态）
    *
    * 与基准日评分同一套入口（computeStockScoreForCode + 按该交易日截断的取数），
    * 算完会写回评分序列，因此该交易日的缓存同时被补齐/刷新。
+   * 成功返回结果（期间切换了标的则返回 null）；失败抛错，由调用方展示原因。
    */
+  const computeDayDetail = async (day: string) => {
+    // 记录发起时的身份（股票/数据源/训练日）：期间切换了标的就丢弃这次结果
+    const runIdentity = identityRef.current;
+    const r = await ScoreList.computeStockScoreForCode({
+      code,
+      source: kLineApiSourceSetting,
+      date: day,
+      circMv,
+      moneyFlow,
+      hybk: hybk || null,
+    });
+    if (identityRef.current !== runIdentity) {
+      return null;
+    }
+    if (!r || !r.detail) {
+      throw new Error(r?.row?.error || '未获取到该交易日的日K数据');
+    }
+    setDayDetails((prev) => ({ ...prev, [day]: r }));
+    // 同步历史条上的分数（现算的这行就是写回序列的那行）
+    setSeries((prev) => ({ ...prev, [r.scoreDayKey || day]: r.row }));
+    return r;
+  };
+
+  /** 单日：点历史条上的某个交易日（或明细卡里的按钮）时现取数计算明细 */
   const startDayDetail = async (day: string) => {
-    if (!day || dayDetailLoadingDay) {
+    if (!day || dayDetailLoadingDay || batchComputing) {
       return;
     }
     setDayDetailLoadingDay(day);
@@ -892,32 +968,59 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
       delete next[day];
       return next;
     });
-    // 记录发起时的身份（股票/数据源/训练日）：期间切换了标的就丢弃这次结果
     const runIdentity = identityRef.current;
     try {
-      const r = await ScoreList.computeStockScoreForCode({
-        code,
-        source: kLineApiSourceSetting,
-        date: day,
-        circMv,
-        moneyFlow,
-        hybk: hybk || null,
-      });
-      if (identityRef.current !== runIdentity) {
-        return;
-      }
-      if (!r || !r.detail) {
-        throw new Error(r?.row?.error || '未获取到该交易日的日K数据');
-      }
-      setDayDetails((prev) => ({ ...prev, [day]: r }));
-      // 同步历史条上的分数（现算的这行就是写回序列的那行）
-      setSeries((prev) => ({ ...prev, [r.scoreDayKey || day]: r.row }));
+      await computeDayDetail(day);
     } catch (e: any) {
       if (identityRef.current === runIdentity) {
         setDayDetailErrors((prev) => ({ ...prev, [day]: e?.message || '计算失败' }));
       }
     } finally {
       setDayDetailLoadingDay((prev) => (prev === day ? '' : prev));
+    }
+  };
+
+  /**
+   * 批量补算：把「近 N 个交易日」里没有评分缓存的交易日逐日现取数算出来
+   *
+   * 已有缓存的交易日不重复计算，缺哪天算哪天（历史条上对应的格子算完立刻显示分数）；
+   * 一天一天串行取数，避免同时打十几个接口。
+   */
+  const startRecentScore = async () => {
+    if (batchComputing || dayDetailLoadingDay) {
+      return;
+    }
+    const targets = missingDays;
+    if (!targets.length) {
+      return;
+    }
+    const runIdentity = identityRef.current;
+    setBatchComputing(true);
+    setBatchProgress({ done: 0, total: targets.length });
+    setDayDetailErrors((prev) => {
+      const next = { ...prev };
+      targets.forEach((d) => delete next[d]);
+      return next;
+    });
+    try {
+      for (let i = 0; i < targets.length; i += 1) {
+        const day = targets[i];
+        try {
+          await computeDayDetail(day);
+        } catch (e: any) {
+          if (identityRef.current === runIdentity) {
+            setDayDetailErrors((prev) => ({ ...prev, [day]: e?.message || '计算失败' }));
+          }
+        }
+        if (identityRef.current !== runIdentity) {
+          // 已切换到别的标的：丢弃剩余任务
+          return;
+        }
+        setBatchProgress({ done: i + 1, total: targets.length });
+      }
+    } finally {
+      setBatchComputing(false);
+      setBatchProgress(null);
     }
   };
 
@@ -944,6 +1047,12 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     [recentDays, baseDayKey]
   );
 
+  // 历史条里还没有评分缓存、也没有现算结果的交易日：用于给出「计算缺失的交易日」入口
+  const missingDays = useMemo(
+    () => displayDays.filter((d) => !series[d] && !dayDetails[d]),
+    [displayDays, series, dayDetails]
+  );
+
   const dklines = scoreData?.klines || null;
   const result = scoreData?.detail || null;
   // 大盘评分对比基准名称：市值风格板块优先，缺失时回退所属指数（由评分内核决定）
@@ -962,11 +1071,17 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
       <DayScoreStrip
         days={displayDays}
         series={series}
+        errors={dayDetailErrors}
         viewDay={viewDay}
         baseDayKey={baseDayKey}
         loadingDay={dayDetailLoadingDay}
+        missingCount={missingDays.length}
+        failedCount={missingDays.filter((d) => !!dayDetailErrors[d]).length}
+        computingMissing={batchComputing}
+        computingProgress={batchProgress}
         onSelect={(d) => setSelectedDay(d)}
         onBackToBase={() => setSelectedDay('')}
+        onComputeMissing={() => void startRecentScore()}
       />
     ) : null;
 
@@ -987,6 +1102,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         showMoneyChart={isBase}
         onRecompute={() => (isBase ? setForceLive(true) : void startDayDetail(viewDay))}
         recomputeLoading={isBase ? scoreLoading : dayDetailLoadingDay === viewDay}
+        recomputeDisabled={!isBase && batchComputing}
         recomputeHint={
           isBase ? '重新计算会现取数据、展开逐日明细，并覆盖该交易日的缓存' : '重新按该交易日取数，覆盖该交易日的缓存'
         }
@@ -1004,6 +1120,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         hint={isBase ? '重新计算会现取数据、展开逐日明细，并覆盖该交易日的缓存' : undefined}
         onComputeDetail={isBase ? () => setForceLive(true) : () => void startDayDetail(viewDay)}
         computing={isBase ? scoreLoading : dayDetailLoadingDay === viewDay}
+        computeDisabled={!isBase && batchComputing}
         error={dayDetailErrors[viewDay]}
       />
     );
@@ -1037,6 +1154,13 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         <Spin /> 正在按 {formatDay(viewDay)} 取数计算明细...
       </div>
     );
+  } else if (batchComputing) {
+    // 正在批量补算：这一天的分数还在排队计算
+    content = (
+      <div style={{ ...cardStyle, textAlign: 'center', padding: 24 }}>
+        <Spin /> 正在批量补算缺失的交易日（{batchProgress?.done || 0}/{batchProgress?.total || 0}）...
+      </div>
+    );
   } else {
     // ④ 历史交易日没有评分缓存：手动现算
     content = (
@@ -1045,6 +1169,11 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         <Button size="small" onClick={() => void startDayDetail(viewDay)}>
           现取数计算该交易日明细
         </Button>
+        {missingDays.length > 1 ? (
+          <Button size="small" style={{ marginLeft: 8 }} onClick={() => void startRecentScore()}>
+            计算缺失的 {missingDays.length} 个交易日
+          </Button>
+        ) : null}
         {dayDetailErrors[viewDay] ? (
           <div style={{ marginTop: 6, color: '#ff4d4f' }}>计算失败：{dayDetailErrors[viewDay]}</div>
         ) : null}
