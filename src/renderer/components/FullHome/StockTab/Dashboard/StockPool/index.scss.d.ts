@@ -9,8 +9,12 @@ declare namespace IndexScssNamespace {
     chartwrapper: string;
     container: string;
     content: string;
+    filterbtn: string;
+    filterbtnActive: string;
     header: string;
     hint: string;
+    klineShapeHeader: string;
+    klineShapeHeaderText: string;
     listview: string;
     loadmore: string;
     moreheader: string;
@@ -19,6 +23,11 @@ declare namespace IndexScssNamespace {
     qsmoreheader: string;
     row: string;
     rowheader: string;
+    shapeFilterActions: string;
+    shapeFilterCount: string;
+    shapeFilterList: string;
+    shapeFilterOverlay: string;
+    shapeFilterPanel: string;
     sortbtn: string;
     table: string;
     tagbar: string;

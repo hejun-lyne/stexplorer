@@ -103,6 +103,91 @@
   }
 }
 
+// 表头「K线形态」筛选：标题 + 漏斗按钮 + 排序按钮 同行排布
+.klineShapeHeader {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.klineShapeHeaderText {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.filterbtn {
+  padding: 0 2px;
+
+  .anticon {
+    top: 0;
+  }
+
+  svg {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    fill: var(--main-text-color);
+  }
+}
+
+// 有勾选时的漏斗高亮
+.filterbtnActive {
+  svg {
+    fill: var(--primary-color);
+  }
+}
+
+// Excel 式筛选面板（Dropdown 的自定义 overlay 不自带背景/阴影，这里自己补）
+.shapeFilterPanel {
+  min-width: 180px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px 4px;
+  background-color: var(--background-color, #fff);
+  border-radius: 4px;
+  box-shadow:
+    0 3px 6px -4px rgba(0, 0, 0, 0.12),
+    0 6px 16px 0 rgba(0, 0, 0, 0.08),
+    0 9px 28px 8px rgba(0, 0, 0, 0.05);
+}
+
+.shapeFilterActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border-color, rgba(128, 128, 128, 0.2));
+
+  a {
+    font-size: 12px;
+  }
+}
+
+// 用两级选择器保证压过 antd 的 .ant-checkbox-group { display: inline-block }
+.shapeFilterPanel .shapeFilterList {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  padding: 0 8px;
+
+  :global(.ant-checkbox-wrapper) {
+    display: flex;
+    align-items: center;
+    margin: 0 0 4px 0;
+    line-height: 20px;
+  }
+}
+
+.shapeFilterCount {
+  margin-left: 4px;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
 .content {
   overflow-y: auto;
   background-color: var(--background-color);

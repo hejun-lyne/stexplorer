@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination, Modal, message } from 'antd';
+import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination, Modal, message, Dropdown } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -21,7 +21,7 @@ import { BKType, KFilterType, KFilterTypeNames, SingleKLineShapeNames } from '@/
 import classNames from 'classnames';
 import { batch, useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
-import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined } from '@ant-design/icons';
+import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined, FilterOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
   computeShortTermScoreRows,
@@ -94,18 +94,31 @@ const klineShapeWeight = (shape?: string, yin?: boolean): number => {
 };
 
 /**
- * 「K线形态」筛选项
+ * 「K线形态」表头筛选项
  *
  * 先按排序优先级表（阳线、阴线）给出顺序，再补上优先级表里没有的形态
- * （目前是「小海绵宝宝」，保证筛选器覆盖所有可识别形态）。
+ * （目前是「小海绵宝宝」，保证筛选器覆盖所有可识别形态）；
+ * 末尾追加「未识别」（value 为空字符串），对应列表里形态为空或「未知」的股票，Excel 式筛选可以连空值一起筛。
  */
-const KLINE_SHAPE_FILTER_OPTIONS = Array.from(
-  new Set([
-    ...KLINE_SHAPE_ORDER_YANG,
-    ...KLINE_SHAPE_ORDER_YIN,
-    ...Object.values(SingleKLineShapeNames).filter((name) => name && name !== '未知'),
-  ])
-).map((name) => ({ label: name, value: name }));
+const KLINE_SHAPE_FILTER_OPTIONS = [
+  ...Array.from(
+    new Set([
+      ...KLINE_SHAPE_ORDER_YANG,
+      ...KLINE_SHAPE_ORDER_YIN,
+      ...Object.values(SingleKLineShapeNames).filter((name) => name && name !== '未知'),
+    ])
+  ).map((name) => ({ label: name, value: name })),
+  { label: '（未识别）', value: '' },
+];
+
+/**
+ * 行内 K线形态归一化：把「未知」和空值统一成空字符串，
+ * 这样表头筛选里的「（未识别）」一项能同时覆盖它们（勾「全选」不会漏行）。
+ */
+const normalizeKlineShape = (shape?: string): string => {
+  const v = String(shape || '');
+  return v === '未知' ? '' : v;
+};
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -1156,7 +1169,7 @@ const STList: React.FC<STListProps> = ({
 
   // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
   // 盘中（或收盘后数据源还没生成当日日K）时，短线评分拿不到基准日的日K，当日列只显示 --。
-  // 只针对「当前过滤结果的全部股票」（不分页）逐只取当日分时合成一根当日K线，
+  // 只针对「当前过滤结果的全部股票」（不分页；K线形态表头勾选过滤只影响显示，不计入这里的候选池）逐只取当日分时合成一根当日K线，
   // 算「K线形态 / 阴阳 / 是否放量」与「RSI」，不跑完整评分流程（不取指数分时 / 板块 / 资金 / 涨跌比）；
   // 当前交易日的评分列显示 -- 。是否交易日直接查交易日历；当日日K生成后再点一次即可用官方口径覆盖。
   // 注意：这里刻意不用 useCallback —— 它要引用声明在后面的 visibleShowList，
@@ -1749,11 +1762,8 @@ const STList: React.FC<STListProps> = ({
         const rsiThreshold = Number(shortScoreRsiFilterScore);
         list = list.filter((s: any) => s.rsiScore != null && s.rsiScore > rsiThreshold);
       }
-      // K线形态筛选：仅保留所选形态的股票（空=不过滤）
-      if (shortScoreKlineShapes.length) {
-        const shapeSet = new Set(shortScoreKlineShapes);
-        list = list.filter((s: any) => shapeSet.has(String(s.klineShape || '')));
-      }
+      // 注意：K线形态筛选不在这里做（它是纯展示层过滤，见 displayList），
+      // 否则会连带缩小「当日评分」的候选股票池。
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
         if (keys[0] === KLINE_SHAPE_SORT_KEY) {
@@ -1801,7 +1811,7 @@ const STList: React.FC<STListProps> = ({
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreKlineShapes, shortScoreSeries, shortScoreDisplayDays]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, shortScoreDisplayDays]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」和「名字过滤」过滤（对所有展示模式生效）
@@ -1821,6 +1831,40 @@ const STList: React.FC<STListProps> = ({
   }, [showList, excludeStarBse, nameFilter]);
 
   /**
+   * 「K线形态」表头勾选过滤（仅短线评分列表）
+   *
+   * 这是纯展示层过滤：只决定列表显示哪些行，**不参与** visibleShowList，
+   * 因此不会影响「当日评分」的候选股票（见下方 collectVisibleItems / todayScoreCount）。
+   * 分页 total 也用它，保证页码与可见行数一致。
+   */
+  const displayList = React.useMemo(() => {
+    if (displayMode !== 'shortScore' || !shortScoreKlineShapes.length) {
+      return visibleShowList as any[];
+    }
+    const shapeSet = new Set(shortScoreKlineShapes);
+    return (visibleShowList as any[]).filter((row: any) => shapeSet.has(normalizeKlineShape(row.klineShape)));
+  }, [visibleShowList, displayMode, shortScoreKlineShapes]);
+
+  /**
+   * 表头 K线形态筛选项（带当前列表的股票数）：统计基于 visibleShowList，
+   * 因此勾选后各项数量不会互相影响（保持 Excel 式筛选的稳定计数）。
+   */
+  const klineShapeFilterItems = React.useMemo(() => {
+    const counts: Record<string, number> = {};
+    (visibleShowList as any[]).forEach((row: any) => {
+      const key = normalizeKlineShape(row.klineShape);
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return KLINE_SHAPE_FILTER_OPTIONS.map((o) => ({ ...o, count: counts[o.value] || 0 }));
+  }, [visibleShowList]);
+
+  /** 表头勾选后统一回到第 1 页 */
+  const handleKlineShapeFilterChange = useCallback((next: string[]) => {
+    setShortScoreKlineShapes(next);
+    setCurrentPage(1);
+  }, []);
+
+  /**
    * 列表诊断日志：点「短线评分」后仍找不到某只股票时，用它定位是哪一层把行过滤掉的
    * （评分池完整、结果行都在，但展示层又少了一半时，看这行日志即可）
    */
@@ -1833,13 +1877,15 @@ const STList: React.FC<STListProps> = ({
     const starBseRows = rows.filter((r) => isStarOrBseCode(codeOfListItem(r))).length;
     console.log(
       `[短线评分] 列表诊断：评分行 ${rows.length} 行（未上市 ${notListedRows}、科创/北交 ${starBseRows}），` +
-        `当前展示 ${visibleShowList.length} 行；排除科创北交=${excludeStarBse} 显示未上市=${shortScoreShowNotListed}` +
-        ` 评分过滤=${shortScoreFilterEnabled} RSI过滤=${shortScoreRsiFilterEnabled} 名字过滤="${nameFilter}"`
+        `当前展示 ${displayList.length} 行（形态过滤前 ${visibleShowList.length} 行）；排除科创北交=${excludeStarBse} 显示未上市=${shortScoreShowNotListed}` +
+        ` 评分过滤=${shortScoreFilterEnabled} RSI过滤=${shortScoreRsiFilterEnabled} 形态过滤=${shortScoreKlineShapes.length ? shortScoreKlineShapes.join('/') : '无'} 名字过滤="${nameFilter}"`
     );
   }, [
     displayMode,
     shortScoreData,
+    displayList,
     visibleShowList,
+    shortScoreKlineShapes,
     shortScoreLoading,
     todayScoreLoading,
     excludeStarBse,
@@ -1855,6 +1901,8 @@ const STList: React.FC<STListProps> = ({
    * 即用户在列表上筛出来的那批：排除科创板/北交所、名字过滤、K线过滤（ftypes）、
    * 各选股模式（龙头 / 排雷 / 择时 / 主力建仓）的结果集，以及「N 天前的近 M 日出现过 ≥ 阈值分」这类评分侧过滤，
    * 全部计入；只是不再无条件把整个板块跑一遍。
+   * **K线形态表头勾选过滤除外**：它只是展示层过滤（displayList），不缩小这里的候选池，
+   * 所以用 visibleShowList 而不是 displayList。
    * 列表行可能是 code / ts_code / secid 三种形态，统一用 codeOfListItem 取回 6 位代码再与池子取交集。
    */
   const collectVisibleItems = useCallback((): ShortTermScoreItem[] => {
@@ -1865,7 +1913,7 @@ const STList: React.FC<STListProps> = ({
     return base.filter((i) => codes.has(i.code));
   }, [collectCurrentItems, visibleShowList]);
 
-  /** 当前过滤结果的股票数：即「当日评分」实际会处理的数量（全部页），直接标在按钮上 */
+  /** 当前过滤结果的股票数：即「当日评分」实际会处理的数量（全部页，不含K线形态表头勾选过滤），直接标在按钮上 */
   const todayScoreCount = visibleShowList.length;
 
   /** 板块 secid -> 名称（用于下拉展示与结果列表标记所属板块） */
@@ -1985,7 +2033,7 @@ const STList: React.FC<STListProps> = ({
             onClick={handleTodayScore}
             loading={todayScoreLoading}
             style={{ marginLeft: 4 }}
-            title="处理当前过滤结果的全部股票（不分页）：更新只依赖K线的当日K线形态与 RSI（当日K线未生成时用分时补全）。当日不计算综合分，评分列显示 --"
+            title="处理当前过滤结果的全部股票（不分页）：更新只依赖K线的当日K线形态与 RSI（当日K线未生成时用分时补全）。K线形态表头勾选只影响显示，不影响这里的候选股票。当日不计算综合分，评分列显示 --"
           >
             {todayScoreLoading ? `当日评分中 ${todayScoreProgress}%` : `当日评分(${todayScoreCount})`}
           </Button>
@@ -2075,26 +2123,6 @@ const STList: React.FC<STListProps> = ({
                 title="训练回看历史日时，当前成分股里包含当时还没上市的新股；默认隐藏它们，勾选后可查看"
               />
               <span>显示未上市</span>
-            </span>
-          )}
-          {displayMode === 'shortScore' && (
-            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <span>K线形态</span>
-              <Select
-                size="small"
-                mode="multiple"
-                allowClear
-                placeholder="全部"
-                value={shortScoreKlineShapes}
-                onChange={(v) => {
-                  setShortScoreKlineShapes((v as string[]) || []);
-                  setCurrentPage(1);
-                }}
-                options={KLINE_SHAPE_FILTER_OPTIONS}
-                maxTagCount="responsive"
-                style={{ minWidth: 140, maxWidth: 260 }}
-                title="只显示所选K线形态的股票（可多选，不区分阳线/阴线；留空显示全部）"
-              />
             </span>
           )}
           {ontrain && (
@@ -2252,26 +2280,82 @@ const STList: React.FC<STListProps> = ({
           >
             RSI形态识别
           </Col>
-          <Col
-            span={2}
-            title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小"
-          >
-            K线形态
-            <Button
-              size="small"
-              type="text"
-              icon={
-                sortTypes[KLINE_SHAPE_SORT_KEY] == 1 ? (
-                  <CaretUpOutlined />
-                ) : sortTypes[KLINE_SHAPE_SORT_KEY] == 2 ? (
-                  <CaretDownOutlined />
-                ) : (
-                  <CaretRightOutlined />
-                )
-              }
-              className={styles.sortbtn}
-              onClick={() => updateSortType(KLINE_SHAPE_SORT_KEY)}
-            />
+          <Col span={2} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小">
+              <span className={styles.klineShapeHeaderText}>K线形态</span>
+              <Dropdown
+                trigger={['click']}
+                placement="bottomLeft"
+                overlayClassName={styles.shapeFilterOverlay}
+                overlay={
+                  <div className={styles.shapeFilterPanel} onClick={(e) => e.stopPropagation()}>
+                    <div className={styles.shapeFilterActions}>
+                      <Checkbox
+                        checked={
+                          KLINE_SHAPE_FILTER_OPTIONS.length > 0 &&
+                          shortScoreKlineShapes.length === KLINE_SHAPE_FILTER_OPTIONS.length
+                        }
+                        indeterminate={
+                          shortScoreKlineShapes.length > 0 &&
+                          shortScoreKlineShapes.length < KLINE_SHAPE_FILTER_OPTIONS.length
+                        }
+                        onChange={(e) =>
+                          handleKlineShapeFilterChange(
+                            e.target.checked ? KLINE_SHAPE_FILTER_OPTIONS.map((o) => o.value) : []
+                          )
+                        }
+                      >
+                        全选
+                      </Checkbox>
+                      <a onClick={() => handleKlineShapeFilterChange([])}>清空</a>
+                    </div>
+                    <Checkbox.Group
+                      value={shortScoreKlineShapes}
+                      onChange={(v) => handleKlineShapeFilterChange((v as string[]) || [])}
+                      className={styles.shapeFilterList}
+                    >
+                      {klineShapeFilterItems.map((o) => (
+                        <Checkbox
+                          key={o.value || '__unrecognized__'}
+                          value={o.value}
+                          disabled={!o.count && shortScoreKlineShapes.indexOf(o.value) < 0}
+                        >
+                          {o.label}
+                          <span className={styles.shapeFilterCount}>({o.count})</span>
+                        </Checkbox>
+                      ))}
+                    </Checkbox.Group>
+                  </div>
+                }
+              >
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<FilterOutlined />}
+                  className={classNames(styles.filterbtn, { [styles.filterbtnActive]: shortScoreKlineShapes.length > 0 })}
+                  title={
+                    shortScoreKlineShapes.length
+                      ? `已按 ${shortScoreKlineShapes.length} 种K线形态过滤（点击修改）；不影响「当日评分」候选股票`
+                      : '按K线形态勾选过滤（Excel 式多选，不区分阳线/阴线）；仅影响列表显示，不影响「当日评分」的候选股票'
+                  }
+                />
+              </Dropdown>
+              <Button
+                size="small"
+                type="text"
+                icon={
+                  sortTypes[KLINE_SHAPE_SORT_KEY] == 1 ? (
+                    <CaretUpOutlined />
+                  ) : sortTypes[KLINE_SHAPE_SORT_KEY] == 2 ? (
+                    <CaretDownOutlined />
+                  ) : (
+                    <CaretRightOutlined />
+                  )
+                }
+                className={styles.sortbtn}
+                onClick={() => updateSortType(KLINE_SHAPE_SORT_KEY)}
+              />
+            </span>
           </Col>
           <Col span={1} title="最新交易日是否放量">
             放量
@@ -2326,7 +2410,7 @@ const STList: React.FC<STListProps> = ({
       )}
       <div className={classNames(styles.table, styles.moreheader)}>
         {displayMode === 'stocks' ? (
-          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
+          displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
             <Row key={s.code} className={styles.row}>
               <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
                 {s.name}
@@ -2351,7 +2435,7 @@ const STList: React.FC<STListProps> = ({
             </Row>
           ))
         ) : displayMode === 'leaders' ? (
-          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => (
+          displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => (
             <Row key={s.ts_code} className={styles.row}>
               <Col span={4}>
                 <span>{s.ts_code}</span>
@@ -2380,7 +2464,7 @@ const STList: React.FC<STListProps> = ({
             </Row>
           ))
         ) : displayMode === 'risk' ? (
-          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+          displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             const isPassed = s.passed === true;
             return (
               <Row
@@ -2416,7 +2500,7 @@ const STList: React.FC<STListProps> = ({
             );
           })
         ) : displayMode === 'signals' ? (
-          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+          displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             const hasSignal = s.has_signal === true;
             return (
               <Row
@@ -2458,7 +2542,7 @@ const STList: React.FC<STListProps> = ({
             );
           })
         ) : displayMode === 'shortScore' ? (
-          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+          displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             // 不用红色表示低分：只保留 A/B 的淡色底，去掉 D（低分）的红色底
             const rowBg =
               s.grade === 'A' ? 'rgba(82, 196, 26, 0.08)'
@@ -2585,7 +2669,7 @@ const STList: React.FC<STListProps> = ({
             );
           })
         ) : (
-          visibleShowList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
+          displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => {
             const sceneCode = s.advice_scene || '';
             const isActiveScene = /^A-/.test(sceneCode) || sceneCode === 'G-1';
             const isWatchScene = /^(B-|G-[23])/.test(sceneCode);
@@ -2695,7 +2779,7 @@ const STList: React.FC<STListProps> = ({
         <Pagination
           current={currentPage}
           pageSize={pageSize}
-          total={visibleShowList.length}
+          total={displayList.length}
           onChange={onPageChange}
           showSizeChanger={false}
           size="small"
