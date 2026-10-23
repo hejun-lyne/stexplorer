@@ -66,8 +66,8 @@ export interface BoardScoreRow {
 export const BOARD_SCORE_CONFIG = {
   /** 取数K线根数（RSI24 需要 54 根以上，留足历史） */
   klineLimit: 120,
-  /** 带历史列时的取数K线根数：最新交易日往前 15 天仍要留够 RSI24 的 54 根预热 */
-  historyKlineLimit: 200,
+  /** 带历史列时的取数K线根数：最新交易日往前 N 天仍要留够 RSI24 的 54 根预热 */
+  historyKlineLimit: 150,
   /** 评分所需最少K线根数 */
   minKlines: 60,
   /** 主力资金回看交易日数 */

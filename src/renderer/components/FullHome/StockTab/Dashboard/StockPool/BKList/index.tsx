@@ -27,6 +27,7 @@ import {
 } from '@/helpers/boardShortTermScore';
 import { scoreColor } from '@/helpers/shortTermScore';
 import { resolveRecentTradingDays } from '@/helpers/shortTermScoreList';
+import { isThemeBoard } from '@/helpers/boardFilter';
 
 export interface BKListProps {
   type: BKType;
@@ -55,6 +56,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const isPausedRef = React.useRef(false);
   const currentIndexRef = React.useRef(0);
   const [nameFilter, setNameFilter] = useState('');
+  /** 概念板块「只看题材」：过滤掉风格/指数/持仓/业绩预告等伪概念（规则见 helpers/boardFilter） */
+  const [onlyTheme, setOnlyTheme] = useState(false);
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
   const [currentPage, setCurrentPage] = useState(1);
   /** 当前展示的数据（板块列表 / 行业筛选结果 / 板块短线评分结果 共用，按 displayMode 区分行结构） */
@@ -156,9 +159,10 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     }
 
     if (displayMode === 'boardScore') {
-      // 板块短线评分结果：名称 / 最低分过滤 + 排序（未指定排序时按评分从高到低）
+      // 板块短线评分结果：名称 / 最低分 / 只看题材 过滤 + 排序（未指定排序时按评分从高到低）
       let list = scoreData.filter((s) => {
         if (nameFilter && !String(s.name || '').includes(nameFilter)) return false;
+        if (onlyTheme && type === BKType.Gainian && !isThemeBoard(s.name)) return false;
         if (scoreMinScore > 0 && s.total != null && s.total < scoreMinScore) return false;
         return true;
       });
@@ -185,6 +189,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
 
     let list = bankuais.filter((b) => {
       if (nameFilter && !b.name.includes(nameFilter)) return false;
+      // 只看题材（仅概念板块 Tab 生效，切到行业 Tab 时不参与过滤）
+      if (onlyTheme && type === BKType.Gainian && !isThemeBoard(b.name)) return false;
       if (!filterMA20 && !filterMA40 && !filterMA60 && !filterRSI) return true;
       if (filterMA20 && maResults[b.secid] && !maResults[b.secid].ma20) return false;
       if (filterMA40 && maResults[b.secid] && !maResults[b.secid].ma40) return false;
@@ -218,7 +224,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       }
     }
     setShowList(list);
-  }, [bankuais, sortTypes, nameFilter, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, industryAllData, industryDisplayCount, scoreData, scoreMinScore]);
+  }, [bankuais, sortTypes, nameFilter, onlyTheme, type, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, industryAllData, industryDisplayCount, scoreData, scoreMinScore]);
 
   const totalPage = Math.max(1, Math.ceil(showList.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPage);
@@ -605,6 +611,19 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             onChange={(e) => setNameFilter(e.target.value)}
             style={{ width: 100, marginRight: 8 }}
           />
+          {type === BKType.Gainian && (
+            <Checkbox
+              checked={onlyTheme}
+              onChange={(e) => {
+                setOnlyTheme(e.target.checked);
+                setCurrentPage(1);
+              }}
+              style={{ marginRight: 8, color: 'var(--main-text-color)' }}
+              title="只保留题材属性板块：过滤掉小盘股/次新股/沪深300/沪股通/基金重仓/举牌回购/预盈预增等风格、指数、持仓、事件类伪概念（规则见 helpers/boardFilter.ts，漏网的直接加一行正则）"
+            >
+              只看题材
+            </Checkbox>
+          )}
           <Select
             size="small"
             value={dataSource}
@@ -803,7 +822,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         </Row>
       ) : (
         <Row className={styles.header}>
-          <Col span={3}>板块名称</Col>
+          <Col span={4}>板块名称</Col>
           <Col span={2}>
             评分/评级
             <Button size="small" type="text" icon={sortTypes.total == 1 ? <CaretUpOutlined /> : sortTypes.total == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('total')} />
@@ -824,6 +843,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
+          <Col span={4}>建议 / 说明（悬停看明细）</Col>
           {Array.from({ length: BOARD_SCORE_HISTORY_DAYS }).map((_, i) => {
             const day = scoreDays[i] || '';
             return (
@@ -948,7 +968,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             return (
               <Row key={`${s.code}-${index}`} className={styles.row} style={{ backgroundColor: rowBg }}>
                 <Col
-                  span={3}
+                  span={4}
                   style={{ cursor: 'pointer' }}
                   onClick={() => onOpenBK(s.secid, s.name)}
                   title={detail || s.name}
@@ -977,6 +997,15 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                 </Col>
                 <Col span={1} title={s.rsiPattern || undefined}>
                   {s.rsiScore == null ? '--' : s.rsiScore.toFixed(0)}
+                </Col>
+                <Col
+                  span={4}
+                  style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  title={detail || undefined}
+                >
+                  <span style={{ color: s.grade ? scoreColor(s.total || 0) : 'var(--reverse-text-color)' }}>
+                    {s.advice || s.error || '--'}
+                  </span>
                 </Col>
                 {Array.from({ length: BOARD_SCORE_HISTORY_DAYS }).map((_, i) => {
                   const day = scoreDays[i] || '';
