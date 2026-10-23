@@ -929,6 +929,52 @@ export async function GetBoardsByDateBatchFromTushare(dates: string[], bk_type?:
   }
 }
 
+/** 板块主力净流入日序列（板块短线评分「资金」维度用） */
+export interface BoardMoneyFlowSeries {
+  dates: string[];
+  main: number[];
+}
+
+/**
+ * 批量获取板块主力净流入日序列
+ *
+ * 一次 IPC 取回整批板块的日序列（python 侧一条区间查询覆盖全部东财板块），
+ * 避免逐只板块调用造成分钟级等待。同花顺板块没有历史序列接口，返回空对象。
+ *
+ * @param codes 板块代码数组（可带 90. 前缀 / .DC 后缀）
+ * @param days 回看交易日数量
+ * @param options.startDate / options.endDate 显式区间（训练周期预计算回看历史窗口时必须传）
+ */
+export async function GetBoardMoneyFlowHistoryFromTushare(
+  codes: string[],
+  days = 40,
+  options?: { startDate?: string; endDate?: string; ignoreTrain?: boolean }
+): Promise<Record<string, BoardMoneyFlowSeries>> {
+  try {
+    if (!codes || !codes.length) {
+      return {};
+    }
+    const params: Record<string, any> = { codes, days };
+    if (options?.startDate) {
+      params.start_date = String(options.startDate).replace(/-/g, '');
+    }
+    if (options?.endDate) {
+      params.end_date = String(options.endDate).replace(/-/g, '');
+    }
+    const result = await callTushare('get_board_money_flow_history', params, {
+      ignoreTrain: options?.ignoreTrain,
+    });
+    if (!result || result.error || typeof result !== 'object') {
+      console.warn('[板块资金流] 批量获取失败:', result?.error || 'Invalid response');
+      return {};
+    }
+    return result as Record<string, BoardMoneyFlowSeries>;
+  } catch (error) {
+    logError(error, 'GetBoardMoneyFlowHistoryFromTushare', '批量获取板块资金流序列失败');
+    return {};
+  }
+}
+
 /**
  * 批量获取板块成分股，按 date+boardCode 去重内部查询
  * @param requests 请求数组，每个元素包含 { date, boardCode, boardName }
@@ -1502,9 +1548,27 @@ export async function SaveShortTermScoreSeriesToTushare(
     return 0;
   }
   // 按 JSON 体积分组（而不是按股票数）：控制单次参数体积，避免参数过大导致 python 启动失败
+  const chunks = chunkScoreSeriesForWrite(series);
+
+  let written = 0;
+  for (const chunk of chunks) {
+    const result = await callTushare('save_short_term_score_series_batch', { stocks: chunk, source });
+    if (result && typeof result === 'object' && result.error) {
+      throw new Error(`写入短线评分序列失败：${result.error}`);
+    }
+    written += Object.keys(chunk).length;
+  }
+  return written;
+}
+
+/**
+ * 把评分序列按「JSON 体积 ≤ SHORT_SCORE_WRITE_MAX_CHARS」切分成多次写入的参数
+ * （个股与板块评分序列共用，避免单次命令行参数过大导致 python 起不来）
+ */
+function chunkScoreSeriesForWrite(series: Record<string, Record<string, any>>): Record<string, Record<string, any>>[] {
   const chunks: Record<string, Record<string, any>>[] = [];
-  codes.forEach((code) => {
-    const days = series[code];
+  Object.keys(series || {}).forEach((code) => {
+    const days = series[code] || {};
     let part: Record<string, any> = {};
     let chars = 0;
     Object.keys(days).forEach((day) => {
@@ -1521,16 +1585,7 @@ export async function SaveShortTermScoreSeriesToTushare(
       chunks.push({ [code]: part });
     }
   });
-
-  let written = 0;
-  for (const chunk of chunks) {
-    const result = await callTushare('save_short_term_score_series_batch', { stocks: chunk, source });
-    if (result && typeof result === 'object' && result.error) {
-      throw new Error(`写入短线评分序列失败：${result.error}`);
-    }
-    written += Object.keys(chunk).length;
-  }
-  return written;
+  return chunks;
 }
 
 /**
@@ -1589,6 +1644,98 @@ export async function ClearShortTermScoreSeriesFromTushare(
     }
   } catch (error) {
     logError(error, 'ClearShortTermScoreSeriesFromTushare', '清理短线评分序列失败');
+  }
+}
+
+// ==================== 板块短线评分序列（按板块，存 meta.db/api_cache） ====================
+// 与个股评分序列同样的存储语义，但 key 前缀独立（board_score_series_*），
+// 板块评分行结构也不同，两边版本号各自独立、互不影响。
+
+/**
+ * 批量读取多个板块的「板块短线评分时间序列」
+ * @param codes 板块代码数组（如 BK0428）
+ * @param options.rowVersion 评分行结构版本：只返回该版本的行
+ * @returns { [板块代码]: { [交易日YYYYMMDD]: 评分行 } }，未命中的板块为 {}
+ */
+export async function GetBoardScoreSeriesFromTushare(
+  codes: string[],
+  source?: string | number,
+  options?: ScoreSeriesQueryOptions
+): Promise<Record<string, Record<string, any>>> {
+  try {
+    if (!codes || !codes.length) {
+      return {};
+    }
+    const result = await callTushare(
+      'get_board_score_series_batch',
+      { codes, source, version: options?.rowVersion, dates: options?.dates },
+      { ignoreTrain: options?.ignoreTrain }
+    );
+    if (result && typeof result === 'object' && !result.error) {
+      return result as Record<string, Record<string, any>>;
+    }
+    return {};
+  } catch (error) {
+    logError(error, 'GetBoardScoreSeriesFromTushare', '读取板块评分序列失败');
+    return {};
+  }
+}
+
+/**
+ * 批量写入多个板块的板块短线评分时间序列（按交易日合并）
+ *
+ * 写入失败会抛错，避免「预计算提示完成、缓存里其实什么都没有」。
+ * @returns 实际写入的板块数
+ */
+export async function SaveBoardScoreSeriesToTushare(
+  series: Record<string, Record<string, any>>,
+  source?: string | number
+): Promise<number> {
+  if (!series) {
+    return 0;
+  }
+  const codes = Object.keys(series).filter((code) => Object.keys(series[code] || {}).length);
+  if (!codes.length) {
+    return 0;
+  }
+  const chunks = chunkScoreSeriesForWrite(series);
+  let written = 0;
+  for (const chunk of chunks) {
+    const result = await callTushare('save_board_score_series_batch', { stocks: chunk, source });
+    if (result && typeof result === 'object' && result.error) {
+      throw new Error(`写入板块评分序列失败：${result.error}`);
+    }
+    written += Object.keys(chunk).length;
+  }
+  return written;
+}
+
+/**
+ * 检查多个板块的评分序列对指定交易日的覆盖情况（预计算增量补算用）
+ * @returns { [交易日YYYYMMDD]: 该日仍缺失的板块数 }
+ */
+export async function GetBoardScoreSeriesSummaryFromTushare(
+  codes: string[],
+  dates: string[],
+  source?: string | number,
+  options?: ScoreSeriesQueryOptions
+): Promise<Record<string, number>> {
+  try {
+    if (!codes?.length || !dates?.length) {
+      return {};
+    }
+    const result = await callTushare(
+      'get_board_score_series_summary',
+      { codes, dates, source, version: options?.rowVersion },
+      { ignoreTrain: options?.ignoreTrain }
+    );
+    if (result && typeof result === 'object' && !result.error) {
+      return result as Record<string, number>;
+    }
+    return {};
+  } catch (error) {
+    logError(error, 'GetBoardScoreSeriesSummaryFromTushare', '读取板块评分序列覆盖情况失败');
+    return {};
   }
 }
 

@@ -536,6 +536,17 @@ def _short_term_score_series_key(code: str, source: Any = None) -> str:
     return f"{_SHORT_TERM_SCORE_SERIES_PREFIX}_{code}_{src}" if src else f"{_SHORT_TERM_SCORE_SERIES_PREFIX}_{code}"
 
 
+# 板块短线评分「时间序列」缓存 key 前缀：一个板块一条记录，值为该板块多个交易日的评分行
+# （与个股评分序列分开存，行结构不同、版本号独立）
+_BOARD_SCORE_SERIES_PREFIX = "board_score_series"
+
+
+def _board_score_series_key(code: str, source: Any = None) -> str:
+    """板块短线评分序列缓存 key：按板块一条（带数据源，避免切换K线数据源后复用旧源算出的分数）"""
+    src = str(source) if source is not None else ""
+    return f"{_BOARD_SCORE_SERIES_PREFIX}_{code}_{src}" if src else f"{_BOARD_SCORE_SERIES_PREFIX}_{code}"
+
+
 def cached_api_call(func_name: str, max_age_hours: int, api_func, **kwargs):
     """带缓存的 API 调用"""
     cache_key = _cache_key(func_name, **kwargs)
@@ -2958,6 +2969,94 @@ class TushareAPI:
         return result
 
     @staticmethod
+    def get_board_money_flow_history(
+        codes: List[str],
+        days: int = 40,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """批量获取板块「主力净流入」日序列（板块短线评分用）
+
+        Args:
+            codes: 板块代码数组，可带 90. 前缀或 .DC 后缀，如 ["BK0428", "90.BK0474"]
+            days: 回看交易日数量（含最新交易日）
+            start_date / end_date: 显式指定区间（YYYYMMDD / YYYY-MM-DD）。训练周期预计算回看
+                历史窗口时必须传（否则只能拿到「当前数据截止日」之前的序列）。
+
+        Returns:
+            { "BK0428": { "dates": ["20260101", ...], "main": [净流入(元), ...] } }
+            dates 升序、与 main 一一对应。
+            同花顺板块（88xxxx 等）只有单日接口，取历史序列成本过高，这里返回空
+            （前端会把「资金」维度视为数据缺失，按剩余维度归一化评分）。
+        """
+        try:
+            want = max(5, int(days or 40))
+            pro = get_pro()
+
+            # ---- 归一化代码：去掉 90. 前缀与 .DC/.TI 后缀 ----
+            norm: Dict[str, str] = {}
+            for c in codes or []:
+                s = str(c or "").strip()
+                if not s:
+                    continue
+                if s.startswith("90."):
+                    s = s[3:]
+                for suffix in (".DC", ".dc", ".TI", ".ti"):
+                    if s.endswith(suffix):
+                        s = s[: -len(suffix)]
+                        break
+                if s:
+                    norm[s] = s
+            if not norm:
+                return {}
+            norm_upper = {k.upper(): v for k, v in norm.items()}
+            if not any(k.startswith("BK") for k in norm_upper):
+                return {}
+
+            # ---- 区间：自然日放宽，保证能覆盖 want 个交易日 ----
+            end_dt = _parse_date_str(str(end_date).replace('-', '')) if end_date else None
+            if end_dt is None:
+                end_dt = _now_date()
+            end_day = end_dt.strftime("%Y%m%d")
+            start_override = _parse_date_str(str(start_date).replace('-', '')) if start_date else None
+            if start_override is not None:
+                start_day = start_override.strftime("%Y%m%d")
+            else:
+                start_day = (end_dt - timedelta(days=int(want * 1.8) + 15)).strftime("%Y%m%d")
+
+            frames = [
+                safe_api_call(pro.moneyflow_ind_dc, start_date=start_day, end_date=end_day),
+                safe_api_call(pro.moneyflow_con_dc, start_date=start_day, end_date=end_day),
+            ]
+
+            series: Dict[str, Dict[str, float]] = {}
+            for df in frames:
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    continue
+                for _, row in df.iterrows():
+                    ts_code = str(row.get("ts_code", ""))
+                    pure = ts_code[:-3] if ts_code.upper().endswith(".DC") else ts_code
+                    code = norm_upper.get(pure.upper())
+                    if not code:
+                        continue
+                    d = str(row.get("trade_date", "")).replace("-", "")[:8]
+                    if not d:
+                        continue
+                    net = _to_float(row.get("net_amount", 0))
+                    # 与 get_board_detail / get_boards_by_date 口径一致：亿元量级时换算成元
+                    if 0 < abs(net) < 1e6:
+                        net = net * 1e8
+                    series.setdefault(code, {})[d] = net
+
+            result: Dict[str, Any] = {}
+            for code, dated in series.items():
+                dates = sorted(dated.keys())[-want:]
+                result[code] = {"dates": dates, "main": [round(dated[d], 2) for d in dates]}
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
     def get_industry_stocks(secid: str, date: Optional[str] = None) -> Dict[str, Any]:
         """获取申万二级行业成分股（支持 801010.SI 或 90.801010 格式）
 
@@ -4557,6 +4656,109 @@ class TushareAPI:
         让预计算误判「已覆盖」而跳过重算（列表侧按当前版本读取会全部未命中）。
         """
         series = TushareAPI.get_short_term_score_series_batch(codes, source, version, dates)
+        result: Dict[str, Any] = {}
+        code_list = [str(c) for c in (codes or [])]
+        for d in dates or []:
+            target = str(d).replace('-', '').replace('/', '')
+            result[target] = sum(1 for c in code_list if target not in (series.get(c) or {}))
+        return result
+
+    # ------------------ 板块短线评分「时间序列」缓存（按板块，一条序列含多个交易日）------------------
+
+    @staticmethod
+    def get_board_score_series_batch(
+        codes: Optional[List[str]] = None,
+        source: Any = None,
+        version: Any = None,
+        dates: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """批量读取多个板块的短线评分时间序列
+
+        返回 {板块代码: {交易日(YYYYMMDD): 评分行}}，未命中的板块返回空字典。
+        与个股评分序列（short_term_score_series_*）分开存储，互不影响。
+
+        Args:
+            version: 评分行结构版本（TS 侧 BOARD_SCORE_ROW_VERSION）。传入时只返回该版本的行，
+                避免评分口径调整后继续用旧行（否则预计算会误判「已覆盖」而跳过重算）。
+            dates: 只返回这些交易日的行；为空表示整条序列。
+        """
+        targets = {str(d).replace('-', '').replace('/', '') for d in (dates or []) if d}
+        result: Dict[str, Any] = {}
+        try:
+            for c in codes or []:
+                code = str(c)
+                cached = read_cache(_board_score_series_key(code, source), max_age_hours=8760)
+                rows = cached.get("rows") if isinstance(cached, dict) else None
+                if isinstance(rows, dict) and targets:
+                    rows = {
+                        d: r
+                        for d, r in rows.items()
+                        if str(d).replace('-', '').replace('/', '') in targets
+                    }
+                if isinstance(rows, dict) and version is not None:
+                    rows = {
+                        d: r
+                        for d, r in rows.items()
+                        if isinstance(r, dict) and r.get("v") == version
+                    }
+                result[code] = rows if isinstance(rows, dict) else {}
+            hit = sum(1 for v in result.values() if v)
+            print(f"[板块评分序列读取] {len(result)} 个，命中 {hit} 个")
+        except Exception as e:
+            print(f"[板块评分序列读取失败] {e}")
+        return result
+
+    @staticmethod
+    def save_board_score_series_batch(
+        stocks: Optional[Dict[str, Any]] = None, source: Any = None
+    ) -> Dict[str, Any]:
+        """批量写入多个板块的短线评分时间序列（按交易日合并，不影响其它交易日 / 其它板块）
+
+        Args:
+            stocks: {板块代码: {交易日(YYYYMMDD / YYYY-MM-DD): 评分行}}
+            source: K线数据源标识，参与缓存 key
+
+        Returns:
+            {板块代码: 该板块序列累计天数}
+        """
+        out: Dict[str, Any] = {}
+        try:
+            for code, new_rows in (stocks or {}).items():
+                if not isinstance(new_rows, dict) or not new_rows:
+                    continue
+                c = str(code)
+                cache_key = _board_score_series_key(c, source)
+                cached = read_cache(cache_key, max_age_hours=8760)
+                rows = cached.get("rows") if isinstance(cached, dict) else None
+                if not isinstance(rows, dict):
+                    rows = {}
+                for d, row in new_rows.items():
+                    if not d:
+                        continue
+                    rows[str(d).replace('-', '').replace('/', '')] = row
+                write_cache(
+                    cache_key,
+                    {"code": c, "source": str(source) if source is not None else None, "rows": rows},
+                )
+                out[c] = len(rows)
+            print(f"[板块评分序列写入] {len(out)} 个")
+        except Exception as e:
+            print(f"[板块评分序列写入失败] {e}")
+            return {"error": str(e)}
+        return out
+
+    @staticmethod
+    def get_board_score_series_summary(
+        codes: Optional[List[str]] = None,
+        dates: Optional[List[str]] = None,
+        source: Any = None,
+        version: Any = None,
+    ) -> Dict[str, Any]:
+        """检查多个板块的评分序列对指定交易日的覆盖情况
+
+        返回 {交易日(YYYYMMDD): 该日仍缺失的板块数}，用于训练周期预计算只补算缺口。
+        """
+        series = TushareAPI.get_board_score_series_batch(codes, source, version, dates)
         result: Dict[str, Any] = {}
         code_list = [str(c) for c in (codes or [])]
         for d in dates or []:
