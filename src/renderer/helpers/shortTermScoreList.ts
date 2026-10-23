@@ -38,6 +38,14 @@ export interface ShortTermScoreRow {
   rsiScore: number | null; // RSI得分 /40
   rsiPattern: string; // RSI命中情形
   sectorTrend: string; // 板块趋势描述
+  /**
+   * 本次评分「板块维度」请求使用的板块代码（如 BK0428）
+   *
+   * 仅用于缓存一致性：短线评分按所选板块取板块K线后，若序列里的旧行是用别的板块算的，
+   * 该行会被判为未命中并重算（否则换了板块却一直命中旧缓存，板块分永远是旧口径）。
+   * 空串 = 未指定板块（走东财所属板块兜底），此时不参与校验。
+   */
+  boardCode?: string;
   moneyScore: number | null; // 资金得分 /30
   moneyNote: string; // 资金形态说明
   /** 最新交易日单根K线形态名称（复用 helpers/tech 识别结果） */
@@ -97,6 +105,8 @@ export function buildShortTermScoreRow(params: {
   intraday?: boolean;
   /** 评分失败原因（有值时该行不会写入缓存，便于下次重算） */
   error?: string;
+  /** 板块维度「请求使用」的板块代码（缓存一致性校验用，见 boardCode 字段说明） */
+  boardCode?: string;
 }): ShortTermScoreRow {
   const {
     code,
@@ -116,6 +126,7 @@ export function buildShortTermScoreRow(params: {
     volumeExpanded,
     intraday,
     error,
+    boardCode,
   } = params;
   const row: ShortTermScoreRow = {
     code,
@@ -131,6 +142,7 @@ export function buildShortTermScoreRow(params: {
     rsiScore: rsi.available ? rsi.score : null,
     rsiPattern: rsi.pattern,
     sectorTrend: sector.available ? sector.trendDesc : '',
+    boardCode: boardCode || '',
     moneyScore: money.available ? money.score : null,
     moneyNote: money.note,
     klineShape: klineShape || '',
@@ -375,6 +387,8 @@ export function computeShortTermScoreForDate(params: {
   baselineKlines?: Stock.KLineItem[] | null;
   boardKlines: Stock.KLineItem[];
   boardName: string;
+  /** 板块维度「请求使用」的板块代码（写进行里，切换板块后据此重算该日） */
+  boardCode?: string;
   upRatioMap?: Score.UpRatioMap | null;
   marketStats?: Score.MarketActivityStats | null;
   circMv?: number;
@@ -385,10 +399,13 @@ export function computeShortTermScoreForDate(params: {
   /** 当日K线由分时合成（「当日评分」）：标记在行上，便于界面区分与后续官方数据覆盖 */
   intraday?: boolean;
 }): { row: ShortTermScoreRow; detail: ShortTermScoreDetail | null } {
-  const { code, name, klines, baselineKlines, boardKlines, boardName, upRatioMap, marketStats, circMv, detailMain, detailRetail, scoreDay, intraday } = params;
+  const { code, name, klines, baselineKlines, boardKlines, boardName, boardCode, upRatioMap, marketStats, circMv, detailMain, detailRetail, scoreDay, intraday } = params;
   if (!klines || klines.length < 30) {
     // 无有效数据：按 0 分写入缓存（见 zeroShortTermScoreRow 说明）
-    return { row: zeroShortTermScoreRow(code, name, `日K数据不足（${klines?.length || 0}条）`), detail: null };
+    // 同样记下请求的板块代码，避免下一轮因板块不一致被反复重算
+    const row = zeroShortTermScoreRow(code, name, `日K数据不足（${klines?.length || 0}条）`);
+    row.boardCode = boardCode || '';
+    return { row, detail: null };
   }
   // 日K未覆盖到评分基准日（最新交易日行情尚未生成 / 个股停牌 / 上游取数失败回退到旧缓存）：
   // 分值一律留空（列表显示 --），不能把上一交易日的分数当成当日分数。
@@ -422,6 +439,7 @@ export function computeShortTermScoreForDate(params: {
     volume,
     rsi,
     money,
+    boardCode,
     klineShape: latestShape?.name || '',
     klineYin: latestShape?.yin,
     klineSize: latestShape?.size,
@@ -461,6 +479,8 @@ export interface StockScoreInputs {
   baselineName: string;
   boardKlines: Stock.KLineItem[];
   boardName: string;
+  /** 板块维度请求使用的板块代码（写进行里，供缓存一致性校验） */
+  boardCode: string;
   upRatioMap?: Score.UpRatioMap | null;
   marketStats?: Score.MarketActivityStats | null;
   circMv?: number;
@@ -538,7 +558,7 @@ async function fetchDayKlines(
 }
 
 /** 判断日K是否覆盖到指定交易日（最后一根日期 >= 目标日） */
-function klinesCoverDay(ks: Stock.KLineItem[] | undefined, day: string): boolean {
+export function klinesCoverDay(ks: Stock.KLineItem[] | undefined, day: string): boolean {
   if (!ks || !ks.length || !day) {
     return false;
   }
@@ -585,7 +605,7 @@ function trendLastDay(trends: Stock.TrendItem[] | undefined | null): string {
  * 昨收取日K序列里最后一根（< 基准日）的收盘价 —— 涨跌幅/振幅都依赖昨收；
  * 流通股本有值时用于估算换手率（量能维度的横向对比优先用换手率）。
  */
-function buildTrendBar(params: {
+export function buildTrendBar(params: {
   secid: string;
   trends: Stock.TrendItem[] | undefined | null;
   klines: Stock.KLineItem[] | undefined;
@@ -610,7 +630,7 @@ function buildTrendBar(params: {
 }
 
 /** 把合成的当日K并入日K序列：先去掉「基准日及之后」的旧K，再追加到末尾 */
-function mergeTrendBar(klines: Stock.KLineItem[] | undefined, bar: Stock.KLineItem): Stock.KLineItem[] {
+export function mergeTrendBar(klines: Stock.KLineItem[] | undefined, bar: Stock.KLineItem): Stock.KLineItem[] {
   const day = toDay(bar.date);
   return [...(klines || []).filter((k) => toDay(k?.date) < day), bar];
 }
@@ -623,7 +643,7 @@ function mergeTrendBar(klines: Stock.KLineItem[] | undefined, bar: Stock.KLineIt
  * 其余数据源沿用 stock.ts 的统一入口（内部按设置分发）。
  * 训练模式下统一按训练日期截断，只保留训练日及之前的分时。
  */
-async function fetchTrendsOfSource(source: FundApiType, secid: string): Promise<Stock.TrendItem[]> {
+export async function fetchTrendsOfSource(source: FundApiType, secid: string): Promise<Stock.TrendItem[]> {
   try {
     if (source === FundApiType.Tushare) {
       const r = await Services.Tushare.GetTrendFromTushare(secid);
@@ -637,8 +657,15 @@ async function fetchTrendsOfSource(source: FundApiType, secid: string): Promise<
 }
 
 /** 公共上下文：三大指数日K（缺失的才取，已预取的部分保持不动） */
-export async function ensureIndexKlines(ctx: ScoreSharedContext, limit = 60): Promise<Record<string, Stock.KLineItem[]>> {
-  const missing = INDEX_SECIDS.filter((s) => !ctx.indexKlinesMap[s] || !ctx.indexKlinesMap[s].length);
+export async function ensureIndexKlines(
+  ctx: ScoreSharedContext,
+  limit = 60,
+  /** 强制重取（已有的也覆盖）：训练日很久远时要按更长的窗口重取，才能覆盖到补算窗口 */
+  force = false
+): Promise<Record<string, Stock.KLineItem[]>> {
+  const missing = force
+    ? INDEX_SECIDS.slice()
+    : INDEX_SECIDS.filter((s) => !ctx.indexKlinesMap[s] || !ctx.indexKlinesMap[s].length);
   if (!missing.length) {
     return ctx.indexKlinesMap;
   }
@@ -966,6 +993,9 @@ export async function buildStockScoreInputs(
     baselineName,
     boardKlines,
     boardName,
+    // 「请求使用」的板块代码（item.hybk 优先 = 列表所选板块 / 个股手动板块）：
+    // 存进评分行后，切换板块时会因代码不一致被判为未命中并重算，避免一直命中旧板块的分数
+    boardCode: item.hybk?.code || '',
     upRatioMap,
     marketStats,
     circMv: item.circMv,
@@ -1188,6 +1218,30 @@ export function pickScoreRow(
 }
 
 /**
+ * 缓存行的「板块维度」是否与本次请求一致
+ *
+ * 短线评分是用「当前所选板块」的板块K线算板块分（20% 权重）的：换板块后必须重算，
+ * 否则会一直命中旧板块算出来的分。判定规则：
+ * - 行未上市跳过（notListed）→ 不受影响；
+ * - 本次未指定板块（走东财所属板块兜底）→ 不校验，沿用旧行；
+ * - 行里没记录板块代码（本版本之前写的旧行）→ 有指定板块时视为不一致，重算一次；
+ * - 其余按代码严格比较。
+ */
+export function isScoreRowBoardMatched(
+  row: ShortTermScoreRow | null | undefined,
+  hybkCode?: string
+): boolean {
+  if (!row || row.notListed) {
+    return true;
+  }
+  const want = String(hybkCode || '');
+  if (!want) {
+    return true;
+  }
+  return String(row.boardCode || '') === want;
+}
+
+/**
  * 读某只股票在「某个基准日」的缓存评分行（详情页/列表共用的唯一分数来源）
  *
  * 命中即返回该日缓存行，未命中返回 null（由调用方现算并回写序列）。
@@ -1283,8 +1337,6 @@ export interface ComputeRowsResult {
 /** 每只股票评分所需的日K根数（与单只取数口径一致） */
 const SCORE_KLINES_PER_STOCK = 250;
 
-/** 一次补算的 (股票 × 交易日) 上限：股票池很大时避免一次补太多，超出部分下次再补 */
-const BACKFILL_MAX_ROWS = 4000;
 /** 每补算多少个交易日落盘一次（控制单次写入的 payload 大小） */
 const BACKFILL_FLUSH_DAYS = 5;
 
@@ -1319,7 +1371,9 @@ async function backfillScores(params: {
   const missing: { item: ShortTermScoreItem; dayKey: string }[] = [];
   items.forEach((item) => {
     targets.forEach((dayKey) => {
-      if (!pickScoreRow(existing[item.code], dayKey)) {
+      const hit = pickScoreRow(existing[item.code], dayKey);
+      // 命中但板块维度不一致（所选板块变了）→ 也算缺，按新板块重算并覆盖
+      if (!hit || !isScoreRowBoardMatched(hit.row, item.hybk?.code)) {
         missing.push({ item, dayKey });
       }
     });
@@ -1328,11 +1382,12 @@ async function backfillScores(params: {
     console.log(`[短线评分] 近 ${targets.length} 个交易日的评分已完整，无需补算`);
     return { filled: 0, skipped: 0, truncated: false };
   }
-  const truncated = missing.length > BACKFILL_MAX_ROWS;
-  const work = truncated ? missing.slice(0, BACKFILL_MAX_ROWS) : missing;
+  // 一次把窗口内缺的行全部补完（不再按条数截断）：
+  // 「点一次短线评分，最近 N 个交易日的历史评分就是齐的」，不需要反复点击续补。
+  // 取数/评分都在同一个 ctx 里做内存切片，写库按 BACKFILL_FLUSH_DAYS 分批，不会撑爆单次 payload。
+  const work = missing;
   console.log(
-    `[短线评分] 近 ${targets.length} 个交易日有 ${missing.length} 条评分缺失，开始补算` +
-      (truncated ? `（本次先补 ${work.length} 条，其余下次继续）` : '')
+    `[短线评分] 近 ${targets.length} 个交易日有 ${missing.length} 条评分缺失，开始补算`
   );
 
   // 「基准日尚未上市」的股票：在其上市前的交易日写一条跳过行（确定性结论，写库后不再重试）
@@ -1451,7 +1506,7 @@ async function backfillScores(params: {
     await saveScoreSeries(buffer, source);
   }
   console.log(`[短线评分] 历史补算完成：补入 ${filled} 条、数据未就绪跳过 ${skipped} 条`);
-  return { filled, skipped, truncated };
+  return { filled, skipped, truncated: false };
 }
 
 export async function computeShortTermScoreRows(items: ShortTermScoreItem[], options: ComputeOptions): Promise<ComputeRowsResult> {
@@ -1490,6 +1545,12 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       return;
     }
     try {
+      // 训练日可能离今天很远，而指数日K默认只取 30/60 根：覆盖不到「基准日往前 backfillDays」时
+      // collectRecentDays() 只剩基准日一天，补算就只补一天（表现为「点了评分，历史列还是空的」）。
+      // 这里按需强制重取一次指数日K，保证补算窗口（默认最近 20 个交易日）完整。
+      if (collectRecentDays().length < backfillDays) {
+        await ensureIndexKlines(ctx, Math.max(60, backfillDays + 20), true);
+      }
       await backfillScores({
         items,
         ctx,
@@ -1511,7 +1572,8 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     // 表现为「评分池 845 只、结果列表只有 423 只」。
     [...items].forEach((item) => {
       const hit = pickScoreRow(series[item.code], scoreDayKey);
-      if (hit?.row && typeof hit.row === 'object') {
+      // 板块维度与本次请求不一致（换了所属板块）→ 当作未命中，按新板块重算
+      if (hit?.row && typeof hit.row === 'object' && isScoreRowBoardMatched(hit.row, item.hybk?.code)) {
         // 名字以调用方股票池为准（缓存行可能只存了代码）
         const row = { ...hit.row, code: item.code, name: hit.row.name || item.name || item.code } as ShortTermScoreRow;
         results.push(row);
@@ -1627,7 +1689,10 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       return computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay, ...inputs }).row;
     } catch (e: any) {
       // 取数异常同样按 0 分入缓存，避免每次点击都为同一只股票重复取数
-      return zeroShortTermScoreRow(item.code, item.name, e?.message || '评分失败');
+      // （boardCode 一并写入，否则会因板块不一致被当成未命中、每次都重算）
+      const row = zeroShortTermScoreRow(item.code, item.name, e?.message || '评分失败');
+      row.boardCode = item.hybk?.code || '';
+      return row;
     }
   };
 

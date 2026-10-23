@@ -2040,6 +2040,53 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
+    def _get_trend_from_eastmoney(secid: str) -> List[Dict[str, Any]]:
+        """从东方财富获取指数/板块分时数据
+
+        腾讯个股分时接口不支持板块（如 90.BK0428），东财 trends2 支持，
+        返回格式与 _get_trend_from_tencent_minute 一致（datetime/current/last/vol/average/up）。
+        """
+        if requests is None:
+            return {"error": "requests 未安装"}
+        try:
+            url = "http://push2his.eastmoney.com/api/qt/stock/trends2/get"
+            params = {
+                "secid": secid,
+                "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                "ndays": 1,
+                "iscr": 0,
+                "iscca": 0,
+                "_": int(datetime.now().timestamp() * 1000),
+            }
+            resp = requests.get(url, params=params, timeout=10)
+            resp.encoding = "utf-8"
+            data = resp.json()
+            if not data.get("data") or not data["data"].get("trends"):
+                return {"error": "No trend data available"}
+
+            trends = []
+            for item in data["data"]["trends"]:
+                parts = str(item).split(",")
+                if len(parts) < 8:
+                    continue
+                current = _to_float(parts[2])
+                if current <= 0:
+                    continue
+                last = _to_float(parts[1])
+                trends.append({
+                    "datetime": parts[0],
+                    "current": current,
+                    "last": last,
+                    "vol": _to_int(parts[5]),
+                    "average": _to_float(parts[7]),
+                    "up": 1 if current >= last else -1,
+                })
+            return trends
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
     def get_stock_trend(secid: str) -> List[Dict[str, Any]]:
         """
         获取分时走势数据 - 使用腾讯财经数据源
@@ -2065,6 +2112,11 @@ class TushareAPI:
                     return saved
             except Exception:
                 pass
+
+        # 板块（东财概念/行业，如 90.BK0428）：腾讯个股分时接口不支持，走东财 trends2
+        # （板块K线由 dc_daily 提供、收盘后才有当日，盘中要靠这条分时补出「当日K线」）
+        if is_board_code(secid):
+            return TushareAPI._get_trend_from_eastmoney(secid)
 
         if ak is None:
             return {"error": "akshare 未安装，无法获取分时数据"}

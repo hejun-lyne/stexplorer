@@ -17,7 +17,7 @@ import {
   MainInFilterStocksFromTushare,
 } from '@/services/tushare';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
-import { BKType, KFilterType, KFilterTypeNames, SingleKLineShapeNames } from '@/utils/enums';
+import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
 import classNames from 'classnames';
 import { batch, useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
@@ -33,92 +33,24 @@ import {
   ShortTermScoreSeries,
 } from '@/helpers/shortTermScoreList';
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
+import {
+  compareKlineShape,
+  KLINE_SHAPE_FILTER_OPTIONS,
+  KLINE_SHAPE_SORT_KEY,
+  normalizeKlineShape,
+} from '@/helpers/klineShape';
 import { saveTrainDayAction } from '@/actions/train';
 
 /** 短线评分列表「近 N 日评分」历史列展示的交易日数量（仅影响展示列数，过滤窗口另有其天数） */
 const SHORT_SCORE_HISTORY_DAYS = 15;
 
 /**
- * 「K线形态」列的排序键
+ * 执行「短线评分 / 预计算训练评分」时顺带补全的历史评分天数
  *
- * 该列的排序不是单一数值：先阳线后阴线（阳线在前），同为阳/阴时再按形态优先级
- * （见 klineShapeWeight）；同一形态内按「下影 - 上影」从小到大，再按K线实体大小兜底。
- * 因此它在 showList 里有专门的比较逻辑，不走通用的数值排序。
+ * 点一次评分就把最近 20 个交易日的评分补齐（写回评分序列），历史列不再逐日出现 `--`；
+ * 过滤窗口更宽时按窗口天数补（见 shortScoreHistoryDays）。
  */
-const KLINE_SHAPE_SORT_KEY = 'klineShape';
-
-/** 阳线形态排序优先级（越靠前越优先） */
-const KLINE_SHAPE_ORDER_YANG = [
-  '铁锤线',
-  '倒宝剑线',
-  '十字星',
-  '螺旋桨',
-  '纺锤线',
-  '地线宝宝',
-  '中海绵宝宝',
-  '大海绵宝宝',
-  '天线宝宝',
-  '倒铁锤线',
-  '宝剑线',
-];
-
-/** 阴线形态排序优先级（越靠前越优先） */
-const KLINE_SHAPE_ORDER_YIN = [
-  '倒宝剑线',
-  '十字星',
-  '铁锤线',
-  '螺旋桨',
-  '纺锤线',
-  '宝剑线',
-  '倒铁锤线',
-  '地线宝宝',
-  '天线宝宝',
-  '中海绵宝宝',
-  '大海绵宝宝',
-];
-
-/**
- * K线形态排序权重（越大越靠前）
- *
- * 阳线整体大于阴线；同为阳/阴时按各自的形态优先级表（上面的顺序即优先级）；
- * 形态未识别（空 / 未知）的统一排最后。
- */
-const klineShapeWeight = (shape?: string, yin?: boolean): number => {
-  const list = yin ? KLINE_SHAPE_ORDER_YIN : KLINE_SHAPE_ORDER_YANG;
-  const idx = list.indexOf(String(shape || ''));
-  if (idx < 0) {
-    return 0; // 未识别形态：排在所有已识别形态之后
-  }
-  // 阳线权重从 100 起、阴线从 50 起，各组内按优先级递减；这样阳线整体大于阴线，两者都大于未识别形态（0）
-  return (yin ? 50 : 100) - idx;
-};
-
-/**
- * 「K线形态」表头筛选项
- *
- * 先按排序优先级表（阳线、阴线）给出顺序，再补上优先级表里没有的形态
- * （目前是「小海绵宝宝」，保证筛选器覆盖所有可识别形态）；
- * 末尾追加「未识别」（value 为空字符串），对应列表里形态为空或「未知」的股票，Excel 式筛选可以连空值一起筛。
- */
-const KLINE_SHAPE_FILTER_OPTIONS = [
-  ...Array.from(
-    new Set([
-      ...KLINE_SHAPE_ORDER_YANG,
-      ...KLINE_SHAPE_ORDER_YIN,
-      ...Object.values(SingleKLineShapeNames).filter((name) => name && name !== '未知'),
-    ])
-  ).map((name) => ({ label: name, value: name })),
-  { label: '（未识别）', value: '' },
-];
-
-/**
- * 行内 K线形态归一化：把「未知」和空值统一成空字符串，
- * 这样表头筛选里的「（未识别）」一项能同时覆盖它们（勾「全选」不会漏行）。
- */
-const normalizeKlineShape = (shape?: string): string => {
-  const v = String(shape || '');
-  return v === '未知' ? '' : v;
-};
+const SHORT_SCORE_BACKFILL_DAYS = 20;
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -274,15 +206,19 @@ const STList: React.FC<STListProps> = ({
   // K线形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；同一形态名不区分阴阳）
   const [shortScoreKlineShapes, setShortScoreKlineShapes] = useState<string[]>([]);
   /**
-   * 短线评分需要加载的交易日数量
+   * 短线评分需要加载/补全的交易日数量
    *
-   * 「近 N 日评分」历史列固定展示 SHORT_SCORE_HISTORY_DAYS 日；而过滤窗口是「N 天前的近 M 日」，
-   * 最远要追溯到「N 天前」再往前 M 日，因此取两者较大值，保证过滤窗口用到的评分都已经读进来。
+   * 三者的最大值：
+   * - SHORT_SCORE_HISTORY_DAYS：「近 N 日评分」历史列展示的天数；
+   * - SHORT_SCORE_BACKFILL_DAYS：执行短线评分时顺带补全的历史评分天数（至少最近 20 个交易日）；
+   * - 过滤窗口「N 天前的近 M 日」的最远回溯距离。
+   * 这样点一次短线评分，历史列与过滤窗口用到的评分都会被补齐，不用再逐日手动补。
    */
   const shortScoreHistoryDays = React.useMemo(
     () =>
       Math.max(
         SHORT_SCORE_HISTORY_DAYS,
+        SHORT_SCORE_BACKFILL_DAYS,
         Math.max(0, Number(shortScoreFilterBeforeDays) || 0) + Math.max(1, Number(shortScoreFilterWindowDays) || 0)
       ),
     [shortScoreFilterBeforeDays, shortScoreFilterWindowDays]
@@ -305,6 +241,25 @@ const STList: React.FC<STListProps> = ({
   const boardStocksCacheRef = React.useRef<Record<string, Stock.DetailItem[]>>({});
   /** 每只股票所属的「已选板块」secid 列表（code -> secid[]），用于结果列表标记所属板块 */
   const [stockBoardSecidsMap, setStockBoardSecidsMap] = useState<Record<string, string[]>>({});
+  /**
+   * 已选板块 -> 评分用的「所属板块」（代码去掉市场前缀：90.BK0428 -> BK0428）
+   *
+   * 短线评分 / 预计算里「板块维度」占 20% 权重，板块K线必须取**当前选中的板块**：
+   * 否则 resolveBoards 会退回东财返回的第一批所属板块（行业/风格板块），
+   * 板块分就算到了与用户所选板块无关的地方。代码口径与 getBoardKlines 的 `90.${code}` 一致。
+   */
+  const selectedBoardMeta = React.useMemo(() => {
+    const all = [...industries, ...gainians];
+    const meta: Record<string, { code: string; name: string }> = {};
+    selectedSecids.forEach((sid) => {
+      const found = all.find((b) => b.secid === sid);
+      const code = String(sid).includes('.') ? String(sid).split('.').pop() || '' : String(sid);
+      if (code) {
+        meta[sid] = { code, name: found?.name || code };
+      }
+    });
+    return meta;
+  }, [selectedSecids, industries, gainians]);
   // 板块身份：评分结果与股票池都绑定「已选板块组合」，切换板块后必须整体重来
   /** 上一次评分结果所属的板块组合（用于判断能否沿用上一次的股票池） */
   const shortScorePoolRef = React.useRef('');
@@ -964,9 +919,20 @@ const STList: React.FC<STListProps> = ({
   // 短线评分与「训练周期评分预计算」共用，保证预计算覆盖的正是当前要评分的这批股票
   const collectCurrentItemsRaw = useCallback((options?: { ignoreReuse?: boolean }): ShortTermScoreItem[] => {
     const lookupName = (code: string) => stocks.find((s) => s.code === code)?.name || '';
+    /**
+     * 板块维度用的「所属板块」：优先用当前选中的板块
+     *
+     * 短线评分是对所选板块的成分股打分，板块K线必须取自所选板块（见 selectedBoardMeta）；
+     * 多个板块同时选中时取该股票命中的第一个（按选择顺序），不在任何已选板块里时退回个股手动设置的板块，
+     * 两者都没有才交给 resolveBoards 用东财所属板块兜底。
+     */
     const lookupHybk = (code: string) => {
       const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
-      return stockConfigsMapping[secid]?.hybk || null;
+      const manual = stockConfigsMapping[secid]?.hybk || null;
+      const boardSecids = stockBoardSecidsMap[code] || [];
+      const hitSecid = selectedSecids.find((sid) => boardSecids.indexOf(sid) >= 0) || boardSecids[0] || '';
+      const selected = hitSecid ? selectedBoardMeta[hitSecid] : null;
+      return selected || manual;
     };
     if (displayMode === 'mainIn') {
       return mainInData.filter((d: any) => d.buy_signal).map((d: any) => {
@@ -1018,7 +984,20 @@ const STList: React.FC<STListProps> = ({
       circMv: (s as any).lt ? (s as any).lt * 1e8 : undefined,
       hybk: lookupHybk(s.code),
     }));
-  }, [stocks, poolStocks, stockConfigsMapping, displayMode, mainInData, signalData, riskData, leaderData, leaderDisplayCount]);
+  }, [
+    stocks,
+    poolStocks,
+    stockConfigsMapping,
+    displayMode,
+    mainInData,
+    signalData,
+    riskData,
+    leaderData,
+    leaderDisplayCount,
+    stockBoardSecidsMap,
+    selectedSecids,
+    selectedBoardMeta,
+  ]);
 
   /**
    * 评分池：在「当前股票池」基础上按「排除科创板+北交所」过滤
@@ -1767,30 +1746,10 @@ const STList: React.FC<STListProps> = ({
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
         if (keys[0] === KLINE_SHAPE_SORT_KEY) {
-          // K线形态排序：先阳线后阴线（阳线大于阴线），同为阳/阴时按形态优先级
-          // （阳线：铁锤线 > 倒宝剑线 > 十字星 > …；阴线：倒宝剑线 > 十字星 > 铁锤线 > …，见 klineShapeWeight）。
-          // 同一形态内：有上下影线时按「下影线长度 - 上影线长度」从小到大（越低越靠前），
-          // 仍相同再按K线实体大小（实体 / 近期平均实体，越大实体越大）兜底。
-          // 降序=阳线在前、形态优先级高的在前、同形态内（下影-上影）小的在前。
+          // K线形态排序：先阳线后阴线、同阴阳内按形态优先级、再按（下影-上影）、实体大小兜底，
+          // 与板块评分列表共用同一套比较逻辑（helpers/klineShape）。降序=阳线在前、形态优先级高的在前。
           const t = sortTypes[KLINE_SHAPE_SORT_KEY];
-          const shadowDiff = (r: any) => (Number(r.klineLowerShadow) || 0) - (Number(r.klineUpperShadow) || 0);
-          list.sort((a: any, b: any) => {
-            const left = klineShapeWeight(a.klineShape, a.klineYin);
-            const right = klineShapeWeight(b.klineShape, b.klineYin);
-            if (left !== right) {
-              return t === 2 ? right - left : left - right;
-            }
-            // 同一形态：下影 - 上影，越低越靠前（无上下影线时两者都是 0，自然交给实体大小兜底）
-            const leftShadow = shadowDiff(a);
-            const rightShadow = shadowDiff(b);
-            if (leftShadow !== rightShadow) {
-              return t === 2 ? leftShadow - rightShadow : rightShadow - leftShadow;
-            }
-            const leftSize = Number(a.klineSize) || 0;
-            const rightSize = Number(b.klineSize) || 0;
-            if (leftSize === rightSize) return 0;
-            return t === 2 ? rightSize - leftSize : leftSize - rightSize;
-          });
+          list.sort((a: any, b: any) => compareKlineShape(a, b, t));
         } else {
           list.sort((a: any, b: any) => {
             const left = Number(a[keys[0]]) || 0;

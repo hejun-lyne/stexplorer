@@ -1,9 +1,19 @@
 import * as Services from '@/services';
-import { KLineType } from '@/utils/enums';
+import { FundApiType, KLineType } from '@/utils/enums';
 import { Stock } from '@/types/stock';
+import dayjs from 'dayjs';
 import * as TrainFilter from '@/utils/trainFilter';
 import * as Score from './shortTermScore';
-import { resolveRecentTradingDays } from './shortTermScoreList';
+import {
+  buildTrendBar,
+  describeLatestKlineShape,
+  fetchTrendsOfSource,
+  isLatestVolumeExpanded,
+  isTradeDayOn,
+  klinesCoverDay,
+  mergeTrendBar,
+  resolveRecentTradingDays,
+} from './shortTermScoreList';
 
 // ==================== 板块短线评分（BKList 专用） ====================
 //
@@ -21,7 +31,7 @@ import { resolveRecentTradingDays } from './shortTermScoreList';
 // 与个股短线评分的「个股走弱触发一票否决」对应（板块走弱时，资金/量能再好也不适合短线参与）。
 
 /** 行结构版本：新增/变更展示字段或评分口径时递增（界面缓存/调试时可识别） */
-export const BOARD_SCORE_ROW_VERSION = 1;
+export const BOARD_SCORE_ROW_VERSION = 2;
 
 /** 板块短线评分输入项 */
 export interface BoardScoreItem {
@@ -60,6 +70,20 @@ export interface BoardScoreRow {
   /** 数据未就绪（板块日K不足 / 取数失败）：分值留空，下次运行会重新计算 */
   pending?: boolean;
   error?: string;
+  /** 最新交易日单根K线形态名称（复用 helpers/tech 识别结果，与个股短线评分列表同口径） */
+  klineShape?: string;
+  /** 最新交易日K线是否阴线（true=阴线，false=阳线；无数据时 undefined） */
+  klineYin?: boolean;
+  /** 最新交易日K线实体大小（实体 / 近期平均实体，1=平均；越大实体越大。用于列表排序） */
+  klineSize?: number;
+  /** 最新交易日K线上影线长度（上影 / 近期平均影线，1=平均） */
+  klineUpperShadow?: number;
+  /** 最新交易日K线下影线长度（下影 / 近期平均影线，1=平均） */
+  klineLowerShadow?: number;
+  /** 最新交易日是否放量（成交量 / 前 5 日均量 ≥ VOLUME_EXPAND_RATIO） */
+  volumeExpanded?: boolean;
+  /** 当日K线由分时合成（官方日K还没覆盖到当日） */
+  intraday?: boolean;
   v?: number;
 }
 
@@ -137,6 +161,7 @@ export function emptyBoardScoreRow(item: BoardScoreItem): BoardScoreRow {
     main5: null,
     main10: null,
     main20: null,
+    klineShape: '',
     v: BOARD_SCORE_ROW_VERSION,
   };
 }
@@ -439,6 +464,32 @@ function cutMoney(
 }
 
 /**
+ * 给评分行补上「最新交易日K线形态 / 是否放量」（与个股短线评分列表同一套识别）
+ *
+ * expectDay 传入评分基准日：最后一根K线日期必须与之一致，否则说明数据没到当天，
+ * 不把上一交易日的形态当成当日的（停牌 / 取数失败回退旧缓存）。
+ */
+export function attachLatestKlineFields(
+  row: BoardScoreRow,
+  klines: Stock.KLineItem[],
+  expectDay?: string
+): BoardScoreRow {
+  if (!klines || !klines.length) {
+    return row;
+  }
+  const shape = describeLatestKlineShape(klines, expectDay);
+  if (shape) {
+    row.klineShape = shape.name;
+    row.klineYin = shape.yin;
+    row.klineSize = shape.size;
+    row.klineUpperShadow = shape.upperShadow;
+    row.klineLowerShadow = shape.lowerShadow;
+  }
+  row.volumeExpanded = isLatestVolumeExpanded(klines);
+  return row;
+}
+
+/**
  * 某交易日的板块评分行（纯计算）
  * @param dayKey 评分基准日（YYYYMMDD / YYYY-MM-DD）；空表示用全部K线的最后一天
  */
@@ -448,7 +499,9 @@ export function computeBoardScoreRowForDay(
   money: { dates?: string[]; main?: number[] } | null | undefined,
   dayKey: string
 ): BoardScoreRow {
-  return computeBoardScoreRow(item, cutKlines(klines, dayKey), cutMoney(money, dayKey));
+  const bars = cutKlines(klines, dayKey);
+  const row = computeBoardScoreRow(item, bars, cutMoney(money, dayKey));
+  return attachLatestKlineFields(row, bars, dayKey || toDayKey(lastDay(bars)));
 }
 
 export interface ComputeBoardScoreOptions {
@@ -665,6 +718,212 @@ export async function computeBoardShortTermScoreRows(
 
   await saveBoardScoreSeries(buffer, source);
   return result;
+}
+
+// ==================== 当日评分（只补当日K线形态 + RSI） ====================
+
+export interface ComputeTodayBoardScoreOptions {
+  source: any;
+  concurrency?: number;
+  shouldStop?: () => boolean;
+  onRow?: (row: BoardScoreRow, item: BoardScoreItem, done: number, total: number) => void;
+  /** 「近 N 日评分」历史列需要覆盖的交易日数量 */
+  historyDays?: number;
+}
+
+export interface ComputeTodayBoardScoreResult {
+  rows: BoardScoreRow[];
+  /** 当日（YYYYMMDD） */
+  scoreDayKey: string;
+  /** 含当日的最近交易日（升序） */
+  recentDays: string[];
+  /** 当日K线取到并算出形态的板块数 */
+  filled: number;
+  /** 当日K线不可用（未收盘且分时取不到 / 停牌 / 形态识别失败）的板块数 */
+  skipped: number;
+}
+
+/**
+ * 「当日评分」（板块）
+ *
+ * 与 STList 的「当日评分」同一套思路：只更新「只依赖K线」的部分 —— K线形态（含阴阳 / 是否放量）与 RSI 评分。
+ * 板块日K来自 dc_daily，盘中拿不到当日那根，因此：
+ * - 官方日K已覆盖当日的板块不取分时，直接按官方K线计算；
+ * - 否则取当日分时（python 侧板块分时走东财 trends2）合成一根日K补在末尾再计算；
+ * - 只填 `klineShape / klineYin / klineSize / 上下影线 / volumeExpanded / rsiScore / rsiPattern / intraday`，
+ *   综合分与其它维度留空（列表评分列显示「待评分」）；
+ * - 当日不给综合分，也不写评分序列缓存（没有综合分可缓存）。
+ */
+export async function computeTodayBoardScoreRows(
+  items: BoardScoreItem[],
+  options: ComputeTodayBoardScoreOptions
+): Promise<ComputeTodayBoardScoreResult> {
+  const { source, concurrency = 4, shouldStop, onRow, historyDays = BOARD_SCORE_HISTORY_DAYS } = options;
+  const rows: BoardScoreRow[] = [];
+  let done = 0;
+  let filled = 0;
+  let skipped = 0;
+  if (!items || !items.length) {
+    return { rows, scoreDayKey: '', recentDays: [], filled, skipped };
+  }
+
+  // 当日评分固定针对「当前交易日」：训练模式跟随训练日，非训练模式取真实今天
+  const trainDayKey = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
+  const dayKey = trainDayKey || dayjs().format('YYYYMMDD');
+  const scoreDay = `${dayKey.substring(0, 4)}-${dayKey.substring(4, 6)}-${dayKey.substring(6, 8)}`;
+  const recentDays = await resolveRecentTradingDays(source, historyDays);
+
+  // 是否交易日：直接查交易日历
+  if (!(await isTradeDayOn(source, dayKey))) {
+    console.log(`[板块当日评分] ${scoreDay} 不是交易日，已跳过`);
+    return { rows, scoreDayKey: dayKey, recentDays, filled, skipped };
+  }
+
+  const total = items.length;
+
+  // ---- 1. 批量取板块日K（并发；与完整评分同一取数口径）----
+  const klinesMap: Record<string, Stock.KLineItem[]> = {};
+  const queue = [...items];
+  const fetchWorker = async () => {
+    while (queue.length > 0) {
+      if (shouldStop?.()) {
+        return;
+      }
+      const item = queue.shift() as BoardScoreItem;
+      try {
+        const { ks } = await Services.Stock.GetKFromSetting(
+          item.secid,
+          KLineType.Day,
+          BOARD_SCORE_CONFIG.historyKlineLimit
+        );
+        klinesMap[item.secid] = (Array.isArray(ks) ? ks : []) as Stock.KLineItem[];
+      } catch {
+        klinesMap[item.secid] = [];
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => fetchWorker()));
+
+  // ---- 2. 批量预取分时：只取「日K还没覆盖到当日」的板块 ----
+  const trendMap: Record<string, Stock.TrendItem[]> = {};
+  const needTrendItems = items.filter((i) => !klinesCoverDay(klinesMap[i.secid], dayKey));
+  if (source === FundApiType.Tushare && needTrendItems.length) {
+    try {
+      const batch = await Services.Tushare.GetTrendsBatchFromTushare(needTrendItems.map((i) => i.secid));
+      needTrendItems.forEach((i) => {
+        const ts = batch?.[i.secid];
+        if (Array.isArray(ts) && ts.length) {
+          trendMap[i.secid] = TrainFilter.CutTrends(ts);
+        }
+      });
+      console.log(
+        `[板块当日评分] 批量分时预取 ${needTrendItems.length} 个板块，命中 ${Object.keys(trendMap).length} 个`
+      );
+    } catch {
+      // 批量分时失败时退回逐只取数，不影响主流程
+    }
+  }
+
+  /** 当日行：只填「只依赖K线」的字段（K线形态 + 放量 + RSI），综合分与其它维度留空 */
+  const klineOnlyRow = (
+    item: BoardScoreItem,
+    info?: {
+      shape: { name: string; yin: boolean; size: number; upperShadow: number; lowerShadow: number } | null;
+      intraday: boolean;
+      volumeExpanded: boolean;
+      rsi: Score.RsiScoreResult;
+    },
+    reason?: string
+  ): BoardScoreRow => {
+    const row = emptyBoardScoreRow(item);
+    row.intraday = !!info?.intraday;
+    row.klineShape = info?.shape?.name || '';
+    row.klineYin = info?.shape?.yin;
+    row.klineSize = info?.shape?.size;
+    row.klineUpperShadow = info?.shape?.upperShadow;
+    row.klineLowerShadow = info?.shape?.lowerShadow;
+    row.volumeExpanded = info?.volumeExpanded;
+    if (info?.rsi) {
+      // RSI 只依赖K线：当日K线（可能是分时补全的）就绪时同样可算可展示；数据不足时留空显示 --
+      row.rsiScore = info.rsi.available ? info.rsi.score : null;
+      row.rsiPattern = info.rsi.pattern;
+    }
+    if (reason) {
+      row.error = reason;
+      row.pending = true; // 没有当日数据可展示：标记未就绪，行内悬停可看原因
+    }
+    return row;
+  };
+
+  const processOne = async (item: BoardScoreItem): Promise<BoardScoreRow> => {
+    try {
+      let bars = klinesMap[item.secid] || [];
+      if (!bars.length) {
+        const { ks } = await Services.Stock.GetKFromSetting(
+          item.secid,
+          KLineType.Day,
+          BOARD_SCORE_CONFIG.historyKlineLimit
+        );
+        bars = (Array.isArray(ks) ? ks : []) as Stock.KLineItem[];
+        klinesMap[item.secid] = bars;
+      }
+      let intraday = false;
+      if (!klinesCoverDay(bars, dayKey)) {
+        // 官方日K还没到当日：用当日分时合成一根日K补在末尾（优先用批量预取的结果）
+        const prefetched = trendMap[item.secid];
+        const trends = prefetched ? prefetched : await fetchTrendsOfSource(source, item.secid);
+        const bar = buildTrendBar({ secid: item.secid, trends, klines: bars, dayKey });
+        if (!bar) {
+          skipped += 1;
+          return klineOnlyRow(item, undefined, `当日分时不可用，无法补全 ${scoreDay} 的K线`);
+        }
+        bars = mergeTrendBar(bars, bar);
+        intraday = true;
+      }
+      // 复用完整评分同一套纯计算函数，保证「当日评分」与「短线评分」口径一致
+      const shape = describeLatestKlineShape(bars, dayKey);
+      const rsi = Score.scoreStockRsi(bars);
+      if (!shape) {
+        skipped += 1;
+        return klineOnlyRow(
+          item,
+          { shape: null, intraday, volumeExpanded: false, rsi },
+          `K线形态识别失败（日K ${bars.length} 条）`
+        );
+      }
+      filled += 1;
+      return klineOnlyRow(item, { shape, intraday, volumeExpanded: isLatestVolumeExpanded(bars), rsi });
+    } catch (e: any) {
+      skipped += 1;
+      return klineOnlyRow(item, undefined, e?.message || '取数失败');
+    }
+  };
+
+  // 并发工作池：逐只回调，支持暂停
+  const queue2 = [...items];
+  const worker = async () => {
+    while (queue2.length > 0) {
+      if (shouldStop?.()) {
+        return;
+      }
+      const item = queue2.shift() as BoardScoreItem;
+      // eslint-disable-next-line no-await-in-loop
+      const row = await processOne(item);
+      rows.push(row);
+      done += 1;
+      try {
+        onRow?.(row, item, done, total);
+      } catch {
+        // 回调异常不影响主流程
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+
+  console.log(
+    `[板块当日评分] 交易日 ${scoreDay}：共 ${total} 个板块，更新K线形态/RSI ${filled} 个、未取到 ${skipped} 个`
+  );
+  return { rows, scoreDayKey: dayKey, recentDays, filled, skipped };
 }
 
 // ==================== 训练周期预计算 ====================
