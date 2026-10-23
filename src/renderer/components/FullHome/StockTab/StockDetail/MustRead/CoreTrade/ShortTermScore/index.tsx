@@ -149,7 +149,7 @@ const DayScoreStrip = ({
             title={`${formatDay(d)}：${v == null ? '--' : v.toFixed(1)} ${row?.grade || ''}${note}${
               isBase ? '｜评分基准日' : ''
             }${isLoading ? '｜正在计算该交易日明细…' : ''}${
-              dayDetailErrors[d] ? `｜计算失败：${dayDetailErrors[d]}` : ''
+              errors[d] ? `｜计算失败：${errors[d]}` : ''
             }`}
             style={{
               flex: '0 0 auto',
