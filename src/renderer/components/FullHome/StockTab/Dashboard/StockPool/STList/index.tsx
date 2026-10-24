@@ -1905,6 +1905,7 @@ const STList: React.FC<STListProps> = ({
             <Select.Option value={BKType.Gainian}>概念板块</Select.Option>
           </Select>
           <Select
+            className={styles.boardSelect}
             mode="multiple"
             value={selectedSecids}
             onChange={(v) => setSelectedSecids(v as string[])}

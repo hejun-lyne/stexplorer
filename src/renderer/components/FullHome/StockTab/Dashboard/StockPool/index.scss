@@ -188,6 +188,23 @@
   opacity: 0.6;
 }
 
+// 板块多选框：选中项的标签底色偏浅（接近白色），文字沿用主题色时会变成「白底白字」看不清，
+// 这里把标签文字统一固定为黑色；移除按钮一并处理，避免图标也看不见。
+.boardSelect {
+  :global(.ant-select-selection-item),
+  :global(.ant-select-selection-item-content) {
+    color: #000 !important;
+  }
+
+  :global(.ant-select-selection-item-remove) {
+    color: #000 !important;
+
+    &:hover {
+      color: #000 !important;
+    }
+  }
+}
+
 .content {
   overflow-y: auto;
   background-color: var(--background-color);
