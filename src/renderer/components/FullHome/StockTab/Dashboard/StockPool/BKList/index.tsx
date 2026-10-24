@@ -1370,11 +1370,37 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                   onClick={() => onOpenBK(s.secid, s.name)}
                   title={detail || s.name}
                 >
-                  <div
-                    title={s.name}
-                    style={{ color: '#1890ff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-                  >
-                    {s.name}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0 }}>
+                    <span
+                      title={s.name}
+                      style={{
+                        color: '#1890ff',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        minWidth: 0,
+                      }}
+                    >
+                      {s.name}
+                    </span>
+                    {/* 箭头：不进入板块详情，直接跳到「板块股票」(STList) 看该板块的成分股 */}
+                    <span
+                      title="查看该板块的股票列表"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenBKStocks(type, s.secid);
+                      }}
+                      style={{
+                        flex: 'none',
+                        color: '#1890ff',
+                        fontSize: 13,
+                        lineHeight: 1,
+                        padding: '0 2px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ›
+                    </span>
                   </div>
                   {!!(s.advice || s.error) && (
                     <div
