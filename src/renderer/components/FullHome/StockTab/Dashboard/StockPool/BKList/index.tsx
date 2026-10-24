@@ -64,7 +64,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const isPausedRef = React.useRef(false);
   const currentIndexRef = React.useRef(0);
   const [nameFilter, setNameFilter] = useState('');
-  /** 概念板块「只看题材」：过滤掉风格/指数/持仓/业绩预告等伪概念（规则见 helpers/boardFilter） */
+  /** 概念板块「只看题材」：只保留行业/产业/技术题材，剔除风格/指数/持仓/事件/地域等伪概念（规则见 helpers/boardFilter） */
   const [onlyTheme, setOnlyTheme] = useState(false);
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
   const [currentPage, setCurrentPage] = useState(1);
@@ -852,7 +852,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                 setCurrentPage(1);
               }}
               style={{ marginRight: 8, color: 'var(--main-text-color)' }}
-              title="只保留题材属性板块：过滤掉小盘股/次新股/沪深300/沪股通/基金重仓/举牌回购/预盈预增等风格、指数、持仓、事件类伪概念（规则见 helpers/boardFilter.ts，漏网的直接加一行正则）"
+              title="只保留行业/产业/技术题材（医疗、机器人、航天、电池、半导体、光伏…），剔除小盘股/价值股/高换手/周期股/破净股/次新股/沪深300/沪股通/基金重仓/举牌回购/预盈预增/长三角/国企改革等风格、指数、持仓、事件、地域类伪概念（规则见 helpers/boardFilter.ts：漏网伪概念加到 NON_THEME_PATTERNS，误杀真题材加到 INDUSTRY_THEME_KEYWORDS）"
             >
               只看题材
             </Checkbox>

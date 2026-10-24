@@ -1516,17 +1516,26 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     return { rows: results, scoreDayKey: '', recentDays: [] };
   }
 
-  const total = items.length;
+  /**
+   * 股票清单快照（务必保留）
+   *
+   * 调用方（列表组件）会在 onRow 回调里从「传进来这个数组」中 splice 掉已完成的股票（支持暂停续跑），
+   * 也就是说 items 会被边算边删。历史补算 / 未上市判断都需要完整的股票清单，
+   * 所以一进来就留一份快照，之后所有批量遍历都走它 ——
+   * 否则补算时 items 早已被删空，backfillScores 直接返回，表现为「历史列只有基准日，前面全是 --」。
+   */
+  const allItems = [...items];
+  const total = allItems.length;
   let done = 0;
   /** 未命中序列、需要实际取数计算的股票 */
-  const pending: ShortTermScoreItem[] = [...items];
+  const pending: ShortTermScoreItem[] = [...allItems];
   const ctx = createScoreContext(source);
 
   // ---- 评分基准日：训练模式用训练日（归位到真实交易日），非训练模式取行情最后交易日 ----
   const trainDateKey = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
   let scoreDayKey = trainDateKey ? await resolveScoreDate(source, trainDateKey, ctx) : '';
 
-  const codes = items.map((i) => i.code);
+  const codes = allItems.map((i) => i.code);
 
   /**
    * 评分基准日为止的交易日（来自评分流程已取的指数日K，训练模式下已被收敛到训练日）。
@@ -1552,7 +1561,8 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
         await ensureIndexKlines(ctx, Math.max(60, backfillDays + 20), true);
       }
       await backfillScores({
-        items,
+        // 用完整股票清单快照：items 已被 onRow 边算边删，用它补算会「无股可补」
+        items: allItems,
         ctx,
         source,
         days: collectRecentDays().slice(-backfillDays),
@@ -1567,10 +1577,10 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   /** 用评分序列填充（未命中的进入 pending） */
   const fillFromSeries = (series: ShortTermScoreSeries) => {
     pending.length = 0;
-    // 必须遍历 items 的快照：调用方（列表组件）会在 onRow 里从它传入的那个数组
+    // 必须遍历完整的股票清单快照：调用方（列表组件）会在 onRow 里从它传入的那个数组
     // （即 items 本身）中 splice 掉已完成的股票，边遍历边删会跳过后续元素，
     // 表现为「评分池 845 只、结果列表只有 423 只」。
-    [...items].forEach((item) => {
+    allItems.forEach((item) => {
       const hit = pickScoreRow(series[item.code], scoreDayKey);
       // 板块维度与本次请求不一致（换了所属板块）→ 当作未命中，按新板块重算
       if (hit?.row && typeof hit.row === 'object' && isScoreRowBoardMatched(hit.row, item.hybk?.code)) {
