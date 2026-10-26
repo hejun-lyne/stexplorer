@@ -39,6 +39,7 @@ import {
   KLINE_SHAPE_SORT_KEY,
   normalizeKlineShape,
 } from '@/helpers/klineShape';
+import { RSI_SHAPE_FILTER_OPTIONS, normalizeRsiShape } from '@/helpers/rsiShape';
 import { saveTrainDayAction } from '@/actions/train';
 
 /** 短线评分列表「近 N 日评分」历史列展示的交易日数量（仅影响展示列数，过滤窗口另有其天数） */
@@ -205,6 +206,8 @@ const STList: React.FC<STListProps> = ({
   const [shortScoreShowNotListed, setShortScoreShowNotListed] = useState(false);
   // K线形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；同一形态名不区分阴阳）
   const [shortScoreKlineShapes, setShortScoreKlineShapes] = useState<string[]>([]);
+  // RSI形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；按归一化后的形态 key 过滤）
+  const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
   /**
    * 短线评分需要加载/补全的交易日数量
    *
@@ -1790,19 +1793,28 @@ const STList: React.FC<STListProps> = ({
   }, [showList, excludeStarBse, nameFilter]);
 
   /**
-   * 「K线形态」表头勾选过滤（仅短线评分列表）
+   * 「K线形态 / RSI形态」表头勾选过滤（仅短线评分列表）
    *
    * 这是纯展示层过滤：只决定列表显示哪些行，**不参与** visibleShowList，
    * 因此不会影响「当日评分」的候选股票（见下方 collectVisibleItems / todayScoreCount）。
+   * 两列同时勾选时按「与」关系叠加（与 Excel 多列筛选一致）。
    * 分页 total 也用它，保证页码与可见行数一致。
    */
   const displayList = React.useMemo(() => {
-    if (displayMode !== 'shortScore' || !shortScoreKlineShapes.length) {
+    if (displayMode !== 'shortScore') {
       return visibleShowList as any[];
     }
-    const shapeSet = new Set(shortScoreKlineShapes);
-    return (visibleShowList as any[]).filter((row: any) => shapeSet.has(normalizeKlineShape(row.klineShape)));
-  }, [visibleShowList, displayMode, shortScoreKlineShapes]);
+    let list = visibleShowList as any[];
+    if (shortScoreKlineShapes.length) {
+      const shapeSet = new Set(shortScoreKlineShapes);
+      list = list.filter((row: any) => shapeSet.has(normalizeKlineShape(row.klineShape)));
+    }
+    if (shortScoreRsiShapes.length) {
+      const rsiSet = new Set(shortScoreRsiShapes);
+      list = list.filter((row: any) => rsiSet.has(normalizeRsiShape(row.rsiPattern)));
+    }
+    return list;
+  }, [visibleShowList, displayMode, shortScoreKlineShapes, shortScoreRsiShapes]);
 
   /**
    * 表头 K线形态筛选项（带当前列表的股票数）：统计基于 visibleShowList，
@@ -1817,9 +1829,28 @@ const STList: React.FC<STListProps> = ({
     return KLINE_SHAPE_FILTER_OPTIONS.map((o) => ({ ...o, count: counts[o.value] || 0 }));
   }, [visibleShowList]);
 
+  /**
+   * 表头 RSI形态筛选项（带当前列表的股票数）：统计口径与 K线形态一致，
+   * 基于 visibleShowList（不含其它列的表头勾选），勾选后各项数量保持稳定。
+   */
+  const rsiShapeFilterItems = React.useMemo(() => {
+    const counts: Record<string, number> = {};
+    (visibleShowList as any[]).forEach((row: any) => {
+      const key = normalizeRsiShape(row.rsiPattern);
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return RSI_SHAPE_FILTER_OPTIONS.map((o) => ({ ...o, count: counts[o.value] || 0 }));
+  }, [visibleShowList]);
+
   /** 表头勾选后统一回到第 1 页 */
   const handleKlineShapeFilterChange = useCallback((next: string[]) => {
     setShortScoreKlineShapes(next);
+    setCurrentPage(1);
+  }, []);
+
+  /** RSI形态勾选后统一回到第 1 页 */
+  const handleRsiShapeFilterChange = useCallback((next: string[]) => {
+    setShortScoreRsiShapes(next);
     setCurrentPage(1);
   }, []);
 
@@ -1837,7 +1868,9 @@ const STList: React.FC<STListProps> = ({
     console.log(
       `[短线评分] 列表诊断：评分行 ${rows.length} 行（未上市 ${notListedRows}、科创/北交 ${starBseRows}），` +
         `当前展示 ${displayList.length} 行（形态过滤前 ${visibleShowList.length} 行）；排除科创北交=${excludeStarBse} 显示未上市=${shortScoreShowNotListed}` +
-        ` 评分过滤=${shortScoreFilterEnabled} RSI过滤=${shortScoreRsiFilterEnabled} 形态过滤=${shortScoreKlineShapes.length ? shortScoreKlineShapes.join('/') : '无'} 名字过滤="${nameFilter}"`
+        ` 评分过滤=${shortScoreFilterEnabled} RSI过滤=${shortScoreRsiFilterEnabled}` +
+        ` K线形态过滤=${shortScoreKlineShapes.length ? shortScoreKlineShapes.join('/') : '无'}` +
+        ` RSI形态过滤=${shortScoreRsiShapes.length ? shortScoreRsiShapes.join('/') : '无'} 名字过滤="${nameFilter}"`
     );
   }, [
     displayMode,
@@ -1845,6 +1878,7 @@ const STList: React.FC<STListProps> = ({
     displayList,
     visibleShowList,
     shortScoreKlineShapes,
+    shortScoreRsiShapes,
     shortScoreLoading,
     todayScoreLoading,
     excludeStarBse,
@@ -2233,12 +2267,70 @@ const STList: React.FC<STListProps> = ({
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
-          <Col
-            span={3}
-            title="RSI 评分逻辑识别出的形态：金叉/死叉、超卖后金叉、超买后回踩、接近金叉、多头/空头排列等"
-            style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-          >
-            RSI形态识别
+          <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span
+              className={styles.klineShapeHeader}
+              title="RSI 评分逻辑识别出的形态：金叉/死叉、超卖后金叉、超买后回踩、接近金叉、多头/空头排列等。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
+            >
+              <span className={styles.klineShapeHeaderText}>RSI形态识别</span>
+              <Dropdown
+                trigger={['click']}
+                placement="bottomLeft"
+                overlayClassName={styles.shapeFilterOverlay}
+                overlay={
+                  <div className={styles.shapeFilterPanel} onClick={(e) => e.stopPropagation()}>
+                    <div className={styles.shapeFilterActions}>
+                      <Checkbox
+                        checked={
+                          RSI_SHAPE_FILTER_OPTIONS.length > 0 &&
+                          shortScoreRsiShapes.length === RSI_SHAPE_FILTER_OPTIONS.length
+                        }
+                        indeterminate={
+                          shortScoreRsiShapes.length > 0 &&
+                          shortScoreRsiShapes.length < RSI_SHAPE_FILTER_OPTIONS.length
+                        }
+                        onChange={(e) =>
+                          handleRsiShapeFilterChange(
+                            e.target.checked ? RSI_SHAPE_FILTER_OPTIONS.map((o) => o.value) : []
+                          )
+                        }
+                      >
+                        全选
+                      </Checkbox>
+                      <a onClick={() => handleRsiShapeFilterChange([])}>清空</a>
+                    </div>
+                    <Checkbox.Group
+                      value={shortScoreRsiShapes}
+                      onChange={(v) => handleRsiShapeFilterChange((v as string[]) || [])}
+                      className={styles.shapeFilterList}
+                    >
+                      {rsiShapeFilterItems.map((o) => (
+                        <Checkbox
+                          key={o.value || '__unrecognized__'}
+                          value={o.value}
+                          disabled={!o.count && shortScoreRsiShapes.indexOf(o.value) < 0}
+                        >
+                          {o.label}
+                          <span className={styles.shapeFilterCount}>({o.count})</span>
+                        </Checkbox>
+                      ))}
+                    </Checkbox.Group>
+                  </div>
+                }
+              >
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<FilterOutlined />}
+                  className={classNames(styles.filterbtn, { [styles.filterbtnActive]: shortScoreRsiShapes.length > 0 })}
+                  title={
+                    shortScoreRsiShapes.length
+                      ? `已按 ${shortScoreRsiShapes.length} 种RSI形态过滤（点击修改）；不影响「当日评分」候选股票`
+                      : '按RSI形态勾选过滤（Excel 式多选）；仅影响列表显示，不影响「当日评分」的候选股票'
+                  }
+                />
+              </Dropdown>
+            </span>
           </Col>
           <Col span={2} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小">
