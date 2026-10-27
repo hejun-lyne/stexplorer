@@ -205,6 +205,17 @@
   }
 }
 
+// 短线评分列表：股票名称后的「新」标记（相对上一交易日新达标）
+.newEntryTag {
+  flex: none;
+  padding: 0 3px;
+  border-radius: 2px;
+  font-size: 10px;
+  line-height: 14px;
+  color: #fff;
+  background-color: #f5222d;
+}
+
 .content {
   overflow-y: auto;
   background-color: var(--background-color);

@@ -5,6 +5,7 @@ declare namespace IndexScssNamespace {
     actions: string;
     anticon: string;
     autoSize: string;
+    boardSelect: string;
     chart: string;
     chartwrapper: string;
     container: string;
@@ -19,6 +20,7 @@ declare namespace IndexScssNamespace {
     loadmore: string;
     moreheader: string;
     name: string;
+    newEntryTag: string;
     on: string;
     qsmoreheader: string;
     row: string;

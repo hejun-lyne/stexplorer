@@ -320,51 +320,68 @@ const STList: React.FC<STListProps> = ({
   const trainDayIdx = trainDate ? trainCalendarDays.indexOf(trainDate) : -1;
   const nextTrainDay =
     trainDayIdx >= 0 && trainDayIdx < trainCalendarDays.length - 1 ? trainCalendarDays[trainDayIdx + 1] : '';
+  /** 上一个交易日：训练日不在列表里（trainDayIdx < 0）时为空 */
+  const prevTrainDay = trainDayIdx > 0 ? trainCalendarDays[trainDayIdx - 1] : '';
   const trainFinished = trainCalendarDays.length > 0 && trainDayIdx >= trainCalendarDays.length - 1;
 
+  /**
+   * 跳到指定训练日并落盘（「上一天」/「下一天」共用）
+   *
+   * 与训练工具栏一致：切换一个交易日就落盘一次「训练日 + 训练进度」，
+   * 关闭/重启应用后会从这一天继续（见 saveTrainDayAction / restoreTrainCursorAction）；
+   * 列表侧监听 trainDate 变化后会清空旧结果并按新训练日重算，因此往回切同样能核对历史数据。
+   */
+  const handleGotoTrainDay = useCallback(
+    (targetDay: string) => {
+      if (!targetDay) {
+        return;
+      }
+      // 进度里还没有标的时（第一次从列表切换），用当前选中的板块补上，便于「继续上一次训练」时识别
+      const progressSecid = trainProgress?.secid || selectedSecids[0] || secid || '';
+      const progressName =
+        trainProgress?.name || [...industries, ...gainians].find((i) => i.secid === progressSecid)?.name || '';
+      dispatch(
+        saveTrainDayAction({
+          date: targetDay,
+          secid: progressSecid,
+          name: progressName,
+          startDate: trainStartDate || trainProgress?.startDate || '',
+          endDate: trainEndDate || trainProgress?.endDate || '',
+          days: trainCalendarDays,
+          initialCapital: Number(initialCapital) || trainProgress?.initialCapital || 0,
+          commissionRate:
+            commissionRate != null && Number.isFinite(Number(commissionRate))
+              ? Number(commissionRate)
+              : trainProgress?.commissionRate,
+        })
+      );
+      const idx = trainCalendarDays.indexOf(targetDay);
+      message.success(
+        `已保存训练进度：${targetDay}（${idx + 1}/${trainCalendarDays.length} 个交易日），下次启动从此日继续`
+      );
+    },
+    [
+      dispatch,
+      trainProgress,
+      trainStartDate,
+      trainEndDate,
+      trainCalendarDays,
+      initialCapital,
+      commissionRate,
+      selectedSecids,
+      secid,
+      industries,
+      gainians,
+    ]
+  );
+
   const handleNextTrainDay = useCallback(() => {
-    if (!nextTrainDay) {
-      return;
-    }
-    // 与训练工具栏一致：推进一个交易日就落盘一次「训练日 + 训练进度」，
-    // 关闭/重启应用后会从这一天继续（见 saveTrainDayAction / restoreTrainCursorAction）
-    // 进度里还没有标的时（第一次从列表推进），用当前选中的板块补上，便于「继续上一次训练」时识别
-    const progressSecid = trainProgress?.secid || selectedSecids[0] || secid || '';
-    const progressName =
-      trainProgress?.name || [...industries, ...gainians].find((i) => i.secid === progressSecid)?.name || '';
-    dispatch(
-      saveTrainDayAction({
-        date: nextTrainDay,
-        secid: progressSecid,
-        name: progressName,
-        startDate: trainStartDate || trainProgress?.startDate || '',
-        endDate: trainEndDate || trainProgress?.endDate || '',
-        days: trainCalendarDays,
-        initialCapital: Number(initialCapital) || trainProgress?.initialCapital || 0,
-        commissionRate:
-          commissionRate != null && Number.isFinite(Number(commissionRate))
-            ? Number(commissionRate)
-            : trainProgress?.commissionRate,
-      })
-    );
-    const idx = trainCalendarDays.indexOf(nextTrainDay);
-    message.success(
-      `已保存训练进度：${nextTrainDay}（${idx + 1}/${trainCalendarDays.length} 个交易日），下次启动从此日继续`
-    );
-  }, [
-    nextTrainDay,
-    dispatch,
-    trainProgress,
-    trainStartDate,
-    trainEndDate,
-    trainCalendarDays,
-    initialCapital,
-    commissionRate,
-    selectedSecids,
-    secid,
-    industries,
-    gainians,
-  ]);
+    handleGotoTrainDay(nextTrainDay);
+  }, [handleGotoTrainDay, nextTrainDay]);
+
+  const handlePrevTrainDay = useCallback(() => {
+    handleGotoTrainDay(prevTrainDay);
+  }, [handleGotoTrainDay, prevTrainDay]);
 
   // ========== 当前持仓（训练共享账户，仅训练模式） ==========
   // 持仓来自各标的的模拟买卖点（t='train'），与详情页训练工具栏用同一套回放口径，
@@ -1651,6 +1668,47 @@ const STList: React.FC<STListProps> = ({
     return shortScoreFilterDays.slice(0, Math.max(0, shortScoreFilterDays.length - beforeDays)).slice(-windowDays);
   }, [shortScoreFilterDays, shortScoreFilterBeforeDays, shortScoreFilterWindowDays]);
 
+  /** 「新出现」标记的达标分：复用「N 天前的近 M 日出现过≥X 分」里的阈值分（默认 60） */
+  const newEntryScore = Math.max(0, Number(shortScoreFilterScore) || 0);
+
+  /**
+   * 「新出现」的股票代码集合（相对上一交易日）
+   *
+   * 口径：基准日综合分 ≥ 达标分（newEntryScore），而上一交易日（shortScoreFilterDays 里基准日的前一个交易日）
+   * 没有评分行、或综合分不足达标分 —— 即今天新达标 / 新进榜。
+   * 上一交易日取不到（数据未加载、已是窗口第一天）时一律不标记，避免整表都标成「新」。
+   * 当日评分后基准日综合分为空（不计算综合分），此时也不会误标。
+   */
+  const newEntryCodes = React.useMemo(() => {
+    const codes = new Set<string>();
+    if (displayMode !== 'shortScore' || !shortScoreData.length) {
+      return codes;
+    }
+    const baseDay = shortScoreFilterDays.length ? shortScoreFilterDays[shortScoreFilterDays.length - 1] : '';
+    const baseIdx = baseDay ? shortScoreFilterDays.indexOf(baseDay) : -1;
+    const prevDay = baseIdx > 0 ? shortScoreFilterDays[baseIdx - 1] : '';
+    if (!prevDay) {
+      return codes;
+    }
+    // 安全阀：上一交易日一条评分行都读不到（序列未加载 / 行结构版本升级后旧数据被过滤）时不做判断，
+    // 否则会把整表都标成「新」。
+    const prevDayHasData = Object.keys(shortScoreSeries || {}).some((code) => !!shortScoreSeries[code]?.[prevDay]);
+    if (!prevDayHasData) {
+      return codes;
+    }
+    (shortScoreData as any[]).forEach((row: any) => {
+      const cur = row.total;
+      if (row.notListed || cur == null || cur < newEntryScore) {
+        return;
+      }
+      const prevTotal = shortScoreSeries?.[row.code]?.[prevDay]?.total;
+      if (prevTotal == null || prevTotal < newEntryScore) {
+        codes.add(row.code);
+      }
+    });
+    return codes;
+  }, [displayMode, shortScoreData, shortScoreFilterDays, shortScoreSeries, newEntryScore]);
+
   // 使用 useMemo 在 render 阶段计算 showList，避免 useLayoutEffect 中 setState 导致的无限循环
   const showList = React.useMemo(() => {
     if (displayMode === 'leaders') {
@@ -2123,6 +2181,14 @@ const STList: React.FC<STListProps> = ({
             <span style={{ marginLeft: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>训练日</span>
               <span style={{ fontSize: 12, fontWeight: 'bold' }}>{trainDate || '--'}</span>
+              <Button
+                size="small"
+                disabled={!prevTrainDay || shortScoreLoading || todayScoreLoading}
+                onClick={handlePrevTrainDay}
+                title="回退到上一个交易日，并把训练日与训练进度落盘；列表会按该日重新计算，便于核对历史数据"
+              >
+                上一天
+              </Button>
               <Button
                 size="small"
                 disabled={!nextTrainDay || shortScoreLoading || todayScoreLoading}
@@ -2612,9 +2678,26 @@ const STList: React.FC<STListProps> = ({
                 }}>
                   <div
                     title={s.name || s.code}
-                    style={{ color: '#1890ff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    style={{
+                      color: '#1890ff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                    }}
                   >
-                    {s.name || s.code}
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name || s.code}</span>
+                    {newEntryCodes.has(s.code) && (
+                      <span
+                        className={styles.newEntryTag}
+                        title={`新出现：基准日综合分 ≥ ${newEntryScore} 分，上一交易日不足该分或没有评分（对比交易日 ${shortScoreFilterDays[
+                          shortScoreFilterDays.length - 2
+                        ] || '--'}）`}
+                      >
+                        新
+                      </span>
+                    )}
                   </div>
                   {(() => {
                     // 标记该股票所属的已选板块（可能同时属于多个）
