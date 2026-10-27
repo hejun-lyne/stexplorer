@@ -24,4 +24,5 @@ export default {
   GITHUB_REPO: 'ThingsStorage', // 用于数据同步的仓库
   BAIDU_TOKENS: 'BAIDU_TOKENS', // 百度账号信息
   STORAGE_TYPE: 'STORAGE_TYPE', // 存储类型：'github' | 'sqlite'
+  SHORT_TERM_SCORE_ROW_MARKS: 'SHORT_TERM_SCORE_ROW_MARKS', // 短线评分列表行标记（股票代码 -> 趋势/横排/回调/反弹）
 };

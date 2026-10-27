@@ -53,6 +53,12 @@ const SHORT_SCORE_HISTORY_DAYS = 15;
  */
 const SHORT_SCORE_BACKFILL_DAYS = 20;
 
+/** 「K线形态」后行标记的默认值：未定 = 未标记（不写入存储） */
+const ROW_MARK_DEFAULT = '未定';
+
+/** 「K线形态」后行标记可选项：人工给股票打标签（默认「未定」，按股票代码持久化） */
+const ROW_MARK_OPTIONS = [ROW_MARK_DEFAULT, '趋势', '横排', '回调', '反弹'];
+
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
   { label: KFilterTypeNames[KFilterType.FLYX], value: KFilterType.FLYX },
@@ -208,6 +214,15 @@ const STList: React.FC<STListProps> = ({
   const [shortScoreKlineShapes, setShortScoreKlineShapes] = useState<string[]>([]);
   // RSI形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；按归一化后的形态 key 过滤）
   const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
+  /**
+   * 行标记（K线形态后的下拉选择）：股票代码 -> 趋势 / 横排 / 回调 / 反弹
+   *
+   * 人工给股票打的标签，与评分无关：默认「未定」（未标记，不写入存储）；
+   * 选中其它值后按股票代码持久化到 localStorage，切换板块、重新评分、重启应用后仍然保留。
+   */
+  const [shortScoreRowMarks, setShortScoreRowMarks] = useState<Record<string, string>>(
+    () => (Utils.GetStorage(CONST.STORAGE.SHORT_TERM_SCORE_ROW_MARKS, {}) as Record<string, string>) || {}
+  );
   /**
    * 短线评分需要加载/补全的交易日数量
    *
@@ -1912,6 +1927,27 @@ const STList: React.FC<STListProps> = ({
     setCurrentPage(1);
   }, []);
 
+  /** 行标记变更（空值 = 取消标记）：只改内存，持久化由下面的 effect 统一处理 */
+  const handleRowMarkChange = useCallback((code: string, mark?: string) => {
+    if (!code) {
+      return;
+    }
+    setShortScoreRowMarks((prev) => {
+      const next = { ...prev };
+      if (mark) {
+        next[code] = mark;
+      } else {
+        delete next[code];
+      }
+      return next;
+    });
+  }, []);
+
+  // 行标记持久化：切换板块 / 重新评分 / 重启应用后仍然保留
+  useEffect(() => {
+    Utils.SetStorage(CONST.STORAGE.SHORT_TERM_SCORE_ROW_MARKS, shortScoreRowMarks);
+  }, [shortScoreRowMarks]);
+
   /**
    * 列表诊断日志：点「短线评分」后仍找不到某只股票时，用它定位是哪一层把行过滤掉的
    * （评分池完整、结果行都在，但展示层又少了一半时，看这行日志即可）
@@ -2333,7 +2369,7 @@ const STList: React.FC<STListProps> = ({
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
-          <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Col span={2} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
               title="RSI 评分逻辑识别出的形态：金叉/死叉、超卖后金叉、超买后回踩、接近金叉、多头/空头排列等。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
@@ -2398,8 +2434,8 @@ const STList: React.FC<STListProps> = ({
               </Dropdown>
             </span>
           </Col>
-          <Col span={2} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小">
+          <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。行尾下拉可给该股票打标记：未定/趋势/横排/回调/反弹（未定=未标记，其余按股票代码保存，切板块/重新评分/重启后仍保留）">
               <span className={styles.klineShapeHeaderText}>K线形态</span>
               <Dropdown
                 trigger={['click']}
@@ -2733,7 +2769,7 @@ const STList: React.FC<STListProps> = ({
                   </span>
                 </Col>
                 <Col
-                  span={3}
+                  span={2}
                   title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
                   style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
@@ -2746,27 +2782,46 @@ const STList: React.FC<STListProps> = ({
                     <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
                   )}
                 </Col>
-                <Col
-                  span={2}
-                  style={{ fontSize: 12 }}
-                  title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${
-                    s.klineSize != null ? `｜实体 ${s.klineSize.toFixed(2)}倍平均` : ''
-                  }${
-                    s.klineUpperShadow != null && s.klineLowerShadow != null
-                      ? `｜影线 上${s.klineUpperShadow.toFixed(2)}/下${s.klineLowerShadow.toFixed(2)}（差 ${(
-                          s.klineLowerShadow - s.klineUpperShadow
-                        ).toFixed(2)}）`
-                      : ''
-                  }${s.intraday ? '｜当日K线由分时补全' : ''}${s.error ? `｜${s.error}` : ''}`}
-                >
-                  {s.klineShape ? (
-                    <span className={Utils.GetValueColor(s.klineYin ? -1 : 1).textClass}>{s.klineShape}</span>
-                  ) : s.notListed ? (
-                    // 评分基准日尚未上市：不计分、不取数（悬停看上市日期）
-                    <span style={{ color: 'var(--reverse-text-color)' }}>未上市</span>
-                  ) : (
-                    '--'
-                  )}
+                <Col span={3} style={{ fontSize: 12 }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span
+                      style={{ flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                      title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${
+                        s.klineSize != null ? `｜实体 ${s.klineSize.toFixed(2)}倍平均` : ''
+                      }${
+                        s.klineUpperShadow != null && s.klineLowerShadow != null
+                          ? `｜影线 上${s.klineUpperShadow.toFixed(2)}/下${s.klineLowerShadow.toFixed(2)}（差 ${(
+                              s.klineLowerShadow - s.klineUpperShadow
+                            ).toFixed(2)}）`
+                          : ''
+                      }${s.intraday ? '｜当日K线由分时补全' : ''}${s.error ? `｜${s.error}` : ''}`}
+                    >
+                      {s.klineShape ? (
+                        <span className={Utils.GetValueColor(s.klineYin ? -1 : 1).textClass}>{s.klineShape}</span>
+                      ) : s.notListed ? (
+                        // 评分基准日尚未上市：不计分、不取数（悬停看上市日期）
+                        <span style={{ color: 'var(--reverse-text-color)' }}>未上市</span>
+                      ) : (
+                        '--'
+                      )}
+                    </span>
+                    {/* 行标记：默认「未定」（未标记），选中其它值后按股票代码持久化（切板块/重新评分/重启后仍保留） */}
+                    <span
+                      style={{ flex: '0 0 auto' }}
+                      title="给该股票打标记（未定/趋势/横排/回调/反弹）；未定=未标记，其余按股票代码保存，切换板块、重新评分、重启应用后仍保留"
+                    >
+                      <Select
+                        size="small"
+                        value={shortScoreRowMarks[s.code] || ROW_MARK_DEFAULT}
+                        style={{ width: 62 }}
+                        dropdownMatchSelectWidth={false}
+                        onChange={(v) =>
+                          handleRowMarkChange(s.code, v === ROW_MARK_DEFAULT ? undefined : (v as string))
+                        }
+                        options={ROW_MARK_OPTIONS.map((m) => ({ label: m, value: m }))}
+                      />
+                    </span>
+                  </span>
                 </Col>
                 <Col span={1} title={s.volumeExpanded == null ? '无数据' : s.volumeExpanded ? '最新交易日放量' : '最新交易日未放量'}>
                   {s.volumeExpanded == null ? (
