@@ -500,7 +500,7 @@ export enum SingleKLineShape {
   BJX = 1,
   // 倒宝剑线，小实体，长下影线，短上影线
   DBJX = 2,
-  // 十字星，小实体，中长上下影线
+  // 十字星，小实体，中长上下影线且上下影线差不多长
   SZX = 3,
   // 螺旋桨，小实体，小上下影线
   LXJ = 4,
@@ -520,6 +520,10 @@ export enum SingleKLineShape {
   TXBB = 11,
   // 地线宝宝，大实体，中长下影线
   DXBB = 12,
+  // 黄昏星，小实体，上影线长于下影线
+  HHS = 13,
+  // 启明星，小实体，下影线长于上影线
+  QMX = 14,
 }
 
 export const SingleKLineShapeNames: {
@@ -538,6 +542,8 @@ export const SingleKLineShapeNames: {
   10: '中海绵宝宝',
   11: '天线宝宝',
   12: '地线宝宝',
+  13: '黄昏星',
+  14: '启明星',
 };
 
 export enum MultiKlineShape {

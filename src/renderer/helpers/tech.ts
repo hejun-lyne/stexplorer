@@ -436,6 +436,35 @@ export function calculateChouMa(klines: { date: string; zg: number; zd: number; 
   } as Stock.ChouMaItem;
 }
 
+/**
+ * 上下影线「差不多」的容差：|上影 - 下影| / 较长影线 ≤ 该值即视为差不多长（十字星）；
+ * 超过该值再按谁更长区分为黄昏星（上影长）/ 启明星（下影长）。
+ */
+const SHADOW_NEAR_EQUAL_RATIO = 0.3;
+
+/** 上下影线是否差不多长（较长者为 0 时视为相等，避免除零） */
+function isNearEqualShadow(top: number, down: number) {
+  const longer = Math.max(top, down);
+  if (longer <= 0) {
+    return true;
+  }
+  return Math.abs(top - down) / longer <= SHADOW_NEAR_EQUAL_RATIO;
+}
+
+/**
+ * 十字星族：十字星（上下影线差不多）/ 黄昏星（上影长）/ 启明星（下影长）
+ *
+ * 三者实体都小、上下影线都不短，只是上下影线长短不同；
+ * 技术信号（DetermineKlines 的买卖判断）仍按原「十字星」口径统一处理，避免拆分形态后信号口径漂移。
+ */
+export function IsDojiFamily(shapeType?: Enums.SingleKLineShape) {
+  return (
+    shapeType == Enums.SingleKLineShape.SZX ||
+    shapeType == Enums.SingleKLineShape.HHS ||
+    shapeType == Enums.SingleKLineShape.QMX
+  );
+}
+
 export function DescribeKlines(klines: Stock.KLineItem[], lastOnly = false) {
   const referDays = 40; // 参考最近10天的k线作为形态判别
   if (klines.length <= referDays) {
@@ -518,15 +547,17 @@ export function DescribeKlines(klines: Stock.KLineItem[], lastOnly = false) {
         shapeType = Enums.SingleKLineShape.BJX;
       } else if (hatchType == Enums.KLineHatchType.SuperDown) {
         shapeType = Enums.SingleKLineShape.DBJX;
-      } else if (
-        hatchType == Enums.KLineHatchType.EqualMedium ||
-        hatchType == Enums.KLineHatchType.EqualSuper ||
-        hatchType == Enums.KLineHatchType.MoreTop ||
-        hatchType == Enums.KLineHatchType.MoreDown
-      ) {
-        shapeType = Enums.SingleKLineShape.SZX;
       } else if (hatchType == Enums.KLineHatchType.EqualTiny) {
         shapeType = Enums.SingleKLineShape.LXJ;
+      } else if (isNearEqualShadow(shape.top, shape.down)) {
+        // 上下影线差不多长才是十字星
+        shapeType = Enums.SingleKLineShape.SZX;
+      } else if (shape.top > shape.down) {
+        // 上影线长于下影线：黄昏星
+        shapeType = Enums.SingleKLineShape.HHS;
+      } else {
+        // 下影线长于上影线：启明星
+        shapeType = Enums.SingleKLineShape.QMX;
       }
     } else if (sizeType == Enums.KLineEntitySize.Medium) {
       if (hatchType == Enums.KLineHatchType.SuperDown) {
@@ -694,7 +725,7 @@ export function DetermineKlines(klines: Stock.KLineItem[]) {
     if (!des) {
       continue;
     }
-    if (des.sshapeType == Enums.SingleKLineShape.SZX || des.sshapeType == Enums.SingleKLineShape.DBJX) {
+    if (IsDojiFamily(des.sshapeType) || des.sshapeType == Enums.SingleKLineShape.DBJX) {
       k.buyorsell.canBuy = true;
       k.buyorsell.buyReason = 'shape: ' + Enums.SingleKLineShapeNames[des.sshapeType];
     }
@@ -845,7 +876,7 @@ export function DetermineKlines(klines: Stock.KLineItem[]) {
         if (desc.sshapeType == Enums.SingleKLineShape.TCX && desc.down > 2) {
           continue;
         }
-        if (desc.sshapeType == Enums.SingleKLineShape.SZX) {
+        if (IsDojiFamily(desc.sshapeType)) {
           continue;
         }
         if (desc.yin || desc.sshapeType == Enums.SingleKLineShape.BJX || desc.sshapeType == Enums.SingleKLineShape.DTCX) {
@@ -853,7 +884,7 @@ export function DetermineKlines(klines: Stock.KLineItem[]) {
           if (
             desc1.yin ||
             desc1.sshapeType == Enums.SingleKLineShape.BJX ||
-            desc1.sshapeType == Enums.SingleKLineShape.SZX ||
+            IsDojiFamily(desc1.sshapeType) ||
             desc1.sshapeType == Enums.SingleKLineShape.DTCX
           ) {
             if (k.zd < prek.zd) {
@@ -862,7 +893,7 @@ export function DetermineKlines(klines: Stock.KLineItem[]) {
               if (
                 desc2.yin ||
                 desc2.sshapeType == Enums.SingleKLineShape.BJX ||
-                desc2.sshapeType == Enums.SingleKLineShape.SZX ||
+                IsDojiFamily(desc2.sshapeType) ||
                 desc2.sshapeType == Enums.SingleKLineShape.DTCX
               ) {
                 if (prek.zd < klines[n - 2].zd) {

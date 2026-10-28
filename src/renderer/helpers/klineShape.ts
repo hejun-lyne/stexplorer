@@ -14,6 +14,8 @@ export const KLINE_SHAPE_ORDER_YANG = [
   '铁锤线',
   '倒宝剑线',
   '十字星',
+  '黄昏星',
+  '启明星',
   '螺旋桨',
   '纺锤线',
   '地线宝宝',
@@ -28,6 +30,8 @@ export const KLINE_SHAPE_ORDER_YANG = [
 export const KLINE_SHAPE_ORDER_YIN = [
   '倒宝剑线',
   '十字星',
+  '黄昏星',
+  '启明星',
   '铁锤线',
   '螺旋桨',
   '纺锤线',
