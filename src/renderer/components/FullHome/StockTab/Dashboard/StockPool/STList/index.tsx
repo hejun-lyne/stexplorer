@@ -56,8 +56,49 @@ const SHORT_SCORE_BACKFILL_DAYS = 20;
 /** 「K线形态」后行标记的默认值：未定 = 未标记（不写入存储） */
 const ROW_MARK_DEFAULT = '未定';
 
-/** 「K线形态」后行标记可选项：人工给股票打标签（默认「未定」，按股票代码持久化） */
-const ROW_MARK_OPTIONS = [ROW_MARK_DEFAULT, '趋势', '横排', '回调', '反弹'];
+/**
+ * 「K线形态」后行标记可选项：人工给股票打标签（默认「未定」，按股票代码持久化）
+ *
+ * 统一为「形态-触发条件」：趋势-阴线不破 / 横盘-阳线突破 / 回调-长下影线 / 反弹-放量阳线，
+ * 标记本身就是选股理由，不用再靠记忆区分。
+ */
+const ROW_MARK_OPTIONS = [
+  ROW_MARK_DEFAULT,
+  '趋势-阴线不破',
+  '横盘-阳线突破',
+  '回调-长下影线',
+  '反弹-放量阳线',
+];
+
+/**
+ * 旧标记 -> 新标记的映射（读取本地存储时迁移）
+ *
+ * 之前存的是「趋势 / 横排 / 回调 / 反弹」（横排为横盘笔误）。
+ * 不迁移的话旧值在下拉里找不到对应项，会原样显示成脏值。
+ */
+const ROW_MARK_ALIASES: Record<string, string> = {
+  '趋势': '趋势-阴线不破',
+  '横排': '横盘-阳线突破',
+  '横盘': '横盘-阳线突破',
+  '回调': '回调-长下影线',
+  '反弹': '反弹-放量阳线',
+};
+
+/** 读取本地存储的行标记并迁移旧值：只保留当前可选项（未定 / 未知值不落库） */
+const normalizeRowMarks = (raw?: Record<string, string> | null): Record<string, string> => {
+  const marks: Record<string, string> = {};
+  if (!raw) {
+    return marks;
+  }
+  Object.keys(raw).forEach((code) => {
+    const mark = String(raw[code] || '');
+    const next = ROW_MARK_ALIASES[mark] || mark;
+    if (code && next && next !== ROW_MARK_DEFAULT && ROW_MARK_OPTIONS.indexOf(next) >= 0) {
+      marks[code] = next;
+    }
+  });
+  return marks;
+};
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -215,13 +256,14 @@ const STList: React.FC<STListProps> = ({
   // RSI形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；按归一化后的形态 key 过滤）
   const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
   /**
-   * 行标记（K线形态后的下拉选择）：股票代码 -> 趋势 / 横排 / 回调 / 反弹
+   * 行标记（K线形态后的下拉选择）：股票代码 -> 趋势-阴线不破 / 横盘-阳线突破 / 回调-长下影线 / 反弹-放量阳线
    *
    * 人工给股票打的标签，与评分无关：默认「未定」（未标记，不写入存储）；
    * 选中其它值后按股票代码持久化到 localStorage，切换板块、重新评分、重启应用后仍然保留。
+   * 读取时会把旧标记（趋势/横排/回调/反弹）迁移成新标记。
    */
-  const [shortScoreRowMarks, setShortScoreRowMarks] = useState<Record<string, string>>(
-    () => (Utils.GetStorage(CONST.STORAGE.SHORT_TERM_SCORE_ROW_MARKS, {}) as Record<string, string>) || {}
+  const [shortScoreRowMarks, setShortScoreRowMarks] = useState<Record<string, string>>(() =>
+    normalizeRowMarks(Utils.GetStorage(CONST.STORAGE.SHORT_TERM_SCORE_ROW_MARKS, {}) as Record<string, string>)
   );
   /**
    * 短线评分需要加载/补全的交易日数量
@@ -2434,8 +2476,8 @@ const STList: React.FC<STListProps> = ({
               </Dropdown>
             </span>
           </Col>
-          <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。行尾下拉可给该股票打标记：未定/趋势/横排/回调/反弹（未定=未标记，其余按股票代码保存，切板块/重新评分/重启后仍保留）">
+          <Col span={4} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。行尾下拉可给该股票打标记：未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线（未定=未标记，其余按股票代码保存，切板块/重新评分/重启后仍保留）">
               <span className={styles.klineShapeHeaderText}>K线形态</span>
               <Dropdown
                 trigger={['click']}
@@ -2510,10 +2552,6 @@ const STList: React.FC<STListProps> = ({
                 onClick={() => updateSortType(KLINE_SHAPE_SORT_KEY)}
               />
             </span>
-          </Col>
-          <Col span={1} title="最新交易日是否放量">
-            放量
-            <Button size="small" type="text" icon={sortTypes.volumeExpanded == 1 ? <CaretUpOutlined /> : sortTypes.volumeExpanded == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('volumeExpanded')} />
           </Col>
           {shortScoreDisplayDays.map((d) => (
             <Col
@@ -2782,10 +2820,10 @@ const STList: React.FC<STListProps> = ({
                     <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
                   )}
                 </Col>
-                <Col span={3} style={{ fontSize: 12 }}>
+                <Col span={4} style={{ fontSize: 12 }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span
-                      style={{ flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                      style={{ flex: '0 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                       title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${
                         s.klineSize != null ? `｜实体 ${s.klineSize.toFixed(2)}倍平均` : ''
                       }${
@@ -2807,13 +2845,13 @@ const STList: React.FC<STListProps> = ({
                     </span>
                     {/* 行标记：默认「未定」（未标记），选中其它值后按股票代码持久化（切板块/重新评分/重启后仍保留） */}
                     <span
-                      style={{ flex: '0 0 auto' }}
-                      title="给该股票打标记（未定/趋势/横排/回调/反弹）；未定=未标记，其余按股票代码保存，切换板块、重新评分、重启应用后仍保留"
+                      style={{ flex: '0 1 136px', minWidth: 96 }}
+                      title="给该股票打标记（未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线）；未定=未标记，其余按股票代码保存，切换板块、重新评分、重启应用后仍保留"
                     >
                       <Select
                         size="small"
                         value={shortScoreRowMarks[s.code] || ROW_MARK_DEFAULT}
-                        style={{ width: 62 }}
+                        style={{ width: '100%', fontSize: 12 }}
                         dropdownMatchSelectWidth={false}
                         onChange={(v) =>
                           handleRowMarkChange(s.code, v === ROW_MARK_DEFAULT ? undefined : (v as string))
@@ -2822,15 +2860,6 @@ const STList: React.FC<STListProps> = ({
                       />
                     </span>
                   </span>
-                </Col>
-                <Col span={1} title={s.volumeExpanded == null ? '无数据' : s.volumeExpanded ? '最新交易日放量' : '最新交易日未放量'}>
-                  {s.volumeExpanded == null ? (
-                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
-                  ) : s.volumeExpanded ? (
-                    <span className="text-up">是</span>
-                  ) : (
-                    <span style={{ color: 'var(--reverse-text-color)' }}>否</span>
-                  )}
                 </Col>
                 {shortScoreDisplayDays.map((d) => {
                   const dayRow = shortScoreSeries?.[s.code]?.[d];

@@ -4,6 +4,10 @@
   "productName": "STExplorer",
   "description": "股票分析",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hejun-lyne/stexplorer.git"
+  },
   "scripts": {
     "dev": "electron-webpack dev",
     "compile": "electron-webpack",
