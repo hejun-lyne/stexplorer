@@ -94,6 +94,24 @@ const ROW_MARK_ALIASES: Record<string, string> = {
  */
 const THEME_ONLY_SECID = '__THEME_ONLY__';
 
+/**
+ * 「选择概念板块」下拉里的伪选项：只看概念
+ *
+ * 只保留板块名称以「概念」结尾的板块（如「锂电池概念」「华为概念」），其余处理同上。
+ */
+const CONCEPT_ONLY_SECID = '__CONCEPT_ONLY__';
+
+/**
+ * 「选择概念板块」下拉里的伪选项：只看风格
+ *
+ * 只保留板块名称以「风格」结尾的板块，其余处理同上。
+ */
+const STYLE_ONLY_SECID = '__STYLE_ONLY__';
+
+/** 是否为下拉里的伪选项（只看题材 / 只看概念 / 只看风格）：它们都要先展开成真实板块再取数 */
+const isPseudoBoardSecid = (secid: string): boolean =>
+  secid === THEME_ONLY_SECID || secid === CONCEPT_ONLY_SECID || secid === STYLE_ONLY_SECID;
+
 /** 读取本地存储的行标记并迁移旧值：只保留当前可选项（未定 / 未知值不落库） */
 const normalizeRowMarks = (raw?: Record<string, string> | null): Record<string, string> => {
   const marks: Record<string, string> = {};
@@ -315,15 +333,38 @@ const STList: React.FC<STListProps> = ({
     () => (bktype === BKType.Gainian ? filterThemeBoards(gainians).map((b) => b.secid) : []),
     [bktype, gainians]
   );
+  /** 「只看概念」实际对应的板块：当前概念板块列表里名称以「概念」结尾的板块 */
+  const conceptBoardSecids = React.useMemo(
+    () =>
+      bktype === BKType.Gainian
+        ? gainians.filter((b) => String(b?.name || '').trim().endsWith('概念')).map((b) => b.secid)
+        : [],
+    [bktype, gainians]
+  );
+  /** 「只看风格」实际对应的板块：当前概念板块列表里名称以「风格」结尾的板块 */
+  const styleBoardSecids = React.useMemo(
+    () =>
+      bktype === BKType.Gainian
+        ? gainians.filter((b) => String(b?.name || '').trim().endsWith('风格')).map((b) => b.secid)
+        : [],
+    [bktype, gainians]
+  );
   /**
-   * 真正参与取数/合并的板块列表：把伪选项「只看题材」展开成所有题材板块
+   * 真正参与取数/合并的板块列表：把伪选项（只看题材 / 只看概念）展开成对应的一批真实板块
    *
    * 取数、合并、boardStocks 就绪判断、板块维度评分都用它；`selectedSecids` 只负责下拉框的选中态。
    */
   const effectiveSecids = React.useMemo(() => {
     const out: string[] = [];
     selectedSecids.forEach((sid) => {
-      const list = sid === THEME_ONLY_SECID ? themeBoardSecids : [sid];
+      const list =
+        sid === THEME_ONLY_SECID
+          ? themeBoardSecids
+          : sid === CONCEPT_ONLY_SECID
+            ? conceptBoardSecids
+            : sid === STYLE_ONLY_SECID
+              ? styleBoardSecids
+              : [sid];
       list.forEach((x) => {
         if (x && out.indexOf(x) === -1) {
           out.push(x);
@@ -331,7 +372,7 @@ const STList: React.FC<STListProps> = ({
       });
     });
     return out;
-  }, [selectedSecids, themeBoardSecids]);
+  }, [selectedSecids, themeBoardSecids, conceptBoardSecids, styleBoardSecids]);
   const effectiveSecidsRef = React.useRef<string[]>([]);
   effectiveSecidsRef.current = effectiveSecids;
   /** 展开后的板块组合签名：伪选项展开结果变化（如板块列表加载完成）时也要重新拉取成分股 */
@@ -749,12 +790,11 @@ const STList: React.FC<STListProps> = ({
   useWorkDayTimeToDo(
     () => {
       const secids = effectiveSecidsRef.current;
-      // 「只看题材」会展开成几十个板块：定时刷新时只补拉还没缓存的，
+      // 「只看题材 / 只看概念」会展开成几十个板块：定时刷新时只补拉还没缓存的，
       // 否则每 6 秒对几十个板块各发一次请求，接口会直接被限流
-      const targets =
-        selectedSecidsRef.current.indexOf(THEME_ONLY_SECID) >= 0
-          ? secids.filter((s) => boardStocksCacheRef.current[s] === undefined)
-          : secids;
+      const targets = selectedSecidsRef.current.some(isPseudoBoardSecid)
+        ? secids.filter((s) => boardStocksCacheRef.current[s] === undefined)
+        : secids;
       loadBoardsStocks(targets);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
@@ -2164,6 +2204,16 @@ const STList: React.FC<STListProps> = ({
             {bktype === BKType.Gainian && (
               <Select.Option value={THEME_ONLY_SECID} key={THEME_ONLY_SECID}>
                 只看题材
+              </Select.Option>
+            )}
+            {bktype === BKType.Gainian && (
+              <Select.Option value={CONCEPT_ONLY_SECID} key={CONCEPT_ONLY_SECID}>
+                只看概念
+              </Select.Option>
+            )}
+            {bktype === BKType.Gainian && (
+              <Select.Option value={STYLE_ONLY_SECID} key={STYLE_ONLY_SECID}>
+                只看风格
               </Select.Option>
             )}
             {(bktype === BKType.Industry ? industries : gainians).map((i) => (
