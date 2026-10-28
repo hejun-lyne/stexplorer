@@ -527,6 +527,45 @@ let restartTimer: ReturnType<typeof setTimeout> | null = null;
 let isPushing = false;
 let pendingRestart = false;
 
+/** 非交易时段的重连检查间隔：纯本地计时，不产生任何请求 */
+const PUSH_SESSION_CHECK_INTERVAL = 60 * 1000;
+let pushSessionTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 是否处于可实时推送的交易时段（工作日 9:20-11:30、13:00-15:00） */
+function isPushSessionTime() {
+  return Utils.JudgeWorkDayTime(new Date().getTime());
+}
+
+/** 关闭行情长链接（非交易时段/无订阅标的时用） */
+function closeStockDetailPush() {
+  if (sPush) {
+    sPush.close();
+    sPush = null as any;
+  }
+}
+
+/**
+ * 交易时段看门狗
+ *
+ * 东财 SSE 只在交易时段有数据：非交易时段建立长链接会拿到空响应（ERR_EMPTY_RESPONSE），
+ * 并被 EventSource 反复重连。因此收盘后主动断开，每分钟本地检查一次，
+ * 进入交易时段（含应用一直开到第二天开盘）再自动补开。
+ */
+function watchPushSession() {
+  if (pushSessionTimer) {
+    return;
+  }
+  pushSessionTimer = setInterval(() => {
+    if (!isPushSessionTime()) {
+      closeStockDetailPush();
+      return;
+    }
+    if (!sPush) {
+      MultiStockDetailPush(true);
+    }
+  }, PUSH_SESSION_CHECK_INTERVAL);
+}
+
 function debouncedRestart() {
   if (restartTimer) {
     clearTimeout(restartTimer);
@@ -572,31 +611,39 @@ export function RemoveStockDetailPush(secid: string, callback?: (detail: Stock.P
   debouncedRestart();
 }
 export function MultiStockDetailPush(restart:boolean) {
+  // 非交易时段不请求 SSE：东财对 ulist/sse 会直接返回空响应（ERR_EMPTY_RESPONSE），
+  // EventSource 收到 error 后还会按重连策略反复重试，白白刷请求和控制台；
+  // 收盘后行情本来就不再变化，直接断开即可，等进入交易时段由看门狗自动补开。
+  if (!isPushSessionTime()) {
+    closeStockDetailPush();
+    watchPushSession();
+    return;
+  }
   if (isPushing) {
     pendingRestart = true;
     return;
   }
   isPushing = true;
   pendingRestart = false;
-  // if (sPush && !Utils.JudgeWorkDayTime(new Date().getTime())) {
-  //   // 非交易时间不更新
-  //   return;
-  // }
   try {
     if (sPush != null) {
       if(!restart) {
         return;
       }
-      sPush.close();
-      sPush = null as any;
+      closeStockDetailPush();
     }
     const {
       stock: { stockConfigs },
     } = store.getState();
     const secids = stockConfigs.filter((_) => _.type != Enums.StockMarketType.Future).map((s) => s.secid);
     const appendSecids = sAppendStocks.map((s) => s.secid);
+    const allSecids = secids.concat(appendSecids);
+    if (!allSecids.length) {
+      // 没有任何订阅标的：不建立长链接（空 secids 同样只会拿到空响应）
+      return;
+    }
     sPush = new EastmoneyStockDetailsPush({
-      secids: secids.concat(appendSecids),
+      secids: allSecids,
       success: (data: {
         total: 1;
         diff: {
@@ -793,11 +840,9 @@ export async function UpdateStockDetails() {
       stock: { stockConfigs, stocksLoading, stocksMapping, maMonitors, chanMonitors, gMonitors },
     } = store.getState();
 
-    // 非交易时段行情不会再变化：不再请求东财/新浪详情接口，
-    // 价格等实时字段由已有的长链接推送（MultiStockDetailPush）继续补齐
-    if (!Utils.JudgeWorkDayTime(new Date().getTime())) {
-      return;
-    }
+    // 非交易时段不再有 SSE 推送（见 MultiStockDetailPush），但启动时仍要拉一次快照：
+    // 否则左侧列表只有分组、没有任何行情（盘外长链接返回空响应，等不到补全数据）。
+    // 这里走普通 HTTP 详情接口，只发一次，不建立长链接。
     if (stocksLoading) {
       return;
     }

@@ -40,6 +40,7 @@ import {
   normalizeKlineShape,
 } from '@/helpers/klineShape';
 import { RSI_SHAPE_FILTER_OPTIONS, normalizeRsiShape } from '@/helpers/rsiShape';
+import { filterThemeBoards } from '@/helpers/boardFilter';
 import { saveTrainDayAction } from '@/actions/train';
 
 /** 短线评分列表「近 N 日评分」历史列展示的交易日数量（仅影响展示列数，过滤窗口另有其天数） */
@@ -83,6 +84,15 @@ const ROW_MARK_ALIASES: Record<string, string> = {
   '回调': '回调-长下影线',
   '反弹': '反弹-放量阳线',
 };
+
+/**
+ * 「选择概念板块」下拉里的伪选项：只看题材
+ *
+ * 不是真实板块：选中后展开成「当前概念板块列表里所有题材板块」（规则见 helpers/boardFilter），
+ * 股票列表 = 这些题材板块成分股去重合并的结果。
+ * 伪选项本身不参与取数、不记入「股票→所属板块」映射，所以个股的板块维度评分仍落在真实板块上。
+ */
+const THEME_ONLY_SECID = '__THEME_ONLY__';
 
 /** 读取本地存储的行标记并迁移旧值：只保留当前可选项（未定 / 未知值不落库） */
 const normalizeRowMarks = (raw?: Record<string, string> | null): Record<string, string> => {
@@ -297,6 +307,37 @@ const STList: React.FC<STListProps> = ({
   const boardsKey = React.useMemo(() => [...selectedSecids].sort().join(','), [selectedSecids]);
   const boardsKeyRef = React.useRef('');
   boardsKeyRef.current = boardsKey;
+  /**
+   * 「只看题材」实际对应的板块：当前概念板块列表中通过题材过滤的所有板块
+   * （板块列表随 BKList 拉取，晚到时这里会从空变满，下面的 effectiveBoardsKey 会触发重新加载）
+   */
+  const themeBoardSecids = React.useMemo(
+    () => (bktype === BKType.Gainian ? filterThemeBoards(gainians).map((b) => b.secid) : []),
+    [bktype, gainians]
+  );
+  /**
+   * 真正参与取数/合并的板块列表：把伪选项「只看题材」展开成所有题材板块
+   *
+   * 取数、合并、boardStocks 就绪判断、板块维度评分都用它；`selectedSecids` 只负责下拉框的选中态。
+   */
+  const effectiveSecids = React.useMemo(() => {
+    const out: string[] = [];
+    selectedSecids.forEach((sid) => {
+      const list = sid === THEME_ONLY_SECID ? themeBoardSecids : [sid];
+      list.forEach((x) => {
+        if (x && out.indexOf(x) === -1) {
+          out.push(x);
+        }
+      });
+    });
+    return out;
+  }, [selectedSecids, themeBoardSecids]);
+  const effectiveSecidsRef = React.useRef<string[]>([]);
+  effectiveSecidsRef.current = effectiveSecids;
+  /** 展开后的板块组合签名：伪选项展开结果变化（如板块列表加载完成）时也要重新拉取成分股 */
+  const effectiveBoardsKey = React.useMemo(() => [...effectiveSecids].sort().join(','), [effectiveSecids]);
+  const effectiveBoardsKeyRef = React.useRef('');
+  effectiveBoardsKeyRef.current = effectiveBoardsKey;
   /** 每个板块的成分股缓存：secid -> stocks（多板块合并前各自独立保存） */
   const boardStocksCacheRef = React.useRef<Record<string, Stock.DetailItem[]>>({});
   /** 每只股票所属的「已选板块」secid 列表（code -> secid[]），用于结果列表标记所属板块 */
@@ -311,7 +352,8 @@ const STList: React.FC<STListProps> = ({
   const selectedBoardMeta = React.useMemo(() => {
     const all = [...industries, ...gainians];
     const meta: Record<string, { code: string; name: string }> = {};
-    selectedSecids.forEach((sid) => {
+    // 用展开后的板块列表：伪选项「只看题材」不是真实板块，不能算出 code
+    effectiveSecids.forEach((sid) => {
       const found = all.find((b) => b.secid === sid);
       const code = String(sid).includes('.') ? String(sid).split('.').pop() || '' : String(sid);
       if (code) {
@@ -319,7 +361,7 @@ const STList: React.FC<STListProps> = ({
       }
     });
     return meta;
-  }, [selectedSecids, industries, gainians]);
+  }, [effectiveSecids, industries, gainians]);
   // 板块身份：评分结果与股票池都绑定「已选板块组合」，切换板块后必须整体重来
   /** 上一次评分结果所属的板块组合（用于判断能否沿用上一次的股票池） */
   const shortScorePoolRef = React.useRef('');
@@ -394,7 +436,7 @@ const STList: React.FC<STListProps> = ({
         return;
       }
       // 进度里还没有标的时（第一次从列表切换），用当前选中的板块补上，便于「继续上一次训练」时识别
-      const progressSecid = trainProgress?.secid || selectedSecids[0] || secid || '';
+      const progressSecid = trainProgress?.secid || effectiveSecids[0] || secid || '';
       const progressName =
         trainProgress?.name || [...industries, ...gainians].find((i) => i.secid === progressSecid)?.name || '';
       dispatch(
@@ -425,7 +467,7 @@ const STList: React.FC<STListProps> = ({
       trainCalendarDays,
       initialCapital,
       commissionRate,
-      selectedSecids,
+      effectiveSecids,
       secid,
       industries,
       gainians,
@@ -570,19 +612,14 @@ const STList: React.FC<STListProps> = ({
             `（按涨跌幅排序取前 N），列表成员可能随行情变化`
         );
       }
-      if (selectedSecidsRef.current.indexOf(requestedSecid) === -1) {
+      if (effectiveSecidsRef.current.indexOf(requestedSecid) === -1) {
         // 该板块已不在当前选择中：只缓存，不参与合并
         return;
       }
-      const merged = rebuildStocksFromBoards();
+      rebuildStocksFromBoards();
+      // K线过滤防抖：多板块逐个返回时只跑最后一次（见 scheduleKlineFilter）
       if (ftypes.length > 0) {
-        setFiltering(true);
-        const base = excludeStarBse ? merged.filter((s) => !isStarOrBseCode(s.code)) : merged;
-        runFilterStocks(
-          base.map((s) => s.secid),
-          ftypes,
-          fdays
-        );
+        scheduleKlineFilter();
       }
     },
   });
@@ -608,18 +645,12 @@ const STList: React.FC<STListProps> = ({
       }
       // 多板块：先把该板块的列表存入缓存
       boardStocksCacheRef.current[requestedSecid] = data.stocks as Stock.DetailItem[];
-      if (selectedSecidsRef.current.indexOf(requestedSecid) === -1) {
+      if (effectiveSecidsRef.current.indexOf(requestedSecid) === -1) {
         return;
       }
-      const merged = rebuildStocksFromBoards();
+      rebuildStocksFromBoards();
       if (ftypes.length > 0) {
-        setFiltering(true);
-        const base = excludeStarBse ? merged.filter((s) => !isStarOrBseCode(s.code)) : merged;
-        runFilterStocks(
-          base.map((s) => s.secid),
-          ftypes,
-          fdays
-        );
+        scheduleKlineFilter();
       }
     },
   });
@@ -643,15 +674,15 @@ const STList: React.FC<STListProps> = ({
     [kLineApiSourceSetting, runGetIndustryStocks, runGetStocks]
   );
 
-  /** 已选板块的成分股是否都已就绪（缓存里都有） */
+  /** 已选板块的成分股是否都已就绪（缓存里都有）；「只看题材」按展开后的板块逐个检查 */
   const boardsReady = useCallback(() => {
-    const secids = selectedSecidsRef.current;
+    const secids = effectiveSecidsRef.current;
     return secids.length > 0 && secids.every((s) => boardStocksCacheRef.current[s] !== undefined);
   }, []);
 
   /** 用各板块缓存的成分股重建「合并股票列表」与「股票→所属板块」映射 */
   const rebuildStocksFromBoards = useCallback(() => {
-    const secids = selectedSecidsRef.current;
+    const secids = effectiveSecidsRef.current;
     const merged: Stock.DetailItem[] = [];
     const seen = new Set<string>();
     const membership: Record<string, string[]> = {};
@@ -680,9 +711,51 @@ const STList: React.FC<STListProps> = ({
     return merged;
   }, []);
 
+  /** K线过滤的防抖定时器：多板块逐个返回时，只在「最后一次返回」后跑一次过滤 */
+  const klineFilterTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /**
+   * 触发一次 K线过滤（防抖 400ms）
+   *
+   * 多板块（尤其「只看题材」展开成几十个板块）逐个返回时，每返回一个就跑一次全量过滤会卡死；
+   * 用防抖合并成一次，且定时器到点后用缓存重建最新合并结果，保证过滤的是完整股票池。
+   */
+  const scheduleKlineFilter = useCallback(() => {
+    if (klineFilterTimerRef.current) {
+      clearTimeout(klineFilterTimerRef.current);
+    }
+    klineFilterTimerRef.current = setTimeout(() => {
+      klineFilterTimerRef.current = null;
+      const list = rebuildStocksFromBoards();
+      const base = excludeStarBse ? list.filter((s) => !isStarOrBseCode(s.code)) : list;
+      setFiltering(true);
+      runFilterStocks(
+        base.map((s) => s.secid),
+        ftypes,
+        fdays
+      );
+    }, 400);
+  }, [rebuildStocksFromBoards, excludeStarBse, ftypes, fdays, runFilterStocks]);
+
+  useEffect(
+    () => () => {
+      if (klineFilterTimerRef.current) {
+        clearTimeout(klineFilterTimerRef.current);
+      }
+    },
+    []
+  );
+
   useWorkDayTimeToDo(
     () => {
-      loadBoardsStocks(selectedSecidsRef.current);
+      const secids = effectiveSecidsRef.current;
+      // 「只看题材」会展开成几十个板块：定时刷新时只补拉还没缓存的，
+      // 否则每 6 秒对几十个板块各发一次请求，接口会直接被限流
+      const targets =
+        selectedSecidsRef.current.indexOf(THEME_ONLY_SECID) >= 0
+          ? secids.filter((s) => boardStocksCacheRef.current[s] === undefined)
+          : secids;
+      loadBoardsStocks(targets);
     },
     active ? CONST.DEFAULT.STOCK_TREND_DELAY : null
   );
@@ -697,7 +770,7 @@ const STList: React.FC<STListProps> = ({
       return;
     }
     // 龙头识别按「单个板块」进行：多板块时取第一个选中板块
-    const primarySecid = selectedSecidsRef.current[0] || secid;
+    const primarySecid = effectiveSecidsRef.current[0] || secid;
     if (!primarySecid) {
       console.log('[龙头股] 请先选择一个板块/行业');
       return;
@@ -1007,7 +1080,7 @@ const STList: React.FC<STListProps> = ({
       const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
       const manual = stockConfigsMapping[secid]?.hybk || null;
       const boardSecids = stockBoardSecidsMap[code] || [];
-      const hitSecid = selectedSecids.find((sid) => boardSecids.indexOf(sid) >= 0) || boardSecids[0] || '';
+      const hitSecid = effectiveSecids.find((sid) => boardSecids.indexOf(sid) >= 0) || boardSecids[0] || '';
       const selected = hitSecid ? selectedBoardMeta[hitSecid] : null;
       return selected || manual;
     };
@@ -1072,7 +1145,7 @@ const STList: React.FC<STListProps> = ({
     leaderData,
     leaderDisplayCount,
     stockBoardSecidsMap,
-    selectedSecids,
+    effectiveSecids,
     selectedBoardMeta,
   ]);
 
@@ -1487,7 +1560,8 @@ const STList: React.FC<STListProps> = ({
   // 若变化前正在看评分结果列表，则在新板块组合的股票列表就绪后自动按新组合重算一次，列表跟着板块走。
   useEffect(() => {
     const targetKey = boardsKey;
-    const targetSecids = selectedSecidsRef.current;
+    // 展开后的真实板块（「只看题材」= 所有题材板块）：取数/合并/就绪判断都以它为准
+    const targetSecids = effectiveSecidsRef.current;
     /** 变化前正在展示评分结果时，记录该列表是「短线评分」还是「当日评分」算出来的 */
     const rescoreMode = displayModeRef.current === 'shortScore' ? shortScoreSourceRef.current : '';
     setCurrentPage(1);
@@ -1581,9 +1655,10 @@ const STList: React.FC<STListProps> = ({
     return () => {
       canceled = true;
     };
-    // 依赖只保留 boardsKey：其余为 ref / 稳定 useCallback，加入依赖会导致无关重跑
+    // 依赖只保留两个板块签名：其余为 ref / 稳定 useCallback，加入依赖会导致无关重跑。
+    // effectiveBoardsKey 用于「只看题材」：概念板块列表晚到（题材板块从 0 变多）时也要重新拉取成分股。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boardsKey]);
+  }, [boardsKey, effectiveBoardsKey]);
 
   // 训练日切换（训练工具栏或列表里的「下一天」）→ 若正在展示「短线评分」结果列表，自动按新训练日重算。
   // 用 ref 持有最新的 handleShortScore，避免把它写进依赖导致「评分状态变化 → effect 重跑」的循环。
@@ -2086,6 +2161,11 @@ const STList: React.FC<STListProps> = ({
             maxTagCount="responsive"
             allowClear
           >
+            {bktype === BKType.Gainian && (
+              <Select.Option value={THEME_ONLY_SECID} key={THEME_ONLY_SECID}>
+                只看题材
+              </Select.Option>
+            )}
             {(bktype === BKType.Industry ? industries : gainians).map((i) => (
               <Select.Option value={i.secid} key={i.code}>
                 {i.name}
@@ -2477,7 +2557,7 @@ const STList: React.FC<STListProps> = ({
             </span>
           </Col>
           <Col span={4} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/铁锤线/海绵宝宝…）。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。行尾下拉可给该股票打标记：未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线（未定=未标记，其余按股票代码保存，切板块/重新评分/重启后仍保留）">
+            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/黄昏星/启明星/铁锤线/海绵宝宝…）。十字星=小实体且上下影线差不多长，上影线长于下影线=黄昏星，下影线长于上影线=启明星。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。行尾下拉可给该股票打标记：未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线（未定=未标记，其余按股票代码保存，切板块/重新评分/重启后仍保留）">
               <span className={styles.klineShapeHeaderText}>K线形态</span>
               <Dropdown
                 trigger={['click']}
