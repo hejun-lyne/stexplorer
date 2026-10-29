@@ -904,14 +904,17 @@ export async function GetKFromDataSource(
   }
 
   // 1. 尝试读取磁盘缓存
+  //    训练模式下「数据应有的最新日期」就是训练日，缓存只要覆盖训练日就能直接用：
+  //    否则每个训练日都会被判成「过期」（期望最新日期是真实最新交易日），逐只重复请求，非常慢。
+  const trainMode = TrainFilter.IsTrainFilterOn() && !ignoreTrain;
   try {
     const cached = await window.contextModules.electron.sqliteRead(cacheTable, cacheKey);
     if (cached?.success && cached.data?.data?.ks && cached.data.data.ks.length > 0) {
       const ks: Stock.KLineItem[] = cached.data.data.ks;
       const lastDate = ks[ks.length - 1].date;
-      const expectedLatestDate = await getExpectedLatestDate();
+      const expectedLatestDate = trainMode ? '' : await getExpectedLatestDate();
 
-      if (lastDate >= expectedLatestDate) {
+      if (trainMode || lastDate >= expectedLatestDate) {
         // 检查缓存数据长度是否满足 limit 要求
         if (limit && limit > 0 && ks.length < limit) {
           // 缓存数据量不足，需要重新请求

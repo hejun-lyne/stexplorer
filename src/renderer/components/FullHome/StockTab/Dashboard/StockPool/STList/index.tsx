@@ -28,6 +28,7 @@ import {
   computeTodayScoreRows,
   loadScoreSeries,
   resolveRecentTradingDays,
+  SHORT_SCORE_SOURCE,
   ShortTermScoreItem,
   ShortTermScoreRow,
   ShortTermScoreSeries,
@@ -42,14 +43,20 @@ import {
 import { RSI_SHAPE_FILTER_OPTIONS, normalizeRsiShape } from '@/helpers/rsiShape';
 import { filterThemeBoards } from '@/helpers/boardFilter';
 import { saveTrainDayAction } from '@/actions/train';
+import ScoreStockPanel from './ScoreStockPanel';
 
-/** 短线评分列表「近 N 日评分」历史列展示的交易日数量（仅影响展示列数，过滤窗口另有其天数） */
+/**
+ * 评分序列至少加载的交易日数量
+ *
+ * 列表不再渲染「近 N 日评分」历史列，这些评分只用于「N 天前的近 M 日」过滤窗口与「新出现」标记，
+ * 所以这里只是加载天数下限（过滤窗口更宽时按窗口天数补，见 shortScoreHistoryDays）。
+ */
 const SHORT_SCORE_HISTORY_DAYS = 15;
 
 /**
  * 执行「短线评分 / 预计算训练评分」时顺带补全的历史评分天数
  *
- * 点一次评分就把最近 20 个交易日的评分补齐（写回评分序列），历史列不再逐日出现 `--`；
+ * 点一次评分就把最近 20 个交易日的评分补齐（写回评分序列），过滤窗口用到的天数不再缺分；
  * 过滤窗口更宽时按窗口天数补（见 shortScoreHistoryDays）。
  */
 const SHORT_SCORE_BACKFILL_DAYS = 20;
@@ -60,7 +67,7 @@ const ROW_MARK_DEFAULT = '未定';
 /**
  * 「K线形态」后行标记可选项：人工给股票打标签（默认「未定」，按股票代码持久化）
  *
- * 统一为「形态-触发条件」：趋势-阴线不破 / 横盘-阳线突破 / 回调-长下影线 / 反弹-放量阳线，
+ * 统一为「形态-触发条件」：趋势-阴线不破 / 横盘-阳线突破 / 回调-长下影线 / 反弹-放量阳线 / 上升-待观察 / 顶部-震荡谨慎，
  * 标记本身就是选股理由，不用再靠记忆区分。
  */
 const ROW_MARK_OPTIONS = [
@@ -69,6 +76,8 @@ const ROW_MARK_OPTIONS = [
   '横盘-阳线突破',
   '回调-长下影线',
   '反弹-放量阳线',
+  '上升-待观察',
+  '顶部-震荡谨慎',
 ];
 
 /**
@@ -183,6 +192,34 @@ const nameOfListItem = (item: any): string => {
   return String(item.name ?? item.stockName ?? '');
 };
 
+/**
+ * 取一条列表行的「流通市值」（单位：亿元），用于市值区间筛选
+ *
+ * 两类行的口径不同：
+ * - 短线评分行：circ_mv 是评分接口给的「元」；
+ * - 板块成分股行：lt 按项目既有约定就是「亿元」（表格里的市值列也按亿展示）。
+ * 兜底：数值 > 100 万时视为「元」自动换算成亿（东财/akshare 源会直接给元）。
+ *
+ * @returns 亿元；取不到市值时返回 undefined（调用方放行，避免整表被筛空）
+ */
+const marketCapYiOf = (item: any): number | undefined => {
+  const circMv = Number(item?.circ_mv);
+  if (Number.isFinite(circMv) && circMv > 0) {
+    return circMv > 1e6 ? circMv / 1e8 : circMv;
+  }
+  const mv = Number(item?.lt ?? item?.sz);
+  if (!Number.isFinite(mv) || mv <= 0) {
+    return undefined;
+  }
+  return mv > 1e6 ? mv / 1e8 : mv;
+};
+
+/** 是否落在市值区间内（亿元）：没有市值数据的行放行，避免数据缺失时整表消失 */
+const inMarketCapRange = (item: any, min: number, max: number): boolean => {
+  const mv = marketCapYiOf(item);
+  return mv === undefined || (mv >= min && mv <= max);
+};
+
 export interface STListProps {
   industries: Stock.BanKuaiItem[];
   gainians: Stock.BanKuaiItem[];
@@ -214,6 +251,18 @@ const STList: React.FC<STListProps> = ({
   const [nameFilter, setNameFilter] = useState('');
   /** 排除科创板 + 北交所（默认勾选）：同时作用于列表展示与评分池（短线评分 / 训练周期预计算） */
   const [excludeStarBse, setExcludeStarBse] = useState(true);
+  /** 市值区间筛选（默认 20~200 亿，可关闭）：与「排除科创板+北交所」一样，同时作用于列表展示与评分池 */
+  const [marketCapFilterEnabled, setMarketCapFilterEnabled] = useState(true);
+  const [marketCapMin, setMarketCapMin] = useState(20);
+  const [marketCapMax, setMarketCapMax] = useState(200);
+  /** 归一化后的市值区间（亿元）：最小值>最大值时自动对调 */
+  const marketCapRange = React.useMemo(() => {
+    const a = Number(marketCapMin);
+    const b = Number(marketCapMax);
+    const min = Number.isFinite(a) && a >= 0 ? a : 0;
+    const max = Number.isFinite(b) && b > 0 ? b : Number.POSITIVE_INFINITY;
+    return min <= max ? { min, max } : { min: max, max: min };
+  }, [marketCapMin, marketCapMax]);
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
 
   // 选股流程状态
@@ -260,7 +309,7 @@ const STList: React.FC<STListProps> = ({
   const shortScoreRemainingRef = React.useRef<ShortTermScoreItem[]>([]);
   const shortScoreTotalRef = React.useRef(0);
   const shortScoreCodesRef = React.useRef<string[]>([]);
-  // 「近 N 日评分」历史列：交易日列表 + 每只股票的评分序列
+  // 评分序列：交易日列表 + 每只股票的每日评分（供过滤窗口 / 「新出现」标记使用，不渲染成历史列）
   const [shortScoreDays, setShortScoreDays] = useState<string[]>([]);
   const [shortScoreSeries, setShortScoreSeries] = useState<ShortTermScoreSeries>({});
   /** 历史缺口补算进度：执行短线评分时顺带补齐近 N 个交易日缺的评分 */
@@ -283,8 +332,10 @@ const STList: React.FC<STListProps> = ({
   const [shortScoreKlineShapes, setShortScoreKlineShapes] = useState<string[]>([]);
   // RSI形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；按归一化后的形态 key 过滤）
   const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
+  /** 右侧面板当前展示的股票代码（点列表里的名字切换；空 = 默认展示列表第一只） */
+  const [panelCode, setPanelCode] = useState('');
   /**
-   * 行标记（K线形态后的下拉选择）：股票代码 -> 趋势-阴线不破 / 横盘-阳线突破 / 回调-长下影线 / 反弹-放量阳线
+   * 行标记（K线形态后的下拉选择）：股票代码 -> 趋势-阴线不破 / 横盘-阳线突破 / 回调-长下影线 / 反弹-放量阳线 / 上升-待观察 / 顶部-震荡谨慎
    *
    * 人工给股票打的标签，与评分无关：默认「未定」（未标记，不写入存储）；
    * 选中其它值后按股票代码持久化到 localStorage，切换板块、重新评分、重启应用后仍然保留。
@@ -297,10 +348,10 @@ const STList: React.FC<STListProps> = ({
    * 短线评分需要加载/补全的交易日数量
    *
    * 三者的最大值：
-   * - SHORT_SCORE_HISTORY_DAYS：「近 N 日评分」历史列展示的天数；
+   * - SHORT_SCORE_HISTORY_DAYS：评分序列的加载天数下限；
    * - SHORT_SCORE_BACKFILL_DAYS：执行短线评分时顺带补全的历史评分天数（至少最近 20 个交易日）；
    * - 过滤窗口「N 天前的近 M 日」的最远回溯距离。
-   * 这样点一次短线评分，历史列与过滤窗口用到的评分都会被补齐，不用再逐日手动补。
+   * 这样点一次短线评分，过滤窗口与「新出现」标记用到的评分都会被补齐，不用再逐日手动补。
    */
   const shortScoreHistoryDays = React.useMemo(
     () =>
@@ -666,15 +717,18 @@ const STList: React.FC<STListProps> = ({
   });
 
   /**
-   * 「排除科创板+北交所」后的板块股票池
+   * 「排除科创板+北交所」「市值区间」后的板块股票池
    *
    * 选股漏斗各步（龙头识别 / 排雷 / 择时 / 主力建仓）、K线过滤、列表展示与评分池
-   * 统一以它为准：被排除的标的既不进入后续分析请求，也不会出现在列表或评分结果里。
+   * 统一以它为准：被筛掉的标的不进入后续分析请求，也不会出现在列表或评分结果里。
    */
-  const poolStocks = React.useMemo(
-    () => (excludeStarBse ? stocks.filter((s) => !isStarOrBseCode(s.code)) : stocks),
-    [stocks, excludeStarBse]
-  );
+  const poolStocks = React.useMemo(() => {
+    let list = excludeStarBse ? stocks.filter((s) => !isStarOrBseCode(s.code)) : stocks;
+    if (marketCapFilterEnabled) {
+      list = list.filter((s) => inMarketCapRange(s, marketCapRange.min, marketCapRange.max));
+    }
+    return list;
+  }, [stocks, excludeStarBse, marketCapFilterEnabled, marketCapRange]);
 
   const { run: runGetIndustryStocks } = useRequest(GetIndustryStocksFromTushare, {
     throwOnError: true,
@@ -768,7 +822,12 @@ const STList: React.FC<STListProps> = ({
     klineFilterTimerRef.current = setTimeout(() => {
       klineFilterTimerRef.current = null;
       const list = rebuildStocksFromBoards();
-      const base = excludeStarBse ? list.filter((s) => !isStarOrBseCode(s.code)) : list;
+      // 与 poolStocks 保持同一口径（排除科创/北交 + 市值区间），不为已被筛掉的股票跑 K线过滤
+      const base = list.filter(
+        (s) =>
+          (!excludeStarBse || !isStarOrBseCode(s.code)) &&
+          (!marketCapFilterEnabled || inMarketCapRange(s, marketCapRange.min, marketCapRange.max))
+      );
       setFiltering(true);
       runFilterStocks(
         base.map((s) => s.secid),
@@ -776,7 +835,7 @@ const STList: React.FC<STListProps> = ({
         fdays
       );
     }, 400);
-  }, [rebuildStocksFromBoards, excludeStarBse, ftypes, fdays, runFilterStocks]);
+  }, [rebuildStocksFromBoards, excludeStarBse, marketCapFilterEnabled, marketCapRange, ftypes, fdays, runFilterStocks]);
 
   useEffect(
     () => () => {
@@ -1158,15 +1217,22 @@ const STList: React.FC<STListProps> = ({
       // （不这样做会退回「当前板块全部股票」，与「预计算训练评分」覆盖的股票池不一致，
       //   多出来的股票只能现算，表现为「预计算过了、再点短线评分仍然很慢」。）
       // 板块组合已经变化时必须放弃沿用：否则会把上一组板块的股票当成当前板块再评一遍。
-      return shortScoreCodesRef.current.map((code) => {
-        const s = stocks.find((x) => x.code === code) as any;
-        return {
-          code,
-          name: s?.name || lookupName(code),
-          circMv: s?.lt ? s.lt * 1e8 : undefined,
-          hybk: lookupHybk(code),
-        };
-      });
+      const stockByCode = new Map((stocks as any[]).map((x) => [x.code, x]));
+      return shortScoreCodesRef.current
+        .filter(
+          (code) =>
+            !marketCapFilterEnabled ||
+            inMarketCapRange(stockByCode.get(code), marketCapRange.min, marketCapRange.max)
+        )
+        .map((code) => {
+          const s = stockByCode.get(code) as any;
+          return {
+            code,
+            name: s?.name || lookupName(code),
+            circMv: s?.lt ? s.lt * 1e8 : undefined,
+            hybk: lookupHybk(code),
+          };
+        });
     }
     return poolStocks.map((s) => ({
       code: s.code,
@@ -1187,10 +1253,12 @@ const STList: React.FC<STListProps> = ({
     stockBoardSecidsMap,
     effectiveSecids,
     selectedBoardMeta,
+    marketCapFilterEnabled,
+    marketCapRange,
   ]);
 
   /**
-   * 评分池：在「当前股票池」基础上按「排除科创板+北交所」过滤
+   * 评分池：在「当前股票池」基础上按「排除科创板+北交所」「市值区间」过滤
    * （短线评分与训练周期预计算都用它，保证预计算覆盖的正是要评分的这批股票）
    */
   const collectCurrentItems = useCallback((options?: { ignoreReuse?: boolean }): ShortTermScoreItem[] => {
@@ -1264,7 +1332,7 @@ const STList: React.FC<STListProps> = ({
       // 历史列：先取近 N 个交易日（口径与评分基准日一致），已有序列稍后一并刷新
       setShortScoreSeries({});
       try {
-        setShortScoreDays(await resolveRecentTradingDays(kLineApiSourceSetting, shortScoreHistoryDays));
+        setShortScoreDays(await resolveRecentTradingDays(SHORT_SCORE_SOURCE, shortScoreHistoryDays));
       } catch {
         setShortScoreDays([]);
       }
@@ -1278,7 +1346,7 @@ const STList: React.FC<STListProps> = ({
 
     try {
       const computed = await computeShortTermScoreRows(shortScoreRemainingRef.current, {
-        source: kLineApiSourceSetting,
+        source: SHORT_SCORE_SOURCE,
         concurrency: 3,
         shouldStop: () => isShortScorePausedRef.current,
         // 近 N 个交易日的历史列有缺口时顺带补算（列表缺哪天补哪天）
@@ -1318,7 +1386,7 @@ const STList: React.FC<STListProps> = ({
             -shortScoreHistoryDays
           );
           setShortScoreSeries(
-            await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays })
+            await loadScoreSeries(shortScoreCodesRef.current, SHORT_SCORE_SOURCE, { dates: historyDays })
           );
         }
       } catch {
@@ -1334,7 +1402,7 @@ const STList: React.FC<STListProps> = ({
       setShortScoreLoading(false);
       isShortScoreRunningRef.current = false;
     }
-  }, [shortScoreLoading, collectCurrentItems, kLineApiSourceSetting, shortScoreDays, shortScoreHistoryDays, waitBoardStocks]);
+  }, [shortScoreLoading, collectCurrentItems, shortScoreDays, shortScoreHistoryDays, waitBoardStocks]);
 
   // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
   // 盘中（或收盘后数据源还没生成当日日K）时，短线评分拿不到基准日的日K，当日列只显示 --。
@@ -1392,14 +1460,14 @@ const STList: React.FC<STListProps> = ({
     setDisplayMode('shortScore');
     setCurrentPage(1);
     try {
-      setShortScoreDays(await resolveRecentTradingDays(kLineApiSourceSetting, shortScoreHistoryDays));
+      setShortScoreDays(await resolveRecentTradingDays(SHORT_SCORE_SOURCE, shortScoreHistoryDays));
     } catch {
       setShortScoreDays([]);
     }
 
     try {
       const computed = await computeTodayScoreRows(currentItems, {
-        source: kLineApiSourceSetting,
+        source: SHORT_SCORE_SOURCE,
         concurrency: 6,
         historyDays: shortScoreHistoryDays,
         shouldStop: () => isTodayScorePausedRef.current,
@@ -1437,7 +1505,7 @@ const STList: React.FC<STListProps> = ({
         const historyDays = (computed.recentDays.length ? computed.recentDays : shortScoreDays).slice(
           -shortScoreHistoryDays
         );
-        const series = await loadScoreSeries(shortScoreCodesRef.current, kLineApiSourceSetting, { dates: historyDays });
+        const series = await loadScoreSeries(shortScoreCodesRef.current, SHORT_SCORE_SOURCE, { dates: historyDays });
         // 把「当前交易日」从展示序列里摘掉（库里可能还留着旧版本写入的当日分时评分），保证当日列显示 --
         const k = computed.scoreDayKey;
         if (k && k.length === 8) {
@@ -1475,7 +1543,7 @@ const STList: React.FC<STListProps> = ({
   // ========== 训练周期评分预计算（仅训练模式） ==========
   // 把「当前股票池 × 整段训练窗口（trainStartDate ~ trainEndDate）」的短线评分一次性算完并落库，
   // 之后每推进一个训练日，执行短线评分都会直接命中数据库缓存，无需再等待取数计算。
-  const handlePrecompute = useCallback(async () => {
+  const handlePrecompute = useCallback(async (force = false) => {
     if (precomputing) {
       // 再次点击视为暂停：当前交易日算完后停止
       isPrecomputePausedRef.current = true;
@@ -1510,9 +1578,11 @@ const STList: React.FC<STListProps> = ({
         // 列表「近 N 日评分」历史列/过滤窗口按「基准日往前 N 个交易日」读取，
         // 训练日刚到窗口开头时会跨到 trainStartDate 之前 —— 一并覆盖，避免点「短线评分」时补算。
         historyDays: shortScoreHistoryDays,
-        source: kLineApiSourceSetting,
-        // 点击「预计算训练评分」= 忽略已有评分缓存、整段窗口重新计算（暂停后再次点击同样重头算）
-        ignoreCache: true,
+        source: SHORT_SCORE_SOURCE,
+        // 默认增量：只算「窗口内还没有评分（或板块/行版本不匹配）」的交易日，
+        // 算过的直接复用（暂停后再次点击也只会补剩下的缺口）。
+        // 只有按住 Shift 点击才整段强制重算（改了评分公式、需要刷新旧结果时用；改公式请务必 bump SCORE_ROW_VERSION）。
+        ignoreCache: force,
         shouldStop: () => isPrecomputePausedRef.current,
         onProgress: (done, total, message) => {
           setPrecomputeDone(done);
@@ -1566,7 +1636,6 @@ const STList: React.FC<STListProps> = ({
     trainDate,
     trainStartDate,
     trainEndDate,
-    kLineApiSourceSetting,
     shortScoreHistoryDays,
     collectCurrentItems,
     waitBoardStocks,
@@ -1803,8 +1872,8 @@ const STList: React.FC<STListProps> = ({
 
   // 评分序列里可用的交易日（升序）：
   // 优先用评分流程返回的交易日（已按训练日收敛）；若为空则退回评分序列里已存在的交易日
-  // （训练模式下以训练日为上限，避免读到预计算写入的未来交易日），保证有数据时历史列不消失。
-  // 这些天既用于渲染历史列，也用于计算「N 天前的近 M 日」过滤窗口。
+  // （训练模式下以训练日为上限，避免读到预计算写入的未来交易日）。
+  // 这些天用于计算「N 天前的近 M 日」过滤窗口与「新出现」标记。
   const shortScoreFilterDays = React.useMemo(() => {
     if (shortScoreDays.length) {
       return shortScoreDays;
@@ -1821,12 +1890,6 @@ const STList: React.FC<STListProps> = ({
     });
     return [...set].sort().slice(-shortScoreHistoryDays);
   }, [shortScoreDays, shortScoreSeries, ontrain, trainDate, shortScoreHistoryDays]);
-
-  // 「近 N 日评分」列实际展示的交易日：固定取最近的 SHORT_SCORE_HISTORY_DAYS 个交易日
-  const shortScoreDisplayDays = React.useMemo(
-    () => shortScoreFilterDays.slice(-SHORT_SCORE_HISTORY_DAYS),
-    [shortScoreFilterDays]
-  );
 
   /**
    * 「N 天前的近 M 日」过滤窗口内的交易日
@@ -2003,10 +2066,10 @@ const STList: React.FC<STListProps> = ({
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, shortScoreDisplayDays]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries]);
 
   /**
-   * 实际渲染的列表：按「排除科创板+北交所」和「名字过滤」过滤（对所有展示模式生效）
+   * 实际渲染的列表：按「排除科创板+北交所」「市值区间」和「名字过滤」过滤（对所有展示模式生效）
    * 分页 total 同样用它，保证页码与可见行数一致。
    */
   const visibleShowList = React.useMemo(() => {
@@ -2014,13 +2077,16 @@ const STList: React.FC<STListProps> = ({
     if (excludeStarBse) {
       list = list.filter((item: any) => !isStarOrBseCode(codeOfListItem(item)));
     }
+    if (marketCapFilterEnabled) {
+      list = list.filter((item: any) => inMarketCapRange(item, marketCapRange.min, marketCapRange.max));
+    }
     // 名字过滤：对所有展示模式（含短线评分结果列表）统一生效
     const kw = nameFilter.trim();
     if (kw) {
       list = list.filter((item: any) => nameOfListItem(item).includes(kw));
     }
     return list;
-  }, [showList, excludeStarBse, nameFilter]);
+  }, [showList, excludeStarBse, marketCapFilterEnabled, marketCapRange, nameFilter]);
 
   /**
    * 「K线形态 / RSI形态」表头勾选过滤（仅短线评分列表）
@@ -2170,8 +2236,30 @@ const STList: React.FC<STListProps> = ({
   }, [industries, gainians]);
   const boardLabel = useCallback((s: string) => boardNameMap[s] || s, [boardNameMap]);
 
+  /**
+   * 右侧信息面板要展示的股票
+   *
+   * 优先用列表里点过的那只；没点过（或点过的那只已被过滤掉）时默认展示第一只，
+   * 这样面板不会长时间空着。只有评分结果列表才展示面板。
+   */
+  const panelRow = React.useMemo(() => {
+    if (displayMode !== 'shortScore') {
+      return null;
+    }
+    const list = displayList as any[];
+    if (!list.length) {
+      return null;
+    }
+    return list.find((row) => codeOfListItem(row) === panelCode) || list[0];
+  }, [displayMode, displayList, panelCode]);
+  /** 面板股票的 6 位代码 / secid（行数据的 code 可能是 ts_code 形态，统一取一次） */
+  const panelStockCode = panelRow ? codeOfListItem(panelRow) : '';
+  const panelStockSecid = panelStockCode ? `${panelStockCode.startsWith('6') ? '1' : '0'}.${panelStockCode}` : '';
+
   return (
     <>
+      {/* 操作区占满整行；下方「评分结果列表 | 个股信息面板」平分宽度 */}
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div className={classNames(styles.header, styles.actbar)}>
         <div>
           <Select
@@ -2242,6 +2330,50 @@ const STList: React.FC<STListProps> = ({
           >
             排除科创板+北交所
           </Checkbox>
+          <span
+            style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            title="按流通市值区间筛选（亿元）：同时作用于列表展示与评分池（短线评分 / 当日评分 / 训练预计算）"
+          >
+            <Checkbox
+              checked={marketCapFilterEnabled}
+              onChange={(e) => {
+                setMarketCapFilterEnabled(e.target.checked);
+                setCurrentPage(1);
+              }}
+            >
+              市值
+            </Checkbox>
+            <InputNumber
+              size="small"
+              min={0}
+              max={100000}
+              step={10}
+              value={marketCapMin}
+              disabled={!marketCapFilterEnabled}
+              onChange={(v) => {
+                setMarketCapMin(typeof v === 'number' ? v : 20);
+                setCurrentPage(1);
+              }}
+              style={{ width: 64 }}
+              title="市值区间下限（亿元）"
+            />
+            <span>~</span>
+            <InputNumber
+              size="small"
+              min={0}
+              max={100000}
+              step={10}
+              value={marketCapMax}
+              disabled={!marketCapFilterEnabled}
+              onChange={(v) => {
+                setMarketCapMax(typeof v === 'number' ? v : 200);
+                setCurrentPage(1);
+              }}
+              style={{ width: 64 }}
+              title="市值区间上限（亿元）"
+            />
+            <span>亿</span>
+          </span>
           &nbsp;
           {filtering && <span>筛选中...</span>}
           <Button
@@ -2423,9 +2555,10 @@ const STList: React.FC<STListProps> = ({
           {ontrain && (
             <Button
               size="small"
-              onClick={handlePrecompute}
+              onClick={(e) => handlePrecompute(e.shiftKey || e.altKey)}
               loading={precomputing}
               style={{ marginLeft: 4 }}
+              title="默认增量：只补窗口内还缺的交易日，已有的直接复用；按住 Shift 点击 = 整段强制重算"
             >
               {precomputing
                 ? `预计算中 ${precomputeDone}/${precomputeTotal || '-'}`
@@ -2446,6 +2579,9 @@ const STList: React.FC<STListProps> = ({
           )}
         </div>
       </div>
+      {/* 列表与个股面板左右平分；没有面板时列表占满 */}
+      <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0 }}>
+        <div style={{ flex: panelRow ? '1 1 50%' : '1 1 100%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       {displayMode === 'stocks' ? (
         <Row className={styles.header}>
           <Col span={3}>名字</Col>
@@ -2536,12 +2672,12 @@ const STList: React.FC<STListProps> = ({
         </Row>
       ) : displayMode === 'shortScore' ? (
         <Row className={styles.header}>
-          <Col span={2}>股票名称</Col>
-          <Col span={1} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
+          <Col span={5}>股票名称</Col>
+          <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
-          <Col span={2} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Col span={7} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
               title="RSI 评分逻辑识别出的形态：金叉/死叉、超卖后金叉、超买后回踩、接近金叉、多头/空头排列等。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
@@ -2606,8 +2742,8 @@ const STList: React.FC<STListProps> = ({
               </Dropdown>
             </span>
           </Col>
-          <Col span={4} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/黄昏星/启明星/铁锤线/海绵宝宝…）。十字星=小实体且上下影线差不多长，上影线长于下影线=黄昏星，下影线长于上影线=启明星。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。行尾下拉可给该股票打标记：未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线（未定=未标记，其余按股票代码保存，切板块/重新评分/重启后仍保留）">
+          <Col span={10} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/黄昏星/启明星/铁锤线/海绵宝宝…）。十字星=小实体且上下影线差不多长，上影线长于下影线=黄昏星，下影线长于上影线=启明星。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。行尾下拉可给该股票打标记：未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线/上升-待观察/顶部-震荡谨慎（未定=未标记，其余按股票代码保存，切板块/重新评分/重启后仍保留）">
               <span className={styles.klineShapeHeaderText}>K线形态</span>
               <Dropdown
                 trigger={['click']}
@@ -2683,16 +2819,6 @@ const STList: React.FC<STListProps> = ({
               />
             </span>
           </Col>
-          {shortScoreDisplayDays.map((d) => (
-            <Col
-              span={1}
-              key={d}
-              style={{ fontSize: 11, textAlign: 'center', padding: 0 }}
-              title={`${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)} 短线评分`}
-            >
-              {d.substring(4, 6)}-{d.substring(6, 8)}
-            </Col>
-          ))}
         </Row>
       ) : (
         <Row className={styles.header}>
@@ -2730,7 +2856,8 @@ const STList: React.FC<STListProps> = ({
           <Col span={3}>操作建议</Col>
         </Row>
       )}
-      <div className={classNames(styles.table, styles.moreheader)}>
+      {/* 表格高度改为占满分栏剩余空间（不再用 moreheader 的固定 calc，避免操作区外置后底部留白） */}
+      <div className={styles.table} style={{ height: 'auto', flex: '1 1 auto', minHeight: 0 }}>
         {displayMode === 'stocks' ? (
           displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
             <Row key={s.code} className={styles.row}>
@@ -2870,18 +2997,20 @@ const STList: React.FC<STListProps> = ({
               s.grade === 'A' ? 'rgba(82, 196, 26, 0.08)'
                 : s.grade === 'B' ? 'rgba(24, 144, 255, 0.06)'
                   : undefined;
+            // 右侧面板当前展示的这只：整行加一道左侧高亮，便于对照
+            const isPanelActive = !!panelStockCode && panelStockCode === s.code;
             return (
               <Row
                 key={s.code}
                 className={styles.row}
-                style={{ backgroundColor: rowBg }}
+                style={{
+                  backgroundColor: rowBg,
+                  boxShadow: isPanelActive ? 'inset 2px 0 0 #1890ff' : undefined,
+                }}
               >
-                <Col span={2} style={{ cursor: 'pointer' }} onClick={() => {
-                  const secid = s.code.startsWith('6') ? `1.${s.code}` : `0.${s.code}`;
-                  onOpenStock(secid, s.name || s.code);
-                }}>
+                <Col span={5} style={{ cursor: 'pointer' }} onClick={() => setPanelCode(s.code)}>
                   <div
-                    title={s.name || s.code}
+                    title={`${s.name || s.code}（点击在右侧面板查看公司简介与日K线）`}
                     style={{
                       color: '#1890ff',
                       display: 'flex',
@@ -2927,7 +3056,7 @@ const STList: React.FC<STListProps> = ({
                   })()}
                 </Col>
                 <Col
-                  span={1}
+                  span={2}
                   title={s.error || undefined}
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
@@ -2937,7 +3066,7 @@ const STList: React.FC<STListProps> = ({
                   </span>
                 </Col>
                 <Col
-                  span={2}
+                  span={7}
                   title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
                   style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
@@ -2950,10 +3079,10 @@ const STList: React.FC<STListProps> = ({
                     <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
                   )}
                 </Col>
-                <Col span={4} style={{ fontSize: 12 }}>
+                <Col span={10} style={{ fontSize: 12 }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span
-                      style={{ flex: '0 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                      style={{ flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                       title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${
                         s.klineSize != null ? `｜实体 ${s.klineSize.toFixed(2)}倍平均` : ''
                       }${
@@ -2976,7 +3105,7 @@ const STList: React.FC<STListProps> = ({
                     {/* 行标记：默认「未定」（未标记），选中其它值后按股票代码持久化（切板块/重新评分/重启后仍保留） */}
                     <span
                       style={{ flex: '0 1 136px', minWidth: 96 }}
-                      title="给该股票打标记（未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线）；未定=未标记，其余按股票代码保存，切换板块、重新评分、重启应用后仍保留"
+                      title="给该股票打标记（未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线/上升-待观察/顶部-震荡谨慎）；未定=未标记，其余按股票代码保存，切换板块、重新评分、重启应用后仍保留"
                     >
                       <Select
                         size="small"
@@ -2991,29 +3120,6 @@ const STList: React.FC<STListProps> = ({
                     </span>
                   </span>
                 </Col>
-                {shortScoreDisplayDays.map((d) => {
-                  const dayRow = shortScoreSeries?.[s.code]?.[d];
-                  const v = dayRow ? dayRow.total : null;
-                  const dayText = `${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)}`;
-                  // 不用红色表示低分：未开启阈值过滤时用默认色；开启后按阈值分 up/down 两色
-                  const cellClass =
-                    v == null || !shortScoreFilterEnabled
-                      ? ''
-                      : v >= Number(shortScoreFilterScore)
-                        ? 'text-up'
-                        : 'text-down';
-                  return (
-                    <Col
-                      span={1}
-                      key={d}
-                      className={cellClass}
-                      style={{ fontSize: 11, textAlign: 'center', padding: 0, color: v == null ? 'var(--reverse-text-color)' : undefined }}
-                      title={dayRow ? `${dayText}：${v == null ? '--' : v.toFixed(1)}${dayRow.intraday ? '（当日K线由分时补全）' : ''}` : `${dayText}：无评分`}
-                    >
-                      {v == null ? '--' : v.toFixed(0)}
-                    </Col>
-                  );
-                })}
               </Row>
             );
           })
@@ -3134,6 +3240,17 @@ const STList: React.FC<STListProps> = ({
           size="small"
           style={{ padding: '10px 0', textAlign: 'center' }}
         />
+      </div>
+        </div>
+        {panelRow && panelStockSecid ? (
+          <ScoreStockPanel
+            code={panelStockCode}
+            secid={panelStockSecid}
+            name={nameOfListItem(panelRow)}
+            onOpenStock={onOpenStock}
+          />
+        ) : null}
+        </div>
       </div>
       <Modal
         title={`当前持仓（训练日 ${trainDate || '--'}）`}

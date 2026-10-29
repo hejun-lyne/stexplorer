@@ -15,6 +15,15 @@ import dayjs from 'dayjs';
  */
 export const SCORE_ROW_VERSION = 10;
 
+/**
+ * 短线评分统一使用的数据源（Tushare）
+ *
+ * 只有 Tushare 源提供批量接口（日K / 资金流 / 涨跌比 / 市值档），其它源只能逐只请求；
+ * 评分序列又按 source 分键存储，所以列表与个股详情页必须共用这一常量，
+ * 否则两边读写的不是同一份缓存（详情页会重复计算、历史列对不上）。
+ */
+export const SHORT_SCORE_SOURCE = FundApiType.Tushare;
+
 /** 短线评分列表输入项 */
 export interface ShortTermScoreItem {
   code: string; // 6位代码
@@ -521,6 +530,8 @@ export interface ScoreSharedContext {
   boardCodeMap: Record<string, string>;
   /** 板块「某基准日下最后一个有行情的日期」缓存（"板块代码|基准日" -> 日期） */
   boardLastDateMap: Record<string, string>;
+  /** 板块日K「取数中」的 promise（并发补算同一板块时只真正取一次） */
+  boardPromiseMap: Record<string, Promise<Stock.KLineItem[]>>;
   /** 板块「基准日附近是否有行情」的判定基准日（训练模式=训练日，预计算=窗口末日） */
   referenceDate?: string;
 }
@@ -539,6 +550,7 @@ export function createScoreContext(source: FundApiType, init?: Partial<ScoreShar
     bankuaiMap: {},
     boardCodeMap: {},
     boardLastDateMap: {},
+    boardPromiseMap: {},
     ...(init || {}),
   };
 }
@@ -761,12 +773,24 @@ async function getBoardKlines(ctx: ScoreSharedContext, boardCode: string): Promi
   if (ctx.boardKlinesMap[boardCode] !== undefined) {
     return ctx.boardKlinesMap[boardCode];
   }
-  try {
-    ctx.boardKlinesMap[boardCode] = await fetchDayKlines(ctx.source, `90.${boardCode}`, 60, { allowSynthesis: false });
-  } catch {
-    ctx.boardKlinesMap[boardCode] = [];
+  // 并发补算时同一板块只真正取一次（几十只股票常属同一板块，否则会重复取数）
+  const inflight = ctx.boardPromiseMap[boardCode];
+  if (inflight) {
+    return inflight;
   }
-  return ctx.boardKlinesMap[boardCode];
+  const task = (async (): Promise<Stock.KLineItem[]> => {
+    try {
+      return await fetchDayKlines(ctx.source, `90.${boardCode}`, 60, { allowSynthesis: false });
+    } catch {
+      return [];
+    }
+  })().then((ks) => {
+    ctx.boardKlinesMap[boardCode] = ks;
+    delete ctx.boardPromiseMap[boardCode];
+    return ks;
+  });
+  ctx.boardPromiseMap[boardCode] = task;
+  return task;
 }
 
 /** 板块名称 -> 代码（按名称缓存；解析不到时也缓存空串，避免同一名称反复解析） */
@@ -1337,8 +1361,41 @@ export interface ComputeRowsResult {
 /** 每只股票评分所需的日K根数（与单只取数口径一致） */
 const SCORE_KLINES_PER_STOCK = 250;
 
+/** 资金流取数天数（与单只取数口径一致：60 日主力/散户明细） */
+const MONEY_FLOW_DAYS = 60;
+
+/**
+ * 批量预取个股资金流（60 日主力/散户明细）
+ *
+ * 逐只调 GetMoneyFlowFromTushare 是 N 次串行 IPC（常驻 python 服务单线程处理），
+ * 是列表评分里最耗时的一段；这里一次批量取回（python 侧 6 线程并发、命中各自缓存）。
+ * 批量失败 / 个别股票失败的，仍由 buildStockScoreInputs 逐只兜底，不改变评分口径。
+ */
+async function prefetchMoneyFlow(ctx: ScoreSharedContext, codes: string[]): Promise<void> {
+  const pending = Array.from(new Set((codes || []).filter((c) => c && !ctx.moneyFlowMap[c])));
+  if (!pending.length) {
+    return;
+  }
+  try {
+    const map = await Services.Tushare.BatchGetMoneyFlowFromTushare(pending, MONEY_FLOW_DAYS);
+    Object.keys(map || {}).forEach((code) => {
+      const mf = map[code];
+      // 批量接口对单只失败会返回 { error }：不能塞进 ctx，交给逐只兜底重试
+      if (mf && !mf.error) {
+        ctx.moneyFlowMap[code] = mf;
+      }
+    });
+    console.log(`[短线评分] 批量资金流预取 ${pending.length} 只，命中 ${Object.keys(map || {}).length} 只`);
+  } catch {
+    // 批量失败时退回逐只取数，不影响主流程
+  }
+}
+
 /** 每补算多少个交易日落盘一次（控制单次写入的 payload 大小） */
 const BACKFILL_FLUSH_DAYS = 5;
+
+/** 历史补算时「同一个交易日内」的并发股票数（取数都走 ctx 缓存/批量，4 路足够且不会压垮接口） */
+const BACKFILL_CONCURRENCY = 4;
 
 /**
  * 补算「近 N 个交易日」里缺失的 (股票 × 交易日) 评分行并写回评分序列
@@ -1397,6 +1454,9 @@ async function backfillScores(params: {
   } catch {
     listDates = {};
   }
+
+  // 补算用到的股票资金流一次批量取回（基准日那次批量可能没覆盖到这些股票）
+  await prefetchMoneyFlow(ctx, [...new Set(work.map((w) => w.item.code))]);
 
   // ---- 公共数据：把补算区间需要的「涨跌比 / 市值档成交统计」一次性取回 ----
   // 大盘维度每天都要用「该日 + 前 marketDays 天」的涨跌比；ensureUpRatio 只覆盖最近 marketDays 天，
@@ -1460,39 +1520,51 @@ async function backfillScores(params: {
       break;
     }
     const day = `${dayKey.substring(0, 4)}-${dayKey.substring(4, 6)}-${dayKey.substring(6, 8)}`;
-    for (const item of byDay.get(dayKey) || []) {
-      if (shouldStop?.()) {
-        break;
-      }
-      doneCount += 1;
-      try {
-        if (isListedOnDay(listDates[item.code], dayKey) === false) {
-          buffer[item.code] = {
-            ...(buffer[item.code] || {}),
-            [dayKey]: notListedShortTermScoreRow(item.code, item.name, listDates[item.code] || '', dayKey),
-          };
-          skipped += 1;
-        } else {
-          // eslint-disable-next-line no-await-in-loop
-          const inputs = await buildStockScoreInputs(ctx, item, day);
-          const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay: day, ...inputs });
-          if (row.pending) {
-            // 该交易日停牌 / 日K未覆盖到该日：不写缓存，下次运行还会再试
+    const dayItems = byDay.get(dayKey) || [];
+    // 同一天内按股票并发补算（纯内存切片 + 纯函数计算，取数走 ctx 缓存/批量）：
+    // 原来 20 天 × N 只全部串行，是补算最慢的一段。
+    let cursor = 0;
+    const runOne = async () => {
+      for (;;) {
+        if (shouldStop?.()) {
+          return;
+        }
+        const idx = cursor;
+        cursor += 1;
+        if (idx >= dayItems.length) {
+          return;
+        }
+        const item = dayItems[idx];
+        doneCount += 1;
+        try {
+          if (isListedOnDay(listDates[item.code], dayKey) === false) {
+            buffer[item.code] = {
+              ...(buffer[item.code] || {}),
+              [dayKey]: notListedShortTermScoreRow(item.code, item.name, listDates[item.code] || '', dayKey),
+            };
             skipped += 1;
           } else {
-            buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
-            filled += 1;
+            const inputs = await buildStockScoreInputs(ctx, item, day);
+            const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay: day, ...inputs });
+            if (row.pending) {
+              // 该交易日停牌 / 日K未覆盖到该日：不写缓存，下次运行还会再试
+              skipped += 1;
+            } else {
+              buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
+              filled += 1;
+            }
           }
+        } catch {
+          skipped += 1;
         }
-      } catch {
-        skipped += 1;
+        try {
+          onProgress?.({ done: doneCount, total: work.length, day });
+        } catch {
+          // 回调异常不影响主流程
+        }
       }
-      try {
-        onProgress?.({ done: doneCount, total: work.length, day });
-      } catch {
-        // 回调异常不影响主流程
-      }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(BACKFILL_CONCURRENCY, dayItems.length) }, runOne));
     if (dayIndex % BACKFILL_FLUSH_DAYS === 0 && Object.keys(buffer).length) {
       // eslint-disable-next-line no-await-in-loop
       await saveScoreSeries(buffer, source);
@@ -1688,6 +1760,14 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
     } catch {
       // 批量取数失败时退回逐只取数，不影响主流程
     }
+  }
+
+  // ---- 批量回填个股资金流（关键，等价于把 N 次串行 IPC 压成 1 次）----
+  if (pending.length) {
+    await prefetchMoneyFlow(
+      ctx,
+      pending.map((i) => i.code)
+    );
   }
 
   // 评分基准日（YYYY-MM-DD）：所有输入序列都按它截断，保证与个股详情页同口径

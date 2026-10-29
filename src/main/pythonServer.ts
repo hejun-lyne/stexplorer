@@ -49,8 +49,18 @@ export function resolvePythonScriptDir(): string {
   return path.join(process.resourcesPath, 'python');
 }
 
+/**
+ * 每个脚本最多起几个常驻进程
+ *
+ * py_service.py 是「一行一个请求、串行处理」的循环，所以单进程时渲染层的并发在 IPC 边界会被压成 1；
+ * 起 2~3 个进程轮转，才能真正并行（取数/批量方法内部另有线程池）。
+ * 进程是按需创建的：只有「现有进程都忙」且未达上限时才再起一个，平时只占 1 个进程。
+ */
+const MAX_WORKERS_PER_SCRIPT = Math.max(1, Number(process.env.PY_MAX_WORKERS) || 3);
+
 class PythonService {
-  private children = new Map<string, PyChild>();
+  /** 每个脚本对应一组常驻进程（轮转使用） */
+  private children = new Map<string, PyChild[]>();
 
   private pythonPath =
     process.env.PYTHON_PATH || (process.platform === 'win32' ? 'python' : '/usr/bin/python3');
@@ -59,7 +69,7 @@ class PythonService {
    * 调用常驻进程，返回 stdout 行数组（末行为 JSON 结果），与旧 execPyScript 一致
    */
   run(fileName: string, args: string[]): Promise<string[]> {
-    const child = this.ensureChild(fileName);
+    const child = this.acquireChild(fileName);
     return new Promise<string[]>((resolve, reject) => {
       const id = child.seq + 1;
       child.seq = id;
@@ -73,12 +83,25 @@ class PythonService {
     });
   }
 
-  private ensureChild(fileName: string): PyChild {
-    const existing = this.children.get(fileName);
-    if (existing) {
-      return existing;
+  /**
+   * 选一个进程执行本次调用：
+   * 1) 有完全空闲的进程（没有在排队/执行的请求）→ 直接用；
+   * 2) 都忙且未达上限 → 再起一个新进程（首次会付一次 python import 成本，之后一直复用）；
+   * 3) 已达上限 → 交给排队最少的那个，避免某个进程积压。
+   */
+  private acquireChild(fileName: string): PyChild {
+    const pool = this.children.get(fileName) || [];
+    const idle = pool.find((c) => c.pending.size === 0);
+    if (idle) {
+      return idle;
     }
+    if (pool.length < MAX_WORKERS_PER_SCRIPT) {
+      return this.spawnChild(fileName);
+    }
+    return pool.reduce((a, b) => (a.pending.size <= b.pending.size ? a : b));
+  }
 
+  private spawnChild(fileName: string): PyChild {
     const scriptDir = resolvePythonScriptDir();
     const serviceScript = path.join(scriptDir, 'py_service.py');
     const proc = spawn(this.pythonPath, ['-u', serviceScript, fileName], {
@@ -87,8 +110,10 @@ class PythonService {
     }) as ChildProcessWithoutNullStreams;
 
     const child: PyChild = { proc, stdoutBuffer: '', pending: new Map(), seq: 0 };
-    this.children.set(fileName, child);
-    console.log(`[py] 启动常驻进程: ${fileName} (${this.pythonPath})`);
+    const pool = this.children.get(fileName) || [];
+    pool.push(child);
+    this.children.set(fileName, pool);
+    console.log(`[py] 启动常驻进程: ${fileName} #${pool.length} (${this.pythonPath})`);
 
     proc.stdout.on('data', (data: Buffer) => {
       child.stdoutBuffer += data.toString();
@@ -113,20 +138,30 @@ class PythonService {
 
     proc.on('error', (err: Error) => {
       console.error(`[py:${fileName}] 常驻进程启动失败:`, err);
-      if (this.children.get(fileName) === child) {
-        this.children.delete(fileName);
-      }
+      this.removeChild(fileName, child);
       this.rejectAll(child, err);
     });
 
     proc.on('close', (code: number | null) => {
-      if (this.children.get(fileName) === child) {
-        this.children.delete(fileName);
-      }
+      this.removeChild(fileName, child);
       this.rejectAll(child, new Error(`python 常驻进程退出，code=${code}`));
     });
 
     return child;
+  }
+
+  /** 进程退出/启动失败后从进程池里摘掉（池空了就删除该脚本的键） */
+  private removeChild(fileName: string, child: PyChild) {
+    const pool = this.children.get(fileName);
+    if (!pool) {
+      return;
+    }
+    const next = pool.filter((c) => c !== child);
+    if (next.length) {
+      this.children.set(fileName, next);
+    } else {
+      this.children.delete(fileName);
+    }
   }
 
   private handleLine(child: PyChild, line: string) {
@@ -156,19 +191,21 @@ class PythonService {
     child.pending.clear();
   }
 
-  /** 退出应用时回收所有常驻进程 */
+  /** 退出应用时回收所有常驻进程（含并发池里的每一个） */
   dispose() {
-    this.children.forEach((child, fileName) => {
-      try {
-        child.proc.stdin.end();
-      } catch (e) {
-        // ignore
-      }
-      try {
-        child.proc.kill();
-      } catch (e) {
-        // ignore
-      }
+    this.children.forEach((pool, fileName) => {
+      pool.forEach((child) => {
+        try {
+          child.proc.stdin.end();
+        } catch (e) {
+          // ignore
+        }
+        try {
+          child.proc.kill();
+        } catch (e) {
+          // ignore
+        }
+      });
       this.children.delete(fileName);
     });
   }

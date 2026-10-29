@@ -785,8 +785,9 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
 
   // 用户在板块页手动设置的活跃板块（优先）
   const hybk = useSelector((store: StoreState) => store.stock.stockConfigsMapping[secid]?.hybk);
-  // K线数据源设置（与主图同源，走多源兜底 + sqlite 缓存）
-  const { kLineApiSourceSetting, ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
+  // 短线评分固定走 Tushare 源（ScoreList.SHORT_SCORE_SOURCE），与列表/预计算共用同一份缓存；
+  // 不再跟随「K线数据源」设置，否则评分序列会按 source 分键存储、两边互相读不到。
+  const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
   // 训练模式：按训练日期区分请求缓存，并在训练日期变化时重新取数（评分必须基于训练日期为止的数据）
   const trainKey = ontrain && trainDate ? trainDate : 'live';
 
@@ -802,7 +803,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     async () => {
       const r = await ScoreList.computeStockScoreForCode({
         code,
-        source: kLineApiSourceSetting,
+        source: ScoreList.SHORT_SCORE_SOURCE,
         // 训练模式下按训练日期取数（评分必须基于训练日期为止的数据）
         date: ontrain && trainDate ? trainDate : undefined,
         circMv,
@@ -817,7 +818,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     },
     {
       manual: true,
-      cacheKey: `ShortTermScore/${code}/${kLineApiSourceSetting}/${trainKey}`,
+      cacheKey: `ShortTermScore/${code}/${ScoreList.SHORT_SCORE_SOURCE}/${trainKey}`,
       onSuccess: (r) => {
         setScoreError(null);
         setScoreData(r);
@@ -837,7 +838,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
       if (!forceLive) {
         const hit = await ScoreList.getCachedScoreRow({
           code,
-          source: kLineApiSourceSetting,
+          source: ScoreList.SHORT_SCORE_SOURCE,
           date: ontrain && trainDate ? trainDate : undefined,
         });
         if (canceled) {
@@ -855,7 +856,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     return () => {
       canceled = true;
     };
-  }, [code, kLineApiSourceSetting, trainKey, circMv, moneyFlow, forceLive]);
+  }, [code, trainKey, circMv, moneyFlow, forceLive]);
 
   // ---- 「近 N 个交易日评分」历史条：交易日列表 + 该股评分序列 ----
   const [recentDays, setRecentDays] = useState<string[]>([]);
@@ -877,7 +878,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   const viewDay = selectedDay || baseDayKey;
   // 当前「股票 + 数据源 + 训练日」身份：异步回写前用它比对，避免切换标的后把旧结果写到新标的上
   const identityRef = useRef('');
-  identityRef.current = `${code}/${kLineApiSourceSetting}/${trainKey}`;
+  identityRef.current = `${code}/${ScoreList.SHORT_SCORE_SOURCE}/${trainKey}`;
 
   // 切换股票 / 训练日 / 数据源：重置历史条的选择与按需计算结果
   useEffect(() => {
@@ -889,7 +890,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     setDayDetailLoadingDay('');
     setBatchComputing(false);
     setBatchProgress(null);
-  }, [code, kLineApiSourceSetting, trainKey]);
+  }, [code, trainKey]);
 
   // 加载近 N 个交易日 + 该股在这些交易日的评分序列（与列表「近 N 日评分」同一份缓存）
   useEffect(() => {
@@ -897,7 +898,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     (async () => {
       let days: string[] = [];
       try {
-        days = await ScoreList.resolveRecentTradingDays(kLineApiSourceSetting, RECENT_SCORE_DAYS);
+        days = await ScoreList.resolveRecentTradingDays(ScoreList.SHORT_SCORE_SOURCE, RECENT_SCORE_DAYS);
       } catch {
         days = [];
       }
@@ -914,7 +915,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
         return;
       }
       try {
-        const s = await ScoreList.loadScoreSeries([code], kLineApiSourceSetting, { dates: days });
+        const s = await ScoreList.loadScoreSeries([code], ScoreList.SHORT_SCORE_SOURCE, { dates: days });
         if (!canceled) {
           setSeries(s?.[code] || {});
         }
@@ -925,7 +926,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     return () => {
       canceled = true;
     };
-  }, [code, kLineApiSourceSetting, trainKey, baseDayKey]);
+  }, [code, trainKey, baseDayKey]);
 
   /**
    * 现取数计算某个交易日的完整明细（单日点击 / 批量补算共用，不含 loading 状态）
@@ -939,7 +940,7 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
     const runIdentity = identityRef.current;
     const r = await ScoreList.computeStockScoreForCode({
       code,
-      source: kLineApiSourceSetting,
+      source: ScoreList.SHORT_SCORE_SOURCE,
       date: day,
       circMv,
       moneyFlow,

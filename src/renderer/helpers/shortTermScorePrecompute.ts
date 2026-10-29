@@ -7,6 +7,7 @@ import {
   computeShortTermScoreForDate,
   createScoreContext,
   isListedOnDay,
+  loadScoreSeries,
   notListedShortTermScoreRow,
   primeBoards,
   saveScoreSeries,
@@ -40,9 +41,10 @@ import {
  * - 板块代码解析：进程内记忆板块列表（见 services/tushare.ts 的 GetBoardListsMemo）
  * 之后逐日只在内存中切片 + 纯函数评分，最后按「股票」一次性写回各自的评分序列。
  *
- * 增量：开始前会检查每只股票的评分序列对本次股票池的覆盖情况，已覆盖全部股票的日子直接跳过；
+ * 增量（默认）：开始前会检查每只股票的评分序列对本次股票池的覆盖情况，
+ * 已覆盖全部股票的日子直接跳过；只缺几只股票的日子只重算这几只（不再整天全量重算）。
  * 整段窗口预计算完成后，训练日推进（下一天）无需再做任何取数/计算。
- * 「忽略缓存」（options.ignoreCache）时不做上面的增量判断，先清掉窗口内已存的评分行再整段重算。
+ * 只有「按住 Shift 点预计算」才会传 options.ignoreCache = true，整段窗口重算。
  */
 
 /** 每个交易日评分所需的个股历史K线根数（RSI24 + 历史分位需要较长历史） */
@@ -55,6 +57,9 @@ const BOARD_KLINES_PER_DAY = 60;
 const MONEY_DAYS_PER_DAY = 60;
 /** 每计算多少个交易日落盘一次（兼顾中断安全与写入次数） */
 const FLUSH_EVERY_DAYS = 20;
+
+/** 每个交易日内并发计算的股票数（取数都已批量预取，只有纯计算与少量兜底） */
+const CONCURRENCY_PER_DAY = 4;
 
 export interface PrecomputeOptions {
   items: ShortTermScoreItem[];
@@ -185,6 +190,8 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   // ignoreCache（点「预计算训练评分」从头重算）时：先清掉窗口内已存的评分行，再整段重算，
   // 避免旧行残留导致「明明重算了却还是旧分数 / 显示未覆盖」。
   let pendingDays: string[];
+  /** 每个交易日「还缺几只股票」（增量模式下只补这些股票，不整天重算） */
+  let missingByDay: Record<string, number> = {};
   if (ignoreCache) {
     // 忽略缓存 = 不做增量判断、窗口内所有交易日全部重算。
     // 这里刻意「不」预先清空旧评分行：写入是按 (股票, 交易日) 覆盖合并的，重算到的交易日会被新结果覆盖。
@@ -199,6 +206,7 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
       ignoreTrain: true,
       rowVersion: SCORE_ROW_VERSION,
     });
+    missingByDay = summary || {};
     pendingDays = days.filter((d) => (summary[d.replace(/-/g, '')] ?? Infinity) > 0);
     result.reused = days.length - pendingDays.length;
     if (!pendingDays.length) {
@@ -290,31 +298,59 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     }
     const day = pendingDays[di];
     const dayKey = day.replace(/-/g, '');
-    let count = 0;
-    for (const item of items) {
-      if (isListedOnDay(listDateByCode[item.code], dayKey) === false) {
-        const skipRow = notListedShortTermScoreRow(item.code, item.name, listDateByCode[item.code], day);
-        buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: skipRow };
-        count += 1;
-        result.rows += 1;
-        result.notListed += 1;
-        continue;
-      }
+    // 只补当天真正缺行的股票：缺行多半是停牌 / 数据未到，为一两只股票整天全量重算不划算
+    let dayItems = items;
+    const missingCount = ignoreCache ? items.length : Number(missingByDay[dayKey]) || 0;
+    if (!ignoreCache && missingCount > 0 && missingCount < items.length) {
       try {
-        const inputs = await buildStockScoreInputs(ctx, item, day);
-        const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay: day, ...inputs });
-        // 数据未就绪（日K不足 / 未覆盖到基准日）：不写缓存，留给后续运行重新取数计算
-        if (row.pending) {
-          result.skipped += 1;
-          continue;
+        const series = await loadScoreSeries(codes, source, { dates: [dayKey] });
+        const lacking = items.filter((i) => !series[i.code]?.[dayKey]);
+        if (lacking.length) {
+          dayItems = lacking;
         }
-        buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
-        count += 1;
-        result.rows += 1;
       } catch {
-        result.skipped += 1;
+        // 序列读不到就退回整池计算，保证结果完整
       }
     }
+    let count = 0;
+    // 同一天内按股票并发（数据都已批量预取，这里是纯计算）：原来 天数 × 股票数 全部串行
+    let cursor = 0;
+    const runOne = async () => {
+      for (;;) {
+        if (shouldStop?.()) {
+          return;
+        }
+        const idx = cursor;
+        cursor += 1;
+        if (idx >= dayItems.length) {
+          return;
+        }
+        const item = dayItems[idx];
+        if (isListedOnDay(listDateByCode[item.code], dayKey) === false) {
+          const skipRow = notListedShortTermScoreRow(item.code, item.name, listDateByCode[item.code], day);
+          buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: skipRow };
+          count += 1;
+          result.rows += 1;
+          result.notListed += 1;
+          continue;
+        }
+        try {
+          const inputs = await buildStockScoreInputs(ctx, item, day);
+          const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay: day, ...inputs });
+          // 数据未就绪（日K不足 / 未覆盖到基准日）：不写缓存，留给后续运行重新取数计算
+          if (row.pending) {
+            result.skipped += 1;
+            continue;
+          }
+          buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
+          count += 1;
+          result.rows += 1;
+        } catch {
+          result.skipped += 1;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY_PER_DAY, dayItems.length) }, runOne));
     result.dates += 1;
     onProgress?.(di + 1, pendingDays.length, `${day} 完成（${count} 只）`);
     // 定期落盘，中断时已算完的交易日不会丢失
