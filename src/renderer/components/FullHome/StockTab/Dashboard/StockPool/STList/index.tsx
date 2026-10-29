@@ -3286,6 +3286,8 @@ const STList: React.FC<STListProps> = ({
             );
           })
         )}
+      </div>
+        {/* 分页控件放在滚动区之外并固定在列表底部：否则行数超出可视高度时会被滚到内容末尾而看不见 */}
         <Pagination
           current={currentPage}
           pageSize={pageSize}
@@ -3293,9 +3295,8 @@ const STList: React.FC<STListProps> = ({
           onChange={onPageChange}
           showSizeChanger={false}
           size="small"
-          style={{ padding: '10px 0', textAlign: 'center' }}
+          style={{ flex: '0 0 auto', padding: '8px 0', textAlign: 'center' }}
         />
-      </div>
         </div>
         {panelRow && panelStockSecid ? (
           <ScoreStockPanel
