@@ -1147,7 +1147,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           </Col>
           <Col
             span={3}
-            title="RSI 评分逻辑识别出的形态：金叉/死叉、超卖后金叉、超买后回踩、接近金叉、多头/空头排列等"
+            title="RSI 评分逻辑识别出的「当日」形态：超买回踩企稳/回踩中、超卖反转、金叉、死叉、金叉在即、修复中、多头/空头排列、超买钝化"
             style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
           >
             RSI形态识别
@@ -1433,7 +1433,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                   title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
                   style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
-                  {/* RSI 形态：来自 RSI 评分逻辑的形态识别结果（金叉/死叉/超卖后金叉/超买后回踩…），空值显示占位 */}
+                  {/* RSI 形态：来自 RSI 评分逻辑的当日形态识别结果（超买回踩/金叉/死叉/多头排列…），空值显示占位 */}
                   {s.rsiPattern ? (
                     s.rsiPattern
                   ) : s.pending ? (

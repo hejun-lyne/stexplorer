@@ -31,7 +31,7 @@ import {
 // 与个股短线评分的「个股走弱触发一票否决」对应（板块走弱时，资金/量能再好也不适合短线参与）。
 
 /** 行结构版本：新增/变更展示字段或评分口径时递增（界面缓存/调试时可识别） */
-export const BOARD_SCORE_ROW_VERSION = 3;
+export const BOARD_SCORE_ROW_VERSION = 4;
 
 /** 板块短线评分输入项 */
 export interface BoardScoreItem {
