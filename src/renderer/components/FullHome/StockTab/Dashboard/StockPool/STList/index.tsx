@@ -312,6 +312,13 @@ const STList: React.FC<STListProps> = ({
   // 评分序列：交易日列表 + 每只股票的每日评分（供过滤窗口 / 「新出现」标记使用，不渲染成历史列）
   const [shortScoreDays, setShortScoreDays] = useState<string[]>([]);
   const [shortScoreSeries, setShortScoreSeries] = useState<ShortTermScoreSeries>({});
+  /**
+   * 最近一次评分结果的「评分基准日」（YYYY-MM-DD）
+   *
+   * 训练日推进时若正在展示结果列表会自动按新训练日重算，用它在工具栏提示
+   * 「当前看到的是哪一天算出来的分」（重算进行中为空）。
+   */
+  const [shortScoreDate, setShortScoreDate] = useState('');
   /** 历史缺口补算进度：执行短线评分时顺带补齐近 N 个交易日缺的评分 */
   const [shortScoreBackfill, setShortScoreBackfill] = useState<{ done: number; total: number } | null>(null);
   // 过滤：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的股票
@@ -1289,7 +1296,13 @@ const STList: React.FC<STListProps> = ({
   }, [boardsReady]);
 
   // ========== 短线评分 ==========
-  const handleShortScore = useCallback(async () => {
+  /**
+   * 执行短线评分
+   *
+   * @param candidateItems 可选：指定候选股票池。训练日推进自动更新时传入「当前结果列表」，
+   *                       与「当日评分」的候选池保持一致；不传则取当前板块的全部股票。
+   */
+  const handleShortScore = useCallback(async (candidateItems?: ShortTermScoreItem[]) => {
     if (shortScoreLoading || scoreStartingRef.current) {
       isShortScorePausedRef.current = true;
       return;
@@ -1306,9 +1319,15 @@ const STList: React.FC<STListProps> = ({
       message.warning('板块的股票列表还在加载，请稍后再点评分');
       return;
     }
-    // 评分池永远取「当前板块池」（忽略沿用）：板块成分股列表每 6 秒会随行情刷新，
-    // 沿用上一轮快照会把新出现在列表里的股票永久排除在评分结果之外（列表里有、评分结果里没有）。
-    const currentItems = collectCurrentItems({ ignoreReuse: true });
+    // 评分池：
+    // - 传入 candidateItems（训练日推进自动更新）时用它，与「当日评分」的候选池一致；
+    // - 否则取「当前板块池」（忽略沿用）：板块成分股列表每 6 秒会随行情刷新，
+    //   沿用上一轮快照会把新出现在列表里的股票永久排除在评分结果之外（列表里有、评分结果里没有）。
+    const currentItems = candidateItems?.length ? candidateItems : collectCurrentItems({ ignoreReuse: true });
+    // 训练日推进自动更新：强制开新一轮，不复用上一轮可能残留的暂停队列
+    if (candidateItems?.length) {
+      shortScoreRemainingRef.current = [];
+    }
 
     // 暂停后恢复：继续处理剩余未评分项；全新开始：重置
     if (shortScoreRemainingRef.current.length === 0) {
@@ -1321,6 +1340,7 @@ const STList: React.FC<STListProps> = ({
         return;
       }
       setShortScoreData([]);
+      setShortScoreDate('');
       setShortScoreProgress(0);
       setShortScoreBackfill(null);
       shortScoreTotalRef.current = currentItems.length;
@@ -1373,6 +1393,11 @@ const STList: React.FC<STListProps> = ({
       });
       // 板块已切换时，历史列/序列属于上一组板块，不再回写
       const sameBoard = shortScorePoolRef.current === boardsKeyRef.current;
+      // 记录本次结果的评分基准日：训练日推进不会自动重算，列表上要提示「这是哪天算的」
+      if (sameBoard && computed.scoreDayKey) {
+        const k = computed.scoreDayKey;
+        setShortScoreDate(`${k.substring(0, 4)}-${k.substring(4, 6)}-${k.substring(6, 8)}`);
+      }
       // 历史列交易日：优先用评分流程内部（已按训练日收敛）的交易日，避免单独取数失败导致历史列消失
       if (sameBoard && computed.recentDays.length) {
         setShortScoreDays(computed.recentDays.slice(-shortScoreHistoryDays));
@@ -1493,6 +1518,11 @@ const STList: React.FC<STListProps> = ({
       });
       // 板块已切换时，历史列/序列属于上一组板块，不再回写
       const sameBoard = shortScorePoolRef.current === boardsKeyRef.current;
+      // 记录「当日评分」的基准日（训练模式跟随训练日，非训练模式为真实今天）
+      if (sameBoard && computed.scoreDayKey) {
+        const k = computed.scoreDayKey;
+        setShortScoreDate(`${k.substring(0, 4)}-${k.substring(4, 6)}-${k.substring(6, 8)}`);
+      }
       // 历史列交易日：用交易日历给出的最近交易日（含当日），保证当日列一定在
       if (sameBoard && computed.recentDays.length) {
         setShortScoreDays(computed.recentDays.slice(-shortScoreHistoryDays));
@@ -1649,19 +1679,21 @@ const STList: React.FC<STListProps> = ({
     setSelectedSecids([secid]);
   }, [secid]);
 
-  // 评分基准日随训练日/数据源变化：旧结果是上一交易日（或上一数据源）算的，直接展示会误导，需清空重算
+  // 仅「数据源」变化时在这里清空旧结果：评分口径与缓存 key 都变了，继续展示旧数据源算的分会误导。
+  // 训练日推进不在这里清空：由下方「训练日推进 → 自动重算」的 effect 重新计算（清空/写入由评分流程自己做）。
   useEffect(() => {
     if (isShortScoreRunningRef.current || todayScoreRunningRef.current) {
       return;
     }
     setShortScoreData([]);
+    setShortScoreDate('');
     setShortScoreProgress(0);
     setTodayScoreProgress(0);
     setShortScoreBackfill(null);
     shortScoreRemainingRef.current = [];
     setShortScoreSeries({});
     setShortScoreDays([]);
-  }, [trainDate, kLineApiSourceSetting]);
+  }, [kLineApiSourceSetting]);
 
   // 板块选择变化（含增删板块）：列表展示、评分结果与选股漏斗结果都属于上一组板块，必须整体重置。
   // （从「板块列表/行业」进入新板块时 displayMode 可能停在 shortScore，
@@ -1686,6 +1718,7 @@ const STList: React.FC<STListProps> = ({
     isSignalPausedRef.current = true;
     isMainInPausedRef.current = true;
     setShortScoreData([]);
+    setShortScoreDate('');
     setShortScoreProgress(0);
     setTodayScoreProgress(0);
     setShortScoreBackfill(null);
@@ -1769,12 +1802,18 @@ const STList: React.FC<STListProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardsKey, effectiveBoardsKey]);
 
-  // 训练日切换（训练工具栏或列表里的「下一天」）→ 若正在展示「短线评分」结果列表，自动按新训练日重算。
-  // 用 ref 持有最新的 handleShortScore，避免把它写进依赖导致「评分状态变化 → effect 重跑」的循环。
-  const handleShortScoreRef = React.useRef<() => void>(() => {});
+  // 用 ref 持有最新的 handleShortScore / collectVisibleItems：
+  // 自动重算场景（切板块、训练日推进）要读最新闭包，又不希望把它们写进依赖导致 effect 反复重跑。
+  const handleShortScoreRef = React.useRef<(items?: ShortTermScoreItem[]) => void>(() => {});
   useEffect(() => {
     handleShortScoreRef.current = handleShortScore;
   }, [handleShortScore]);
+  /** 最新的「当日评分」候选池求值函数（在 collectVisibleItems 定义处赋值，见下方） */
+  const collectVisibleItemsRef = React.useRef<() => ShortTermScoreItem[]>(() => []);
+
+  // 训练日推进（训练工具栏或列表里的「下一天」）→ 若正在展示短线评分结果列表，自动按新训练日重算。
+  // 候选池与「当日评分」保持一致（当前列表的过滤结果，不分页），而不是整个板块池：
+  // 推进训练日只更新当前看到的这批股票，不会把板块里被过滤掉的股票重新拉回来。
   const prevTrainDateRef = React.useRef(trainDate);
   useEffect(() => {
     const prev = prevTrainDateRef.current;
@@ -1785,8 +1824,13 @@ const STList: React.FC<STListProps> = ({
     if (displayMode !== 'shortScore' || isShortScoreRunningRef.current) {
       return;
     }
-    // 上面「清空旧结果」的 effect 已先执行，这里按新训练日重新计算
-    handleShortScoreRef.current();
+    const items = collectVisibleItemsRef.current();
+    if (!items.length) {
+      console.log('[短线评分] 训练日推进：当前结果列表为空，跳过自动重算');
+      return;
+    }
+    console.log(`[短线评分] 训练日推进到 ${trainDate} → 自动更新当前结果列表（${items.length} 只）`);
+    handleShortScoreRef.current(items);
   }, [ontrain, trainDate, displayMode]);
 
   const updateFtypes = useCallback(
@@ -2223,6 +2267,9 @@ const STList: React.FC<STListProps> = ({
     return base.filter((i) => codes.has(i.code));
   }, [collectCurrentItems, visibleShowList]);
 
+  // 供「训练日推进 → 自动重算」读取最新候选池（effect 声明在该函数之前，用 ref 传递避免闭包过期）
+  collectVisibleItemsRef.current = collectVisibleItems;
+
   /** 当前过滤结果的股票数：即「当日评分」实际会处理的数量（全部页，不含K线形态表头勾选过滤），直接标在按钮上 */
   const todayScoreCount = visibleShowList.length;
 
@@ -2410,7 +2457,7 @@ const STList: React.FC<STListProps> = ({
           </Button>
           <Button
             size="small"
-            onClick={handleShortScore}
+            onClick={() => handleShortScore()}
             loading={shortScoreLoading}
             style={{ marginLeft: 4 }}
           >
@@ -2429,6 +2476,14 @@ const STList: React.FC<STListProps> = ({
           >
             {todayScoreLoading ? `当日评分中 ${todayScoreProgress}%` : `当日评分(${todayScoreCount})`}
           </Button>
+          {displayMode === 'shortScore' && shortScoreDate && (
+            <span
+              style={{ marginLeft: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}
+              title="当前结果列表对应的评分基准日；训练日推进不会自动重算，点「短线评分」才会按新训练日更新"
+            >
+              评分日期 {shortScoreDate}
+            </span>
+          )}
           {displayMode === 'shortScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <Checkbox
