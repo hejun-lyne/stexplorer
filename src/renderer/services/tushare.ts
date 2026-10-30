@@ -1196,9 +1196,14 @@ export async function GetBankuaiCodeByNameFromTushare(name: string, fuzzy = true
 
 // ==================== 板块成分股 ====================
 
-export async function GetBankuaiStocksFromTushare(secid: string, date: string): Promise<any> {
+export async function GetBankuaiStocksFromTushare(secid: string, date?: string): Promise<any> {
   try {
-    const result = await callTushare('get_board_stocks', { secid, date });
+    // 不传日期时 python 侧按「数据截止日」取（训练模式下即训练日）
+    const params: Record<string, any> = { secid };
+    if (date) {
+      params.date = date;
+    }
+    const result = await callTushare('get_board_stocks', params);
     
     if (result.error) {
       console.error('获取板块成分股失败:', result.error);

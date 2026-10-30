@@ -2020,7 +2020,12 @@ export async function GetBankuaiStocksFromEastmoney(secid: string, count = 20) {
   }
 }
 
-export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, secid: string, count = 20) {
+export async function GetBankuaiStocksFromDataSource(
+  source: Enums.FundApiType,
+  secid: string,
+  count = 20,
+  date?: string
+) {
   // const cacheTable = 'board_stocks_cache';
   // const cacheKey = `${secid}_${count}`;
 
@@ -2042,8 +2047,8 @@ export async function GetBankuaiStocksFromDataSource(source: Enums.FundApiType, 
   if (source === Enums.FundApiType.Akshare) {
     result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
   } else if (source === Enums.FundApiType.Tushare) {
-
-    result = await TushareAPI.GetBankuaiStocksFromTushare(secid, dayjs().subtract(1, 'day').format('YYYYMMDD'));
+    // 传了日期就按该交易日还原成分股与当日行情（训练模式）；不传则由 python 侧按数据截止日取
+    result = await TushareAPI.GetBankuaiStocksFromTushare(secid, date);
   } else {
     result = await GetBankuaiStocksFromEastmoney(secid, count);
   }

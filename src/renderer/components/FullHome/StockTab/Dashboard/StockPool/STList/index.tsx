@@ -521,6 +521,13 @@ const STList: React.FC<STListProps> = ({
   /** 上一个交易日：训练日不在列表里（trainDayIdx < 0）时为空 */
   const prevTrainDay = trainDayIdx > 0 ? trainCalendarDays[trainDayIdx - 1] : '';
   const trainFinished = trainCalendarDays.length > 0 && trainDayIdx >= trainCalendarDays.length - 1;
+  /**
+   * 板块成分股取数用的训练日（YYYYMMDD，非训练模式为空）
+   *
+   * 板块成分股与当日行情必须按训练日还原：不传日期时 python 侧用的是「数据截止日」，
+   * 但成分股缓存按交易日分片，前端不显式带日期就可能一直复用同一份列表（切训练日不刷新）。
+   */
+  const trainDay = ontrain && trainDate ? String(trainDate).replace(/-/g, '') : '';
 
   /**
    * 跳到指定训练日并落盘（「上一天」/「下一天」共用）
@@ -700,7 +707,13 @@ const STList: React.FC<STListProps> = ({
         return;
       }
       // 多板块：先把该板块的列表存入缓存（即便它已被取消勾选，也留作再次勾选时秒回）
-      boardStocksCacheRef.current[requestedSecid] = data.stocks as Stock.DetailItem[];
+      // 空结果不覆盖旧缓存：切训练日/接口偶发失败时，列表才不会突然变空、名称也才不会退化成代码
+      const fetched = (data?.stocks || []) as Stock.DetailItem[];
+      if (fetched.length) {
+        boardStocksCacheRef.current[requestedSecid] = fetched;
+      } else if (!boardStocksCacheRef.current[requestedSecid]) {
+        boardStocksCacheRef.current[requestedSecid] = [];
+      }
       // 板块成分股接口按「涨跌幅」排序并且只取前 N 条（东财源），
       // 返回条数小于真实成分股数时，股票列表与评分池都只是「涨幅靠前的子集」，会随行情漂移。
       const total = Number((data as any)?.total) || 0;
@@ -745,8 +758,13 @@ const STList: React.FC<STListProps> = ({
       if (!requestedSecid) {
         return;
       }
-      // 多板块：先把该板块的列表存入缓存
-      boardStocksCacheRef.current[requestedSecid] = data.stocks as Stock.DetailItem[];
+      // 多板块：先把该板块的列表存入缓存（空结果不覆盖旧缓存，避免列表变空/名称退化成代码）
+      const fetched = (data?.stocks || []) as Stock.DetailItem[];
+      if (fetched.length) {
+        boardStocksCacheRef.current[requestedSecid] = fetched;
+      } else if (!boardStocksCacheRef.current[requestedSecid]) {
+        boardStocksCacheRef.current[requestedSecid] = [];
+      }
       if (effectiveSecidsRef.current.indexOf(requestedSecid) === -1) {
         return;
       }
@@ -757,24 +775,53 @@ const STList: React.FC<STListProps> = ({
     },
   });
 
-  /** 拉取指定板块的成分股（多板块时逐板块各发一次请求，避免节流把中间板块吞掉） */
+  /**
+   * 拉取指定板块的成分股（多板块时逐板块各发一次请求，避免节流把中间板块吞掉）
+   *
+   * 训练模式下强制走 Tushare 并带上训练日：只有它支持按交易日还原板块成分与当日行情
+   * （东财/akshare 的成分股接口只有实时快照，切训练日会看到完全一样的列表）。
+   */
   const loadBoardsStocks = useCallback(
     (secids: string[]) => {
+      const source = ontrain ? SHORT_SCORE_SOURCE : kLineApiSourceSetting;
+      const date = trainDay || undefined;
       secids.forEach((s) => {
         if (!s) {
           return;
         }
         if (isSWIndustryCode(s)) {
-          // 申万二级行业代码，使用 Tushare index_member 接口
-          runGetIndustryStocks(s);
+          // 申万二级行业代码，使用 Tushare index_member 接口（支持按日期还原历史成分）
+          runGetIndustryStocks(s, date);
         } else {
-          // 东财/同花顺板块代码，走原有逻辑
-          runGetStocks(kLineApiSourceSetting, s, 200);
+          // 东财/同花顺板块代码：Tushare 源按训练日取，其它源为实时快照
+          runGetStocks(source, s, 200, date);
         }
       });
     },
-    [kLineApiSourceSetting, runGetIndustryStocks, runGetStocks]
+    [ontrain, trainDay, kLineApiSourceSetting, runGetIndustryStocks, runGetStocks]
   );
+
+  /**
+   * 训练日切换 → 清空板块成分股缓存并按新训练日重拉
+   *
+   * 成分股缓存是按板块 secid 存的（不带日期），不清空会一直复用旧训练日那一份，
+   * 表现为「切训练日后股票列表完全没变」。
+   */
+  const prevTrainDayForBoardsRef = React.useRef(trainDay);
+  useEffect(() => {
+    const prev = prevTrainDayForBoardsRef.current;
+    prevTrainDayForBoardsRef.current = trainDay;
+    if (prev === trainDay) {
+      return;
+    }
+    boardStocksCacheRef.current = {};
+    const secids = effectiveSecidsRef.current;
+    if (!secids.length) {
+      return;
+    }
+    console.log(`[板块] 训练日 ${prev || '--'} → ${trainDay || '--'}：重新拉取板块成分股`);
+    loadBoardsStocks(secids);
+  }, [trainDay, loadBoardsStocks]);
 
   /** 已选板块的成分股是否都已就绪（缓存里都有）；「只看题材」按展开后的板块逐个检查 */
   const boardsReady = useCallback(() => {
@@ -1171,10 +1218,36 @@ const STList: React.FC<STListProps> = ({
     }
   }, [mainInLoading, mainInData.length, displayMode, signalData, riskData, leaderData, leaderDisplayCount, poolStocks]);
 
+  /**
+   * 代码 → 名称（只增不减）
+   *
+   * 切训练日会清空板块成分股缓存并重新拉取，这期间（或新日期下接口返回空时）stocks 里可能查不到名字，
+   * 若只依赖 stocks 取名，评分结果列表就会出现「名字变成代码」。这里把见过的名字都记下来兜底。
+   */
+  const stockNameCacheRef = React.useRef<Record<string, string>>({});
+  useEffect(() => {
+    const remember = (list: any[]) => {
+      (list || []).forEach((s) => {
+        const code = String(s?.code || '').trim();
+        const name = String(s?.name || '').trim();
+        if (code && name) {
+          stockNameCacheRef.current[code] = name;
+        }
+      });
+    };
+    remember(stocks as any[]);
+    remember(shortScoreData as any[]);
+    remember(leaderData as any[]);
+    remember(riskData as any[]);
+    remember(signalData as any[]);
+    remember(mainInData as any[]);
+  }, [stocks, shortScoreData, leaderData, riskData, signalData, mainInData]);
+
   // ========== 当前股票池（沿用选股漏斗：优先取上一步的有效结果） ==========
   // 短线评分与「训练周期评分预计算」共用，保证预计算覆盖的正是当前要评分的这批股票
   const collectCurrentItemsRaw = useCallback((options?: { ignoreReuse?: boolean }): ShortTermScoreItem[] => {
-    const lookupName = (code: string) => stocks.find((s) => s.code === code)?.name || '';
+    const lookupName = (code: string) =>
+      stocks.find((s) => s.code === code)?.name || stockNameCacheRef.current[code] || '';
     /**
      * 板块维度用的「所属板块」：优先用当前选中的板块
      *
@@ -2635,7 +2708,7 @@ const STList: React.FC<STListProps> = ({
         </div>
       </div>
       {/* 列表与个股面板左右平分；没有面板时列表占满 */}
-      <div style={{ display: 'flex', flex: '1 1 0%', minHeight: 0 }}>
+      <div style={{ display: 'flex', flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}>
         <div
           style={{
             flex: panelRow ? '1 1 50%' : '1 1 100%',
@@ -2643,9 +2716,6 @@ const STList: React.FC<STListProps> = ({
             minHeight: 0,
             display: 'flex',
             flexDirection: 'column',
-            // 分页按绝对定位钉在本列底部，这里作为定位容器并裁掉溢出，
-            // 保证行数再多也不会把分页顶出可视区
-            position: 'relative',
             overflow: 'hidden',
           }}
         >
@@ -2923,11 +2993,39 @@ const STList: React.FC<STListProps> = ({
           <Col span={3}>操作建议</Col>
         </Row>
       )}
-      {/* 表格高度严格取「列表列剩余空间」，底部留出固定分页条的高度，避免最后一行被分页压住 */}
+      {/* 表格高度严格取「列表列剩余空间」 */}
       <div
         className={styles.table}
-        style={{ height: 'auto', flex: '1 1 0%', minHeight: 0, overflowY: 'auto', paddingBottom: 40 }}
+        style={{ height: 'auto', flex: '1 1 0%', minHeight: 0, overflowY: 'auto' }}
       >
+        {/* 分页条吸顶：放在表格可视区顶部并随滚动常驻，不依赖外层高度链，任何行数下都一定可见 */}
+        <div
+          style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 2,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            padding: '2px 10px',
+            borderBottom: '1px solid var(--border-color)',
+            backgroundColor: 'var(--background-color)',
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
+            共 {displayList.length} 条 · 第 {currentPage} 页
+          </span>
+          <Pagination
+            current={currentPage}
+            pageSize={pageSize}
+            total={displayList.length}
+            onChange={onPageChange}
+            showSizeChanger={false}
+            size="small"
+            style={{ margin: 0 }}
+          />
+        </div>
         {displayMode === 'stocks' ? (
           displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
             <Row key={s.code} className={styles.row}>
@@ -3069,6 +3167,8 @@ const STList: React.FC<STListProps> = ({
                   : undefined;
             // 右侧面板当前展示的这只：整行加一道左侧高亮，便于对照
             const isPanelActive = !!panelStockCode && panelStockCode === s.code;
+            // 行名兜底：板块重拉/切训练日瞬间评分行的 name 可能为空，用记住的名字补上，不要显示成代码
+            const rowName = s.name || stockNameCacheRef.current[s.code] || s.code;
             return (
               <Row
                 key={s.code}
@@ -3080,7 +3180,7 @@ const STList: React.FC<STListProps> = ({
               >
                 <Col span={5} style={{ cursor: 'pointer' }} onClick={() => setPanelCode(s.code)}>
                   <div
-                    title={`${s.name || s.code}（点击在右侧面板查看公司简介与日K线）`}
+                    title={`${rowName}（点击在右侧面板查看公司简介与日K线）`}
                     style={{
                       color: '#1890ff',
                       display: 'flex',
@@ -3090,7 +3190,7 @@ const STList: React.FC<STListProps> = ({
                       overflow: 'hidden',
                     }}
                   >
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name || s.code}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{rowName}</span>
                     {newEntryCodes.has(s.code) && (
                       <span
                         className={styles.newEntryTag}
@@ -3302,31 +3402,6 @@ const STList: React.FC<STListProps> = ({
           })
         )}
       </div>
-        {/* 分页条钉在列表列底部（不参与表格滚动）：行数再多也始终可见 */}
-        <div
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: 40,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderTop: '1px solid var(--border-color)',
-            backgroundColor: 'var(--background-color)',
-          }}
-        >
-          <Pagination
-            current={currentPage}
-            pageSize={pageSize}
-            total={displayList.length}
-            onChange={onPageChange}
-            showSizeChanger={false}
-            size="small"
-            style={{ margin: 0 }}
-          />
-        </div>
         </div>
         {panelRow && panelStockSecid ? (
           <ScoreStockPanel
