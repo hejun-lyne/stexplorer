@@ -2635,8 +2635,20 @@ const STList: React.FC<STListProps> = ({
         </div>
       </div>
       {/* 列表与个股面板左右平分；没有面板时列表占满 */}
-      <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0 }}>
-        <div style={{ flex: panelRow ? '1 1 50%' : '1 1 100%', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ display: 'flex', flex: '1 1 0%', minHeight: 0 }}>
+        <div
+          style={{
+            flex: panelRow ? '1 1 50%' : '1 1 100%',
+            minWidth: 0,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            // 分页按绝对定位钉在本列底部，这里作为定位容器并裁掉溢出，
+            // 保证行数再多也不会把分页顶出可视区
+            position: 'relative',
+            overflow: 'hidden',
+          }}
+        >
       {displayMode === 'stocks' ? (
         <Row className={styles.header}>
           <Col span={3}>名字</Col>
@@ -2911,8 +2923,11 @@ const STList: React.FC<STListProps> = ({
           <Col span={3}>操作建议</Col>
         </Row>
       )}
-      {/* 表格高度改为占满分栏剩余空间（不再用 moreheader 的固定 calc，避免操作区外置后底部留白） */}
-      <div className={styles.table} style={{ height: 'auto', flex: '1 1 auto', minHeight: 0 }}>
+      {/* 表格高度严格取「列表列剩余空间」，底部留出固定分页条的高度，避免最后一行被分页压住 */}
+      <div
+        className={styles.table}
+        style={{ height: 'auto', flex: '1 1 0%', minHeight: 0, overflowY: 'auto', paddingBottom: 40 }}
+      >
         {displayMode === 'stocks' ? (
           displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
             <Row key={s.code} className={styles.row}>
@@ -3287,16 +3302,31 @@ const STList: React.FC<STListProps> = ({
           })
         )}
       </div>
-        {/* 分页控件放在滚动区之外并固定在列表底部：否则行数超出可视高度时会被滚到内容末尾而看不见 */}
-        <Pagination
-          current={currentPage}
-          pageSize={pageSize}
-          total={displayList.length}
-          onChange={onPageChange}
-          showSizeChanger={false}
-          size="small"
-          style={{ flex: '0 0 auto', padding: '8px 0', textAlign: 'center' }}
-        />
+        {/* 分页条钉在列表列底部（不参与表格滚动）：行数再多也始终可见 */}
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: 40,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderTop: '1px solid var(--border-color)',
+            backgroundColor: 'var(--background-color)',
+          }}
+        >
+          <Pagination
+            current={currentPage}
+            pageSize={pageSize}
+            total={displayList.length}
+            onChange={onPageChange}
+            showSizeChanger={false}
+            size="small"
+            style={{ margin: 0 }}
+          />
+        </div>
         </div>
         {panelRow && panelStockSecid ? (
           <ScoreStockPanel

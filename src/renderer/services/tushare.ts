@@ -23,24 +23,19 @@ const TUSHARE_SCRIPT = 'tushare_api.py';
 /**
  * 训练模式下的时间过滤说明
  *
- * 只过滤「时间序列 / 日频行情」数据，快照类数据（板块列表、实时行情、财报、资讯等）保持原样返回：
- * 1. 入参：以交易日为终点的时序接口，其日期参数收敛到当前训练日期，未传日期的补上训练日期
+ * 1. 入参：以交易日为终点的接口，其日期参数收敛到当前训练日期，未传日期的补上训练日期
  *    （见 TRAIN_AS_OF_PARAM），保证 python 内部用于计算指标的时间序列不含训练日期之后的数据。
  * 2. 出参：返回的时间序列（K线、分时、资金流明细、按日期分组的数据）统一按训练日期截断。
- * 3. 快照类接口（TRAIN_SKIP_METHODS）不做任何日期处理 —— 东财板块 dc_index/dc_member 系接口
- *    无法按历史交易日查询（传历史日期会返回空），按原样返回才不会「获取不到板块数据」。
+ * 3. 板块 / 成分股：dc_index、dc_member、index_member_all 都能按交易日取历史数据，
+ *    因此板块列表、板块成分股与日频行情同等处理（收敛并注入训练日期），不再整体豁免。
+ * 4. 只有真正无法按历史日期查询的接口（实时行情、财报、资讯等）才进入 TRAIN_SKIP_METHODS，
+ *    按原样返回；其中 get_sector_boards 无日期参数，由 python 侧按训练截止日取数。
  */
 
 /** 训练模式下不做任何日期处理的快照 / 非时序接口 */
 const TRAIN_SKIP_METHODS = [
-  // 东财板块快照（dc_index / dc_member 系，不支持按历史交易日查询）
+  // 板块实时列表快照（无日期参数，python 侧内部按训练截止日取数）
   'get_sector_boards',
-  'get_boards_by_date',
-  'get_board_detail',
-  'get_board_stocks',
-  'get_board_stocks_batch',
-  'get_boards_by_date_batch',
-  'get_industry_stocks',
   // 实时行情快照
   'get_stock_realtime',
   'get_stocks_realtime_batch',
@@ -78,6 +73,12 @@ const TRAIN_AS_OF_PARAM: Record<string, string> = {
   get_stk_shock: 'date',
   get_hk_hold: 'date',
   get_strong_stocks: 'date',
+  // 板块 / 成分股（dc_index / dc_member / index_member_all 均支持按交易日查历史）
+  get_boards_by_date: 'date',
+  get_boards_by_date_batch: 'dates',
+  get_board_detail: 'date',
+  get_board_stocks: 'date',
+  get_industry_stocks: 'date',
   // 时间序列类
   get_kline_data: 'end_date',
   get_kline_data_batch: 'end_date',

@@ -740,6 +740,89 @@ def _cached_dc_member(pro, ts_code: str, trade_date: str) -> Any:
     return df
 
 
+# 申万成分股「按日期还原」的内存缓存：(index_code, date) -> records
+_SW_MEMBER_CACHE: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+_SW_MEMBER_CACHE_MAX = 512
+
+
+def _get_sw_members_at(pro, index_code: str, target_date: Optional[str] = None) -> pd.DataFrame:
+    """获取申万行业在指定交易日的成分股（避免训练模式下的前视偏差）
+
+    index_member 只返回「当前」成分股且不支持日期参数；index_member_all 返回每只
+    成分股的 in_date/out_date，可据此还原历史某一交易日仍在行业内的成分。
+    target_date 为空或等于真实今天时直接走 index_member（快照即当日，少的两次请求）。
+
+    返回列与 index_member 对齐：index_code / con_code / con_name / in_date / out_date / is_new。
+    取数失败时打印告警并返回空 DataFrame，调用方按「无成分股」处理。
+    """
+    date_str = (target_date or _now()).replace('-', '')
+
+    if date_str >= _real_today_str():
+        df = safe_api_call(pro.index_member, index_code=index_code)
+        if isinstance(df, dict) and df.get("error"):
+            print(f"[_get_sw_members_at] index_member {index_code} 失败: {df.get('error')}")
+            return pd.DataFrame()
+        if df is None or df.empty:
+            return pd.DataFrame()
+        return df[df['out_date'].isna() | (df['out_date'] == '')]
+
+    cache_key = (index_code, date_str)
+    cached = _SW_MEMBER_CACHE.get(cache_key)
+    if cached is not None:
+        return pd.DataFrame(cached)
+
+    # 申万代码分级：85 开头为三级，一级代码以 0 结尾，其余按二级处理
+    if index_code.startswith('85'):
+        param_groups = [{'l3_code': index_code}]
+    elif index_code.split('.')[0].endswith('0'):
+        param_groups = [{'l1_code': index_code}, {'l2_code': index_code}]
+    else:
+        param_groups = [{'l2_code': index_code}, {'l1_code': index_code}]
+
+    frames: List[pd.DataFrame] = []
+    for params in param_groups:
+        for is_new in ('Y', 'N'):
+            df = safe_api_call(pro.index_member_all, is_new=is_new, **params)
+            if isinstance(df, dict) and df.get("error"):
+                print(f"[_get_sw_members_at] index_member_all {index_code} 失败: {df.get('error')}")
+                return pd.DataFrame()
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                frames.append(df)
+        if frames:
+            break
+
+    if not frames:
+        return pd.DataFrame()
+
+    all_df = pd.concat(frames, ignore_index=True)
+    if len(all_df) >= 2000:
+        # index_member_all 单次最多返回 2000 行，超限时结果可能被截断
+        print(f"[_get_sw_members_at] {index_code} 返回 {len(all_df)} 行，可能触发单次 2000 行上限")
+    if 'ts_code' in all_df.columns and 'con_code' not in all_df.columns:
+        all_df = all_df.rename(columns={'ts_code': 'con_code', 'name': 'con_name'})
+    if 'con_code' not in all_df.columns:
+        return pd.DataFrame()
+
+    all_df['con_code'] = all_df['con_code'].astype(str)
+    all_df = all_df.drop_duplicates(subset=['con_code'], keep='last')
+
+    # 区间过滤：in_date <= target <= out_date（out_date 为空表示仍在成分内）
+    in_date = all_df['in_date'].fillna('').astype(str).str.replace('-', '')
+    out_date = all_df['out_date'].fillna('').astype(str).str.replace('-', '').replace('nan', '')
+    mask = (in_date <= date_str) & ((out_date == '') | (out_date >= date_str))
+    hist = all_df[mask]
+
+    keep_cols = [c for c in ['index_code', 'con_code', 'con_name', 'in_date', 'out_date', 'is_new'] if c in hist.columns]
+    records = df_to_records(hist[keep_cols])
+
+    if len(_SW_MEMBER_CACHE) >= _SW_MEMBER_CACHE_MAX:
+        # 简单淘汰最早写入的一项，避免常驻进程内存无限增长
+        _SW_MEMBER_CACHE.pop(next(iter(_SW_MEMBER_CACHE)))
+    _SW_MEMBER_CACHE[cache_key] = records
+    print(f"[_get_sw_members_at] {index_code} @ {date_str}: 历史成分 {len(records)} 只")
+    return pd.DataFrame(records)
+
+
 # ============ API 封装类 ============
 
 class TushareAPI:
@@ -1158,16 +1241,28 @@ class TushareAPI:
             return {"error": str(e)}
 
     @staticmethod
-    def _get_board_realtime(secid: str) -> Dict[str, Any]:
-        """获取板块实时行情（dc_index，带缓存避免重复全量查询）"""
+    def _get_board_realtime(secid: str, date: Optional[str] = None) -> Dict[str, Any]:
+        """获取板块行情（dc_index，带缓存避免重复全量查询）
+
+        date 为空或为真实当天时返回最新快照；传入历史交易日时按该日取数，
+        避免训练模式下板块价格混入训练日期之后的数据。
+        """
         try:
             code = convert_secid_to_pure_code(secid)
             ts_code = f"{code}.DC" if not code.endswith(".DC") else code
             pro = get_pro()
 
-            # 缓存 key：按板块代码隔离，缓存 1 小时
-            cache_key = f"dc_index_board_{ts_code}"
-            cached = read_cache(cache_key, max_age_hours=1)
+            target_date = (date or '').replace('-', '')
+            is_history = bool(target_date) and target_date < _real_today_str()
+
+            # 缓存 key：按板块代码隔离；历史日期数据不再变化，长期缓存
+            if is_history:
+                cache_key = f"dc_index_board_{ts_code}_{target_date}"
+                max_age = 24 * 365 * 10
+            else:
+                cache_key = f"dc_index_board_{ts_code}"
+                max_age = 1
+            cached = read_cache(cache_key, max_age_hours=max_age)
             # 只有缓存有效且 zx 不为 0 才直接返回（zx==0 说明之前数据不完整，需要重新拉取补全）
             if cached is not None and cached.get("zx", 0) > 0:
                 return cached
@@ -1175,7 +1270,10 @@ class TushareAPI:
             # 先查行业板块，找不到再查概念板块
             board_row = None
             for idx_type in ["行业板块", "概念板块"]:
-                df = safe_api_call(pro.dc_index, idx_type=idx_type)
+                if is_history:
+                    df = safe_api_call(pro.dc_index, idx_type=idx_type, trade_date=target_date)
+                else:
+                    df = safe_api_call(pro.dc_index, idx_type=idx_type)
                 if isinstance(df, dict) and df.get("error"):
                     continue
                 if df is None or df.empty:
@@ -1202,10 +1300,11 @@ class TushareAPI:
             # dc_index 可能缺少最新价（如部分概念板块），用 dc_daily 补全
             if close_p == 0:
                 try:
-                    # 板块实时行情快照：训练模式下同样按最新数据补全，不做截止日期过滤
+                    # 历史日期按目标日补全，避免混入训练日期之后的板块行情
+                    range_end = target_date if is_history else _now()
                     daily_df = safe_api_call(pro.dc_daily, ts_code=ts_code,
-                                             start_date=(datetime.now() - timedelta(days=10)).strftime("%Y%m%d"),
-                                             end_date=datetime.now().strftime("%Y%m%d"))
+                                             start_date=(datetime.strptime(range_end, "%Y%m%d") - timedelta(days=10)).strftime("%Y%m%d"),
+                                             end_date=range_end)
                     if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
                         daily_df = daily_df.sort_values('trade_date', ascending=False)
                         latest = daily_df.iloc[0]
@@ -2281,12 +2380,13 @@ class TushareAPI:
         - 同花顺：moneyflow_ind_ths（行业）/ moneyflow_cnt_ths（概念）
         返回今日主力净流入(main_in) 和 最近5日主力净流入(main_in_5d)
 
-        注意：本接口返回的是「板块实时列表快照」，不属于时间序列数据，
-        训练模式下不做截止日期过滤（dc_index 按历史 trade_date 查询会返回空）。
+        注意：东财数据源按数据截止日期（训练模式下为训练日期）取 dc_index，
+        同花顺数据源只有实时快照，训练模式下无法回溯历史。
         """
         try:
             pro = get_pro()
-            today = datetime.now().strftime('%Y%m%d')
+            today = _now()
+            as_of = get_as_of_date()
 
             if data_source == "ths":
                 # ========== 同花顺数据源 ==========
@@ -2338,7 +2438,18 @@ class TushareAPI:
 
             # ========== 东财数据源（默认） ==========
             idx_type = "行业板块" if bk_type == "industry" else "概念板块"
-            df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
+            snapshot_fallback = False
+            if as_of and as_of < _real_today_str():
+                # 训练模式：按训练日期取板块列表（dc_index 支持 trade_date）
+                df = cached_api_call("dc_index", 24 * 365 * 10, pro.dc_index,
+                                     idx_type=idx_type, trade_date=as_of)
+                if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                    # 该日期无数据时降级为最新快照，并显式标记，避免静默混入未来数据
+                    snapshot_fallback = True
+                    print(f"[get_sector_boards] {as_of} 无板块数据，降级为最新快照")
+                    df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
+            else:
+                df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
             if isinstance(df, dict) and df.get("error"):
                 return df
             if df is None or (isinstance(df, pd.DataFrame) and df.empty):
@@ -2347,8 +2458,8 @@ class TushareAPI:
             # 去重：同一板块可能在接口返回中重复出现
             df = df.drop_duplicates(subset=['ts_code'], keep='first')
 
-            # 获取资金流向数据（与上面的实时板块快照保持一致，不使用训练截止日期）
-            start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+            # 获取资金流向数据（截止到数据截止日期）
+            start_date = (_now_date() - timedelta(days=10)).strftime('%Y%m%d')
 
             # 行业板块用 moneyflow_ind_dc，概念板块用 moneyflow_con_dc
             if bk_type == "industry":
@@ -2395,6 +2506,8 @@ class TushareAPI:
             return {
                 "boards": boards,
                 "count": len(boards),
+                "date": today,
+                "snapshot_fallback": snapshot_fallback,
             }
         except Exception as e:
             return {"error": str(e)}
@@ -2429,8 +2542,8 @@ class TushareAPI:
                 "date": "20240101"
             }
         """
-        # 板块日快照（dc_index 系）不属于时间序列，训练模式下不做截止日期过滤
-        target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+        # 不传日期时默认数据截止日期（训练模式下为训练日期）
+        target_date = (date or _now()).replace("-", "")
         cache_key = f"boards_by_date_{bk_type}_{target_date}"
         cached = read_cache(cache_key, max_age_hours=8760 * 10)  # 历史数据几乎不变，缓存10年
 
@@ -2536,8 +2649,8 @@ class TushareAPI:
             code = convert_secid_to_pure_code(secid)
             is_dc = code.startswith("BK")
             data_source = "dc" if is_dc else "ths"
-            # 板块日快照（dc_index 系）不属于时间序列，训练模式下不做截止日期过滤
-            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+            # 不传日期时默认数据截止日期（训练模式下为训练日期）
+            target_date = (date or _now()).replace("-", "")
 
             pro = get_pro()
 
@@ -2682,8 +2795,8 @@ class TushareAPI:
                                 if td in trade_dates_5d:
                                     main_in_5d += net_amount
 
-            # ---------- 4. 获取板块最新行情（复用 _get_board_realtime）----------
-            realtime = TushareAPI._get_board_realtime(secid)
+            # ---------- 4. 获取板块行情（按目标日期，复用 _get_board_realtime）----------
+            realtime = TushareAPI._get_board_realtime(secid, target_date)
             if isinstance(realtime, dict) and realtime.get("error"):
                 realtime = {}
 
@@ -2735,8 +2848,8 @@ class TushareAPI:
         - 查询时检查目标日期是否已有缓存，有则命中；无则请求后合并
         """
         code = convert_secid_to_pure_code(secid)
-        # 板块日快照（dc_index 系）不属于时间序列，训练模式下不做截止日期过滤
-        target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+        # 不传日期时默认数据截止日期（训练模式下为训练日期）
+        target_date = (date or _now()).replace("-", "")
 
         # 统一缓存 key，与 date 无关
         cache_key = f"board_stocks_{secid}"
@@ -2745,7 +2858,11 @@ class TushareAPI:
             cached_all = {}
 
         # 检查目标日期是否已在缓存中
+        is_ths_board = code.startswith("88") or code.startswith("3")
         cached_day = cached_all.get(target_date)
+        if is_ths_board and target_date < _real_today_str():
+            # 同花顺板块没有历史成分接口，历史日期下的缓存来自「当前快照」，不能复用
+            cached_day = None
         if isinstance(cached_day, dict) and cached_day.get("stocks"):
             if date:
                 # 指定了历史日期，直接返回
@@ -2789,7 +2906,10 @@ class TushareAPI:
 
             # ========== 获取成分股 ==========
             if is_ths:
-                # 同花顺板块：从网页抓取
+                # 同花顺板块：网页抓取只有当前成分快照，无历史日期参数
+                if target_date < _real_today_str():
+                    debug_info["history_unsupported"] = True
+                    print(f"[板块成分股] {code} 同花顺板块不支持历史成分，返回当前快照 query_date={target_date}")
                 ths_stocks = _get_board_stocks_from_ths(code)
                 for s in ths_stocks:
                     stock_code = s["code"]
@@ -2820,10 +2940,12 @@ class TushareAPI:
                     return {"error": df.get("error"), "debug": debug_info}
                 
                 if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-                    # dc_member 只支持最近约7天的历史成分股，更早日期返回空
+                    # dc_member 可按 trade_date 查询历史成分，但数据起始于 2024-12-20
                     # 这里不做 fallback 到最新数据，避免历史日期混入最新成分股
                     debug_info["dc_member_empty"] = True
-                    debug_info["dc_member_limit_note"] = "dc_member only supports ~7 days history"
+                    debug_info["dc_member_limit_note"] = "dc_member history starts at 20241220"
+                    if trade_date < "20241220":
+                        debug_info["dc_member_before_start"] = True
                     # 尝试同花顺 fallback（如果代码看起来像同花顺）
                     if is_ths or code.startswith("88") or code.startswith("3"):
                         ths_stocks = _get_board_stocks_from_ths(code)
@@ -2980,7 +3102,10 @@ class TushareAPI:
                     })
 
                 result = {"total": len(stocks), "stocks": stocks, "date": target_date}
-                if isinstance(result, dict) and result.get("stocks"):
+                if is_ths and target_date < _real_today_str():
+                    # 同花顺板块只有当前成分快照，不能把它落到历史日期缓存下
+                    result["history_unsupported"] = True
+                if isinstance(result, dict) and result.get("stocks") and not result.get("history_unsupported"):
                     # 合并到统一缓存（按日期更新）
                     cached_all[target_date] = result
                     write_cache(cache_key, cached_all)
@@ -3110,9 +3235,10 @@ class TushareAPI:
 
     @staticmethod
     def get_industry_stocks(secid: str, date: Optional[str] = None) -> Dict[str, Any]:
-        """获取申万二级行业成分股（支持 801010.SI 或 90.801010 格式）
+        """获取申万行业成分股（支持 801010.SI 或 90.801010 格式）
 
-        通过 index_member 接口获取申万行业指数成分股，并通过 daily + daily_basic 补全行情数据。
+        成分股按目标交易日还原（index_member_all 的 in_date/out_date），并通过
+        daily + daily_basic 补全该交易日行情，训练模式下不会混入训练日期之后的数据。
         返回格式与 get_board_stocks 兼容：{ total, stocks: [{ code, name, secid, zx, zdf, ... }] }
         """
         try:
@@ -3120,26 +3246,19 @@ class TushareAPI:
             code = convert_secid_to_pure_code(secid)
             if '.' in code:
                 code = code.split('.')[0]
-            # 确保是 801 开头的申万二级行业代码
+            # 确保是 801 开头的申万行业代码
             if not code.startswith('801') or len(code) != 6:
                 return {"error": f"Invalid SW industry code: {secid}"}
 
             ts_code = f"{code}.SI"
-            # 板块日快照（dc_index 系）不属于时间序列，训练模式下不做截止日期过滤
-            target_date = (date or datetime.now().strftime('%Y%m%d')).replace("-", "")
+            # 不传日期时默认数据截止日期（训练模式下为训练日期）
+            target_date = (date or _now()).replace("-", "")
 
             pro = get_pro()
 
-            # 1. 获取成分股
-            df = safe_api_call(pro.index_member, index_code=ts_code)
-            if isinstance(df, dict) and df.get("error"):
-                return df
+            # 1. 获取目标交易日的成分股（历史日期按 in_date/out_date 还原）
+            df = _get_sw_members_at(pro, ts_code, target_date)
             if df is None or df.empty:
-                return {"total": 0, "stocks": [], "source": "sw_index_member"}
-
-            # 过滤仍在成分股中的（out_date 为空表示当前仍在）
-            df = df[df['out_date'].isna() | (df['out_date'] == '')]
-            if df.empty:
                 return {"total": 0, "stocks": [], "source": "sw_index_member"}
 
             # 2. 获取最近交易日
@@ -3270,8 +3389,8 @@ class TushareAPI:
             if concept_source == "dc":
                 # 东财概念：使用 dc_member（按板块缓存，trade_date 为 key）
                 ts_code = f"{concept_code}.DC" if not concept_code.endswith(".DC") else concept_code
-                # 概念成分股快照，训练模式下按原样返回
-                trade_date = datetime.now().strftime('%Y%m%d')
+                # 按数据截止日期取成分股（训练模式下为训练日期）
+                trade_date = _now()
                 df = _cached_dc_member(pro, ts_code, trade_date)
                 if isinstance(df, dict) and df.get("error"):
                     return []
@@ -3884,8 +4003,8 @@ class TushareAPI:
             start_date = start_dt.strftime("%Y%m%d")
             kline = selector.get_industry_kline(industry_code, start_date, trade_date)
 
-            # 获取成分股
-            members = selector.pro.index_member(index_code=industry_code)
+            # 获取该交易日的成分股（避免训练模式下的前视偏差）
+            members = _get_sw_members_at(selector.pro, industry_code, trade_date)
             if members is None or members.empty:
                 return {"leaders": [], "count": 0, "industry_code": industry_code}
 
@@ -7278,8 +7397,8 @@ class StockSelector:
         if cached is not None and isinstance(cached, (int, float)):
             return float(cached)
 
-        # 获取成分股
-        members = self.pro.index_member(index_code=industry_code)
+        # 获取该交易日的成分股（避免训练模式下的前视偏差）
+        members = _get_sw_members_at(self.pro, industry_code, trade_date)
         if members is None or members.empty:
             print(f"[DEBUG fund_flow] {industry_code}: 无成分股")
             return 0.0
@@ -7783,8 +7902,8 @@ class StockSelector:
 
             print(f"\n[Step 2] 行业 {ind_name} - 识别龙头...")
 
-            # 获取成分股
-            members = self.pro.index_member(index_code=ind_code)
+            # 获取该交易日的成分股（避免训练模式下的前视偏差）
+            members = _get_sw_members_at(self.pro, ind_code, trade_date)
             if members is None or members.empty:
                 continue
 
