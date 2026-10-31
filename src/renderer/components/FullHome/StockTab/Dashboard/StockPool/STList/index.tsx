@@ -17,7 +17,7 @@ import {
   MainInFilterStocksFromTushare,
 } from '@/services/tushare';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
-import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
+import { BKType, KFilterType, KFilterTypeNames, KLineType } from '@/utils/enums';
 import classNames from 'classnames';
 import { batch, useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
@@ -51,6 +51,7 @@ import { RSI_SHAPE_FILTER_OPTIONS, normalizeRsiShape } from '@/helpers/rsiShape'
 import { filterThemeBoards } from '@/helpers/boardFilter';
 import { saveTrainDayAction } from '@/actions/train';
 import { toggleStockFavoriteAction } from '@/actions/setting';
+import { fillPendingBuyTradesAction } from '@/actions/stock';
 import ScoreStockPanel from './ScoreStockPanel';
 
 /**
@@ -509,7 +510,7 @@ const STList: React.FC<STListProps> = ({
 
   const { kLineApiSourceSetting, ontrain, trainDate, trainStartDate, trainEndDate, initialCapital, commissionRate } =
     useSelector((state: StoreState) => state.setting.systemSetting);
-  const { stockConfigsMapping } = useSelector((state: StoreState) => state.stock);
+  const { stockConfigsMapping, tradings } = useSelector((state: StoreState) => state.stock);
   // 收藏的股票代码：收藏后忽略评分/RSI/市值/形态等过滤条件，始终留在评分结果列表里
   const favoriteCodes = useSelector((state: StoreState) => state.setting.systemSetting.favorites);
   const favoriteSet = React.useMemo(() => new Set<string>(favoriteCodes || []), [favoriteCodes]);
@@ -2098,36 +2099,93 @@ const STList: React.FC<STListProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardsKey, effectiveBoardsKey]);
 
-  // 用 ref 持有最新的 handleShortScore / collectVisibleItems：
-  // 自动重算场景（切板块、训练日推进）要读最新闭包，又不希望把它们写进依赖导致 effect 反复重跑。
+  // 用 ref 持有最新的 handleShortScore：
+  // 自动重算场景（切板块、训练日推进）要读最新闭包，又不希望把它写进依赖导致 effect 反复重跑。
   const handleShortScoreRef = React.useRef<(items?: ShortTermScoreItem[]) => void>(() => {});
   useEffect(() => {
     handleShortScoreRef.current = handleShortScore;
   }, [handleShortScore]);
-  /** 最新的「当日评分」候选池求值函数（在 collectVisibleItems 定义处赋值，见下方） */
-  const collectVisibleItemsRef = React.useRef<() => ShortTermScoreItem[]>(() => []);
 
   // 训练日推进（训练工具栏或列表里的「下一天」）→ 若正在展示短线评分结果列表，自动按新训练日重算。
-  // 候选池与「当日评分」保持一致（当前列表的过滤结果，不分页），而不是整个板块池：
-  // 推进训练日只更新当前看到的这批股票，不会把板块里被过滤掉的股票重新拉回来。
+  // 评分池必须是「整个板块股票池」，不能用当前过滤后的结果：
+  // 评分过滤 / RSI 过滤 / 市值 / 形态等条件在展示层重新生效，推进交易日后
+  // 新满足条件的股票才能进入列表、不再满足的会退出，否则列表永远是前一天那批股票的子集。
   const prevTrainDateRef = React.useRef(trainDate);
   useEffect(() => {
     const prev = prevTrainDateRef.current;
     prevTrainDateRef.current = trainDate;
     if (!ontrain || !trainDate || prev === trainDate) {
-      return;
+      return () => {};
     }
-    if (displayMode !== 'shortScore' || isShortScoreRunningRef.current) {
-      return;
+    if (displayMode !== 'shortScore') {
+      return () => {};
     }
-    const items = collectVisibleItemsRef.current();
-    if (!items.length) {
-      console.log('[短线评分] 训练日推进：当前结果列表为空，跳过自动重算');
-      return;
-    }
-    console.log(`[短线评分] 训练日推进到 ${trainDate} → 自动更新当前结果列表（${items.length} 只）`);
-    handleShortScoreRef.current(items);
+    // 上一轮还在跑（含刚开始取板块成分股的阶段）时先等它收尾，否则这次推进会被当成「暂停」吞掉，
+    // 列表就停在上一交易日的评分上。
+    let canceled = false;
+    const startedAt = Date.now();
+    const trigger = () => {
+      if (canceled) {
+        return;
+      }
+      const busy = isShortScoreRunningRef.current || todayScoreRunningRef.current || scoreStartingRef.current;
+      if (busy) {
+        if (Date.now() - startedAt < 20000) {
+          setTimeout(trigger, 300);
+        }
+        return;
+      }
+      // 丢掉上一轮可能残留的暂停队列，强制开新的一轮（否则会接着续跑旧队列，评分池还是旧的）
+      shortScoreRemainingRef.current = [];
+      isShortScorePausedRef.current = false;
+      console.log(`[短线评分] 训练日推进到 ${trainDate} → 按板块全量股票重算评分，再重新过滤`);
+      handleShortScoreRef.current();
+    };
+    setTimeout(trigger, 0);
+    return () => {
+      canceled = true;
+    };
   }, [ontrain, trainDate, displayMode]);
+
+  // 训练日推进后回填「涨停挂单」的待成交买入（按新训练日的开盘价成交）。
+  // 不能只依赖右侧面板：面板可能没打开 / 结果列表正在重算 / 面板日K还没刷新，
+  // 那样挂单会一直卡在「待成交」。
+  const pendingBuyTrades = React.useMemo(() => (tradings || []).filter((t) => t.pending), [tradings]);
+  const pendingBuyKey = React.useMemo(
+    () => pendingBuyTrades.map((t) => `${t.id}:${t.secid}`).join(','),
+    [pendingBuyTrades]
+  );
+  useEffect(() => {
+    if (!ontrain || !trainDate || !pendingBuyKey) {
+      return () => {};
+    }
+    const secids = Array.from(new Set(pendingBuyTrades.map((t) => t.secid).filter(Boolean)));
+    if (!secids.length) {
+      return () => {};
+    }
+    let canceled = false;
+    (async () => {
+      for (const secid of secids) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const r = await Services.Stock.GetKFromDataSource(SHORT_SCORE_SOURCE, secid, KLineType.Day, 120);
+          if (canceled) {
+            return;
+          }
+          if (r?.ks?.length) {
+            dispatch(fillPendingBuyTradesAction(secid, r.ks as Stock.KLineItem[]));
+          }
+        } catch (e: any) {
+          console.warn('[待成交] 回填买入委托取日K失败:', secid, e?.message || e);
+        }
+      }
+    })();
+    return () => {
+      canceled = true;
+    };
+    // pendingBuyKey 覆盖「新增/取消挂单」，trainDate 覆盖训练日推进；pendingBuyTrades 由 key 代表
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ontrain, trainDate, pendingBuyKey, dispatch]);
 
   const updateFtypes = useCallback(
     (ts: any[]) => {
@@ -2572,9 +2630,6 @@ const STList: React.FC<STListProps> = ({
     );
     return base.filter((i) => codes.has(i.code));
   }, [collectCurrentItems, visibleShowList]);
-
-  // 供「训练日推进 → 自动重算」读取最新候选池（effect 声明在该函数之前，用 ref 传递避免闭包过期）
-  collectVisibleItemsRef.current = collectVisibleItems;
 
   /** 当前过滤结果的股票数：即「当日评分」实际会处理的数量（全部页，不含K线形态表头勾选过滤），直接标在按钮上 */
   const todayScoreCount = visibleShowList.length;
@@ -3665,6 +3720,7 @@ const STList: React.FC<STListProps> = ({
             code={panelStockCode}
             secid={panelStockSecid}
             name={nameOfListItem(panelRow)}
+            trainDate={ontrain ? trainDate : ''}
             onOpenStock={onOpenStock}
           />
         ) : null}

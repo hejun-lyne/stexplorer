@@ -810,6 +810,7 @@ export function fillPendingBuyTradesAction(secid: string, klines: Stock.KLineIte
       if (ontrain) {
         // 训练模式：补成交直接写入训练买卖点（与详情页共用同一个训练账户），并从待成交队列移除
         filled.forEach(({ order, date, open, amount }) => {
+          console.log(`[待成交] ${secid} 涨停挂单回填成交：${date} 开盘价 ${open}，金额 ${amount}`);
           dispatch(addStockTradePointAction(secid, date, open, true, TRAIN_MARK, amount, order.reason));
         });
         const filledIds = new Set(filled.map((f) => f.order.id));

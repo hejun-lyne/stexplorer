@@ -1,12 +1,19 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Input, InputNumber, Select, message } from 'antd';
 import moment from 'moment';
 import { useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { Stock } from '@/types/stock';
-import { addStockTradePointAction, appendTrade, fillPendingBuyTradesAction, removeTrade } from '@/actions/stock';
+import {
+  addStockAction,
+  addStockTagAction,
+  addStockTradePointAction,
+  appendTrade,
+  fillPendingBuyTradesAction,
+  removeTrade,
+} from '@/actions/stock';
 import { ComputeTrainAccount, IsTrainMark } from '@/helpers/trainAccount';
-import { IsLimitUpKline } from '@/helpers/stock';
+import { GetStockDetail, GetStockType, IsLimitUpKline } from '@/helpers/stock';
 
 /** 一手股数 */
 const MIN_LOT = 100;
@@ -50,7 +57,7 @@ export interface ScoreStockTradeProps {
  */
 const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, klines }) => {
   const dispatch = useDispatch();
-  const { ontrain, trainDate, trainStartDate, initialCapital, commissionRate } = useSelector(
+  const { ontrain, trainDate, trainStartDate, initialCapital, commissionRate, kLineApiSourceSetting } = useSelector(
     (state: StoreState) => state.setting.systemSetting
   );
   const { stockConfigsMapping, nowHolds, tradings } = useSelector((state: StoreState) => state.stock);
@@ -117,10 +124,12 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
   /** 仓位基数：买入按可用资金，卖出按持仓市值 */
   const positionBase = tradeType === 'buy' ? cashBase : sellSharesBase * tradePrice;
 
-  // 仓位 / 买卖方向 / 基数变化时，按仓位比例重新换算委托金额
+  // 仓位 / 买卖方向 / 基数变化时，按仓位比例重新换算委托金额。
+  // 换股也要重算：训练模式的可用资金是共享的，换股后 positionBase 往往不变，
+  // 不重算会把上一只股票手填的金额带过来（可能超过可用资金，按钮就一直不可点）。
   useEffect(() => {
     setAmount(positionBase > 0 ? Math.floor(positionBase / ratio) : null);
-  }, [ratio, tradeType, positionBase]);
+  }, [ratio, tradeType, positionBase, secid]);
 
   const tradeAmount = Number(amount) || 0;
   const shares = useMemo(() => {
@@ -159,12 +168,14 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
     [tradings, secid]
   );
 
-  // 拿到日K后补成交待成交委托（训练模式写入训练买卖点，否则回填手工交易记录）
+  // 拿到日K后补成交待成交委托（训练模式写入训练买卖点，否则回填手工交易记录）。
+  // trainDate 也要作为依赖：训练日推进后，即使日K还没刷新完，也会用新数据再补一次
+  // （旧日K里找不到「委托日之后」的K线，属于安全空操作）。
   useEffect(() => {
     if (klines.length) {
       dispatch(fillPendingBuyTradesAction(secid, klines));
     }
-  }, [secid, klines, dispatch]);
+  }, [secid, klines, dispatch, trainDate]);
 
   // 换股：重置表单（价格等K线回来后再填）
   useEffect(() => {
@@ -183,7 +194,8 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
 
   const canSubmit = (() => {
     if (ontrain) {
-      if (!config || !trainBar || tradePrice <= 0) {
+      // 不再要求已在自选股：买入时会自动加入（见 ensureTrainConfig）
+      if (!trainBar || tradePrice <= 0) {
         return false;
       }
       if (tradeType === 'buy') {
@@ -197,8 +209,56 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
     return shares > 0 && shares <= holdShares;
   })();
 
-  const handleSubmit = () => {
-    if (!canSubmit) {
+  /** 防止重复提交（自动加入自选股要现取详情，期间连点会重复下单/重复打标签） */
+  const submittingRef = useRef(false);
+
+  /**
+   * 训练模式买入前确保该股在自选股里
+   *
+   * 训练账户的买卖点存在个股配置（`stockConfigsMapping[secid]`）里，之前要求先手动收藏；
+   * 现在改为买入时自动加入自选股，并打上「训练」标签，方便在自选股里筛出训练过的标的。
+   */
+  const ensureTrainConfig = async () => {
+    if (!ontrain || config) {
+      return true;
+    }
+    try {
+      const detail = await GetStockDetail(kLineApiSourceSetting, secid);
+      if (!detail) {
+        message.warning('自动加入自选股失败（未取到个股详情），请手动加入后再买入');
+        return false;
+      }
+      dispatch(
+        addStockAction(
+          { ...detail, secid, code, name: detail.name || name || code } as Stock.DetailItem,
+          GetStockType(secid)
+        )
+      );
+      dispatch(addStockTagAction('训练', secid));
+      message.success(`已自动加入自选股：${name || code}（标签：训练）`);
+      console.log(`[交易] 未在自选股，已自动加入：${name || code}（标签：训练）`);
+      return true;
+    } catch (e: any) {
+      message.warning(`自动加入自选股失败：${e?.message || e}`);
+      return false;
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!canSubmit || submittingRef.current) {
+      return;
+    }
+    submittingRef.current = true;
+    try {
+      await doSubmit();
+    } finally {
+      submittingRef.current = false;
+    }
+  };
+
+  const doSubmit = async () => {
+    // 训练模式下买入未收藏的标的：先自动加入自选股（标签：训练），再写入买卖点
+    if (tradeType === 'buy' && !(await ensureTrainConfig())) {
       return;
     }
     const reasonText = reason.trim();
@@ -270,6 +330,52 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
   const noConfig = ontrain && !config;
   const suspended = ontrain && !!trainDate && !!lastBar && !trainBar;
 
+  /**
+   * 「确认买入/清仓」按钮不可点的原因（就绪时为空串）
+   *
+   * 直接显示在按钮下方：之前只有「未加入自选」「停牌」两个提示，
+   * 委托金额超可用资金、当天没有行情、T+1 这些情况点了没反应又看不出原因。
+   */
+  const disabledReason = (() => {
+    if (ontrain) {
+      if (!trainBar || tradePrice <= 0) {
+        return suspended ? '训练日当天停牌，无法交易' : '训练日当天没有该股行情，无法交易';
+      }
+      if (tradeType === 'buy') {
+        if (tradeAmount <= 0) {
+          return '请填写委托金额（大于 0）';
+        }
+        if (tradeAmount > trainCash + 1e-6) {
+          return `委托金额 ${formatMoney(tradeAmount)} 超过可用资金 ${formatMoney(trainCash)}`;
+        }
+        return '';
+      }
+      if (sellSharesBase <= 0) {
+        return '当前无持仓，无法卖出';
+      }
+      if (boughtToday) {
+        return 'T+1：当日买入，下一交易日才能卖出';
+      }
+      return '';
+    }
+    if (tradeType === 'buy') {
+      if (tradeAmount <= 0) {
+        return '请填写委托金额（大于 0）';
+      }
+      if (tradeAmount > availableCash + 1e-6) {
+        return `委托金额 ${formatMoney(tradeAmount)} 超过可用资金 ${formatMoney(availableCash)}`;
+      }
+      return '';
+    }
+    if (shares <= 0) {
+      return '无持仓可卖';
+    }
+    if (shares > holdShares) {
+      return `可卖股数超过持仓（${holdShares} 股）`;
+    }
+    return '';
+  })();
+
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
@@ -279,7 +385,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
         </span>
       </div>
       <Input.TextArea
-        rows={2}
+        rows={5}
         value={reason}
         onChange={(e) => setReason(e.target.value)}
         placeholder="买入/卖出理由（会记录到交易理由里）"
@@ -363,24 +469,24 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
             )}`}
       </div>
       <div style={{ fontSize: 11, color: 'var(--main-text-color)', marginTop: 2 }}>
-        预计成交 <b>{shares}</b> 股 ｜ 金额 <b>{formatMoney(orderAmount)}</b>
+        {pendingBuys.length ? '本次新委托预计成交' : '预计成交'} <b>{shares}</b> 股 ｜ 金额{' '}
+        <b>{formatMoney(orderAmount)}</b>
         {shares === 0 ? (
           <span style={{ color: 'var(--hint-color)' }}>
-            （{tradeType === 'buy' ? '可用资金不足一手' : '无持仓可卖'}）
+            （
+            {tradeType === 'buy'
+              ? `可用资金不足一手，1 手约需 ${formatMoney(tradePrice * MIN_LOT * (1 + commission))}`
+              : '无持仓可卖'}
+            ）
           </span>
         ) : null}
       </div>
-      {tradeType === 'sell' && ontrain && boughtToday ? (
-        <div style={{ fontSize: 11, color: '#faad14', marginTop: 2 }}>
-          T+1：当日买入，下一交易日才能卖出
-        </div>
+      {disabledReason ? (
+        <div style={{ fontSize: 11, color: '#faad14', marginTop: 2 }}>无法委托：{disabledReason}</div>
       ) : null}
-      {suspended ? (
-        <div style={{ fontSize: 11, color: '#faad14', marginTop: 2 }}>训练日当天停牌，无法交易</div>
-      ) : null}
-      {noConfig ? (
-        <div style={{ fontSize: 11, color: '#faad14', marginTop: 2 }}>
-          训练模式需先加入自选股（与详情页一致），才有对应的训练持仓账户
+      {noConfig && tradeType === 'buy' ? (
+        <div style={{ fontSize: 11, color: 'var(--hint-color)', marginTop: 2 }}>
+          未在自选股：买入时会自动加入自选股，并打上「训练」标签
         </div>
       ) : null}
       {tradeType === 'buy' && limitUpToday ? (
@@ -401,6 +507,8 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
           ))}
         </div>
       ) : null}
+      <div style={{ height: 30}}>
+      </div>
     </div>
   );
 };

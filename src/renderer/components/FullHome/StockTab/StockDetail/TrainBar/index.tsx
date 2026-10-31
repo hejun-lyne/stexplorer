@@ -7,6 +7,7 @@ import moment from 'moment';
 import { StoreState } from '@/reducers/types';
 import * as Helpers from '@/helpers';
 import {
+  addStockAction,
   addStockMarkLineAction,
   addStockTagAction,
   addStockTradePointAction,
@@ -75,9 +76,15 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
   const stock = useSelector((state: StoreState) => state.stock.stocksMapping[secid]);
   // 训练资金是「所有标的共享」的一个账户，需要读取全部股票的训练买卖记录
   const stockConfigsMapping = useSelector((state: StoreState) => state.stock.stockConfigsMapping);
-  const { ontrain, trainDate, trainStartDate, trainEndDate, initialCapital, commissionRate } = useSelector(
-    (state: StoreState) => state.setting.systemSetting
-  );
+  const {
+    ontrain,
+    trainDate,
+    trainStartDate,
+    trainEndDate,
+    initialCapital,
+    commissionRate,
+    kLineApiSourceSetting,
+  } = useSelector((state: StoreState) => state.setting.systemSetting);
   const [marktype, setMarktype] = useState(config?.marktype || 0);
   /** 结算结果（弹窗展示） */
   const [settlement, setSettlement] = useState<Train.ArchiveRecord | null>(null);
@@ -380,9 +387,42 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     [account.cash]
   );
 
-  const trade = useCallback(
-    (isBuy: boolean) => {
+  /** 防止重复提交（自动加入自选股可能要先取一次详情） */
+  const tradingRef = useRef(false);
+
+  /**
+   * 确保该股在自选股里（训练账户的买卖点存在个股配置中）
+   *
+   * 之前要求先手动收藏；现在买入时自动加入，并打上「训练」标签。
+   */
+  const ensureStockConfig = useCallback(async () => {
+    if (config) {
+      return true;
+    }
+    try {
+      const detail = stock?.detail || (await Helpers.Stock.GetStockDetail(kLineApiSourceSetting, secid));
+      if (!detail) {
+        message.warning('自动加入自选股失败（未取到个股详情），请手动加入后再买入');
+        return false;
+      }
+      dispatch(addStockAction(detail, Helpers.Stock.GetStockType(secid)));
+      dispatch(addStockTagAction('训练', secid));
+      message.success(`已自动加入自选股：${detail.name || secid}（标签：训练）`);
+      console.log(`[训练交易] 未在自选股，已自动加入：${detail.name || secid}（标签：训练）`);
+      return true;
+    } catch (e: any) {
+      message.warning(`自动加入自选股失败：${e?.message || e}`);
+      return false;
+    }
+  }, [config, stock?.detail, kLineApiSourceSetting, secid]);
+
+  const doTrade = useCallback(
+    async (isBuy: boolean) => {
       if (!currentDay) {
+        return;
+      }
+      // 训练模式买入：未在自选股时先自动加入（买入点必须写进个股配置里）
+      if (isBuy && !(await ensureStockConfig())) {
         return;
       }
       // 停牌（当日无行情）不能交易：估值可以退回上一交易日收盘价，成交价必须用当日真实收盘价
@@ -418,7 +458,32 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       }
       dispatch(addStockTradePointAction(secid, currentDay, todayClose, false, TRAIN_TYPE));
     },
-    [currentDay, todayClose, suspended, secid, buyAmount, account.cash, commission, boughtToday]
+    [
+      currentDay,
+      todayClose,
+      suspended,
+      secid,
+      buyAmount,
+      account.cash,
+      commission,
+      boughtToday,
+      ensureStockConfig,
+    ]
+  );
+
+  const trade = useCallback(
+    async (isBuy: boolean) => {
+      if (!currentDay || tradingRef.current) {
+        return;
+      }
+      tradingRef.current = true;
+      try {
+        await doTrade(isBuy);
+      } finally {
+        tradingRef.current = false;
+      }
+    },
+    [currentDay, doTrade]
   );
 
   const clearBS = useCallback(() => {
@@ -551,9 +616,10 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     dispatch(syncStockMarktypeAction(secid, t));
   }, []);
 
-  // 买入按当前训练日收盘价成交：需要当日有真实收盘价（停牌日不可交易），且资金够买一手
+  // 买入按当前训练日收盘价成交：需要当日有真实收盘价（停牌日不可交易），且资金够买一手。
+  // 不再要求已在自选股：未收藏时买入会自动加入（见 ensureStockConfig）。
   const canBuy =
-    !!config && !suspended && todayClose > 0 && Math.floor(account.cash / (todayClose * MIN_LOT * (1 + commission))) >= 1;
+    !suspended && todayClose > 0 && Math.floor(account.cash / (todayClose * MIN_LOT * (1 + commission))) >= 1;
   // T+1：买入成交当日不可卖出；停牌日不可卖出
   const canSell = !!config && account.shares > 0 && !suspended && todayClose > 0 && !boughtToday;
   const profitClass = Utils.GetValueColor(account.profit).textClass;
@@ -660,7 +726,9 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
                   清空
                 </Button>
               </div>
-              {!config && <span className={styles.hint}>先收藏该标的后才可以进行模拟买卖</span>}
+              {!config && (
+                <span className={styles.hint}>未在自选股：买入时会自动加入自选股（标签：训练）</span>
+              )}
               {config && (
                 <span className={styles.hint}>
                   {finished

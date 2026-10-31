@@ -404,6 +404,13 @@ export interface ScoreStockPanelProps {
   code: string;
   secid: string;
   name: string;
+  /**
+   * 训练日（YYYY-MM-DD）；非训练模式为空
+   *
+   * 取数层按训练日截断日K，训练日推进后必须重取，否则面板会停在上一交易日：
+   * 交易区表现为「训练日当天停牌 / 预计成交 0 股」，涨停挂单也不会回填成交。
+   */
+  trainDate?: string;
   /** 点击名字/代码打开股票详情 */
   onOpenStock: (secid: string, name: string) => void;
 }
@@ -414,7 +421,7 @@ export interface ScoreStockPanelProps {
  * 从上往下：名字+代码（点击打开详情）→ 公司简介 → 日K线（可缩放/成交量/技术指标）→ 买入卖出操作。
  * 日K线与短线评分同源（Tushare），训练模式下由取数层自动截断到训练日。
  */
-const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, onOpenStock }) => {
+const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, trainDate, onOpenStock }) => {
   const [intro, setIntro] = useState('');
   const [introLoading, setIntroLoading] = useState(false);
   const [klines, setKlines] = useState<Stock.KLineItem[]>([]);
@@ -501,7 +508,8 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
     return () => {
       canceled = true;
     };
-  }, [secid]);
+    // 训练日推进也要重取：日K在取数层按训练日截断，不重取会一直停在上一交易日
+  }, [secid, trainDate]);
 
   // 短线评分曲线：选中该技术指标时现取数逐日计算（不读评分缓存），算完再画线
   const [shortScoreScores, setShortScoreScores] = useState<Record<string, number>>({});
