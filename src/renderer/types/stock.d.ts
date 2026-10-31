@@ -46,8 +46,8 @@ declare namespace Stock {
       qstype: DayTrendType; // 趋势类型
     };
     markLines?: number[]; // 标记线
-    buyPoints?: { x: string; y: number; t: string; a?: number }[]; // 买入标记（a：模拟训练的买入金额，缺省为全部可用资金）
-    sellPoints?: { x: string; y: number; t: string }[]; // 买入标记
+    buyPoints?: { x: string; y: number; t: string; a?: number; reason?: string }[]; // 买入标记（a：模拟训练的买入金额，缺省为全部可用资金）
+    sellPoints?: { x: string; y: number; t: string; reason?: string }[]; // 卖出标记
     similars?: SimilarItem[];
     periodMarks: PeriodMarkItem[];
   }
@@ -374,6 +374,10 @@ declare namespace Stock {
     explain: string;
     /** 交易理由（下单时填写，优先于 explain 展示） */
     reason?: string;
+    /** 待成交买入委托：下单当日涨停买不进，等下一交易日开盘价成交 */
+    pending?: boolean;
+    /** 待成交委托金额（元）：补成交时按开盘价换算股数 */
+    pendingAmount?: number;
     profits: number[];
     strategy?: MRType;
   }

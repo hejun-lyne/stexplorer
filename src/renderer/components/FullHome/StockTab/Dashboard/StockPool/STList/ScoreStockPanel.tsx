@@ -1,8 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Input, InputNumber, Select, Slider, Spin, Switch, Tooltip, message } from 'antd';
+import { Button, Select, Slider, Spin, Switch, Tooltip } from 'antd';
 import { ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
-import moment from 'moment';
-import { useDispatch, useSelector } from 'react-redux';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import * as CONST from '@/constants';
@@ -10,10 +8,9 @@ import * as Tech from '@/helpers/tech';
 import { DefaultTechIndicatorTypes, KLineType, TechIndicatorNames, TechIndicatorType } from '@/utils/enums';
 import { useNativeThemeColor, useRenderEcharts, useResizeEchart } from '@/utils/hooks';
 import { Stock } from '@/types/stock';
-import { StoreState } from '@/reducers/types';
-import { appendTrade } from '@/actions/stock';
 import { SHORT_SCORE_SOURCE } from '@/helpers/shortTermScoreList';
 import { GetCompanyFromTushare } from '@/services/tushare';
+import ScoreStockTrade from './ScoreStockTrade';
 
 /** 面板日K线取数条数（约半年） */
 const PANEL_KLINE_LIMIT = 120;
@@ -371,9 +368,6 @@ export interface ScoreStockPanelProps {
  * 日K线与短线评分同源（Tushare），训练模式下由取数层自动截断到训练日。
  */
 const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, onOpenStock }) => {
-  const dispatch = useDispatch();
-  const nowHolds = useSelector((state: StoreState) => state.stock.nowHolds);
-
   const [intro, setIntro] = useState('');
   const [introLoading, setIntroLoading] = useState(false);
   const [klines, setKlines] = useState<Stock.KLineItem[]>([]);
@@ -383,15 +377,8 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
   // ===== 图表控制（与详情页 PriceTrend 对齐）=====
   const [range, setRange] = useState<RangeArea>(DEFAULT_RANGE);
   const [showVolume, setShowVolume] = useState(true);
-  const [techType, setTechType] = useState<number>(DefaultTechIndicatorTypes[0]);
-
-  // ===== 交易表单 =====
-  const [tradeType, setTradeType] = useState<'buy' | 'sell'>('buy');
-  const [price, setPrice] = useState<number | null>(null);
-  const [count, setCount] = useState<number | null>(100);
-  const [reason, setReason] = useState('');
-
-  const hold = useMemo(() => nowHolds.find((h) => h.secid === secid), [nowHolds, secid]);
+  // 与详情页 PriceTrend 一致：技术指标默认显示 RSI
+  const [techType, setTechType] = useState<number>(TechIndicatorType.RSI);
 
   // 公司简介：Tushare 优先，取不到时回退东财（内容更全）
   useEffect(() => {
@@ -452,11 +439,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
           setKlineError(String(r.error));
           return;
         }
-        const ks = r?.ks || [];
-        setKlines(ks);
-        // 新一档数据到位后用最新收盘价作为默认委托价（放在这里可以避免换股时用到上一只的价格）
-        const last = ks[ks.length - 1];
-        setPrice(last ? Number(last.sp) || null : null);
+        setKlines(r?.ks || []);
       })
       .catch((e: any) => {
         if (!canceled) {
@@ -473,13 +456,9 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
     };
   }, [secid]);
 
-  // 切换股票：重置缩放区间、交易表单（价格等K线回来后再填）
+  // 切换股票：重置缩放区间
   useEffect(() => {
     setRange(DEFAULT_RANGE);
-    setTradeType('buy');
-    setReason('');
-    setCount(100);
-    setPrice(null);
   }, [secid]);
 
   const zoomIn = useCallback(() => {
@@ -519,38 +498,6 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
     chartInstance,
     [option]
   );
-
-  const canSubmit =
-    !!price && !!count && price > 0 && count > 0 && !(tradeType === 'sell' && !!hold && count > Number(hold.count));
-
-  const handleSubmit = () => {
-    const tradedPrice = Number(price);
-    const tradedCount = Number(count);
-    if (!tradedPrice || !tradedCount || tradedPrice <= 0 || tradedCount <= 0) {
-      return;
-    }
-    if (tradeType === 'sell' && hold && tradedCount > Number(hold.count)) {
-      return;
-    }
-    const trade: Stock.DoTradeItem = {
-      id: 0,
-      type: tradeType,
-      secid,
-      name: name || code,
-      price: tradedPrice,
-      count: tradedCount,
-      time: moment(new Date()).format('YYYY-MM-DD HH:mm:ss'),
-      stoplossAt: 0,
-      latestNewsAs: 'positive',
-      explain: '',
-      reason: reason.trim(),
-      profits: [0, 0, 0, 0, 0],
-    };
-    dispatch(appendTrade(trade));
-    message.success(`${tradeType === 'buy' ? '买入' : '卖出'}已记录：${trade.name} ${trade.price} × ${trade.count}`);
-    setReason('');
-    setCount(100);
-  };
 
   return (
     <aside
@@ -610,13 +557,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
           <span style={{ fontSize: 12, fontWeight: 600 }}>
             日K线{klines.length ? `（${klines.length}个交易日）` : ''}
           </span>
-          <Select
-            size="small"
-            style={{ width: 100 }}
-            value={techType}
-            onChange={(v) => setTechType(Number(v))}
-            title="技术指标"
-          >
+          <Select size="small" style={{ width: 100 }} value={techType} onChange={(v) => setTechType(Number(v))}>
             <Select.Option value={TECH_NONE}>无指标</Select.Option>
             {DefaultTechIndicatorTypes.map((v) => (
               <Select.Option value={v} key={`tit_${v}`}>
@@ -653,80 +594,12 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
         ) : null}
       </div>
 
-      {/* 买入卖出区域：输入框在上，操作在下 */}
+      {/* 买入卖出区域：训练模式与详情页共用同一个训练账户 */}
       <div style={{ marginTop: 12 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>交易操作</div>
         <p>
           <span>人不渡我，唯有自渡</span>
         </p>
-        <Input.TextArea
-          rows={2}
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="买入/卖出理由（会写入交易记录的 reason 字段）"
-          maxLength={200}
-          style={{ fontSize: 12 }}
-        />
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 6,
-            marginTop: 6,
-          }}
-        >
-          <Button
-            size="small"
-            style={{ width: 54 }}
-            type={tradeType === 'buy' ? 'primary' : 'default'}
-            onClick={() => setTradeType('buy')}
-          >
-            买入
-          </Button>
-          <Button
-            size="small"
-            style={{ width: 54 }}
-            type={tradeType === 'sell' ? 'primary' : 'default'}
-            danger={tradeType === 'sell'}
-            onClick={() => setTradeType('sell')}
-          >
-            卖出
-          </Button>
-          <InputNumber
-            size="small"
-            style={{ width: 90 }}
-            placeholder="价格"
-            step={0.01}
-            min={0}
-            value={price}
-            onChange={setPrice}
-          />
-          <InputNumber
-            size="small"
-            style={{ width: 90 }}
-            placeholder="数量"
-            step={100}
-            min={100}
-            value={count}
-            onChange={setCount}
-          />
-          <Button
-            size="small"
-            type="primary"
-            onClick={handleSubmit}
-            disabled={!canSubmit}
-            danger={tradeType === 'sell'}
-          >
-            确认{tradeType === 'buy' ? '买入' : '卖出'}
-          </Button>
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginTop: 4 }}>
-          持仓：
-          {hold
-            ? `${Number(hold.count)} 股　成本 ${Number(hold.price).toFixed(2)}`
-            : '无'}
-        </div>
+        <ScoreStockTrade secid={secid} code={code} name={name} klines={klines} />
       </div>
     </aside>
   );

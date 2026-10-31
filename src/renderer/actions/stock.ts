@@ -6,6 +6,9 @@ import { batch } from 'react-redux';
 import moment from 'moment';
 import { KNoteType, MarkType, PeriodMarkType, PeriodMarkTypeNames, StrategyType } from '@/utils/enums';
 
+/** 训练模式买卖点标记（与 actions/train 的 TRAIN_TYPE 一致；此处独立定义避免循环依赖） */
+const TRAIN_MARK = 'train';
+
 export const SET_STOCKS_LOADING = 'SET_STOCKS_LOADING';
 export const SYNC_STOCKS_MAPPING = 'SYNC_STOCKS_MAPPING';
 export const SYNC_STOCK_DATA = 'SYNC_STOCK_DATA';
@@ -703,6 +706,10 @@ export function setStockTradingAction(tradings: Stock.DoTradeItem[], lastModifie
           // 之前默认都为接力
           t.strategy = StrategyType.QSJL;
         }
+        // 待成交委托（当日涨停买不进、等次日开盘价）不参与持仓计算
+        if (t.pending) {
+          continue;
+        }
         const h = holds[t.secid];
         if (t.type === 'buy') {
           if (!h) {
@@ -746,6 +753,87 @@ export function setStockTradingAction(tradings: Stock.DoTradeItem[], lastModifie
       }
     } catch (error) {
       console.log('设置股票交易记录出错', error);
+    }
+  };
+}
+
+/**
+ * 补成交「待成交」买入委托
+ *
+ * 下单当日涨停买不进时，买单会以 `pending` 挂起；等该股拿到委托日之后的新K线，
+ * 就按「下一交易日开盘价」成交（一字板开盘即涨停仍然买不进，继续顺延到下一天）。
+ * 调用方：评分结果右侧面板每次加载日K后。
+ */
+export function fillPendingBuyTradesAction(secid: string, klines: Stock.KLineItem[]): ThunkAction {
+  return (dispatch, getState) => {
+    try {
+      const {
+        stock: { tradings },
+        setting: { systemSetting },
+      } = getState();
+      const pendingList = (tradings || []).filter((t) => t.pending && t.secid === secid);
+      if (!pendingList.length || !klines?.length) {
+        return;
+      }
+      const ontrain = !!systemSetting?.ontrain;
+      const commissionRate =
+        Number(systemSetting?.commissionRate) >= 0 ? Number(systemSetting?.commissionRate) : 0.0003;
+
+      const filled: { order: Stock.DoTradeItem; date: string; open: number; amount: number }[] = [];
+      pendingList.forEach((t) => {
+        const orderDate = String(t.time || '').substring(0, 10);
+        // 委托日之后第一根「开盘能买进」的K线：一字板（开盘即涨停）买不到，继续等
+        const bar = klines.find((k) => {
+          const day = String(k.date || '').substring(0, 10);
+          if (day <= orderDate) {
+            return false;
+          }
+          const oneWordBoard =
+            Math.abs(Number(k.kp) - Number(k.zg)) < 0.001 && Helpers.Stock.IsLimitUpKline(k, secid, t.name);
+          return !oneWordBoard;
+        });
+        const open = Number(bar?.kp);
+        if (!bar || !open || open <= 0) {
+          return;
+        }
+        const amount = Number(t.pendingAmount) || Number(t.price) * Number(t.count);
+        // 开盘价偏高导致买不到一手时保持待成交，避免委托静默消失
+        if (Math.floor(amount / (open * 100 * (1 + commissionRate))) < 1) {
+          return;
+        }
+        filled.push({ order: t, date: String(bar.date).substring(0, 10), open, amount });
+      });
+      if (!filled.length) {
+        return;
+      }
+
+      if (ontrain) {
+        // 训练模式：补成交直接写入训练买卖点（与详情页共用同一个训练账户），并从待成交队列移除
+        filled.forEach(({ order, date, open, amount }) => {
+          dispatch(addStockTradePointAction(secid, date, open, true, TRAIN_MARK, amount, order.reason));
+        });
+        const filledIds = new Set(filled.map((f) => f.order.id));
+        dispatch(setStockTradingAction(tradings.filter((t) => !filledIds.has(t.id))));
+      } else {
+        const filledMap = new Map(filled.map((f) => [f.order.id, f]));
+        const next = tradings.map((t) => {
+          const f = filledMap.get(t.id);
+          if (!f) {
+            return t;
+          }
+          return {
+            ...t,
+            pending: false,
+            pendingAmount: undefined,
+            price: f.open,
+            count: Math.floor(f.amount / f.open / 100) * 100,
+            time: `${f.date} 09:30:00`,
+          } as Stock.DoTradeItem;
+        });
+        dispatch(setStockTradingAction(next));
+      }
+    } catch (error) {
+      console.log('补成交待买入委托出错', error);
     }
   };
 }
@@ -981,7 +1069,7 @@ export function deleteStockMarkLineAction(value: number, sid: string): ThunkActi
 }
 
 /** amount：买入金额（模拟训练用），不传表示用全部可用资金；卖出一律清仓，不需要金额 */
-export function addStockTradePointAction(secid: string, date: string, value: number, isBuy: boolean, type:string, amount?: number): ThunkAction {
+export function addStockTradePointAction(secid: string, date: string, value: number, isBuy: boolean, type:string, amount?: number, reason?: string): ThunkAction {
   return (dispatch, getState) => {
     try {
       const {
@@ -991,16 +1079,23 @@ export function addStockTradePointAction(secid: string, date: string, value: num
       if (ss) {
         if (isBuy) {
           // 同一天只允许一个买入点：金额以最新一次委托为准
-          const point = { x: date, y: value, t: type, a: amount && amount > 0 ? amount : undefined };
+          const point = {
+            x: date,
+            y: value,
+            t: type,
+            a: amount && amount > 0 ? amount : undefined,
+            reason: reason || undefined,
+          };
           if (ss.buyPoints) {
             ss.buyPoints = ss.buyPoints.filter((p) => p.x != date);
             ss.buyPoints.push(point);
           } else ss.buyPoints = [point];
         } else {
+          const point = { x: date, y: value, t: type, reason: reason || undefined };
           if (ss.sellPoints) {
             ss.sellPoints = ss.sellPoints.filter((p) => p.x != date);
-            ss.sellPoints.push({ x: date, y: value, t: type });
-          } else ss.sellPoints = [{ x: date, y: value, t: type }];
+            ss.sellPoints.push(point);
+          } else ss.sellPoints = [point];
         }
         dispatch(setStockConfigAction(Utils.DeepCopy(stockConfigs)));
       }

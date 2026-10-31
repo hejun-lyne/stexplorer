@@ -332,11 +332,11 @@ const STList: React.FC<STListProps> = ({
   // 过滤：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的股票
   // （阈值分、天数都可填写，默认：3 天前 / 近 15 日 / ≥ 60 分）
   const [shortScoreFilterEnabled, setShortScoreFilterEnabled] = useState(false);
-  const [shortScoreFilterScore, setShortScoreFilterScore] = useState(60);
+  const [shortScoreFilterScore, setShortScoreFilterScore] = useState(80);
   /** 过滤窗口的回溯起点：从「N 天前」开始往前数（即窗口不含最近 N 个交易日） */
-  const [shortScoreFilterBeforeDays, setShortScoreFilterBeforeDays] = useState(5);
+  const [shortScoreFilterBeforeDays, setShortScoreFilterBeforeDays] = useState(0);
   /** 过滤窗口的长度：近 M 个交易日 */
-  const [shortScoreFilterWindowDays, setShortScoreFilterWindowDays] = useState(15);
+  const [shortScoreFilterWindowDays, setShortScoreFilterWindowDays] = useState(20);
   // RSI 评分阈值过滤：仅显示 RSI 评分「大于」阈值的股票（RSI 满分 40）
   const [shortScoreRsiFilterEnabled, setShortScoreRsiFilterEnabled] = useState(false);
   const [shortScoreRsiFilterScore, setShortScoreRsiFilterScore] = useState(30);
@@ -2189,6 +2189,8 @@ const STList: React.FC<STListProps> = ({
           });
         }
       }
+      // 收藏的股票排到最前面（组内仍保持上面排好的顺序；sort 是稳定排序）
+      list.sort((a: any, b: any) => Number(isFavorited(b)) - Number(isFavorited(a)));
       return list as any;
     }
 

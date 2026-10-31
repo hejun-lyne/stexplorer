@@ -4175,3 +4175,39 @@ export async function LoadQSStocks(options: QSLoaderOptions): Promise<QSLoaderRe
     fromCache,
   };
 }
+
+/**
+ * 涨停幅度（%）：创业板/科创板 20%，北交所 30%，其余 10%；ST 主板 5%
+ */
+export function GetLimitUpPct(secidOrCode: string, name?: string) {
+  const code = String(secidOrCode || '').split('.').pop() || '';
+  let pct = 10;
+  if (/^(300|301|302)/.test(code) || /^(688|689)/.test(code)) {
+    pct = 20;
+  } else if (/^(4|8|920)/.test(code)) {
+    pct = 30;
+  }
+  if (pct === 10 && name && /ST/i.test(name)) {
+    pct = 5;
+  }
+  return pct;
+}
+
+/**
+ * 当日是否涨停：收盘封在最高价，且涨幅达到所属板块的涨停幅度
+ *
+ * 留 0.3% 容差，兼容数据源四舍五入（如 9.98% 仍算涨停）。
+ */
+export function IsLimitUpKline(kline?: Stock.KLineItem | null, secid?: string, name?: string) {
+  if (!kline) {
+    return false;
+  }
+  const prevClose = Number(kline.zs);
+  const pct = prevClose > 0 ? (Number(kline.sp) / prevClose) * 100 - 100 : Number(kline.zdf);
+  if (!Number.isFinite(pct)) {
+    return false;
+  }
+  const limit = GetLimitUpPct(secid || kline.secid, name);
+  const sealed = Math.abs(Number(kline.zg) - Number(kline.sp)) < 0.001;
+  return sealed && pct >= limit - 0.3;
+}

@@ -33,7 +33,9 @@ const TradeHist: React.FC<TradeHistProps> = ({ onOpenStock, onOpenReview }) => {
             <div className={styles.row}>
               <div className={styles.rowHeader}>
                 <div>{t.time.split(' ')[0]}</div>
-                <div className={Utils.GetValueColor(t.type === 'buy' ? 1 : -1).textClass}>&nbsp;{t.type === 'buy' ? '买入' : '卖出'}</div>
+                <div className={Utils.GetValueColor(t.type === 'buy' ? 1 : -1).textClass}>
+                  &nbsp;{t.pending ? '待成交' : t.type === 'buy' ? '买入' : '卖出'}
+                </div>
                 <div><a style={{ marginLeft: 5, marginRight: 5 }} onClick={() => onOpenStock(t.secid, t.name)}>
                   {t.name}
                 </a></div>
