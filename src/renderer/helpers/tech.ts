@@ -214,6 +214,11 @@ export function calculateIndicators(ks: Stock.KLineItem[], techType: TechIndicat
     case TechIndicatorType.CG:
       values = calculateCG(ks);
       break;
+    case TechIndicatorType.SHORT_SCORE:
+      // 短线评分需要现取数（日K / 板块 / 资金 / 涨跌比 / 市值档）逐日计算，不能在同步的指标函数里完成；
+      // 这里只返回序列名，曲线数据由调用方异步算好后写入（见 helpers/shortTermScoreList.computeShortTermScoreCurve）。
+      values = [];
+      break;
     default:
       break;
   }

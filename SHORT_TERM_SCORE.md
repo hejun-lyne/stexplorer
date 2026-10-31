@@ -61,6 +61,7 @@
 stockDims   = { volume: 20, rsi: 0,  money: 60 }  // 权重（合计 100；资金为主，RSI 为 0）
 stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度/展示）
 个股分 = Σ(可用且权重>0子项 (得分/满分) × 权重) / Σ(可用且权重>0子项 权重) × 100
+个股分 = min(个股分, RSI追高护栏上限)   // 见 3.2：RSI 不加权，但超买时封顶
 ```
 
 ### 3.1 量能活跃度（30 分，权重 20）
@@ -89,12 +90,12 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 **择时位置修正**（与板块同一套"找买点、别追高"逻辑）
 
 - 放量启动日 = 近 `volStartLookback(20)` 日内首个「5日均量 / 20日均量 ≥ `volStartRatio(1.3)`」的交易日；当日倍量突破时直接以当日为启动日
-- ① 过热：`ratio > volRatioAllow(10)`（当日倍量突破时用 `breakoutRatio`）→ 每超 1 倍扣 6 分
-- ② 追高：自放量启动日以来涨幅 > `volRiseAllow(50%)` → 每超 1% 扣 1.5 分（无启动日或当日启动时退化为近 5 日涨幅）
+- ① 过热：`ratio > volRatioAllow(2)`（当日倍量突破时用 `breakoutRatio`，阈值换成 `volBreakoutHotRatio(6)`，避免把刚启动的放量当过热）→ 每超 1 倍扣 6 分
+- ② 追高：自放量启动日以来涨幅 > `volRiseAllow(15%)` → 每超 1% 扣 1.5 分（无启动日或当日启动时退化为近 5 日涨幅）
 - ③ 走远：距放量启动日 > `volFreshDays(5)` 日**且放量仍在持续**（`volTrend ≥ 1.3`）→ 每多 1 日扣 1 分
 - 衰减下限 `volScoreFloor(5)`；无同档统计时降级为「仅按自身量能趋势评分」
 
-### 3.2 RSI 择时（40 分，权重 0：仅计算与展示）
+### 3.2 RSI 择时（40 分，权重 0：展示 + 追高护栏）
 
 数据：250 日收盘 → Wilder RSI6 / RSI12 / RSI24（`calculateRSI`，与行情软件同口径）。
 其中 **12 日线仅用于展示**（形态判定只看 6/24 日线的当日结构，不参与格局与真实极值判定）。
@@ -151,6 +152,16 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 因此 **20 分以上的评分不会再出现在超买区**。形态文案会附上原因，如「金叉｜RSI6=78 偏高，下调15分」、「金叉｜RSI6=85 超买，下调17分」。
 死叉 / 空头排列 / 超买钝化本就是低分形态，不再叠加这项衰减。
 
+**第四步：个股维度追高护栏（RSI 不加权，但封顶）**
+
+量能与资金都可能在同一时点给满分（例如连拉数板后：换手数倍于同类 + 资金累计走出"完美微笑金叉"），若只看这两项，**评分峰值会落在股价峰值**，而真正的最佳启动日（放量突破当日）反而分低。因此：
+
+- `RSI6 ≥ rsiOverbought(80)` 或「超买钝化」→ 个股维度封顶 `rsiOverboughtCap(50)`
+- `RSI6 ≥ rsiOverboughtPenaltyStart(68)`（偏高）→ 个股维度封顶 `rsiHighCap(85)`（较轻，基本不触发）
+- 例外：「超买回踩企稳 / 回踩中」是从超买回落后的买点，不按追高封顶
+
+> 效果示例（002437.SZ 2026 年 8 月）：8-07 放量突破（RSI6=70、资金见底反转）个股 73.5、总分 **66.0 B**；8-17 股价顶峰（RSI6=96 超买钝化、换手 8.77 倍同类、自启动 +45%）个股被压到 50、总分 **58.8 C**。评分峰值回到启动日。
+
 ### 3.3 资金指标（30 分，权重 60 —— 个股维度里权重最高）
 
 数据：`GetMoneyFlowFromTushare(code, 60)` 的 60 日主力/散户逐日净流入 → 20 日滚动累计曲线（`moneyWindow`）。
@@ -168,13 +179,13 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 
 | 分（30 分制） | 形态 |
 |---|---|
-| **20~30（最高）** | **完美微笑曲线金叉**：U 型 + 上穿散户线 + 站上 0 轴（当日金叉 30，随天数衰减到 20）｜趋势转折买点 |
+| **20~30（最高）** | **完美微笑曲线金叉**：U 型 + 上穿散户线 + 站上 0 轴（当日金叉 30，随天数衰减到 20）｜趋势转折买点。若主力线**已在区间高位**（≥`moneyHighPosThreshold`）再下调 `moneyHighPosPenalty(8)`——20 日累计资金是滞后指标，形态"完美"时往往已到主升段中后段 |
 | 15~22 | 微笑曲线金叉但尚未站上 0 轴（15~22）；近期上穿散户线但形态未识别为 U 型（12~22，站上 0 轴更高） |
 | 15 | U 型但尚未上穿 → 转折前夜，等待确认 |
 | 18 / 16 / 15 | 主力累计净流入为正**且趋势向上**：刚转正（近 `moneyZeroTurnDays` 日内上穿 0 轴）→ **18** ★；否则 16，若**已在区间高位** → 15（趋势仍在，但已处中后段） |
 | 13 / 7 | 主力累计净流入为正但**趋势走平/回落**、且主力强于散户：位置不高 → 13；**已在区间高位** → 7（已过转折点，谨防追高） |
 | 11 / 9 | 主力累计净流入为正但**趋势走平/回落**、且弱于散户：位置不高 → 11；**已在区间高位** → 9 |
-| 15~18 | **尾部见底反转**：整体倒 U/回落，但近 `moneyTurnLookback` 日内主力线刚拐头向上、即将上穿 0 轴 → `15 + 3×新鲜度`（转折前夜，散户线同步回落时在文案中标注） |
+| 17~22 | **尾部见底反转**：整体倒 U/回落，但近 `moneyTurnLookback` 日内主力线刚拐头向上、即将上穿 0 轴 → `17 + 5×新鲜度`（最早的「资金拐点」，早于"刚转正"；散户线同步回落时在文案中标注） |
 | 11 | 方向不明 |
 | 6 | 倒 U 型（资金撤离迹象） |
 | 最低 | 倒 U 型**下穿散户线且在 0 轴下方**（越新鲜扣得越狠，最低 1~3）；0 轴下方下穿 4~8 |
@@ -323,14 +334,15 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 |---|---|---|---|
 | 综合 | `weights` | `{stock:0.6, sector:0.2, market:0.2}` | 三维度权重 |
 | 综合 | `vetoThreshold` / `vetoCap` | 40 / 55 | 个股分低于 40 → 总分封顶 55 |
-| 个股 | `stockDims` | `{volume:20, rsi:0, money:60}` | 子项权重（资金为主；RSI 为 0：只计算与展示，不计入） |
+| 个股 | `stockDims` | `{volume:20, rsi:0, money:60}` | 子项权重（资金为主；RSI 为 0：不加权，但超买时封顶） |
 | 个股 | `stockSubMax` | `{volume:30, rsi:40, money:30}` | 子项满分（分值刻度，与权重解耦） |
 | 量能 | `mvSmallBound` / `mvMidBound` | 50亿 / 200亿 | 市值分档边界 |
-| 量能 | `volRatioAllow` | 10 | 横向活跃度倍数容忍（换手率口径） |
-| 量能 | `volRiseAllow` | 50 | 自启动日涨幅容忍(%) |
+| 量能 | `volRatioAllow` | 2 | 横向活跃度倍数容忍（换手率口径），>2 倍即过热 |
+| 量能 | `volRiseAllow` | 15 | 自启动日（或近5日）涨幅容忍(%) |
 | 量能 | `volStartRatio` / `volStartLookback` | 1.3 / 20 | 放量启动判定与回看窗口 |
 | 量能 | `volFreshDays` / `volScoreFloor` | 5 / 5 | 距启动天数容忍 / 衰减下限 |
 | 量能 | `volBreakoutRatio` / `volBreakoutLookback` / `volBreakoutFullRatio` | 2 / 5 / 4 | 当日倍量突破判定倍数 / 基准窗口 / 纵向补满分倍数 |
+| 量能 | `volBreakoutHotRatio` | 6 | 倍量突破当日的过热阈值（单日倍数，避免把突破本身当过热） |
 | RSI | `rsiShort` / `rsiMid` / `rsiLong` | 6 / 12 / 24 | RSI 周期（12 线仅用于金叉/死叉提前确认与展示） |
 | RSI | `rsiOverbought` / `rsiOversold` | 80 / 30 | 绝对超买/超卖阈值 |
 | RSI | `rsiOverboughtRelaxed` / `rsiOverboughtPercentile` | 72 / 0.95 | 弱势行情补充超买口径 |
@@ -346,6 +358,7 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 | RSI | `rsiOverboughtPenaltyPerPoint` | 1.5 | 偏高区每高 1 点扣分（最多扣 18 分） |
 | RSI | `rsiOverboughtSteepPerPoint` | 2.5 | 进入超买区（≥80）后每高 1 点再扣的分数 |
 | RSI | `rsiOverboughtFloor` | 10 | 超买追高下调后的最低分 |
+| RSI | `rsiOverboughtCap` / `rsiHighCap` | 50 / 85 | 个股维度追高护栏：超买/钝化 → 封顶 50；RSI6≥68 偏高 → 封顶 85 |
 | 资金 | `moneyWindow` | 20 | 主力/散户累计窗口 |
 | 资金 | `moneyShapeDays` | 30 | 形态识别窗口 |
 | 资金 | `moneyCrossRecentDays` / `moneyCrossDecay` | 5 / 0.8 | 交叉检测窗口 / 时效衰减 |
@@ -354,6 +367,7 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 | 资金 | `moneyZeroTurnDays` | 10 | 「转正」判定窗口：近 N 日内主力累计线由 0 轴下方上穿 0 轴视为刚转正 |
 | 资金 | `moneyRetailDivergePenalty` | 1 | 主力为正但弱于散户时的小幅下调（30 分制）：散户只作轻微修正，不再大幅减分 |
 | 资金 | `moneyTurnLookback` / `moneyTurnRiseRatio` | 5 / 0.08 | 尾部见底反转回看窗口 / 最小回升幅度（相对 30 日窗口最大绝对值） |
+| 资金 | `moneyHighPosPenalty` | 8 | 「完美微笑金叉」出现在区间高位时的下调（30 分制） |
 | 板块 | `sectorDays` / `sectorCompareDays` | 20 / 10 | 趋势窗口 / 超额对比窗口 |
 | 板块 | `sectorNoNewLowDays` | 3 | 企稳判定天数 |
 | 板块 | `sectorBiasAllow` / `sectorRiseAllow` / `sectorFreshDays` | 3 / 6 / 6 | 三个追高维度容忍值 |
@@ -376,6 +390,9 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 | 「转正」认定更宽 / 更严 | 调 `moneyZeroTurnDays`（越大越宽：更久之前上穿 0 轴也算"刚转正"；越小越严） |
 | 散户对资金分的影响 | 调 `moneyRetailDivergePenalty`（默认 1：仅轻微修正；设为 0 则完全不看散户） |
 | 超买追高惩罚太轻/太重 | 调 `rsiOverboughtPenaltyStart`（起始点，越小越早扣）、`rsiOverboughtPenaltyPerPoint`（偏高区斜率）、`rsiOverboughtSteepPerPoint`（超买区斜率）、`rsiOverboughtFloor`（下限） |
+| 评分峰值总是落在股价顶峰 | 收紧追高口径：下调 `volRiseAllow` / `volRatioAllow`、`rsiOverboughtCap`；或提高 `moneyHighPosPenalty` |
+| 「追高护栏」太严 / 太松 | 调 `rsiOverboughtCap`（超买/钝化时个股维度上限）、`rsiHighCap`（偏高区上限） |
+| 「完美微笑金叉」给分太高 | 提高 `moneyHighPosPenalty`，或下调 `moneyHighPosThreshold` |
 | 想让板块影响更小 | 降低 `weights.sector`，或提高 `sectorRelWeight`（更看重个股相对强度） |
 | 板块"追高"惩罚太狠 | 放宽 `sectorRiseAllow` / `sectorBiasAllow` / `sectorFreshDays`，或下调对应扣分系数 |
 | 「金叉在即 / 修复中」太稀有/太频繁 | 调 `rsiApproachGap`（逼近阈值）、`rsiApproachReboundJump`（当日回升幅度）、`rsiApproachRepairDays`（深跌回看窗口） |

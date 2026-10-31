@@ -79,8 +79,10 @@ export const SHORT_TERM_SCORE_CONFIG = {
   mvSmallBound: 50e8, // 小盘上限（元）
   mvMidBound: 200e8, // 中盘上限（元）
   // 量能择时位置（与板块同逻辑：刚温和放量分最高，过热/已走远则下调）
-  volRatioAllow: 10, // 横向活跃度倍数容忍值（默认换手率口径：5日均换手率/同档均值），超出部分每1倍扣6分
-  volRiseAllow: 50, // 自放量启动日以来涨幅容忍(%)，超出部分每1%扣1.5分
+  // 注意：这两个容忍值必须偏严——否则"连拉数板、换手数倍于同类"的主升段末端仍拿满分，
+  // 评分最高点会落在股价顶峰，而真正的最佳启动日反而分低（买点与走势背离）。
+  volRatioAllow: 2, // 横向活跃度倍数容忍值（默认换手率口径：5日均换手率/同档均值），超出部分每1倍扣6分
+  volRiseAllow: 15, // 自放量启动日（或近5日）涨幅容忍(%)，超出部分每1%扣1.5分
   volStartRatio: 1.3, // 放量启动判定：5日均量 / 20日均量 ≥ 该倍数
   volStartLookback: 20, // 放量启动日回看窗口(日)
   volFreshDays: 5, // 距放量启动日天数容忍(日)，超出部分每日扣1分
@@ -90,6 +92,9 @@ export const SHORT_TERM_SCORE_CONFIG = {
   volBreakoutRatio: 2, // 当日量能（换手率优先，缺失回退成交量）≥ 前 N 日均量的该倍数 → 倍量突破
   volBreakoutLookback: 5, // 倍量突破的基准窗口（日，不含当日）
   volBreakoutFullRatio: 4, // 当日量能达到该倍数时，纵向量能分补足到上限
+  // 倍量突破当日的"过热"口径独立于 volRatioAllow：突破本身就要求当日量能翻倍以上，
+  // 不能把刚启动的放量当成过热；超过该倍数才按过热下调
+  volBreakoutHotRatio: 6,
   // ---- 个股-RSI ----
   rsiShort: 6,
   rsiMid: 12, // 中周期线：仅用于展示（不参与形态判定，形态只看 6/24 日线的当日结构）
@@ -121,9 +126,12 @@ export const SHORT_TERM_SCORE_CONFIG = {
   rsiOverboughtPenaltyPerPoint: 1.5, // 偏高区每高 1 点扣 1.5 分（最多扣到 rsiOverbought 处，即 18 分）
   rsiOverboughtSteepPerPoint: 2.5, // 进入超买区（RSI6 ≥ rsiOverbought）后每高 1 点扣的分数（陡增）
   rsiOverboughtFloor: 10, // 超买追高下调后的最低分
+  // RSI 权重仍为 0，但作为「追高护栏」对个股维度封顶：避免「量能/资金都满分」把顶部推到 A 级
+  rsiOverboughtCap: 50, // RSI6 ≥ rsiOverbought（超买）或「超买钝化」时，个股维度封顶
+  rsiHighCap: 85, // RSI6 ≥ rsiOverboughtPenaltyStart（偏高）时的个股维度封顶（较轻）
   // ---- 个股-资金 ----
-  // 主力/散户累计净流入窗口（日）：从 20 日改为 5 日 —— 20 日累计对近期资金变化太滞后，
-  // 等它拐头往往已经错过趋势转折点；5 日累计更早反映回流拐点（形态/金叉仍在 30 日窗口内识别，抑制噪声）。
+  // 主力/散户累计净流入窗口（日）：当前取 20 日。窗口越长越平滑、但对拐点越滞后，
+  // 因此配合「尾部见底反转」单独识别最近 1~2 日刚发生的拐头（见 moneyTurnLookback）。
   moneyWindow: 20,
   moneyShapeDays: 30, // 微笑/悲伤曲线形态识别窗口（日）
   moneyCrossRecentDays: 5, // 交叉检测窗口（日）
@@ -133,6 +141,9 @@ export const SHORT_TERM_SCORE_CONFIG = {
   moneyTrendDays: 5, // 趋势判定窗口（日）：当前主力累计线与 N 日前比较，判断上升/走平回落
   moneyZeroTurnDays: 10, // 「转正」判定窗口（日）：近 N 日内主力累计线由 0 轴下方上穿 0 轴视为刚转正
   moneyRetailDivergePenalty: 1, // 主力为正但弱于散户时的小幅下调（30分制）：散户只作轻微修正，不再因此大幅减分
+  // 「完美微笑金叉」出现在区间高位时的下调：20日累计资金是滞后指标，等它走出完美形态时
+  // 股价往往已在主升段中后段（例：连拉数板后资金才「完美金叉」），此时不该给满分
+  moneyHighPosPenalty: 8,
   // 「尾部见底反转」：30 日窗口用固定中点识别 U/倒U，抓不到最近 1~2 日刚发生的拐头
   // （例：整体是倒U/回落，但最近一日主力线大幅回升、即将上穿0轴，此时不应按"资金撤离"给低分）
   moneyTurnLookback: 5, // 尾部拐头回看窗口（日）：在该窗口内找主力累计线的低点
@@ -595,9 +606,11 @@ export function scoreStockVolume(
   const riseSinceVolStart = volStartClose > 0 ? (stockKlines[lastIdx].sp / volStartClose - 1) * 100 : null;
   // 当日刚启动时 riseSinceVolStart 恒为 0，没有参考意义，改用近5日涨幅做追高判断
   const riseForChase = riseSinceVolStart !== null && daysSinceVolStart !== null && daysSinceVolStart > 0 ? riseSinceVolStart : zdf5;
-  // 过热口径：发生当日倍量突破时用单日量能倍数（5日均值会把单日过热稀释掉）
+  // 过热口径：发生当日倍量突破时用单日量能倍数（5日均值会把单日过热稀释掉），
+  // 但突破当日的判定阈值用 volBreakoutHotRatio（突破本身就要放量，不能当成过热）
   const hotBasis = breakout ? breakoutRatio : ratio;
-  const hotRatio = hotBasis !== null && hotBasis > cfg.volRatioAllow ? (hotBasis - cfg.volRatioAllow) * 6 : 0; // 换手率/成交额过热
+  const hotAllow = breakout ? cfg.volBreakoutHotRatio : cfg.volRatioAllow;
+  const hotRatio = hotBasis !== null && hotBasis > hotAllow ? (hotBasis - hotAllow) * 6 : 0; // 换手率/成交额过热
   const chasingRise = Math.max(0, riseForChase - cfg.volRiseAllow) * 1.5; // 启动以来涨幅过大
   // 距启动点已远：仅在放量仍在持续（当前量能仍处启动水平）时才惩罚；
   // 若量能已消退（回到萎缩/持平），说明这波放量结束，不应再按"已走远"扣分
@@ -613,11 +626,12 @@ export function scoreStockVolume(
   ]
     .filter(Boolean)
     .join('｜');
-  const penaltyShown = Math.round(extensionPenalty);
-  const timingNote =
-    extensionPenalty > 0
-      ? `；${timingDesc}${penaltyShown > 0 ? `，已过热/走远（下调${penaltyShown}分）` : ''}`
-      : `；${timingDesc}`;
+  // 实际扣分 = base - applyTiming(base)：extensionPenalty 可能远大于分值刻度（如 80+），
+  // 直接展示会写出"下调86分"这种不存在的扣分，故按实际生效值显示
+  const timingNoteFor = (base: number) => {
+    const cut = Math.round(base - applyTiming(base));
+    return `；${timingDesc}${cut > 0 ? `，已过热/走远（下调${cut}分）` : ''}`;
+  };
   const ratioDesc = ratio === null ? '未知' : ratio >= 2 ? '显著活跃' : ratio >= 1.2 ? '较为活跃' : ratio >= 0.7 ? '中等' : '清淡';
 
   // 纵向：自身量能趋势 + 量价配合（最多 40% 权重 + 奖惩）
@@ -642,7 +656,7 @@ export function scoreStockVolume(
       score: applyTiming(base),
       max,
       available: true,
-      note: `同类市值${ratioDesc}（5日${ratioLabel}为同类${ratio.toFixed(2)}倍${ratioBasis === 'amount' ? '，换手率缺失回退成交额' : ''}），${volTurnDesc}${timingNote}`,
+      note: `同类市值${ratioDesc}（5日${ratioLabel}为同类${ratio.toFixed(2)}倍${ratioBasis === 'amount' ? '，换手率缺失回退成交额' : ''}），${volTurnDesc}${timingNoteFor(base)}`,
       ratio,
       ratioBasis,
       turnover5,
@@ -666,7 +680,7 @@ export function scoreStockVolume(
     max,
     available: true,
     degraded: '无同类市值统计数据，仅按自身量能趋势评分',
-    note: `${volTurnDesc}${timingNote}`,
+    note: `${volTurnDesc}${timingNoteFor(base)}`,
     ratioBasis: null,
     turnover5,
     volTrend,
@@ -1091,9 +1105,11 @@ export function scoreStockMoney(
   if (shape === 'smile' && cross === 'up') {
     // 完美微笑曲线金叉：U型（先流出后回流）+ 上穿散户线，站上0轴最优；越新鲜越高（衰减到该档下限）
     score = (aboveZero ? s(20) : s(15)) + (aboveZero ? s(10) : s(7)) * upFresh;
+    // 但资金累计是滞后指标：形态「完美」时若主力线已在区间高位，往往对应股价主升段中后段，不做满分
+    if (highPos) score -= s(cfg.moneyHighPosPenalty);
     note = `${aboveZero ? '完美' : ''}微笑曲线${ageDesc}上穿散户线${
       aboveZero ? '且站上0轴' : '（尚未站上0轴）'
-    }｜趋势转折买点`;
+    }${highPos ? `（区间位置${(posInRange * 100).toFixed(0)}%，已处中后段，下调）` : ''}｜趋势转折买点`;
   } else if (cross === 'up') {
     // 近期上穿散户线（形态未被判定为U型）：同为资金转折信号，略低于完美微笑金叉
     score = (aboveZero ? s(16) : s(12)) + s(6) * upFresh;
@@ -1104,9 +1120,9 @@ export function scoreStockMoney(
     note = '主力线走出微笑曲线（资金回流），等待上穿散户线确认';
   } else if (reversal) {
     // 尾部见底反转：整体可能是倒U/回落，但最近刚拐头向上、即将上穿0轴 → 新的资金转折点
-    // 尚未站上0轴，按「转折前夜」给分；拐点越新鲜得分越高
+    // 这是最早的「资金拐点」信号（早于"刚转正"），按转折前夜给较高分；拐点越新鲜得分越高
     const turnFresh = Math.pow(cfg.moneyCrossDecay, tailWin.length - 1 - tailMinIdx);
-    score = s(15) + s(3) * turnFresh;
+    score = s(17) + s(5) * turnFresh;
     note = `主力线${cfg.moneyWindow}日见底反转、即将上穿0轴${
       retailFalling ? '（散户线回落）' : ''
     }｜资金拐点`;
@@ -1187,7 +1203,8 @@ export interface StockScoreResult {
 
 /**
  * 个股表现评分 = 量能活跃度 + 资金（权重见 stockDims）
- * RSI 权重为 0：只计算与展示，不参与个股综合分（短线评分定位是选股，不做择时）。
+ * RSI 权重为 0：不参与加权；但作为「追高护栏」，RSI 超买/钝化时对个股维度封顶
+ * （否则量能+资金双满分会把连拉数板后的顶部推到 A 级，评分峰值落在股价峰值）。
  * 各子项先归一到 0~1 再乘权重，再按「参与加权的权重之和」折算到 100；子项缺失时按剩余权重归一化。
  */
 export function scoreStock(
@@ -1209,9 +1226,21 @@ export function scoreStock(
   }
   const sumW = weighted.reduce((a, s) => a + s.w, 0);
   const sum = weighted.reduce((a, s) => a + (s.r.max > 0 ? (s.r.score / s.r.max) * s.w : 0), 0);
+  let score = sumW > 0 ? (sum / sumW) * 100 : 0;
+  // 追高护栏：RSI 不参与加权，但个股整体处于超买/钝化时封顶，
+  // 避免「量能满分 + 资金完美形态」把已经从底部连拉数板的顶部推到 A 级（评分峰值落在股价峰值）。
+  if (rsi.available) {
+    // 「超买回踩企稳/回踩中」本身是买点（已从超买回落），不按追高封顶
+    const isPullback = rsi.pattern.includes('回踩');
+    if (!isPullback && (rsi.pattern.includes('超买钝化') || rsi.rsi6 >= SHORT_TERM_SCORE_CONFIG.rsiOverbought)) {
+      score = Math.min(score, SHORT_TERM_SCORE_CONFIG.rsiOverboughtCap);
+    } else if (rsi.rsi6 >= SHORT_TERM_SCORE_CONFIG.rsiOverboughtPenaltyStart) {
+      score = Math.min(score, SHORT_TERM_SCORE_CONFIG.rsiHighCap);
+    }
+  }
   return {
     available: true,
-    score: sumW > 0 ? (sum / sumW) * 100 : 0,
+    score,
     volume,
     rsi,
     money,

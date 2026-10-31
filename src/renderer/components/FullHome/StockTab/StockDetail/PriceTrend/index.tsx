@@ -30,6 +30,7 @@ import * as Utils from '@/utils';
 import * as Helpers from '@/helpers';
 import * as Services from '@/services';
 import * as Tech from '@/helpers/tech';
+import { computeShortTermScoreCurve, SHORT_SCORE_CURVE_MAX_DAYS } from '@/helpers/shortTermScoreList';
 import { useHomeContext } from '@/components/FullHome';
 import styles from './index.scss';
 import { Tag, Switch, Input, Select, Slider, Form } from 'antd';
@@ -1885,6 +1886,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       manual: true,
       onSuccess: (data) => {
         const {names, values, techType, opaque} = data;
+        // 短线评分指标的数据要现取数计算（见下方 SHORT_SCORE 的 effect），
+        // 同步指标函数只返回空序列：这里不能覆盖图表上的技术指标序列。
+        if (techType === TechIndicatorType.SHORT_SCORE) {
+          return;
+        }
         const opts = chartOptions[opaque][0];
         const techSeries = getTechSeriesWithResult(opts.techType, values, names);
         opts.series = opts.series.filter((_:any) => _.stype !== 'tech');
@@ -2462,16 +2468,134 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const onTechIndicatorTypeChange = useCallback((value: TechIndicatorType) => {
       if (chartOptions[typeIndex]) {
         chartOptions[typeIndex][0].techType = value;
-        const ks = filterKlinesByToDate(klineData.klines[typeIndex], displayToDate);
-        runCalculateTech(ks, typeIndex, value);
-        // updateTechSeries(chartOptions[typeIndex][0], ks);
-        // setChartOptions({
-        //   ...chartOptions,
-        // });
-        
+        if (value === TechIndicatorType.SHORT_SCORE) {
+          // 短线评分曲线要现取数逐日计算（见下方 effect）：
+          // 先把旧指标序列清掉，避免算完之前还显示上一个指标的线；worker 侧对该指标只返回空序列
+          chartOptions[typeIndex][0].series = (chartOptions[typeIndex][0].series || []).filter(
+            (_: any) => _.stype !== 'tech'
+          );
+          setChartOptions({ ...chartOptions });
+        } else {
+          const ks = filterKlinesByToDate(klineData.klines[typeIndex], displayToDate);
+          runCalculateTech(ks, typeIndex, value);
+        }
         setTechType(value);
       }
-    }, [typeIndex, chartOptions, displayToDate]);
+    }, [typeIndex, chartOptions, displayToDate, klineData]);
+
+    /**
+     * 技术指标「短线评分」曲线：现取数逐日重算（不读评分缓存），算完写入技术指标序列
+     *
+     * 与其它指标不同，它的数据不能同步算出来（要取日K/板块/资金/涨跌比/市值档），
+     * 所以单独异步计算；不跟随 K 线定时刷新（分数本身只在收盘后才有意义）。
+     */
+    const [shortScoreCurveLoading, setShortScoreCurveLoading] = useState(false);
+    /** 异步回调里要读最新的 chartOptions（状态对象会被原地修改，不能依赖闭包里的旧值） */
+    const chartOptionsRef = useRef(chartOptions);
+    chartOptionsRef.current = chartOptions;
+    useEffect(() => {
+      if (techType !== TechIndicatorType.SHORT_SCORE) {
+        return () => {};
+      }
+      const code = String(secid).split('.').pop() || '';
+      if (!/^\d{6}$/.test(code)) {
+        return () => {};
+      }
+      let canceled = false;
+      let retryTimer: any = null;
+
+      /** 把算好的分数按图表 x 轴的交易日对齐后挂到技术指标序列 */
+      const applyToChart = (scores: Record<string, number>, attempt: number) => {
+        if (canceled) {
+          return;
+        }
+        const target = chartOptionsRef.current[typeIndex]?.[0];
+        // K线/图表还没就绪（切换周期的第一帧很常见）：稍后重试，否则曲线会丢
+        if (!target) {
+          if (attempt < 20) {
+            retryTimer = setTimeout(() => applyToChart(scores, attempt + 1), 300);
+          }
+          return;
+        }
+        // 没有分数的交易日留空（曲线断开而不是连成直线）：
+        // 日K按当日精确取分；周/月K取「该 bar 日期之前最后一个评分日」的分。
+        const xs = ((target.xAxis?.[0]?.data || []) as string[]) || [];
+        const isDaily = DefaultKTypes[typeIndex] === KLineType.Day;
+        const scoreDays = Object.keys(scores).sort();
+        const data = xs.map((x) => {
+          const key = String(x || '').replace(/-/g, '').substring(0, 8);
+          let day = '';
+          if (isDaily) {
+            day = scores[key] !== undefined ? key : '';
+          } else {
+            for (let i = scoreDays.length - 1; i >= 0; i -= 1) {
+              if (scoreDays[i] <= key) {
+                day = scoreDays[i];
+                break;
+              }
+            }
+          }
+          const v = day ? scores[day] : undefined;
+          return typeof v === 'number' ? Number(v.toFixed(1)) : null;
+        });
+        target.series = (target.series || []).filter((_: any) => _.stype !== 'tech');
+        target.series.push({
+          name: TechIndicatorSeriesNames[TechIndicatorType.SHORT_SCORE][0],
+          type: 'line',
+          stype: 'tech',
+          symbol: 'none',
+          xAxisIndex: 2,
+          yAxisIndex: 2,
+          data,
+          connectNulls: false,
+          lineStyle: { color: '#faad14', width: 1.2 },
+          itemStyle: { color: '#faad14' },
+          // 60 分是 B 级门槛，作为参考线
+          markLine: {
+            symbol: 'none',
+            silent: true,
+            label: { show: false },
+            data: [{ yAxis: 60, lineStyle: { color: variableColors['--hint-color'] || '#999', opacity: 0.65 } }],
+          },
+        });
+        setChartOptions({ ...chartOptionsRef.current });
+      };
+
+      setShortScoreCurveLoading(true);
+      computeShortTermScoreCurve({
+        code,
+        name: stock?.name,
+        hybk: config?.hybk || null,
+        // 列表里取到的流通市值（亿元）用来选市值档，和列表评分口径对齐
+        circMv: stock?.lt ? Number(stock.lt) * 1e8 : undefined,
+        limit: SHORT_SCORE_CURVE_MAX_DAYS,
+      })
+        .then((curve) => {
+          if (canceled) {
+            return;
+          }
+          applyToChart(curve.scores, 0);
+          console.log(
+            `[短线评分] 技术指标曲线：${code} 基准日 ${curve.scoreDayKey}，共 ${Object.keys(curve.scores).length} 个交易日`
+          );
+        })
+        .catch((e: any) => {
+          console.warn('[短线评分] 技术指标曲线计算失败:', e?.message || e);
+        })
+        .finally(() => {
+          if (!canceled) {
+            setShortScoreCurveLoading(false);
+          }
+        });
+      return () => {
+        canceled = true;
+        if (retryTimer) {
+          clearTimeout(retryTimer);
+        }
+      };
+      // chartOptions / klineData 是原地修改的状态对象，不作为依赖；用长度判断图表是否已就绪
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [techType, typeIndex, displayToDate, secid, stock?.name, config?.hybk, klineData.klines[typeIndex]?.length]);
 
     const onMAPeriodTypeChange = useCallback(
       (value: MAPeriodType) => {
@@ -3063,6 +3187,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                       <Select.Option value={v} key={"tit_" + v}>{TechIndicatorNames[v]}</Select.Option>
                     ))}
                   </Select>
+                  {techType === TechIndicatorType.SHORT_SCORE && shortScoreCurveLoading ? (
+                    <span style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}>
+                      短线评分计算中（最近 {SHORT_SCORE_CURVE_MAX_DAYS} 个交易日）...
+                    </span>
+                  ) : null}
                   &nbsp;
                   <Select value={currentBK || ''} onChange={onBKChange} size="small">
                     <Select.Option value={''}>选择板块</Select.Option>

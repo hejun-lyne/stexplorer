@@ -206,7 +206,9 @@ export enum TechIndicatorType {
   OBV = 3,
   ADV = 4,
   STOCH = 5,
-  CG = 6
+  CG = 6,
+  /** 短线评分（0~100 综合评分曲线，需要现取数计算，见 helpers/shortTermScoreList） */
+  SHORT_SCORE = 7
 }
 
 export const DefaultTechIndicatorTypes = [
@@ -216,7 +218,8 @@ export const DefaultTechIndicatorTypes = [
   TechIndicatorType.OBV,
   TechIndicatorType.ADV,
   TechIndicatorType.STOCH,
-  TechIndicatorType.CG
+  TechIndicatorType.CG,
+  TechIndicatorType.SHORT_SCORE
 ]
 
 export const TechIndicatorNames = {
@@ -226,7 +229,8 @@ export const TechIndicatorNames = {
   3: 'OBV',
   4: 'ADV',
   5: 'STOCH',
-  6: 'CG'
+  6: 'CG',
+  7: '短线评分'
 }
 
 export const TechIndicatorSeriesNames = {
@@ -236,7 +240,8 @@ export const TechIndicatorSeriesNames = {
   3: ['OBV'],
   4: ['ADV', 'DI+', 'DI-'],
   5: ['D', 'K'],
-  6: ['CG', 'signal']
+  6: ['CG', 'signal'],
+  7: ['短线评分']
 }
 
 export enum PeriodMarkType {

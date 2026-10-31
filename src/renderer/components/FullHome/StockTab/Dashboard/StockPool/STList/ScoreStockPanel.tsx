@@ -5,10 +5,16 @@ import * as Services from '@/services';
 import * as Utils from '@/utils';
 import * as CONST from '@/constants';
 import * as Tech from '@/helpers/tech';
-import { DefaultTechIndicatorTypes, KLineType, TechIndicatorNames, TechIndicatorType } from '@/utils/enums';
+import {
+  DefaultTechIndicatorTypes,
+  KLineType,
+  TechIndicatorNames,
+  TechIndicatorSeriesNames,
+  TechIndicatorType,
+} from '@/utils/enums';
 import { useNativeThemeColor, useRenderEcharts, useResizeEchart } from '@/utils/hooks';
 import { Stock } from '@/types/stock';
-import { SHORT_SCORE_SOURCE } from '@/helpers/shortTermScoreList';
+import { computeShortTermScoreCurve, SHORT_SCORE_SOURCE } from '@/helpers/shortTermScoreList';
 import { GetCompanyFromTushare } from '@/services/tushare';
 import ScoreStockTrade from './ScoreStockTrade';
 
@@ -38,7 +44,12 @@ interface KlineOptionParams {
   showVolume: boolean;
   /** TECH_NONE 表示不显示技术指标 */
   techType: number;
+  /** 短线评分曲线（YYYYMMDD -> 综合评分），仅 techType = SHORT_SCORE 时使用 */
+  shortScoreScores?: Record<string, number>;
 }
+
+/** 短线评分曲线的线色（与评分等级色区分，保持中性金色） */
+const SHORT_SCORE_LINE_COLOR = '#faad14';
 
 /** 公司简介内存缓存（secid -> 简介），来回切换股票时不重复取数 */
 const introCache = new Map<string, string>();
@@ -52,12 +63,44 @@ function buildTechSeries(
   techType: TechIndicatorType,
   klines: Stock.KLineItem[],
   axisIndex: number,
-  altAxisIndex = -1
+  altAxisIndex = -1,
+  shortScoreScores?: Record<string, number>
 ) {
   const colors = Utils.getVariablesColor(CONST.VARIABLES);
   const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
   const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
   const hintColor = colors['--hint-color'] || '#999';
+
+  // 短线评分：分数由外部现取数算好后传进来（不走评分缓存），这里只按交易日对齐成曲线
+  if (techType === TechIndicatorType.SHORT_SCORE) {
+    const data = klines.map((k) => {
+      const key = String(k?.date || '').replace(/-/g, '').substring(0, 8);
+      const v = shortScoreScores?.[key];
+      return typeof v === 'number' ? Number(v.toFixed(1)) : null;
+    });
+    return [
+      {
+        name: TechIndicatorSeriesNames[TechIndicatorType.SHORT_SCORE][0],
+        type: 'line',
+        stype: 'tech',
+        symbol: 'none',
+        xAxisIndex: axisIndex,
+        yAxisIndex: axisIndex,
+        data,
+        connectNulls: false,
+        lineStyle: { color: SHORT_SCORE_LINE_COLOR, width: 1.2 },
+        itemStyle: { color: SHORT_SCORE_LINE_COLOR },
+        // 60 分是 B 级门槛，作为参考线
+        markLine: {
+          symbol: 'none',
+          silent: true,
+          label: { show: false },
+          data: [{ yAxis: 60, lineStyle: { color: hintColor, opacity: 0.65 } }],
+        },
+      },
+    ];
+  }
+
   const { names, values } = Tech.calculateIndicators(klines, techType);
 
   if (techType === TechIndicatorType.MACD) {
@@ -131,7 +174,7 @@ function buildTechSeries(
  * 布局（价格 / 成交量 / 技术指标）按开关动态排布，高度用像素计算，
  * 保证在较矮的面板里各 grid 也能等分得比较均匀。
  */
-function buildKlineOption({ klines, range, showVolume, techType }: KlineOptionParams) {
+function buildKlineOption({ klines, range, showVolume, techType, shortScoreScores }: KlineOptionParams) {
   const colors = Utils.getVariablesColor(CONST.VARIABLES);
   const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
   const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
@@ -221,6 +264,8 @@ function buildKlineOption({ klines, range, showVolume, techType }: KlineOptionPa
       axisTick: { show: false },
       axisLabel: { fontSize: 9, color: secondaryColor, formatter: (v: number) => Number(v).toFixed(2) },
       splitLine: { show: false },
+      // 短线评分是 0~100 的固定量纲：固定坐标轴范围，曲线高低不会随区间缩放而失真
+      ...(techType === TechIndicatorType.SHORT_SCORE ? { min: 0, max: 100 } : {}),
     });
     if (techType === TechIndicatorType.ADV) {
       // ADV 的 DI+/DI- 与 ADV 量纲差异大，额外挂一条同 grid 的隐藏 y 轴
@@ -281,7 +326,9 @@ function buildKlineOption({ klines, range, showVolume, techType }: KlineOptionPa
     });
   }
   if (showTech) {
-    series.push(...buildTechSeries(techType as TechIndicatorType, klines, techGridIndex, techAltAxisIndex));
+    series.push(
+      ...buildTechSeries(techType as TechIndicatorType, klines, techGridIndex, techAltAxisIndex, shortScoreScores)
+    );
   }
 
   return {
@@ -456,6 +503,37 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
     };
   }, [secid]);
 
+  // 短线评分曲线：选中该技术指标时现取数逐日计算（不读评分缓存），算完再画线
+  const [shortScoreScores, setShortScoreScores] = useState<Record<string, number>>({});
+  const [shortScoreCurveLoading, setShortScoreCurveLoading] = useState(false);
+  useEffect(() => {
+    if (techType !== TechIndicatorType.SHORT_SCORE) {
+      return () => {};
+    }
+    let canceled = false;
+    setShortScoreScores({});
+    setShortScoreCurveLoading(true);
+    computeShortTermScoreCurve({ code, name, limit: PANEL_KLINE_LIMIT })
+      .then((curve) => {
+        if (!canceled) {
+          setShortScoreScores(curve.scores);
+        }
+      })
+      .catch(() => {
+        if (!canceled) {
+          setShortScoreScores({});
+        }
+      })
+      .finally(() => {
+        if (!canceled) {
+          setShortScoreCurveLoading(false);
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [techType, code, name]);
+
   // 切换股票：重置缩放区间
   useEffect(() => {
     setRange(DEFAULT_RANGE);
@@ -479,9 +557,9 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
   const { option, chartHeight } = useMemo(
     () =>
       klines.length
-        ? buildKlineOption({ klines, range, showVolume, techType })
+        ? buildKlineOption({ klines, range, showVolume, techType, shortScoreScores })
         : { option: null, chartHeight: techType === TECH_NONE ? 400 : 480 },
-    [klines, range, showVolume, techType, darkMode, lowKey]
+    [klines, range, showVolume, techType, shortScoreScores, darkMode, lowKey]
   );
   const { ref: chartRef, chartInstance } = useResizeEchart(-1);
   useRenderEcharts(
@@ -584,6 +662,11 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, on
         {klineLoading ? (
           <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
             <Spin size="small" /> 日K加载中...
+          </div>
+        ) : null}
+        {shortScoreCurveLoading ? (
+          <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
+            <Spin size="small" /> 短线评分曲线现取数计算中（最近 {PANEL_KLINE_LIMIT} 个交易日）...
           </div>
         ) : null}
         {!klineLoading && klineError ? (

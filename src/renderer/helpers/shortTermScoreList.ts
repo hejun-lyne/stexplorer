@@ -13,7 +13,7 @@ import dayjs from 'dayjs';
  * 避免新增字段（如K线形态、是否放量、当日分时补全标记）在旧缓存上永远显示为空，
  * 也避免评分口径调整（如资金维度窗口 20 日 → 5 日）后继续用旧口径的分数。
  */
-export const SCORE_ROW_VERSION = 12;
+export const SCORE_ROW_VERSION = 13;
 
 /**
  * 短线评分统一使用的数据源（Tushare）
@@ -534,6 +534,14 @@ export interface ScoreSharedContext {
   boardPromiseMap: Record<string, Promise<Stock.KLineItem[]>>;
   /** 板块「基准日附近是否有行情」的判定基准日（训练模式=训练日，预计算=窗口末日） */
   referenceDate?: string;
+  /**
+   * 板块日K取数条数（默认 60）
+   *
+   * 逐日回看较长窗口（如技术指标曲线要算最近 120 个交易日）时，
+   * 60 根覆盖不到窗口最早那几天，板块维度会被误判为「板块当时没有行情」，
+   * 因此这类场景把上限放大到「窗口天数 + 60」。
+   */
+  boardKlineLimit?: number;
 }
 
 export function createScoreContext(source: FundApiType, init?: Partial<ScoreSharedContext>): ScoreSharedContext {
@@ -780,7 +788,7 @@ async function getBoardKlines(ctx: ScoreSharedContext, boardCode: string): Promi
   }
   const task = (async (): Promise<Stock.KLineItem[]> => {
     try {
-      return await fetchDayKlines(ctx.source, `90.${boardCode}`, 60, { allowSynthesis: false });
+      return await fetchDayKlines(ctx.source, `90.${boardCode}`, ctx.boardKlineLimit || 60, { allowSynthesis: false });
     } catch {
       return [];
     }
@@ -1335,6 +1343,13 @@ interface ComputeOptions {
   backfillDays?: number;
   /** 补算进度回调（补算是「股票 × 交易日」维度，与当日出分的进度分开回报） */
   onBackfill?: (info: { done: number; total: number; day: string }) => void;
+  /**
+   * 不使用评分缓存（默认 false）
+   *
+   * 为 true 时基准日不再从评分序列里取点，全部股票重新取数计算（算完仍会回写序列，
+   * 供历史列 / 其他入口使用）；历史补算只补缺的交易日，不会重复重算刚算完的基准日。
+   */
+  ignoreCache?: boolean;
 }
 
 /**
@@ -1582,7 +1597,7 @@ async function backfillScores(params: {
 }
 
 export async function computeShortTermScoreRows(items: ShortTermScoreItem[], options: ComputeOptions): Promise<ComputeRowsResult> {
-  const { source, concurrency = 3, shouldStop, onRow, backfillDays = 0, onBackfill } = options;
+  const { source, concurrency = 3, shouldStop, onRow, backfillDays = 0, onBackfill, ignoreCache = false } = options;
   const results: ShortTermScoreRow[] = [];
   if (!items || items.length === 0) {
     return { rows: results, scoreDayKey: '', recentDays: [] };
@@ -1672,7 +1687,8 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   };
 
   // ---- 命中序列即出分：一次调用取回整个股票池的全部序列 ----
-  if (scoreDayKey) {
+  // ignoreCache：不读缓存，整池重新取数计算（pending 保持为全部股票）
+  if (scoreDayKey && !ignoreCache) {
     fillFromSeries(await loadScoreSeries(codes, source, { dates: [scoreDayKey] }));
     if (!pending.length) {
       console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
@@ -1680,6 +1696,8 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       return { rows: results, scoreDayKey, recentDays: collectRecentDays() };
     }
     console.log(`[短线评分] 基准日 ${scoreDayKey}：序列命中 ${total - pending.length} 只，需现算 ${pending.length} 只`);
+  } else if (ignoreCache) {
+    console.log(`[短线评分] 已关闭评分缓存：${total} 只全部重新取数计算`);
   }
 
   // ---- 未命中：准备公共上下文（指数日K / 涨跌比）----
@@ -1698,7 +1716,7 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
       });
     });
     scoreDayKey = [...dates].sort().pop() || '';
-    if (scoreDayKey) {
+    if (scoreDayKey && !ignoreCache) {
       fillFromSeries(await loadScoreSeries(codes, source, { dates: [scoreDayKey] }));
       if (!pending.length) {
         console.log(`[短线评分] 基准日 ${scoreDayKey}：${total} 只全部命中评分序列缓存，无需取数`);
@@ -2089,4 +2107,186 @@ export async function computeStockScoreForCode(params: {
     boardName: inputs.boardName,
     baselineName: inputs.baselineName,
   };
+}
+
+/** 技术指标「短线评分」曲线上限（交易日数） */
+export const SHORT_SCORE_CURVE_MAX_DAYS = 120;
+
+/** 短线评分曲线（技术指标用） */
+export interface ShortTermScoreCurve {
+  /** 评分基准日（YYYYMMDD）；未能确定时为空串 */
+  scoreDayKey: string;
+  /** YYYYMMDD -> 综合评分（0~100）；未上市 / 停牌 / 数据不足的交易日不会出现在这里 */
+  scores: Record<string, number>;
+  /** 未能算出分数的交易日数量 */
+  skipped: number;
+}
+
+/**
+ * 计算「最近 N 个交易日」的短线评分曲线（技术指标用）
+ *
+ * 与列表评分同一套取数与评分内核，但**不读写评分缓存**：每次选中该指标都现取数、逐日重算，
+ * 避免指标曲线受历史缓存口径（旧版本、旧板块）影响。
+ * 单只股票逐日只在内存里切片，取数全部走上下文缓存 + 批量接口，窗口上限默认 120 个交易日。
+ */
+export async function computeShortTermScoreCurve(params: {
+  code: string;
+  name?: string;
+  /** 手动设置的活跃板块（优先作为板块维度的所属板块） */
+  hybk?: { code: string; name: string } | null;
+  circMv?: number;
+  /** 最多计算多少个交易日（默认 120，最大 240） */
+  limit?: number;
+  source?: FundApiType;
+  shouldStop?: () => boolean;
+}): Promise<ShortTermScoreCurve> {
+  const { code, name, hybk, circMv, shouldStop } = params;
+  const source = params.source || SHORT_SCORE_SOURCE;
+  const limit = Math.max(1, Math.min(240, Math.floor(Number(params.limit) || SHORT_SCORE_CURVE_MAX_DAYS)));
+  const empty: ShortTermScoreCurve = { scoreDayKey: '', scores: {}, skipped: 0 };
+  if (!/^\d{6}$/.test(String(code || ''))) {
+    return empty;
+  }
+
+  // 板块日K按「窗口 + 60」取：窗口最早那几天也要能看到板块行情，否则板块维度会被误判为缺失
+  const ctx = createScoreContext(source, { boardKlineLimit: limit + 60 });
+  try {
+    // 指数日K同理：多 60 根用于「每天往前 60 根」的大盘对比
+    await ensureIndexKlines(ctx, limit + 60, true);
+  } catch {
+    // 取不到时后续按维度缺失处理
+  }
+
+  // 评分基准日：训练模式跟随训练日（归位到真实交易日），否则取指数数据里的最后一个交易日
+  const trainKey = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
+  let scoreDayKey = '';
+  if (trainKey) {
+    try {
+      scoreDayKey = await resolveScoreDate(source, trainKey, ctx);
+    } catch {
+      scoreDayKey = '';
+    }
+  }
+  if (!scoreDayKey) {
+    const dates = new Set<string>();
+    Object.keys(ctx.indexKlinesMap).forEach((s) => {
+      (ctx.indexKlinesMap[s] || []).forEach((k) => {
+        const d = String(k?.date || '').replace(/-/g, '').substring(0, 8);
+        if (d) {
+          dates.add(d);
+        }
+      });
+    });
+    scoreDayKey = [...dates].sort().pop() || '';
+  }
+  if (!scoreDayKey) {
+    return empty;
+  }
+
+  const days = recentDaysOnOrBefore(ctx, scoreDayKey).slice(-limit);
+  if (!days.length) {
+    return { ...empty, scoreDayKey };
+  }
+
+  const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
+  const item: ShortTermScoreItem = { code, name, circMv, hybk: hybk || null };
+
+  // 个股日K：一次取够（曲线窗口 + 单日评分要用的 250 根），逐日只在内存里切片
+  try {
+    ctx.stockKlinesMap[secid] = await fetchDayKlines(source, secid, days.length + SCORE_KLINES_PER_STOCK);
+  } catch {
+    ctx.stockKlinesMap[secid] = [];
+  }
+  if (!ctx.stockKlinesMap[secid]?.length) {
+    return { ...empty, scoreDayKey };
+  }
+
+  // 资金流：一次取够整个窗口（逐日按 60 日窗口切片），失败时按维度缺失处理
+  try {
+    const mf = await Services.Tushare.GetMoneyFlowFromTushare(code, Math.min(240, days.length + MONEY_FLOW_DAYS));
+    // 只缓存成功结果：否则 buildStockScoreInputs 会在每个交易日各重试一次（120 次 IPC）
+    if (mf) {
+      ctx.moneyFlowMap[code] = mf;
+    }
+  } catch {
+    // 忽略：资金维度缺失
+  }
+
+  // 涨跌比：ensureUpRatio 只覆盖最近 marketDays 天，窗口更早的日期要批量补齐
+  try {
+    await ensureUpRatio(ctx);
+  } catch {
+    // 忽略
+  }
+  const indexDays = [
+    ...new Set(
+      INDEX_SECIDS.flatMap((s) =>
+        (ctx.indexKlinesMap[s] || []).map((k) => String(k?.date || '').replace(/-/g, '').substring(0, 8))
+      )
+    ),
+  ]
+    .filter(Boolean)
+    .sort();
+  const needRatioDays = new Set<string>();
+  days.forEach((d) => {
+    indexDays
+      .filter((x) => x <= d)
+      .slice(-Score.SHORT_TERM_SCORE_CONFIG.marketDays)
+      .forEach((x) => needRatioDays.add(x));
+  });
+  const missingRatioDays = [...needRatioDays].filter((d) => !ctx.upRatioMap || ctx.upRatioMap[d] === undefined);
+  if (missingRatioDays.length) {
+    try {
+      const more = await Services.Tushare.GetUpRatioFromTushare(missingRatioDays);
+      ctx.upRatioMap = { ...(ctx.upRatioMap || {}), ...(more || {}) };
+    } catch {
+      // 忽略
+    }
+  }
+
+  // 市值档成交统计：按日批量取（否则每天一次 IPC，120 天会明显卡顿）
+  const missingStatDays = days.filter((d) => ctx.marketStatsMap[d] === undefined);
+  if (missingStatDays.length) {
+    try {
+      const stats = await Services.Tushare.GetMarketActivityStatsBatchFromTushare(missingStatDays);
+      missingStatDays.forEach((d) => {
+        ctx.marketStatsMap[d] = stats?.[d] ?? null;
+      });
+    } catch {
+      // 忽略：ensureMarketStats 会逐日兜底
+    }
+  }
+
+  // 上市日期：上市前的交易日不给分（与列表「未上市」口径一致）
+  let listDate = '';
+  try {
+    const listDates = await Services.Tushare.GetStockListDatesFromTushare([code]);
+    listDate = String(listDates?.[code] || '');
+  } catch {
+    listDate = '';
+  }
+
+  const scores: Record<string, number> = {};
+  let skipped = 0;
+  for (const dayKey of days) {
+    if (shouldStop?.()) {
+      break;
+    }
+    if (isListedOnDay(listDate, dayKey) === false) {
+      continue;
+    }
+    const day = `${dayKey.substring(0, 4)}-${dayKey.substring(4, 6)}-${dayKey.substring(6, 8)}`;
+    try {
+      const inputs = await buildStockScoreInputs(ctx, item, day);
+      const { row } = computeShortTermScoreForDate({ code, name, scoreDay: day, ...inputs });
+      if (row.total != null && !row.pending) {
+        scores[dayKey] = Number(row.total);
+      } else {
+        skipped += 1;
+      }
+    } catch {
+      skipped += 1;
+    }
+  }
+  return { scoreDayKey, scores, skipped };
 }

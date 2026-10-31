@@ -593,7 +593,7 @@ const ScoreDetailCards = ({
       {/* ==================== 个股表现明细 ==================== */}
       <div style={{ ...cardStyle, marginTop: 12 }}>
         <Row className={styles.rowheader} style={{ marginBottom: 8 }}>
-          <Col span={20}>个股表现评分（量能20 + 资金60；RSI 仅计算与展示，不计入加权）</Col>
+          <Col span={20}>个股表现评分（量能20 + 资金60；RSI 不计权，但超买/钝化时对个股维度封顶）</Col>
           <Col span={4} style={{ textAlign: 'right' }}>
             <span style={{ fontSize: 16, fontWeight: 'bold', color: Score.scoreColor(stock.score) }}>
               {stock.available ? stock.score.toFixed(1) : '--'}
@@ -616,7 +616,8 @@ const ScoreDetailCards = ({
     按单日实际倍数补足纵向分（5日/20日均量会把单日放量稀释掉），并视作放量启动日（距启动0日）
 
 择时位置修正（找买点，与板块同逻辑）：量能刚由萎缩转为温和放量分最高，以下情况下调——
- · 成交额/同类均值 > ${Score.SHORT_TERM_SCORE_CONFIG.volRatioAllow}倍（过热）：每超1倍扣6分（当日倍量突破时按单日倍数判断）
+ · 5日换手率/同类均值 > ${Score.SHORT_TERM_SCORE_CONFIG.volRatioAllow}倍（过热）：每超1倍扣6分
+   当日倍量突破时改用「单日倍数 > ${Score.SHORT_TERM_SCORE_CONFIG.volBreakoutHotRatio}倍」判断，避免把刚启动的放量当成过热
  · 自放量启动日涨幅 > ${Score.SHORT_TERM_SCORE_CONFIG.volRiseAllow}%（已走远）：每超1%扣1.5分（无启动日/当日启动时退化为近5日涨幅）
  · 距放量启动日 > 5日且放量仍在持续：每多1日扣1分
   放量启动日 = 近20日内首个「5日均量/20日均量 ≥ 1.3」的交易日
@@ -674,7 +675,12 @@ const ScoreDetailCards = ({
  · 偏高区：RSI6 > 68 起每高 1 点扣 1.5 分（到 80 累计扣 18 分）
  · 超买区：RSI6 ≥ 80 后每高 1 点再扣 2.5 分
  · 下限 10 分
-死叉/空头排列/超买钝化本就低分，不再叠加。`}
+死叉/空头排列/超买钝化本就低分，不再叠加。
+
+追高护栏（个股维度封顶，避免"量能+资金双满分"把顶部推到A级）：
+ · RSI6 ≥ 80 或「超买钝化」→ 个股维度 ≤ ${Score.SHORT_TERM_SCORE_CONFIG.rsiOverboughtCap}
+ · RSI6 ≥ 68（偏高）→ 个股维度 ≤ ${Score.SHORT_TERM_SCORE_CONFIG.rsiHighCap}
+ · 例外：「超买回踩企稳/回踩中」是从超买回落后的买点，不封顶`}
                 </div>
               }
               placement="right"
@@ -705,9 +711,10 @@ const ScoreDetailCards = ({
                 <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>
                   {`基于主力/散户近${Score.SHORT_TERM_SCORE_CONFIG.moneyWindow}日累计净流入曲线（与资金流向图同源），满分30；以「主力资金趋势」为主，散户强弱仅作小幅修正（-${Score.SHORT_TERM_SCORE_CONFIG.moneyRetailDivergePenalty}）：
 完美微笑曲线(U型)上穿散户线且站上0轴 → 20~30分 ★（当日金叉最高，随天数衰减）
+  但若主力线已在区间高位(≥72%)再下调${Score.SHORT_TERM_SCORE_CONFIG.moneyHighPosPenalty}分：20日累计是滞后指标，形态"完美"时常已到主升段中后段
 近期上穿散户线（形态未识别为U型）→ 12~22分（站上0轴更高）
 微笑曲线（资金回流）但尚未上穿 → 15分（转折前夜，等待确认）
-尾部见底反转（整体倒U/回落，但最近${Score.SHORT_TERM_SCORE_CONFIG.moneyTurnLookback}日内主力线刚拐头向上、即将上穿0轴）→ 15~18分（资金拐点，拐点越新鲜越高）
+尾部见底反转（整体倒U/回落，但最近${Score.SHORT_TERM_SCORE_CONFIG.moneyTurnLookback}日内主力线刚拐头向上、即将上穿0轴）→ 17~22分（最早的「资金拐点」，拐点越新鲜越高）
 主力累计净流入为正且趋势向上：刚转正(近${Score.SHORT_TERM_SCORE_CONFIG.moneyZeroTurnDays}日内上穿0轴) → 18分 ★；否则 16分，已在区间高位(≥72%) → 15分
 主力累计净流入为正但趋势走平/回落：主力强于散户 → 13分（已在区间高位 → 7分，谨防追高）；弱于散户 → 11分（已在区间高位 → 9分）
 散户净流入强于主力仅小幅下调(-${Score.SHORT_TERM_SCORE_CONFIG.moneyRetailDivergePenalty})，不再作为"资金分歧"大幅减分

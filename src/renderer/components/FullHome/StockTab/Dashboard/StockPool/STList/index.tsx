@@ -447,6 +447,24 @@ const STList: React.FC<STListProps> = ({
   effectiveBoardsKeyRef.current = effectiveBoardsKey;
   /** 每个板块的成分股缓存：secid -> stocks（多板块合并前各自独立保存） */
   const boardStocksCacheRef = React.useRef<Record<string, Stock.DetailItem[]>>({});
+  /**
+   * 最近一次「由板块成分股重建」出的合并列表快照
+   *
+   * 点「短线评分」会先强制重拉成分股，此时 stocks / stockBoardSecidsMap 还是上一次渲染的旧值
+   * （评分函数的闭包也拿不到新 state），评分池必须按这份快照构建。
+   */
+  const boardSnapshotRef = React.useRef<{ stocks: Stock.DetailItem[]; membership: Record<string, string[]> }>({
+    stocks: [],
+    membership: {},
+  });
+  /**
+   * 正在等待「重新拉取」返回的板块：secid -> true
+   *
+   * 不能用 useRequest 的 run 返回的 Promise 等待：同一个 hook 实例被多个板块共用，
+   * 后一次 run 会让前一次的 Promise 永远不 resolve（内部按请求序号丢弃旧请求）。
+   * 所以改在 onSuccess / onError 里打点。
+   */
+  const refreshingBoardsRef = React.useRef<Record<string, boolean>>({});
   /** 每只股票所属的「已选板块」secid 列表（code -> secid[]），用于结果列表标记所属板块 */
   const [stockBoardSecidsMap, setStockBoardSecidsMap] = useState<Record<string, string[]>>({});
   /**
@@ -713,11 +731,19 @@ const STList: React.FC<STListProps> = ({
   const { run: runGetStocks } = useRequest(Services.Stock.GetBankuaiStocksFromDataSource, {
     throwOnError: true,
     manual: true,
+    onError: (_e, params) => {
+      const requestedSecid = String((params as any)?.[1] || '');
+      if (requestedSecid) {
+        delete refreshingBoardsRef.current[requestedSecid];
+      }
+    },
     onSuccess: (data, params) => {
       const requestedSecid = String((params as any)?.[1] || '');
       if (!requestedSecid) {
         return;
       }
+      // 该板块这一轮「重新拉取」已返回（失败时由 onError 打点）
+      delete refreshingBoardsRef.current[requestedSecid];
       // 多板块：先把该板块的列表存入缓存（即便它已被取消勾选，也留作再次勾选时秒回）
       // 空结果不覆盖旧缓存：切训练日/接口偶发失败时，列表才不会突然变空、名称也才不会退化成代码
       const fetched = (data?.stocks || []) as Stock.DetailItem[];
@@ -765,11 +791,19 @@ const STList: React.FC<STListProps> = ({
   const { run: runGetIndustryStocks } = useRequest(GetIndustryStocksFromTushare, {
     throwOnError: true,
     manual: true,
+    onError: (_e, params) => {
+      const requestedSecid = String((params as any)?.[0] || '');
+      if (requestedSecid) {
+        delete refreshingBoardsRef.current[requestedSecid];
+      }
+    },
     onSuccess: (data, params) => {
       const requestedSecid = String((params as any)?.[0] || '');
       if (!requestedSecid) {
         return;
       }
+      // 该板块这一轮「重新拉取」已返回（失败时由 onError 打点）
+      delete refreshingBoardsRef.current[requestedSecid];
       // 多板块：先把该板块的列表存入缓存（空结果不覆盖旧缓存，避免列表变空/名称退化成代码）
       const fetched = (data?.stocks || []) as Stock.DetailItem[];
       if (fetched.length) {
@@ -811,6 +845,44 @@ const STList: React.FC<STListProps> = ({
       });
     },
     [ontrain, trainDay, kLineApiSourceSetting, runGetIndustryStocks, runGetStocks]
+  );
+
+  /**
+   * 强制重新拉取「已选板块」的成分股，并等这一批请求全部返回
+   *
+   * 点「短线评分」时要用最新的成分股重算：只用缓存会漏掉新进榜的股票，
+   * 也会把已经调出板块的股票继续算一遍。
+   * 失败的板块保留原缓存（onSuccess 里「空结果不覆盖旧缓存」同样生效），不会把列表清空。
+   *
+   * @returns 是否在超时前全部返回（超时返回 false，调用方用现有缓存兜底）
+   */
+  const refreshBoardsStocks = useCallback(
+    async (timeoutMs = 30000) => {
+      const secids = effectiveSecidsRef.current.filter(Boolean);
+      if (!secids.length) {
+        return true;
+      }
+      const pending = refreshingBoardsRef.current;
+      secids.forEach((s) => {
+        pending[s] = true;
+      });
+      console.log(`[短线评分] 重新拉取板块成分股：${secids.join('、')}`);
+      loadBoardsStocks(secids);
+      const deadline = Date.now() + timeoutMs;
+      while (secids.some((s) => pending[s]) && Date.now() < deadline) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      const allDone = !secids.some((s) => pending[s]);
+      secids.forEach((s) => {
+        delete pending[s];
+      });
+      if (!allDone) {
+        console.warn('[短线评分] 重新拉取成分股超时，本次评分沿用现有列表');
+      }
+      return allDone;
+    },
+    [loadBoardsStocks]
   );
 
   /**
@@ -868,6 +940,8 @@ const STList: React.FC<STListProps> = ({
     });
     setStockBoardSecidsMap(membership);
     setStocks(merged);
+    // 同步快照：重新拉取成分股后（state 还没刷新）就能按最新列表构建评分池
+    boardSnapshotRef.current = { stocks: merged, membership };
     stocksBoardRef.current = boardsKeyRef.current;
     return merged;
   }, []);
@@ -1255,26 +1329,34 @@ const STList: React.FC<STListProps> = ({
     remember(mainInData as any[]);
   }, [stocks, shortScoreData, leaderData, riskData, signalData, mainInData]);
 
+  /**
+   * 板块维度用的「所属板块」：优先用当前选中的板块
+   *
+   * 短线评分是对所选板块的成分股打分，板块K线必须取自所选板块（见 selectedBoardMeta）；
+   * 多个板块同时选中时取该股票命中的第一个（按选择顺序），不在任何已选板块里时退回个股手动设置的板块，
+   * 两者都没有才交给 resolveBoards 用东财所属板块兜底。
+   *
+   * @param membership 覆盖「股票→所属板块」映射：重新拉取成分股后要用最新快照里的映射
+   */
+  const lookupHybkOf = useCallback(
+    (code: string, membership?: Record<string, string[]>) => {
+      const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
+      const manual = stockConfigsMapping[secid]?.hybk || null;
+      const boardSecids = (membership || boardSnapshotRef.current.membership)[code] || [];
+      const hitSecid =
+        effectiveSecidsRef.current.find((sid) => boardSecids.indexOf(sid) >= 0) || boardSecids[0] || '';
+      const selected = hitSecid ? selectedBoardMeta[hitSecid] : null;
+      return selected || manual;
+    },
+    [stockConfigsMapping, selectedBoardMeta]
+  );
+
   // ========== 当前股票池（沿用选股漏斗：优先取上一步的有效结果） ==========
   // 短线评分与「训练周期评分预计算」共用，保证预计算覆盖的正是当前要评分的这批股票
   const collectCurrentItemsRaw = useCallback((options?: { ignoreReuse?: boolean }): ShortTermScoreItem[] => {
     const lookupName = (code: string) =>
       stocks.find((s) => s.code === code)?.name || stockNameCacheRef.current[code] || '';
-    /**
-     * 板块维度用的「所属板块」：优先用当前选中的板块
-     *
-     * 短线评分是对所选板块的成分股打分，板块K线必须取自所选板块（见 selectedBoardMeta）；
-     * 多个板块同时选中时取该股票命中的第一个（按选择顺序），不在任何已选板块里时退回个股手动设置的板块，
-     * 两者都没有才交给 resolveBoards 用东财所属板块兜底。
-     */
-    const lookupHybk = (code: string) => {
-      const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
-      const manual = stockConfigsMapping[secid]?.hybk || null;
-      const boardSecids = stockBoardSecidsMap[code] || [];
-      const hitSecid = effectiveSecids.find((sid) => boardSecids.indexOf(sid) >= 0) || boardSecids[0] || '';
-      const selected = hitSecid ? selectedBoardMeta[hitSecid] : null;
-      return selected || manual;
-    };
+    const lookupHybk = lookupHybkOf;
     if (displayMode === 'mainIn') {
       return mainInData.filter((d: any) => d.buy_signal).map((d: any) => {
         const code = d.ts_code.split('.')[0];
@@ -1335,16 +1417,13 @@ const STList: React.FC<STListProps> = ({
   }, [
     stocks,
     poolStocks,
-    stockConfigsMapping,
+    lookupHybkOf,
     displayMode,
     mainInData,
     signalData,
     riskData,
     leaderData,
     leaderDisplayCount,
-    stockBoardSecidsMap,
-    effectiveSecids,
-    selectedBoardMeta,
     marketCapFilterEnabled,
     marketCapRange,
   ]);
@@ -1360,6 +1439,55 @@ const STList: React.FC<STListProps> = ({
     }
     return list.filter((i) => !isStarOrBseCode(i.code));
   }, [collectCurrentItemsRaw, excludeStarBse]);
+
+  /**
+   * 按「刚重新拉取的板块成分股快照」构建评分池（点「短线评分」用）
+   *
+   * 不能用 collectCurrentItems：它的闭包拿的是点击那一刻的 stocks，
+   * 重新拉取后的新列表此时还没渲染进 state，按它取会评到旧列表。
+   *
+   * 另外把「已收藏」但不在新列表里的股票补进来一起重算：
+   * 收藏的股票忽略市值/板块筛选，换板块或调出成分股后仍要参与评分。
+   */
+  const collectItemsFromBoardSnapshot = useCallback((): ShortTermScoreItem[] => {
+    const { stocks: list, membership } = boardSnapshotRef.current;
+    const items = new Map<string, ShortTermScoreItem>();
+    const snapshot = list as any[];
+    snapshot.forEach((s) => {
+      const code = String(s?.code || '').trim();
+      if (!code) {
+        return;
+      }
+      // 收藏的股票忽略「排除科创板+北交所」「市值区间」，与列表展示口径一致
+      if (!favoriteSet.has(code)) {
+        if (excludeStarBse && isStarOrBseCode(code)) {
+          return;
+        }
+        if (marketCapFilterEnabled && !inMarketCapRange(s, marketCapRange.min, marketCapRange.max)) {
+          return;
+        }
+      }
+      items.set(code, {
+        code,
+        name: s.name || stockNameCacheRef.current[code] || '',
+        circMv: s.lt ? Number(s.lt) * 1e8 : undefined,
+        hybk: lookupHybkOf(code, membership),
+      });
+    });
+    // 已收藏但不在新列表里：照样加入评分池，执行重新计分
+    favoriteSet.forEach((code) => {
+      const c = String(code || '').trim();
+      if (!c || items.has(c)) {
+        return;
+      }
+      items.set(c, {
+        code: c,
+        name: stockNameCacheRef.current[c] || stocks.find((x) => x.code === c)?.name || '',
+        hybk: lookupHybkOf(c, membership),
+      });
+    });
+    return Array.from(items.values());
+  }, [favoriteSet, excludeStarBse, marketCapFilterEnabled, marketCapRange, lookupHybkOf, stocks]);
 
   /**
    * 等「已选板块」的股票列表全部加载完成
@@ -1396,19 +1524,42 @@ const STList: React.FC<STListProps> = ({
       message.warning('请先选择板块');
       return;
     }
-    // 板块切换/增删后立刻点击：先等已选板块的股票列表到位，否则会漏评或评出上一组板块的股票
+    /**
+     * 是否「全新一轮评分」
+     *
+     * - 训练日推进自动更新（传入 candidateItems）沿用原逻辑，不重拉成分股；
+     * - 暂停后再次点击是「继续剩余队列」，同样不重拉，否则会打乱暂停续跑。
+     */
+    const startNewRound = !candidateItems?.length && shortScoreRemainingRef.current.length === 0;
+    // 板块切换/增删后立刻点击：先等已选板块的股票列表到位，否则会漏评或评出上一组板块的股票。
+    // 全新一轮评分则改为「强制重拉成分股」：按最新列表重算，时间点上的新进/调出股票都能反映出来。
     scoreStartingRef.current = true;
-    const boardReady = await waitBoardStocks();
+    // 重拉成分股要等网络：先置 loading，按钮上能看到「评分中」，避免点击后长时间没反应
+    setShortScoreLoading(true);
+    const refreshed = startNewRound ? await refreshBoardsStocks() : await waitBoardStocks();
     scoreStartingRef.current = false;
-    if (!boardReady) {
+    // 重拉超时但缓存本来就是齐的：用现有列表兜底，不必中断评分
+    if (!refreshed && !boardsReady()) {
+      setShortScoreLoading(false);
       message.warning('板块的股票列表还在加载，请稍后再点评分');
       return;
     }
     // 评分池：
     // - 传入 candidateItems（训练日推进自动更新）时用它，与「当日评分」的候选池一致；
-    // - 否则取「当前板块池」（忽略沿用）：板块成分股列表每 6 秒会随行情刷新，
-    //   沿用上一轮快照会把新出现在列表里的股票永久排除在评分结果之外（列表里有、评分结果里没有）。
-    const currentItems = candidateItems?.length ? candidateItems : collectCurrentItems({ ignoreReuse: true });
+    // - 全新一轮评分时按当前展示口径取池：
+    //   · 股票列表 / 评分结果列表 → 用「刚重拉的板块成分股快照」（stocks state 还是旧列表，
+    //     且已收藏但不在新列表里的股票要一并补进来重算）；
+    //   · 龙头/排雷/择时/主力建仓等漏斗步骤 → 仍按该步骤的结果取池，不能退回整个板块；
+    // - 暂停后继续：沿用剩余队列，不回退到板块全量股票。
+    const useBoardPool =
+      displayModeRef.current === 'stocks' || displayModeRef.current === 'shortScore';
+    const currentItems = candidateItems?.length
+      ? candidateItems
+      : startNewRound
+        ? useBoardPool
+          ? collectItemsFromBoardSnapshot()
+          : collectCurrentItems({ ignoreReuse: true })
+        : [];
     // 训练日推进自动更新：强制开新一轮，不复用上一轮可能残留的暂停队列
     if (candidateItems?.length) {
       shortScoreRemainingRef.current = [];
@@ -1418,6 +1569,7 @@ const STList: React.FC<STListProps> = ({
     if (shortScoreRemainingRef.current.length === 0) {
       if (currentItems.length === 0) {
         console.log('[短线评分] 没有可评分的股票');
+        setShortScoreLoading(false);
         if (displayModeRef.current === 'shortScore') {
           // 切板块后自动重算、而新板块没有可评分的股票：退回股票列表，别停在空的评分列表上
           setDisplayMode('stocks');
@@ -1453,6 +1605,8 @@ const STList: React.FC<STListProps> = ({
       const computed = await computeShortTermScoreRows(shortScoreRemainingRef.current, {
         source: SHORT_SCORE_SOURCE,
         concurrency: 3,
+        // 不使用评分缓存：每次点「短线评分」都重新取数计算（算完仍回写序列供历史列使用）
+        ignoreCache: true,
         shouldStop: () => isShortScorePausedRef.current,
         // 近 N 个交易日的历史列有缺口时顺带补算（列表缺哪天补哪天）
         backfillDays: shortScoreHistoryDays,
@@ -1512,7 +1666,16 @@ const STList: React.FC<STListProps> = ({
       setShortScoreLoading(false);
       isShortScoreRunningRef.current = false;
     }
-  }, [shortScoreLoading, collectCurrentItems, shortScoreDays, shortScoreHistoryDays, waitBoardStocks]);
+  }, [
+    shortScoreLoading,
+    collectCurrentItems,
+    collectItemsFromBoardSnapshot,
+    shortScoreDays,
+    shortScoreHistoryDays,
+    refreshBoardsStocks,
+    waitBoardStocks,
+    boardsReady,
+  ]);
 
   // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
   // 盘中（或收盘后数据源还没生成当日日K）时，短线评分拿不到基准日的日K，当日列只显示 --。
@@ -1845,6 +2008,7 @@ const STList: React.FC<STListProps> = ({
       // 未选板块：清空合并列表与所属板块映射，并退回股票列表
       setStocks([]);
       setStockBoardSecidsMap({});
+      boardSnapshotRef.current = { stocks: [], membership: {} };
       stocksBoardRef.current = '';
       setDisplayMode('stocks');
       return;
