@@ -76,11 +76,21 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 
 > 为什么用换手率：成交额会被股价高低与流通盘大小干扰，同市值档内换手率才具有可比性。
 
+**当日倍量突破**（单日放量，避免被 5/20 日均量平滑掉）
+
+5日/20日均量会把单日放量平均掉：例如单日 3.65 倍量、换手率 10.87%（前几日均在 2%~3%），`volTrend` 仍只有 1.10，会被误判成"量能持平 / 窗口内未见放量启动"。因此单独识别单日突破：
+
+- `breakoutRatio = 当日换手率 ÷ 前 volBreakoutLookback(5) 日均换手率`（换手率缺失时回退成交量）
+- `breakoutRatio ≥ volBreakoutRatio(2)` → 视为**当日倍量突破**：
+  - 在择时上视作「刚启动」（`daysSinceVolStart = 0`），追高判断改用近 5 日涨幅
+  - 纵向分按单日倍数补足：`max*0.4 + 5 × clamp((breakoutRatio−1)/(volBreakoutFullRatio−1), 0, 1)`，与 5/20 均量口径取较大值
+  - 过热判断改用单日倍数，避免"单日极度放量"被 5 日均值掩盖
+
 **择时位置修正**（与板块同一套"找买点、别追高"逻辑）
 
-- 放量启动日 = 近 `volStartLookback(20)` 日内首个「5日均量 / 20日均量 ≥ `volStartRatio(1.3)`」的交易日
-- ① 过热：`ratio > volRatioAllow(2)` → 每超 1 倍扣 6 分
-- ② 追高：自放量启动日以来涨幅 > `volRiseAllow(8%)` → 每超 1% 扣 1.5 分（无启动日时退化为近 5 日涨幅）
+- 放量启动日 = 近 `volStartLookback(20)` 日内首个「5日均量 / 20日均量 ≥ `volStartRatio(1.3)`」的交易日；当日倍量突破时直接以当日为启动日
+- ① 过热：`ratio > volRatioAllow(10)`（当日倍量突破时用 `breakoutRatio`）→ 每超 1 倍扣 6 分
+- ② 追高：自放量启动日以来涨幅 > `volRiseAllow(50%)` → 每超 1% 扣 1.5 分（无启动日或当日启动时退化为近 5 日涨幅）
 - ③ 走远：距放量启动日 > `volFreshDays(5)` 日**且放量仍在持续**（`volTrend ≥ 1.3`）→ 每多 1 日扣 1 分
 - 衰减下限 `volScoreFloor(5)`；无同档统计时降级为「仅按自身量能趋势评分」
 
@@ -152,6 +162,7 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 - **交叉时效衰减**：`moneyCrossDecay(0.8) ^ 距今天数`（3 日前约 0.5，越新鲜影响越大）
 - **主力趋势**（`moneyTrendDays(5)` 日）：当前主力累计线与 5 日前比较 → 趋势向上 / 走平回落
 - **主力转正**（`moneyZeroTurnDays(10)` 日）：近 10 日内主力累计线由 0 轴下方上穿 0 轴 → 视为"刚转正"，是资金转折点
+- **尾部见底反转**（近 `moneyTurnLookback(5)` 日）：30 日窗口用固定中点判断 U/倒 U，抓不到最近 1~2 日刚发生的拐头（例：整体是倒 U/回落，但最新一日主力线大幅回升、即将上穿 0 轴）。在尾部窗口内找主力累计线低点，若低点不在最新、当前仍在 0 轴下方、且自低点回升 ≥ 窗口最大绝对值的 `moneyTurnRiseRatio(8%)` → 判为**见底反转**（散户线近 1 日同步回落作为辅助确认）
 - **位置分**：`主力线在近 30 日区间中的相对位置`（0~1）。位置高 = 资金已持续流入很久（趋势中后段），≥ `moneyHighPosThreshold(0.72)` 视为"已在区间高位"
 - **散户修正**：散户净流入强于主力时仅小幅下调 `moneyRetailDivergePenalty(1)` 分 —— 短线关键看**主力资金趋势**，散户流入多寡不主导评分
 
@@ -163,6 +174,7 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 | 18 / 16 / 15 | 主力累计净流入为正**且趋势向上**：刚转正（近 `moneyZeroTurnDays` 日内上穿 0 轴）→ **18** ★；否则 16，若**已在区间高位** → 15（趋势仍在，但已处中后段） |
 | 13 / 7 | 主力累计净流入为正但**趋势走平/回落**、且主力强于散户：位置不高 → 13；**已在区间高位** → 7（已过转折点，谨防追高） |
 | 11 / 9 | 主力累计净流入为正但**趋势走平/回落**、且弱于散户：位置不高 → 11；**已在区间高位** → 9 |
+| 15~18 | **尾部见底反转**：整体倒 U/回落，但近 `moneyTurnLookback` 日内主力线刚拐头向上、即将上穿 0 轴 → `15 + 3×新鲜度`（转折前夜，散户线同步回落时在文案中标注） |
 | 11 | 方向不明 |
 | 6 | 倒 U 型（资金撤离迹象） |
 | 最低 | 倒 U 型**下穿散户线且在 0 轴下方**（越新鲜扣得越狠，最低 1~3）；0 轴下方下穿 4~8 |
@@ -314,10 +326,11 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 | 个股 | `stockDims` | `{volume:20, rsi:0, money:60}` | 子项权重（资金为主；RSI 为 0：只计算与展示，不计入） |
 | 个股 | `stockSubMax` | `{volume:30, rsi:40, money:30}` | 子项满分（分值刻度，与权重解耦） |
 | 量能 | `mvSmallBound` / `mvMidBound` | 50亿 / 200亿 | 市值分档边界 |
-| 量能 | `volRatioAllow` | 2 | 横向活跃度倍数容忍（换手率口径） |
-| 量能 | `volRiseAllow` | 8 | 自启动日涨幅容忍(%) |
+| 量能 | `volRatioAllow` | 10 | 横向活跃度倍数容忍（换手率口径） |
+| 量能 | `volRiseAllow` | 50 | 自启动日涨幅容忍(%) |
 | 量能 | `volStartRatio` / `volStartLookback` | 1.3 / 20 | 放量启动判定与回看窗口 |
 | 量能 | `volFreshDays` / `volScoreFloor` | 5 / 5 | 距启动天数容忍 / 衰减下限 |
+| 量能 | `volBreakoutRatio` / `volBreakoutLookback` / `volBreakoutFullRatio` | 2 / 5 / 4 | 当日倍量突破判定倍数 / 基准窗口 / 纵向补满分倍数 |
 | RSI | `rsiShort` / `rsiMid` / `rsiLong` | 6 / 12 / 24 | RSI 周期（12 线仅用于金叉/死叉提前确认与展示） |
 | RSI | `rsiOverbought` / `rsiOversold` | 80 / 30 | 绝对超买/超卖阈值 |
 | RSI | `rsiOverboughtRelaxed` / `rsiOverboughtPercentile` | 72 / 0.95 | 弱势行情补充超买口径 |
@@ -340,6 +353,7 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 | 资金 | `moneyTrendDays` | 5 | 主力趋势判定窗口：当前累计线与 N 日前比较，判断转正/上升 |
 | 资金 | `moneyZeroTurnDays` | 10 | 「转正」判定窗口：近 N 日内主力累计线由 0 轴下方上穿 0 轴视为刚转正 |
 | 资金 | `moneyRetailDivergePenalty` | 1 | 主力为正但弱于散户时的小幅下调（30 分制）：散户只作轻微修正，不再大幅减分 |
+| 资金 | `moneyTurnLookback` / `moneyTurnRiseRatio` | 5 / 0.08 | 尾部见底反转回看窗口 / 最小回升幅度（相对 30 日窗口最大绝对值） |
 | 板块 | `sectorDays` / `sectorCompareDays` | 20 / 10 | 趋势窗口 / 超额对比窗口 |
 | 板块 | `sectorNoNewLowDays` | 3 | 企稳判定天数 |
 | 板块 | `sectorBiasAllow` / `sectorRiseAllow` / `sectorFreshDays` | 3 / 6 / 6 | 三个追高维度容忍值 |
@@ -366,6 +380,8 @@ stockSubMax = { volume: 30, rsi: 40, money: 30 }  // 子项满分（分值刻度
 | 板块"追高"惩罚太狠 | 放宽 `sectorRiseAllow` / `sectorBiasAllow` / `sectorFreshDays`，或下调对应扣分系数 |
 | 「金叉在即 / 修复中」太稀有/太频繁 | 调 `rsiApproachGap`（逼近阈值）、`rsiApproachReboundJump`（当日回升幅度）、`rsiApproachRepairDays`（深跌回看窗口） |
 | 量能对"刚放量"不够敏感 | 下调 `volStartRatio`，或放宽 `volFreshDays` |
+| 「当日倍量突破」不够敏感 / 太敏感 | 调 `volBreakoutRatio`（越小越敏感：单日 1.8 倍量也算突破）、`volBreakoutFullRatio`（越低，纵向越快补满） |
+| 「尾部见底反转」太频繁 / 太保守 | 调 `moneyTurnRiseRatio`（提高 → 要求更大幅度的回升）、`moneyTurnLookback`（回看窗口大小） |
 | 大盘维度太敏感 | 提高 `marketMinValidDays`、调小 `marketDecay`（更平滑） |
 
 ---

@@ -13,7 +13,7 @@ import dayjs from 'dayjs';
  * 避免新增字段（如K线形态、是否放量、当日分时补全标记）在旧缓存上永远显示为空，
  * 也避免评分口径调整（如资金维度窗口 20 日 → 5 日）后继续用旧口径的分数。
  */
-export const SCORE_ROW_VERSION = 11;
+export const SCORE_ROW_VERSION = 12;
 
 /**
  * 短线评分统一使用的数据源（Tushare）

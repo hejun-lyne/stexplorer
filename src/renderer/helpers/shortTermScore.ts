@@ -85,6 +85,11 @@ export const SHORT_TERM_SCORE_CONFIG = {
   volStartLookback: 20, // 放量启动日回看窗口(日)
   volFreshDays: 5, // 距放量启动日天数容忍(日)，超出部分每日扣1分
   volScoreFloor: 5, // 量能分经"过热/追高"衰减后的最低分
+  // 当日倍量突破：5日/20日均量会把单日放量稀释掉（例：单日3.6倍量，5日均量/20日均量仅1.1），
+  // 因此单日突破必须单独识别，否则"倍量突破"会被误判成"量能持平"
+  volBreakoutRatio: 2, // 当日量能（换手率优先，缺失回退成交量）≥ 前 N 日均量的该倍数 → 倍量突破
+  volBreakoutLookback: 5, // 倍量突破的基准窗口（日，不含当日）
+  volBreakoutFullRatio: 4, // 当日量能达到该倍数时，纵向量能分补足到上限
   // ---- 个股-RSI ----
   rsiShort: 6,
   rsiMid: 12, // 中周期线：仅用于展示（不参与形态判定，形态只看 6/24 日线的当日结构）
@@ -128,6 +133,10 @@ export const SHORT_TERM_SCORE_CONFIG = {
   moneyTrendDays: 5, // 趋势判定窗口（日）：当前主力累计线与 N 日前比较，判断上升/走平回落
   moneyZeroTurnDays: 10, // 「转正」判定窗口（日）：近 N 日内主力累计线由 0 轴下方上穿 0 轴视为刚转正
   moneyRetailDivergePenalty: 1, // 主力为正但弱于散户时的小幅下调（30分制）：散户只作轻微修正，不再因此大幅减分
+  // 「尾部见底反转」：30 日窗口用固定中点识别 U/倒U，抓不到最近 1~2 日刚发生的拐头
+  // （例：整体是倒U/回落，但最近一日主力线大幅回升、即将上穿0轴，此时不应按"资金撤离"给低分）
+  moneyTurnLookback: 5, // 尾部拐头回看窗口（日）：在该窗口内找主力累计线的低点
+  moneyTurnRiseRatio: 0.08, // 自尾部低点回升的最小幅度（相对 moneyShapeDays 窗口最大绝对值）
   // ---- 综合权重 ----
   // 板块权重从 0.3 下调到 0.2：板块强弱是环境因素，若权重过高会导致高评分股票过度集中在当前强势板块
   weights: { stock: 0.6, sector: 0.2, market: 0.2 },
@@ -538,6 +547,21 @@ export function scoreStockVolume(
   const volTrend = avgVol20 > 0 ? avgVol5 / avgVol20 : 1;
   const zdf5 = stockKlines.slice(-5).reduce((a, k) => a + k.zdf, 0);
 
+  // ---- 当日倍量突破：单日量能远超前 N 日均量（不含当日）----
+  // 5日/20日均量会把单日放量平均掉（例：单日3.65倍量，5日均量/20日均量仅1.10 → 被判成"量能持平"），
+  // 因此单日突破必须单独度量，否则"倍量突破"启动点会被漏掉。
+  const lastIdx = stockKlines.length - 1;
+  const baseStart = Math.max(0, lastIdx - cfg.volBreakoutLookback);
+  const priorVolAvg = mean(cjls.slice(baseStart, lastIdx));
+  const todayHsl = stockKlines[lastIdx].hsl || 0;
+  const priorHslList = stockKlines.slice(baseStart, lastIdx).map((k) => k.hsl || 0).filter((v) => v > 0);
+  const priorHslAvg = priorHslList.length ? mean(priorHslList) : 0;
+  const dayVolRatio = priorVolAvg > 0 ? cjls[lastIdx] / priorVolAvg : 1;
+  const dayTurnoverRatio = priorHslAvg > 0 && todayHsl > 0 ? todayHsl / priorHslAvg : null;
+  // 口径与横向一致：优先换手率，缺失时退回成交量
+  const breakoutRatio = dayTurnoverRatio ?? dayVolRatio;
+  const breakout = breakoutRatio >= cfg.volBreakoutRatio;
+
   const tier = pickMarketTier(circMv, cfg);
   const tierStat = stats?.tiers?.[tier];
   // 横向对比口径：优先换手率（成交额会被股价/流通盘大小干扰，换手率才是同市值档内可比的活跃度），
@@ -559,16 +583,21 @@ export function scoreStockVolume(
       break;
     }
   }
-  const daysSinceVolStart = volStartIdx >= 0 ? cjls.length - 1 - volStartIdx : null;
+  // 当日倍量突破视作"刚启动"（距启动 0 日）；否则沿用 5/20 均量识别的启动日
+  const effectiveStartIdx = breakout ? lastIdx : volStartIdx;
+  const daysSinceVolStart = effectiveStartIdx >= 0 ? lastIdx - effectiveStartIdx : null;
 
   // ---- 择时位置修正：过热 / 追高 / 已走远则下调 ----
   // 与板块同一套三维度：① 成交额倍数过热（对应板块的均线乖离）
   //                   ② 自放量启动日以来的涨幅（对应板块的"距阶段低点涨幅"，无启动日时回退近5日涨幅）
   //                   ③ 距放量启动日天数（对应板块的"距阶段低点天数"）
-  const volStartClose = volStartIdx >= 0 ? stockKlines[volStartIdx].sp : 0;
-  const riseSinceVolStart = volStartClose > 0 ? (stockKlines[stockKlines.length - 1].sp / volStartClose - 1) * 100 : null;
-  const riseForChase = riseSinceVolStart !== null ? riseSinceVolStart : zdf5;
-  const hotRatio = ratio !== null && ratio > cfg.volRatioAllow ? (ratio - cfg.volRatioAllow) * 6 : 0; // 换手率/成交额过热
+  const volStartClose = effectiveStartIdx >= 0 ? stockKlines[effectiveStartIdx].sp : 0;
+  const riseSinceVolStart = volStartClose > 0 ? (stockKlines[lastIdx].sp / volStartClose - 1) * 100 : null;
+  // 当日刚启动时 riseSinceVolStart 恒为 0，没有参考意义，改用近5日涨幅做追高判断
+  const riseForChase = riseSinceVolStart !== null && daysSinceVolStart !== null && daysSinceVolStart > 0 ? riseSinceVolStart : zdf5;
+  // 过热口径：发生当日倍量突破时用单日量能倍数（5日均值会把单日过热稀释掉）
+  const hotBasis = breakout ? breakoutRatio : ratio;
+  const hotRatio = hotBasis !== null && hotBasis > cfg.volRatioAllow ? (hotBasis - cfg.volRatioAllow) * 6 : 0; // 换手率/成交额过热
   const chasingRise = Math.max(0, riseForChase - cfg.volRiseAllow) * 1.5; // 启动以来涨幅过大
   // 距启动点已远：仅在放量仍在持续（当前量能仍处启动水平）时才惩罚；
   // 若量能已消退（回到萎缩/持平），说明这波放量结束，不应再按"已走远"扣分
@@ -577,8 +606,8 @@ export function scoreStockVolume(
   const extensionPenalty = hotRatio + chasingRise + staleVol;
   const applyTiming = (base: number) => clamp(base - extensionPenalty, cfg.volScoreFloor, Math.max(base, cfg.volScoreFloor));
   const timingDesc = [
-    daysSinceVolStart !== null ? `距放量启动${daysSinceVolStart}日` : '窗口内未见放量启动',
-    riseSinceVolStart !== null
+    breakout ? '当日倍量突破' : daysSinceVolStart !== null ? `距放量启动${daysSinceVolStart}日` : '窗口内未见放量启动',
+    riseSinceVolStart !== null && daysSinceVolStart !== null && daysSinceVolStart > 0
       ? `自启动${riseSinceVolStart >= 0 ? '+' : ''}${riseSinceVolStart.toFixed(1)}%`
       : `近5日涨幅${zdf5 >= 0 ? '+' : ''}${zdf5.toFixed(1)}%`,
   ]
@@ -595,8 +624,15 @@ export function scoreStockVolume(
   let vScore = max * 0.4 * clamp((volTrend - 0.7) / 0.8, 0, 1);
   if (volTrend >= 1.2 && zdf5 > 0) vScore += 5; // 放量上涨
   if (volTrend <= 0.8 && zdf5 < 0) vScore -= 5; // 缩量下跌
+  if (breakout) {
+    // 单日倍量突破：5/20 均量会稀释单日放量，按当日量能倍数补足纵向分（达到 volBreakoutFullRatio 时补满）
+    const boost = clamp((breakoutRatio - 1) / Math.max(0.01, cfg.volBreakoutFullRatio - 1), 0, 1);
+    vScore = Math.max(vScore, max * 0.4 + 5 * boost);
+  }
   vScore = clamp(vScore, 0, max * 0.4 + 5);
-  const volTurnDesc = `量能${volTrend >= 1.2 ? '放大' : volTrend >= 0.9 ? '持平' : '萎缩'}（${volTrend.toFixed(2)}倍）`;
+  const volTurnDesc = breakout
+    ? `量能放大（${breakoutRatio.toFixed(2)}倍）`
+    : `量能${volTrend >= 1.2 ? '放大' : volTrend >= 0.9 ? '持平' : '萎缩'}（${volTrend.toFixed(2)}倍）`;
 
   if (ratio !== null) {
     // 横向：相比同类市值股票的活跃度（默认换手率口径，缺失时回退成交额）
@@ -618,8 +654,13 @@ export function scoreStockVolume(
     };
   }
 
-  // 降级：无同类市值数据，仅用自身量能趋势
-  const base = clamp(max * clamp((volTrend - 0.7) / 0.9, 0, 1) + (volTrend >= 1.2 && zdf5 > 0 ? 5 : 0), 0, max);
+  // 降级：无同类市值数据，仅用自身量能趋势（当日倍量突破同样补足）
+  let degradedBase = max * clamp((volTrend - 0.7) / 0.9, 0, 1) + (volTrend >= 1.2 && zdf5 > 0 ? 5 : 0);
+  if (breakout) {
+    const boost = clamp((breakoutRatio - 1) / Math.max(0.01, cfg.volBreakoutFullRatio - 1), 0, 1);
+    degradedBase = Math.max(degradedBase, max * 0.4 + 5 * boost);
+  }
+  const base = clamp(degradedBase, 0, max);
   return {
     score: applyTiming(base),
     max,
@@ -1026,6 +1067,25 @@ export function scoreStockMoney(
   // 散户强于主力只做轻微下调（不再作为"资金分歧"直接大幅减分）
   const retailAdj = retailStronger ? cfg.moneyRetailDivergePenalty : 0;
 
+  // ---- 尾部见底反转（V 型拐头）----
+  // 30 日窗口用固定中点判断 U/倒U，最近 1~2 日刚发生的拐头会被整体形态掩盖：
+  // 例如整体是倒U/回落，但最新一日主力线大幅回升、逼近0轴，此时并非"资金撤离"。
+  const tailWin = mainSeries.slice(-cfg.moneyTurnLookback);
+  let tailMinIdx = tailWin.length - 1;
+  for (let i = 0; i < tailWin.length; i++) {
+    if (tailWin[i] < tailWin[tailMinIdx]) tailMinIdx = i;
+  }
+  const tailMin = tailWin[tailMinIdx];
+  const reversalRise = mainLast - tailMin;
+  // 见底反转：低点不在最新（已拐头向上）、主力仍在0轴下方（即将上穿）、回升幅度相对窗口量级足够大
+  const reversal =
+    !aboveZero &&
+    cross !== 'down' &&
+    tailMinIdx < tailWin.length - 1 &&
+    reversalRise >= magnitude * cfg.moneyTurnRiseRatio;
+  // 散户线近1日同步回落 → 资金由散户向主力切换，作为反转的辅助确认
+  const retailFalling = last > 0 && retailLast < retailSeries[last - 1];
+
   let score: number;
   let note: string;
   if (shape === 'smile' && cross === 'up') {
@@ -1042,6 +1102,14 @@ export function scoreStockMoney(
     // U型但还没上穿：转折前夜，等待确认
     score = s(15);
     note = '主力线走出微笑曲线（资金回流），等待上穿散户线确认';
+  } else if (reversal) {
+    // 尾部见底反转：整体可能是倒U/回落，但最近刚拐头向上、即将上穿0轴 → 新的资金转折点
+    // 尚未站上0轴，按「转折前夜」给分；拐点越新鲜得分越高
+    const turnFresh = Math.pow(cfg.moneyCrossDecay, tailWin.length - 1 - tailMinIdx);
+    score = s(15) + s(3) * turnFresh;
+    note = `主力线${cfg.moneyWindow}日见底反转、即将上穿0轴${
+      retailFalling ? '（散户线回落）' : ''
+    }｜资金拐点`;
   } else if (aboveZero) {
     // 主力已站上0轴、但近期没有金叉：以「主力自身趋势」为主，散户强弱只作小幅修正
     // （旧逻辑把"主力为正但弱于散户"直接压到 9 分，忽略了主力正在转正上升的趋势）
