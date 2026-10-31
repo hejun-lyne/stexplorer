@@ -26,6 +26,8 @@ declare namespace System {
     tushareTokenSetting: string; // Tushare Pro Token
     initialCapital: number; // 初始本金
     commissionRate: number; // 交易佣金比例
+
+    favorites?: string[]; // 收藏的股票代码（短线评分列表里忽略过滤条件始终显示）
   }
 
   export interface GridSetting {

@@ -90,6 +90,31 @@ export function setMonitorSettingAction(setting: System.MonitorSetting): ThunkAc
   };
 }
 
+/**
+ * 收藏 / 取消收藏股票（短线评分结果列表用）
+ *
+ * 收藏列表存在系统设置里（store/setting.json），重启后仍然有效；
+ * 列表中被收藏的股票会忽略评分阈值、RSI、市值、K线形态等过滤条件，始终显示。
+ */
+export function toggleStockFavoriteAction(code: string): ThunkAction {
+  return (dispatch, getState) => {
+    try {
+      const {
+        setting: { systemSetting },
+      } = getState();
+      const c = String(code || '').trim();
+      if (!c) {
+        return;
+      }
+      const favorites = Array.isArray(systemSetting.favorites) ? systemSetting.favorites : [];
+      const next = favorites.includes(c) ? favorites.filter((f) => f !== c) : [...favorites, c];
+      dispatch(setSystemSettingAction({ ...systemSetting, favorites: next }));
+    } catch (error) {
+      console.log('设置股票收藏出错', error);
+    }
+  };
+}
+
 export function setMADefaultsSetting(defaults: number[]): ThunkAction {
   return (dispatch, getState) => {
     try {

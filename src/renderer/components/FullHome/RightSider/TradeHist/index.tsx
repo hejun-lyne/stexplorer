@@ -74,7 +74,7 @@ const TradeHist: React.FC<TradeHistProps> = ({ onOpenStock, onOpenReview }) => {
                     理由
                   </Col>
                   <Col span={20}>
-                    <div className={styles.explain}>{t.explain}</div>
+                    <div className={styles.explain}>{t.reason || t.explain}</div>
                   </Col>
                 </Row>
                 {t.profits && (

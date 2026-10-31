@@ -372,6 +372,8 @@ declare namespace Stock {
     stoplossAt: number; // 止损价
     latestNewsAs: string; // positive | negative
     explain: string;
+    /** 交易理由（下单时填写，优先于 explain 展示） */
+    reason?: string;
     profits: number[];
     strategy?: MRType;
   }

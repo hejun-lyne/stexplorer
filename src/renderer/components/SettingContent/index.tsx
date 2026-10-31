@@ -109,6 +109,8 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
         kimiApiKeySetting: kimiApiKey,
         initialCapital: capital,
         commissionRate: commission,
+        // 收藏股票列表不在设置页里编辑，保存其它设置时原样带回去，避免被覆盖掉
+        favorites: systemSetting.favorites || [],
       })
     );
   }

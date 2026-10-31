@@ -314,7 +314,7 @@ const ActReview: React.FC<ActReviewProps> = React.memo(({ onOpenStock }) => {
         </Row>
         <Row>
           <Col span={2}></Col>
-          <Col span={22}>{t.explain}</Col>
+          <Col span={22}>{t.reason || t.explain}</Col>
         </Row>
       </div>
     );
@@ -352,7 +352,7 @@ const ActReview: React.FC<ActReviewProps> = React.memo(({ onOpenStock }) => {
         </Row>
         <Row>
           <Col span={2}></Col>
-          <Col span={22}>{t.explain}</Col>
+          <Col span={22}>{t.reason || t.explain}</Col>
         </Row>
       </div>
     );

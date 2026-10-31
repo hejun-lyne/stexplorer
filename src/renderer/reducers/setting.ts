@@ -34,6 +34,7 @@ export const defaultSystemSetting: System.Setting = {
   tushareTokenSetting: '',
   initialCapital: 100000,
   commissionRate: 0.0003,
+  favorites: [],
 };
 
 export const defaultMonitorSetting: System.MonitorSetting = {

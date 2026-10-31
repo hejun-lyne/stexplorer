@@ -21,7 +21,14 @@ import { BKType, KFilterType, KFilterTypeNames } from '@/utils/enums';
 import classNames from 'classnames';
 import { batch, useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
-import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined, FilterOutlined } from '@ant-design/icons';
+import {
+  CaretDownOutlined,
+  CaretRightOutlined,
+  CaretUpOutlined,
+  FilterOutlined,
+  StarFilled,
+  StarOutlined,
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
   computeShortTermScoreRows,
@@ -43,6 +50,7 @@ import {
 import { RSI_SHAPE_FILTER_OPTIONS, normalizeRsiShape } from '@/helpers/rsiShape';
 import { filterThemeBoards } from '@/helpers/boardFilter';
 import { saveTrainDayAction } from '@/actions/train';
+import { toggleStockFavoriteAction } from '@/actions/setting';
 import ScoreStockPanel from './ScoreStockPanel';
 
 /**
@@ -484,6 +492,10 @@ const STList: React.FC<STListProps> = ({
   const { kLineApiSourceSetting, ontrain, trainDate, trainStartDate, trainEndDate, initialCapital, commissionRate } =
     useSelector((state: StoreState) => state.setting.systemSetting);
   const { stockConfigsMapping } = useSelector((state: StoreState) => state.stock);
+  // 收藏的股票代码：收藏后忽略评分/RSI/市值/形态等过滤条件，始终留在评分结果列表里
+  const favoriteCodes = useSelector((state: StoreState) => state.setting.systemSetting.favorites);
+  const favoriteSet = React.useMemo(() => new Set<string>(favoriteCodes || []), [favoriteCodes]);
+  const isFavorited = useCallback((item: any) => favoriteSet.has(codeOfListItem(item)), [favoriteSet]);
   // 训练工具栏维护的交易日列表 / 训练进度（训练模式下 STList 也要能按交易日推进）
   const { days: trainDays, progress: trainProgress } = useSelector((state: StoreState) => state.train);
   const dispatch = useDispatch();
@@ -2126,8 +2138,9 @@ const STList: React.FC<STListProps> = ({
     if (displayMode === 'shortScore') {
       let list = [...shortScoreData];
       // 默认隐藏「评分基准日尚未上市」的股票（可用「显示未上市」开关恢复）
+      // 注意：收藏的股票一律放行，忽略所有过滤条件（见 isFavorited）
       if (!shortScoreShowNotListed) {
-        list = list.filter((s: any) => !s.notListed);
+        list = list.filter((s: any) => isFavorited(s) || !s.notListed);
       }
       // 过滤：N 天前的近 M 个交易日出现过 ≥ 阈值分
       // 窗口只落在「N 天前」及其之前（不含最近 N 个交易日）；窗口内无可用交易日时不过滤，避免误清空列表
@@ -2136,6 +2149,9 @@ const STList: React.FC<STListProps> = ({
         // 回溯 0 天时窗口含基准日当天，额外认「当日综合分」，避免序列里缺当日行时漏掉
         const includeTodayScore = Math.max(0, Math.floor(Number(shortScoreFilterBeforeDays) || 0)) === 0;
         list = list.filter((s: any) => {
+          if (isFavorited(s)) {
+            return true;
+          }
           if (includeTodayScore && s.total != null && s.total >= threshold) {
             return true;
           }
@@ -2152,7 +2168,7 @@ const STList: React.FC<STListProps> = ({
       // RSI 评分阈值过滤：仅保留 RSI 评分「大于」阈值的股票
       if (shortScoreRsiFilterEnabled) {
         const rsiThreshold = Number(shortScoreRsiFilterScore);
-        list = list.filter((s: any) => s.rsiScore != null && s.rsiScore > rsiThreshold);
+        list = list.filter((s: any) => isFavorited(s) || (s.rsiScore != null && s.rsiScore > rsiThreshold));
       }
       // 注意：K线形态筛选不在这里做（它是纯展示层过滤，见 displayList），
       // 否则会连带缩小「当日评分」的候选股票池。
@@ -2183,7 +2199,7 @@ const STList: React.FC<STListProps> = ({
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, isFavorited]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」「市值区间」和「名字过滤」过滤（对所有展示模式生效）
@@ -2191,11 +2207,14 @@ const STList: React.FC<STListProps> = ({
    */
   const visibleShowList = React.useMemo(() => {
     let list = showList as any[];
+    // 收藏的股票忽略「排除科创板+北交所」「市值区间」过滤（名字搜索是查找行为，仍然生效）
     if (excludeStarBse) {
-      list = list.filter((item: any) => !isStarOrBseCode(codeOfListItem(item)));
+      list = list.filter((item: any) => isFavorited(item) || !isStarOrBseCode(codeOfListItem(item)));
     }
     if (marketCapFilterEnabled) {
-      list = list.filter((item: any) => inMarketCapRange(item, marketCapRange.min, marketCapRange.max));
+      list = list.filter(
+        (item: any) => isFavorited(item) || inMarketCapRange(item, marketCapRange.min, marketCapRange.max)
+      );
     }
     // 名字过滤：对所有展示模式（含短线评分结果列表）统一生效
     const kw = nameFilter.trim();
@@ -2203,7 +2222,7 @@ const STList: React.FC<STListProps> = ({
       list = list.filter((item: any) => nameOfListItem(item).includes(kw));
     }
     return list;
-  }, [showList, excludeStarBse, marketCapFilterEnabled, marketCapRange, nameFilter]);
+  }, [showList, excludeStarBse, marketCapFilterEnabled, marketCapRange, nameFilter, isFavorited]);
 
   /**
    * 「K线形态 / RSI形态」表头勾选过滤（仅短线评分列表）
@@ -2218,16 +2237,17 @@ const STList: React.FC<STListProps> = ({
       return visibleShowList as any[];
     }
     let list = visibleShowList as any[];
+    // 收藏的股票不受表头形态勾选影响
     if (shortScoreKlineShapes.length) {
       const shapeSet = new Set(shortScoreKlineShapes);
-      list = list.filter((row: any) => shapeSet.has(normalizeKlineShape(row.klineShape)));
+      list = list.filter((row: any) => isFavorited(row) || shapeSet.has(normalizeKlineShape(row.klineShape)));
     }
     if (shortScoreRsiShapes.length) {
       const rsiSet = new Set(shortScoreRsiShapes);
-      list = list.filter((row: any) => rsiSet.has(normalizeRsiShape(row.rsiPattern)));
+      list = list.filter((row: any) => isFavorited(row) || rsiSet.has(normalizeRsiShape(row.rsiPattern)));
     }
     return list;
-  }, [visibleShowList, displayMode, shortScoreKlineShapes, shortScoreRsiShapes]);
+  }, [visibleShowList, displayMode, shortScoreKlineShapes, shortScoreRsiShapes, isFavorited]);
 
   /**
    * 表头 K线形态筛选项（带当前列表的股票数）：统计基于 visibleShowList，
@@ -3169,6 +3189,9 @@ const STList: React.FC<STListProps> = ({
             const isPanelActive = !!panelStockCode && panelStockCode === s.code;
             // 行名兜底：板块重拉/切训练日瞬间评分行的 name 可能为空，用记住的名字补上，不要显示成代码
             const rowName = s.name || stockNameCacheRef.current[s.code] || s.code;
+            // 收藏统一按 6 位代码存取（行数据的 code 可能是 ts_code 形态）
+            const rowCode = codeOfListItem(s);
+            const rowFavorited = favoriteSet.has(rowCode);
             return (
               <Row
                 key={s.code}
@@ -3190,6 +3213,27 @@ const STList: React.FC<STListProps> = ({
                       overflow: 'hidden',
                     }}
                   >
+                    <span
+                      onClick={(e) => {
+                        // 不要触发外层的「右侧面板切换股票」
+                        e.stopPropagation();
+                        dispatch(toggleStockFavoriteAction(rowCode));
+                      }}
+                      title={
+                        rowFavorited
+                          ? '已收藏：忽略过滤条件始终显示，点击取消收藏'
+                          : '收藏：收藏后忽略评分/RSI/市值/形态等过滤条件，始终显示在结果列表'
+                      }
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        flex: '0 0 auto',
+                        cursor: 'pointer',
+                        color: rowFavorited ? '#faad14' : 'var(--reverse-text-color)',
+                      }}
+                    >
+                      {rowFavorited ? <StarFilled /> : <StarOutlined />}
+                    </span>
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{rowName}</span>
                     {newEntryCodes.has(s.code) && (
                       <span

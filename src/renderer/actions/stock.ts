@@ -713,7 +713,7 @@ export function setStockTradingAction(tradings: Stock.DoTradeItem[], lastModifie
               count: t.count,
               lastBuyDate: t.time,
               lastBuyStrategy: t.strategy,
-              lastBuyReason: t.explain,
+              lastBuyReason: t.reason || t.explain,
             } as Stock.NowHoldItem;
           } else {
             // 如果加了仓，那就需要计算平均价
@@ -721,7 +721,7 @@ export function setStockTradingAction(tradings: Stock.DoTradeItem[], lastModifie
             h.count = h.count + t.count;
             h.lastBuyDate = t.time;
             h.lastBuyStrategy = t.strategy;
-            h.lastBuyReason = t.explain;
+            h.lastBuyReason = t.reason || t.explain;
           }
         } else {
           if (!h) {

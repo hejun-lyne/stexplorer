@@ -24,6 +24,7 @@ export const defaultSystemSetting: System.Setting = {
   trainStartDate: '',
   trainEndDate: '',
   commissionRate: 0.0003,
+  favorites: [],
 };
 
 export function GetSystemSetting() {

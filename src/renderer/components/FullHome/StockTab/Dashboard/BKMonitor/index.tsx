@@ -132,7 +132,7 @@ const BKMonitor: React.FC<BKMonitorProps> = ({ onOpenStock }) => {
                       <Col span={6}></Col>
                     </Row>
                     <Row>
-                      <div className={styles.explain}>{t.explain}</div>
+                      <div className={styles.explain}>{t.reason || t.explain}</div>
                     </Row>
                   </Col>
                 </Row>
