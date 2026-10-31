@@ -1490,6 +1490,48 @@ const STList: React.FC<STListProps> = ({
   }, [favoriteSet, excludeStarBse, marketCapFilterEnabled, marketCapRange, lookupHybkOf, stocks]);
 
   /**
+   * 补全「已收藏但不在当前板块列表里」的股票名称
+   *
+   * 名称缓存只记录见过的列表：收藏的股票如果长期不在所选板块里（或换过板块），
+   * 评分结果列表就只剩代码。这里用批量详情接口补一次名字，失败不影响评分。
+   */
+  const ensureFavoriteNames = useCallback(async () => {
+    // 已经知道名字的（列表里有名字 / 名称缓存里记过）不再请求
+    const named = new Set<string>();
+    (boardSnapshotRef.current.stocks as any[]).forEach((s) => {
+      const code = String(s?.code || '').trim();
+      if (code && String(s?.name || '').trim()) {
+        named.add(code);
+      }
+    });
+    Object.keys(stockNameCacheRef.current).forEach((c) => {
+      if (stockNameCacheRef.current[c]) {
+        named.add(c);
+      }
+    });
+    const missing = (favoriteCodes || [])
+      .map((c) => String(c || '').trim())
+      .filter((c) => c && !named.has(c));
+    if (!missing.length) {
+      return;
+    }
+    try {
+      const details = await Services.Tushare.GetDetailsFromTushareBatch(
+        missing.map((c) => (c.startsWith('6') ? `1.${c}` : `0.${c}`))
+      );
+      (details || []).forEach((d, i) => {
+        const name = String(d?.name || '').trim();
+        if (name && missing[i]) {
+          stockNameCacheRef.current[missing[i]] = name;
+        }
+      });
+      console.log(`[短线评分] 补全收藏股票名称 ${missing.length} 只`);
+    } catch (e: any) {
+      console.warn('[短线评分] 收藏股票名称补全失败:', e?.message || e);
+    }
+  }, [favoriteCodes]);
+
+  /**
    * 等「已选板块」的股票列表全部加载完成
    *
    * 板块切换 / 增删板块后立刻点「短线评分 / 当日评分」时，部分板块的列表还在请求中，
@@ -1553,6 +1595,10 @@ const STList: React.FC<STListProps> = ({
     // - 暂停后继续：沿用剩余队列，不回退到板块全量股票。
     const useBoardPool =
       displayModeRef.current === 'stocks' || displayModeRef.current === 'shortScore';
+    // 收藏的股票可能长期不在所选板块里：列表里没有它们的名字，先补一次名称，避免结果列表只剩代码
+    if (startNewRound && useBoardPool) {
+      await ensureFavoriteNames();
+    }
     const currentItems = candidateItems?.length
       ? candidateItems
       : startNewRound
@@ -1670,6 +1716,7 @@ const STList: React.FC<STListProps> = ({
     shortScoreLoading,
     collectCurrentItems,
     collectItemsFromBoardSnapshot,
+    ensureFavoriteNames,
     shortScoreDays,
     shortScoreHistoryDays,
     refreshBoardsStocks,
