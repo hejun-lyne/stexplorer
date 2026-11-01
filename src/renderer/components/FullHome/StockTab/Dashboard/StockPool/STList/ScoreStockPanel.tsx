@@ -652,8 +652,8 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
   const [trends, setTrends] = useState<Stock.TrendItem[]>([]);
   const [trendLoading, setTrendLoading] = useState(false);
   const [trendError, setTrendError] = useState('');
-  // 训练模式默认看分时（只显示到「训练时间」为止，不显示完整分时）
-  const [chartMode, setChartMode] = useState<PanelChartMode>(trainDate ? 'trend' : 'kline');
+  // 图表默认看日K线（分时需要时手动切换；训练模式下日K的当日那根仍按「训练时间」用分时重建）
+  const [chartMode, setChartMode] = useState<PanelChartMode>('kline');
 
   // ===== 图表控制（与详情页 PriceTrend 对齐）=====
   const [range, setRange] = useState<RangeArea>(DEFAULT_RANGE);
@@ -769,21 +769,19 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     };
   }, [techType, code, name]);
 
-  // 训练模式默认看分时：只在「进入/退出训练」时同步默认视图，训练日推进不打断用户当前选择
+  // 默认看日K线：只在「进入/退出训练」时回到日K，训练日推进不打断用户当前选择
   const wasTrainingRef = useRef(inTraining);
   useEffect(() => {
     if (wasTrainingRef.current !== inTraining) {
       wasTrainingRef.current = inTraining;
-      setChartMode(inTraining ? 'trend' : 'kline');
+      setChartMode('kline');
     }
   }, [inTraining]);
 
   // 分时取数：训练模式取训练日的历史分时（Tushare 1 分钟线），非训练模式取实时分时。
-  // 训练模式下即使当前看的是日K也要取：当日那根K线要按分时重建（见 displayKlines）。
+  // 训练模式下即使当前看的是日K也要取：当日那根K线要按分时重建（见 displayKlines）；
+  // 非训练模式同样始终取一次：交易区按「当前分时价」成交，不能只看日K收盘价。
   useEffect(() => {
-    if (chartMode !== 'trend' && !inTraining) {
-      return () => {};
-    }
     let canceled = false;
     setTrends([]);
     setTrendError('');
@@ -812,7 +810,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     return () => {
       canceled = true;
     };
-  }, [chartMode, secid, trainDate, inTraining]);
+  }, [secid, trainDate, inTraining]);
 
   /** 训练时间内已经走出来的分时（<= 当前时刻）；非训练模式/未推进时用全部分时 */
   const visibleTrends = useMemo(() => {
@@ -821,6 +819,45 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     }
     return trends.filter((t) => trendTimeLabel(t.datetime) <= trainTime);
   }, [trends, trainTime, inTraining]);
+
+  /**
+   * 当前分时价：训练模式取训练时刻之前最后一根分钟线，非训练模式取实时分时最新一根。
+   * 交易区（ScoreStockTrade）的买入、卖出都按这个价格成交，0 表示当前还没有分时数据。
+   *
+   * 集合竞价阶段（09:30 前）还没有分钟线：训练模式退回当日开盘价（09:25 竞价已定开盘价），
+   * 不能退回收盘价 —— 那是收盘后的未来数据。
+   */
+  const trendPrice = useMemo(() => {
+    const price = Number(visibleTrends[visibleTrends.length - 1]?.current) || 0;
+    if (price > 0 || !inTraining || !trends.length) {
+      return price;
+    }
+    const day = String(trainDate || '').substring(0, 10);
+    const dayK = klines.find((k) => String(k?.date || '').substring(0, 10) === day);
+    return Number(dayK?.kp) || 0;
+  }, [visibleTrends, inTraining, trends.length, klines, trainDate]);
+
+  // 非训练模式定时刷新分时：交易区按现价成交，价格不能停在打开面板那一刻的快照
+  useEffect(() => {
+    if (inTraining) {
+      return () => {};
+    }
+    let canceled = false;
+    const timer = window.setInterval(() => {
+      Services.Stock.GetTrendFromDataSource(SHORT_SCORE_SOURCE, secid)
+        .then((r: any) => {
+          const list = (r?.trends || []) as Stock.TrendItem[];
+          if (!canceled && list.length) {
+            setTrends(list);
+          }
+        })
+        .catch(() => {});
+    }, 60000);
+    return () => {
+      canceled = true;
+      window.clearInterval(timer);
+    };
+  }, [secid, inTraining]);
 
   const trendTotal = trends.length;
   // 训练模式只画到「训练时间」为止，不显示完整分时；非训练模式直接看完整分时
@@ -1086,7 +1123,14 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
         <p>
           <span>人不渡我，唯有自渡</span>
         </p>
-        <ScoreStockTrade secid={secid} code={code} name={name} klines={klines} />
+        <ScoreStockTrade
+          secid={secid}
+          code={code}
+          name={name}
+          klines={klines}
+          currentPrice={trendPrice}
+          intradayReady={!trendLoading}
+        />
       </div>
     </aside>
   );

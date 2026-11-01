@@ -43,7 +43,7 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
   }, []);
   const [industries, setIndustries] = useState<Stock.BanKuaiItem[]>([]);
   const [gainians, setGainians] = useState<Stock.BanKuaiItem[]>([]);
-  const [bktype, setBKType] = useState(BKType.Industry);
+  const [bktype, setBKType] = useState(BKType.Gainian);
   const [bksecid, setBKSecid] = useState('');
   const updateBKs = useCallback((t: BKType, a: Stock.BanKuaiItem[]) => {
     if (t === BKType.Industry) {

@@ -88,39 +88,6 @@ const SHORT_SCORE_HISTORY_DAYS = 15;
  */
 const SHORT_SCORE_BACKFILL_DAYS = 20;
 
-/** 「K线形态」后行标记的默认值：未定 = 未标记（不写入存储） */
-const ROW_MARK_DEFAULT = '未定';
-
-/**
- * 「K线形态」后行标记可选项：人工给股票打标签（默认「未定」，按股票代码持久化）
- *
- * 统一为「形态-触发条件」：趋势-阴线不破 / 横盘-阳线突破 / 回调-长下影线 / 反弹-放量阳线 / 上升-待观察 / 顶部-震荡谨慎，
- * 标记本身就是选股理由，不用再靠记忆区分。
- */
-const ROW_MARK_OPTIONS = [
-  ROW_MARK_DEFAULT,
-  '趋势-阴线不破',
-  '横盘-阳线突破',
-  '回调-长下影线',
-  '反弹-放量阳线',
-  '上升-待观察',
-  '顶部-震荡谨慎',
-];
-
-/**
- * 旧标记 -> 新标记的映射（读取本地存储时迁移）
- *
- * 之前存的是「趋势 / 横排 / 回调 / 反弹」（横排为横盘笔误）。
- * 不迁移的话旧值在下拉里找不到对应项，会原样显示成脏值。
- */
-const ROW_MARK_ALIASES: Record<string, string> = {
-  '趋势': '趋势-阴线不破',
-  '横排': '横盘-阳线突破',
-  '横盘': '横盘-阳线突破',
-  '回调': '回调-长下影线',
-  '反弹': '反弹-放量阳线',
-};
-
 /**
  * 训练模式「时间推进」的时间轴：09:25 ~ 11:30、13:00 ~ 15:00
  *
@@ -148,7 +115,7 @@ const TRAIN_TIME_LIST: string[] = (() => {
 /** 时间轴默认位置：开盘第一分钟（09:25 集合竞价可手动回退查看） */
 const TRAIN_TIME_DEFAULT_IDX = Math.max(0, TRAIN_TIME_LIST.indexOf('09:30'));
 /** 时间推进倍速（1 = 按真实时间推进：1 个交易分钟 = 1 分钟真实时间） */
-const TRAIN_TIME_SPEEDS = [1, 2, 5, 10];
+const TRAIN_TIME_SPEEDS = [1, 2, 5, 10, 20, 40, 60];
 /** 一个交易分钟对应的真实毫秒 */
 const TRAIN_MINUTE_MS = 60 * 1000;
 
@@ -178,22 +145,6 @@ const STYLE_ONLY_SECID = '__STYLE_ONLY__';
 /** 是否为下拉里的伪选项（只看题材 / 只看概念 / 只看风格）：它们都要先展开成真实板块再取数 */
 const isPseudoBoardSecid = (secid: string): boolean =>
   secid === THEME_ONLY_SECID || secid === CONCEPT_ONLY_SECID || secid === STYLE_ONLY_SECID;
-
-/** 读取本地存储的行标记并迁移旧值：只保留当前可选项（未定 / 未知值不落库） */
-const normalizeRowMarks = (raw?: Record<string, string> | null): Record<string, string> => {
-  const marks: Record<string, string> = {};
-  if (!raw) {
-    return marks;
-  }
-  Object.keys(raw).forEach((code) => {
-    const mark = String(raw[code] || '');
-    const next = ROW_MARK_ALIASES[mark] || mark;
-    if (code && next && next !== ROW_MARK_DEFAULT && ROW_MARK_OPTIONS.indexOf(next) >= 0) {
-      marks[code] = next;
-    }
-  });
-  return marks;
-};
 
 const kFilterOptions = [
   { label: KFilterTypeNames[KFilterType.ZJZT], value: KFilterType.ZJZT },
@@ -249,6 +200,23 @@ const nameOfListItem = (item: any): string => {
   }
   return String(item.name ?? item.stockName ?? '');
 };
+
+/** 「所属板块」批量取数并发数（东财 slist 是逐只接口，控制并发避免被限流） */
+const BANKUAI_FETCH_CONCURRENCY = 4;
+/** 所属板块取数为空（多为并发被限流）时的重试次数 */
+const BANKUAI_FETCH_RETRY = 2;
+/** 所属板块重试间隔（毫秒） */
+const BANKUAI_FETCH_RETRY_DELAY = 1500;
+/** 所属板块重试用尽后的冷却时间（毫秒）：冷却期过了列表刷新才会再排一次，避免反复刷接口 */
+const BANKUAI_FETCH_COOLDOWN = 5 * 60 * 1000;
+
+/**
+ * 所属板块内存缓存：6 位代码 -> 东财「所属板块」列表
+ *
+ * 接口本身有 7 天本地缓存（见 Services.Stock.GetStockBankuaisFromEastmoney），
+ * 这里再挡一层，避免来回切列表/重新评分时反复发请求与反复读 IPC 缓存。
+ */
+const bankuaiMemoryCache = new Map<string, Stock.BanKuai[]>();
 
 /**
  * 取一条列表行的「流通市值」（单位：亿元），用于市值区间筛选
@@ -406,16 +374,39 @@ const STList: React.FC<STListProps> = ({
   const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
   /** 右侧面板当前展示的股票代码（点列表里的名字切换；空 = 默认展示列表第一只） */
   const [panelCode, setPanelCode] = useState('');
+  // 板块筛选：仅显示属于所选板块的股票（多选，空数组=不过滤；值为板块代码 BKxxxx）
+  const [shortScoreBoards, setShortScoreBoards] = useState<string[]>([]);
   /**
-   * 行标记（K线形态后的下拉选择）：股票代码 -> 趋势-阴线不破 / 横盘-阳线突破 / 回调-长下影线 / 反弹-放量阳线 / 上升-待观察 / 顶部-震荡谨慎
+   * 股票代码 -> 所属板块（东财 slist，与详情页 BanKuai 同源）
    *
-   * 人工给股票打的标签，与评分无关：默认「未定」（未标记，不写入存储）；
-   * 选中其它值后按股票代码持久化到 localStorage，切换板块、重新评分、重启应用后仍然保留。
-   * 读取时会把旧标记（趋势/横排/回调/反弹）迁移成新标记。
+   * 用于「所属板块」列与表头板块筛选：以前用的是「当前已选板块」的映射，
+   * 只包含用户选中的板块，看不出股票真实的全量所属板块。
    */
-  const [shortScoreRowMarks, setShortScoreRowMarks] = useState<Record<string, string>>(() =>
-    normalizeRowMarks(Utils.GetStorage(CONST.STORAGE.SHORT_TERM_SCORE_ROW_MARKS, {}) as Record<string, string>)
-  );
+  const [stockBankuaisMap, setStockBankuaisMap] = useState<Record<string, Stock.BanKuai[]>>({});
+  /** 已发起过取数的股票代码（同一只不重复请求） */
+  const bankuaisRequestedRef = React.useRef(new Set<string>());
+  /** 待取所属板块的队列（放 ref 里，列表刷新不丢任务） */
+  const bankuaiQueueRef = React.useRef<string[]>([]);
+  /** 队列是否正在跑 */
+  const bankuaiRunningRef = React.useRef(false);
+  /** 已重试次数（股票代码 -> 次数），空结果重试用 */
+  const bankuaiRetryRef = React.useRef<Record<string, number>>({});
+  /** 重试用尽后的冷却到期时间（股票代码 -> 时间戳），避免对一直失败的股票反复刷接口 */
+  const bankuaiCooldownRef = React.useRef<Record<string, number>>({});
+  /** 冷却到期后自动重排的定时器句柄（0 = 没有） */
+  const bankuaiCooldownTimerRef = React.useRef(0);
+  /** 组件是否还在（卸载后不再 setState） */
+  const bankuaiMountedRef = React.useRef(true);
+  useEffect(() => {
+    bankuaiMountedRef.current = true;
+    return () => {
+      bankuaiMountedRef.current = false;
+      if (bankuaiCooldownTimerRef.current) {
+        window.clearTimeout(bankuaiCooldownTimerRef.current);
+        bankuaiCooldownTimerRef.current = 0;
+      }
+    };
+  }, []);
   /**
    * 短线评分需要加载/补全的交易日数量
    *
@@ -502,6 +493,16 @@ const STList: React.FC<STListProps> = ({
   const effectiveBoardsKey = React.useMemo(() => [...effectiveSecids].sort().join(','), [effectiveSecids]);
   const effectiveBoardsKeyRef = React.useRef('');
   effectiveBoardsKeyRef.current = effectiveBoardsKey;
+  // 已选板块组合变了：结果池整体换了，旧的表头板块筛选留着可能一条都不剩，直接清空
+  const prevBoardsKeyForFilterRef = React.useRef(effectiveBoardsKey);
+  useEffect(() => {
+    if (prevBoardsKeyForFilterRef.current === effectiveBoardsKey) {
+      return;
+    }
+    prevBoardsKeyForFilterRef.current = effectiveBoardsKey;
+    setShortScoreBoards([]);
+    setCurrentPage(1);
+  }, [effectiveBoardsKey]);
   /** 每个板块的成分股缓存：secid -> stocks（多板块合并前各自独立保存） */
   const boardStocksCacheRef = React.useRef<Record<string, Stock.DetailItem[]>>({});
   /**
@@ -2614,8 +2615,27 @@ const STList: React.FC<STListProps> = ({
       const rsiSet = new Set(shortScoreRsiShapes);
       list = list.filter((row: any) => isFavorited(row) || rsiSet.has(normalizeRsiShape(row.rsiPattern)));
     }
+    // 板块筛选：股票所属板块（东财所属板块，与详情页 BanKuai 同源）与勾选板块有交集即显示
+    if (shortScoreBoards.length) {
+      const boardSet = new Set(shortScoreBoards);
+      list = list.filter((row: any) => {
+        if (isFavorited(row)) {
+          return true;
+        }
+        const boards = stockBankuaisMap[codeOfListItem(row)] || [];
+        return boards.some((b) => boardSet.has(b.code));
+      });
+    }
     return list;
-  }, [visibleShowList, displayMode, shortScoreKlineShapes, shortScoreRsiShapes, isFavorited]);
+  }, [
+    visibleShowList,
+    displayMode,
+    shortScoreKlineShapes,
+    shortScoreRsiShapes,
+    shortScoreBoards,
+    stockBankuaisMap,
+    isFavorited,
+  ]);
 
   /**
    * 表头 K线形态筛选项（带当前列表的股票数）：统计基于 visibleShowList，
@@ -2655,26 +2675,11 @@ const STList: React.FC<STListProps> = ({
     setCurrentPage(1);
   }, []);
 
-  /** 行标记变更（空值 = 取消标记）：只改内存，持久化由下面的 effect 统一处理 */
-  const handleRowMarkChange = useCallback((code: string, mark?: string) => {
-    if (!code) {
-      return;
-    }
-    setShortScoreRowMarks((prev) => {
-      const next = { ...prev };
-      if (mark) {
-        next[code] = mark;
-      } else {
-        delete next[code];
-      }
-      return next;
-    });
+  /** 板块勾选后统一回到第 1 页 */
+  const handleBoardFilterChange = useCallback((next: string[]) => {
+    setShortScoreBoards(next);
+    setCurrentPage(1);
   }, []);
-
-  // 行标记持久化：切换板块 / 重新评分 / 重启应用后仍然保留
-  useEffect(() => {
-    Utils.SetStorage(CONST.STORAGE.SHORT_TERM_SCORE_ROW_MARKS, shortScoreRowMarks);
-  }, [shortScoreRowMarks]);
 
   /**
    * 列表诊断日志：点「短线评分」后仍找不到某只股票时，用它定位是哪一层把行过滤掉的
@@ -2692,7 +2697,8 @@ const STList: React.FC<STListProps> = ({
         `当前展示 ${displayList.length} 行（形态过滤前 ${visibleShowList.length} 行）；排除科创北交=${excludeStarBse} 显示未上市=${shortScoreShowNotListed}` +
         ` 评分过滤=${shortScoreFilterEnabled} RSI过滤=${shortScoreRsiFilterEnabled}` +
         ` K线形态过滤=${shortScoreKlineShapes.length ? shortScoreKlineShapes.join('/') : '无'}` +
-        ` RSI形态过滤=${shortScoreRsiShapes.length ? shortScoreRsiShapes.join('/') : '无'} 名字过滤="${nameFilter}"`
+        ` RSI形态过滤=${shortScoreRsiShapes.length ? shortScoreRsiShapes.join('/') : '无'}` +
+        ` 板块过滤=${shortScoreBoards.length ? shortScoreBoards.join('/') : '无'} 名字过滤="${nameFilter}"`
     );
   }, [
     displayMode,
@@ -2701,6 +2707,7 @@ const STList: React.FC<STListProps> = ({
     visibleShowList,
     shortScoreKlineShapes,
     shortScoreRsiShapes,
+    shortScoreBoards,
     shortScoreLoading,
     todayScoreLoading,
     excludeStarBse,
@@ -2731,15 +2738,192 @@ const STList: React.FC<STListProps> = ({
   /** 当前过滤结果的股票数：即「当日评分」实际会处理的数量（全部页，不含K线形态表头勾选过滤），直接标在按钮上 */
   const todayScoreCount = visibleShowList.length;
 
-  /** 板块 secid -> 名称（用于下拉展示与结果列表标记所属板块） */
-  const boardNameMap = React.useMemo(() => {
-    const m: Record<string, string> = {};
-    [...industries, ...gainians].forEach((i) => {
-      m[i.secid] = i.name;
+  /**
+   * 表头板块筛选项（带当前列表的股票数）
+   *
+   * 统计口径同 K线形态 / RSI形态：基于 visibleShowList（不含其它列的表头勾选），
+   * 勾选后各项数量保持稳定。只列出当前结果里出现过的板块（按股票数降序），
+   * 避免把几十个板块全塞进下拉。值用板块代码（BKxxxx），展示用板块名称。
+   */
+  const boardFilterItems = React.useMemo(() => {
+    const counts: Record<string, { label: string; count: number }> = {};
+    (visibleShowList as any[]).forEach((row: any) => {
+      (stockBankuaisMap[codeOfListItem(row)] || []).forEach((b) => {
+        if (!b?.code) {
+          return;
+        }
+        if (!counts[b.code]) {
+          counts[b.code] = { label: b.name, count: 0 };
+        }
+        counts[b.code].count += 1;
+      });
     });
-    return m;
-  }, [industries, gainians]);
-  const boardLabel = useCallback((s: string) => boardNameMap[s] || s, [boardNameMap]);
+    return Object.keys(counts)
+      .map((code) => ({ value: code, label: counts[code].label, count: counts[code].count }))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  }, [visibleShowList, stockBankuaisMap]);
+
+  /** 取一只股票所属板块：ok=false 表示请求失败（可重试），空数组表示接口确实没给板块 */
+  const fetchBankuaisOf = React.useCallback(
+    async (code: string): Promise<{ code: string; list: Stock.BanKuai[]; ok: boolean }> => {
+      const hit = bankuaiMemoryCache.get(code);
+      if (hit) {
+        return { code, list: hit, ok: true };
+      }
+      try {
+        const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
+        const list = ((await Services.Stock.GetStockBankuaisFromEastmoney(secid)) || []) as Stock.BanKuai[];
+        if (list.length) {
+          bankuaiMemoryCache.set(code, list);
+        }
+        return { code, list, ok: true };
+      } catch (e) {
+        return { code, list: [], ok: false };
+      }
+    },
+    []
+  );
+
+  /**
+   * 取「所属板块」的队列泵（东财 slist，与详情页 BanKuai 同一接口）
+   *
+   * 队列放在 ref 里、泵本身不随列表刷新取消：列表每次重排 / 当日评分刷新都会让
+   * `visibleShowList` 换新引用，之前把整轮循环写在 effect 里会被反复取消，
+   * 被取消的股票又已经标记为「已请求」，结果就是大量股票一直显示 `--`。
+   */
+  const pumpBankuaiQueue = React.useCallback(async () => {
+    if (bankuaiRunningRef.current) {
+      return;
+    }
+    bankuaiRunningRef.current = true;
+    let retryCodes: string[] = [];
+    const failedCodes: string[] = [];
+    let filledCount = 0;
+    let emptyCount = 0;
+    try {
+      while (bankuaiQueueRef.current.length) {
+        const batch = bankuaiQueueRef.current.splice(0, BANKUAI_FETCH_CONCURRENCY);
+        /* eslint-disable no-await-in-loop */
+        const results = await Promise.all(batch.map(fetchBankuaisOf));
+        /* eslint-enable no-await-in-loop */
+        if (!bankuaiMountedRef.current) {
+          return;
+        }
+        setStockBankuaisMap((prev) => {
+          const next = { ...prev };
+          results.forEach(({ code, list }) => {
+            next[code] = list;
+          });
+          return next;
+        });
+        // 空结果（多为逐只并发被限流）隔一会儿重试；重试上限后放开标记，列表刷新时会再排一次
+        results.forEach(({ code, list, ok }) => {
+          if (list.length) {
+            filledCount += 1;
+            delete bankuaiRetryRef.current[code];
+            return;
+          }
+          emptyCount += 1;
+          const tries = (bankuaiRetryRef.current[code] || 0) + 1;
+          bankuaiRetryRef.current[code] = tries;
+          if (tries <= BANKUAI_FETCH_RETRY) {
+            retryCodes.push(code);
+          } else {
+            // 重试用尽：放开「已请求」标记，冷却一段时间后（列表刷新时）再排一次，
+            // 不能把股票永久钉死在 `--` 上（详情页单独请求往往是能取到的）
+            delete bankuaiRetryRef.current[code];
+            bankuaisRequestedRef.current.delete(code);
+            bankuaiCooldownRef.current[code] = Date.now() + BANKUAI_FETCH_COOLDOWN;
+            if (!ok) {
+              failedCodes.push(code);
+            }
+          }
+        });
+      }
+    } finally {
+      bankuaiRunningRef.current = false;
+    }
+    if (filledCount || emptyCount) {
+      console.log(`[所属板块] 本轮取数完成：取到板块 ${filledCount} 只，无板块/未取到 ${emptyCount} 只`);
+    }
+    if (failedCodes.length) {
+      console.warn(
+        `[所属板块] ${failedCodes.length} 只取数失败（已重试 ${BANKUAI_FETCH_RETRY} 次），列表刷新后会重新尝试：` +
+          failedCodes.slice(0, 10).join(',')
+      );
+    }
+    if (retryCodes.length) {
+      const codes = retryCodes;
+      retryCodes = [];
+      window.setTimeout(() => {
+        // 去重：两次泵的定时重试可能撞在一起
+        const pending = codes.filter((code) => bankuaiQueueRef.current.indexOf(code) < 0);
+        if (!pending.length) {
+          return;
+        }
+        bankuaiQueueRef.current.push(...pending);
+        pumpBankuaiQueue();
+      }, BANKUAI_FETCH_RETRY_DELAY);
+    }
+    // 还有冷却中的股票：冷却到期后自动再排一次，不用等用户操作列表
+    const cooling = Object.keys(bankuaiCooldownRef.current).length;
+    if (cooling && !bankuaiCooldownTimerRef.current) {
+      bankuaiCooldownTimerRef.current = window.setTimeout(() => {
+        bankuaiCooldownTimerRef.current = 0;
+        if (!bankuaiMountedRef.current) {
+          return;
+        }
+        const now = Date.now();
+        const ready = Object.keys(bankuaiCooldownRef.current).filter((code) => {
+          if ((bankuaiCooldownRef.current[code] || 0) > now || bankuaisRequestedRef.current.has(code)) {
+            return false;
+          }
+          delete bankuaiCooldownRef.current[code];
+          bankuaisRequestedRef.current.add(code);
+          return true;
+        });
+        if (!ready.length) {
+          return;
+        }
+        bankuaiQueueRef.current.push(...ready);
+        pumpBankuaiQueue();
+      }, BANKUAI_FETCH_COOLDOWN + 500);
+    }
+    // 泵结束时队列可能又被塞了新任务（上面重试入队 / effect 追加）
+    if (bankuaiQueueRef.current.length) {
+      pumpBankuaiQueue();
+    }
+  }, [fetchBankuaisOf]);
+
+  /**
+   * 把当前结果列表里还没取过所属板块的股票排进队列
+   *
+   * 按展示顺序排队（先出当前页）；已取过的（含内存缓存命中）不重复请求。
+   */
+  useEffect(() => {
+    if (displayMode !== 'shortScore') {
+      return;
+    }
+    const missing: string[] = [];
+    const now = Date.now();
+    (visibleShowList as any[]).forEach((row: any) => {
+      const code = codeOfListItem(row);
+      if (!code || bankuaisRequestedRef.current.has(code) || missing.indexOf(code) >= 0) {
+        return;
+      }
+      // 上一次取数失败还在冷却期内的先跳过
+      if ((bankuaiCooldownRef.current[code] || 0) > now) {
+        return;
+      }
+      missing.push(code);
+    });
+    if (!missing.length) {
+      return;
+    }
+    missing.forEach((code) => bankuaisRequestedRef.current.add(code));
+    bankuaiQueueRef.current.push(...missing);
+    pumpBankuaiQueue();
+  }, [displayMode, visibleShowList, pumpBankuaiQueue]);
 
   /**
    * 右侧信息面板要展示的股票
@@ -3308,12 +3492,12 @@ const STList: React.FC<STListProps> = ({
         </Row>
       ) : displayMode === 'shortScore' ? (
         <Row className={styles.header}>
-          <Col span={5}>股票名称</Col>
+          <Col span={4}>股票名称</Col>
           <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
-          <Col span={7} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Col span={4} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
               title="RSI 评分逻辑识别出的「当日」形态：超买回踩企稳/回踩中、超卖反转、金叉、死叉、金叉在即、修复中、多头/空头排列、超买钝化。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
@@ -3378,8 +3562,8 @@ const STList: React.FC<STListProps> = ({
               </Dropdown>
             </span>
           </Col>
-          <Col span={10} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/黄昏星/启明星/铁锤线/海绵宝宝…）。十字星=小实体且上下影线差不多长，上影线长于下影线=黄昏星，下影线长于上影线=启明星。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。行尾下拉可给该股票打标记：未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线/上升-待观察/顶部-震荡谨慎（未定=未标记，其余按股票代码保存，切板块/重新评分/重启后仍保留）">
+          <Col span={5} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/黄昏星/启明星/铁锤线/海绵宝宝…）。十字星=小实体且上下影线差不多长，上影线长于下影线=黄昏星，下影线长于上影线=启明星。点漏斗可勾选形态过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。">
               <span className={styles.klineShapeHeaderText}>K线形态</span>
               <Dropdown
                 trigger={['click']}
@@ -3453,6 +3637,67 @@ const STList: React.FC<STListProps> = ({
                 className={styles.sortbtn}
                 onClick={() => updateSortType(KLINE_SHAPE_SORT_KEY)}
               />
+            </span>
+          </Col>
+          <Col span={9} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span
+              className={styles.klineShapeHeader}
+              title="股票所属板块（东财「所属板块」，与详情页板块列表同一接口）。每只股票只显示前 3 个板块。点漏斗可按板块勾选过滤（Excel 式多选，属于任一所选板块即显示；仅影响列表显示，不影响「当日评分」的候选股票）"
+            >
+              <span className={styles.klineShapeHeaderText}>所属板块</span>
+              <Dropdown
+                trigger={['click']}
+                placement="bottomLeft"
+                overlayClassName={styles.shapeFilterOverlay}
+                overlay={
+                  <div className={styles.shapeFilterPanel} onClick={(e) => e.stopPropagation()}>
+                    <div className={styles.shapeFilterActions}>
+                      <Checkbox
+                        checked={
+                          boardFilterItems.length > 0 && shortScoreBoards.length === boardFilterItems.length
+                        }
+                        indeterminate={
+                          shortScoreBoards.length > 0 && shortScoreBoards.length < boardFilterItems.length
+                        }
+                        onChange={(e) =>
+                          handleBoardFilterChange(e.target.checked ? boardFilterItems.map((o) => o.value) : [])
+                        }
+                      >
+                        全选
+                      </Checkbox>
+                      <a onClick={() => handleBoardFilterChange([])}>清空</a>
+                    </div>
+                    <Checkbox.Group
+                      value={shortScoreBoards}
+                      onChange={(v) => handleBoardFilterChange((v as string[]) || [])}
+                      className={styles.shapeFilterList}
+                    >
+                      {boardFilterItems.map((o) => (
+                        <Checkbox
+                          key={o.value}
+                          value={o.value}
+                          disabled={!o.count && shortScoreBoards.indexOf(o.value) < 0}
+                        >
+                          {o.label}
+                          <span className={styles.shapeFilterCount}>({o.count})</span>
+                        </Checkbox>
+                      ))}
+                    </Checkbox.Group>
+                  </div>
+                }
+              >
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<FilterOutlined />}
+                  className={classNames(styles.filterbtn, { [styles.filterbtnActive]: shortScoreBoards.length > 0 })}
+                  title={
+                    shortScoreBoards.length
+                      ? `已按 ${shortScoreBoards.length} 个板块过滤（点击修改）；不影响「当日评分」候选股票`
+                      : '按所属板块勾选过滤（Excel 式多选，属于任一所选板块即显示）；仅影响列表显示，不影响「当日评分」的候选股票'
+                  }
+                />
+              </Dropdown>
             </span>
           </Col>
         </Row>
@@ -3680,7 +3925,7 @@ const STList: React.FC<STListProps> = ({
                   boxShadow: isPanelActive ? 'inset 2px 0 0 #1890ff' : undefined,
                 }}
               >
-                <Col span={5} style={{ cursor: 'pointer' }} onClick={() => setPanelCode(s.code)}>
+                <Col span={4} style={{ cursor: 'pointer' }} onClick={() => setPanelCode(s.code)}>
                   <div
                     title={`${rowName}（点击在右侧面板查看公司简介与日K线）`}
                     style={{
@@ -3725,28 +3970,6 @@ const STList: React.FC<STListProps> = ({
                       </span>
                     )}
                   </div>
-                  {(() => {
-                    // 标记该股票所属的已选板块（可能同时属于多个）
-                    const bs = (stockBoardSecidsMap[s.code] || []).map(boardLabel);
-                    if (!bs.length) {
-                      return null;
-                    }
-                    return (
-                      <div
-                        title={`所属板块：${bs.join('、')}`}
-                        style={{
-                          fontSize: 10,
-                          lineHeight: 1.1,
-                          color: 'var(--secondary-text-color)',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                        }}
-                      >
-                        {bs.join('、')}
-                      </div>
-                    );
-                  })()}
                 </Col>
                 <Col
                   span={2}
@@ -3759,7 +3982,7 @@ const STList: React.FC<STListProps> = ({
                   </span>
                 </Col>
                 <Col
-                  span={7}
+                  span={4}
                   title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
                   style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
@@ -3772,7 +3995,7 @@ const STList: React.FC<STListProps> = ({
                     <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
                   )}
                 </Col>
-                <Col span={10} style={{ fontSize: 12 }}>
+                <Col span={5} style={{ fontSize: 12 }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span
                       style={{ flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -3795,23 +4018,33 @@ const STList: React.FC<STListProps> = ({
                         '--'
                       )}
                     </span>
-                    {/* 行标记：默认「未定」（未标记），选中其它值后按股票代码持久化（切板块/重新评分/重启后仍保留） */}
-                    <span
-                      style={{ flex: '0 1 136px', minWidth: 96 }}
-                      title="给该股票打标记（未定/趋势-阴线不破/横盘-阳线突破/回调-长下影线/反弹-放量阳线/上升-待观察/顶部-震荡谨慎）；未定=未标记，其余按股票代码保存，切换板块、重新评分、重启应用后仍保留"
-                    >
-                      <Select
-                        size="small"
-                        value={shortScoreRowMarks[s.code] || ROW_MARK_DEFAULT}
-                        style={{ width: '100%', fontSize: 12 }}
-                        dropdownMatchSelectWidth={false}
-                        onChange={(v) =>
-                          handleRowMarkChange(s.code, v === ROW_MARK_DEFAULT ? undefined : (v as string))
-                        }
-                        options={ROW_MARK_OPTIONS.map((m) => ({ label: m, value: m }))}
-                      />
-                    </span>
                   </span>
+                </Col>
+                <Col
+                  span={9}
+                  style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                >
+                  {(() => {
+                    // 所属板块：来自东财「所属板块」（与详情页 BanKuai 同一接口），只取前 3 个展示
+                    const bks = stockBankuaisMap[rowCode];
+                    if (bks === undefined) {
+                      // 还没取回来：用省略号区分「取数中」与「确实没有板块」
+                      return (
+                        <span style={{ color: 'var(--hint-color)' }} title="所属板块取数中">
+                          …
+                        </span>
+                      );
+                    }
+                    if (!bks.length) {
+                      return (
+                        <span style={{ color: 'var(--reverse-text-color)' }} title="未取到所属板块">
+                          --
+                        </span>
+                      );
+                    }
+                    const names = bks.map((b) => b.name).slice(0, 3);
+                    return <span title={`所属板块：${names.join('、')}`}>{names.join('、')}</span>;
+                  })()}
                 </Col>
               </Row>
             );

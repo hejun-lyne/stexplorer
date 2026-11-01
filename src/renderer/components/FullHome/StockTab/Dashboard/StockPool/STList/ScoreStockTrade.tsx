@@ -13,7 +13,8 @@ import {
   removeTrade,
 } from '@/actions/stock';
 import { ComputeTrainAccount, IsTrainMark } from '@/helpers/trainAccount';
-import { GetStockDetail, GetStockType, IsLimitUpKline } from '@/helpers/stock';
+import { GetLimitUpPct, GetStockDetail, GetStockType } from '@/helpers/stock';
+import { GetStorage, SetStorage } from '@/utils';
 
 /** 一手股数 */
 const MIN_LOT = 100;
@@ -30,10 +31,54 @@ const POSITION_RATIOS = [
   { value: 3, label: '1/3仓' },
   { value: 4, label: '1/4仓' },
 ];
+/** 「买入/卖出理由」草稿的本地存储键（按标的分开存） */
+const REASON_DRAFT_KEY = 'scoreStockTradeReasonDrafts';
 
 function formatMoney(v: number) {
   const n = Math.abs(Math.round(Number(v) || 0));
   return `¥${n.toLocaleString('zh-CN')}`;
+}
+
+/** 读取该标的上次填写、尚未提交的买卖理由 */
+function readReasonDraft(secid: string) {
+  try {
+    const drafts = GetStorage<Record<string, string>>(REASON_DRAFT_KEY, {}) || {};
+    return String(drafts[secid] || '');
+  } catch (e) {
+    return '';
+  }
+}
+
+/** 保存（传空则删除）该标的的买卖理由草稿 */
+function writeReasonDraft(secid: string, text: string) {
+  if (!secid) {
+    return;
+  }
+  try {
+    const drafts = GetStorage<Record<string, string>>(REASON_DRAFT_KEY, {}) || {};
+    const value = String(text || '');
+    if (value.trim()) {
+      drafts[secid] = value;
+    } else {
+      delete drafts[secid];
+    }
+    SetStorage(REASON_DRAFT_KEY, drafts);
+  } catch (e) {
+    console.log('保存买卖理由草稿出错', e);
+  }
+}
+
+/** 操作记录行（训练买卖点 / 手工交易记录统一成同一形态） */
+interface TradeRecordRow {
+  key: string;
+  /** 记录时间（日期部分） */
+  date: string;
+  type: 'buy' | 'sell';
+  price: number;
+  /** 股数 / 委托金额等补充信息 */
+  detail: string;
+  reason: string;
+  pending?: boolean;
 }
 
 export interface ScoreStockTradeProps {
@@ -42,20 +87,31 @@ export interface ScoreStockTradeProps {
   name: string;
   /** 面板日K（训练模式下已按训练日截断） */
   klines: Stock.KLineItem[];
+  /** 当前分时价（训练模式为训练时刻之前最后一分钟，非训练模式为实时最新价）；0 表示暂无分时 */
+  currentPrice?: number;
+  /** 分时是否已取回（false = 还在加载）：加载中不允许下单，避免用收盘价成交 */
+  intradayReady?: boolean;
 }
 
 /**
  * 评分结果面板的买入卖出区域
  *
+ * - 成交价：买入与卖出都按「当前分时价」成交（`currentPrice`，即面板分时的最后一分钟价），
+ *   取不到分时数据时退回日K收盘价（训练模式为训练日收盘，非训练模式为最新收盘）；
+ *   分时还在加载（`intradayReady === false`）时禁止下单，避免用收盘价成交；
  * - 训练模式：与详情页 TrainBar 完全共用一套数据 —— 买卖点写进 `buyPoints/sellPoints`（t='train'），
- *   买入按训练日收盘价成交（可用金额下委托），卖出为一次清仓，资金/持仓/成本取共享训练账户
+ *   买入按可用金额下委托，卖出为一次清仓，资金/持仓/成本取共享训练账户
  *   （`ComputeTrainAccount`），并遵循 T+1、停牌不可交易、需在自选股中；
  * - 非训练模式：写入手工交易记录（`tradings`），资金口径为「初始本金 - 持仓成本」。
  *
  * 涨停：买入当天涨停买不进，挂为待成交委托，等下一交易日开盘价成交
  * （训练模式下补成交时写入训练买卖点，见 `fillPendingBuyTradesAction`）。
+ *
+ * 买入/卖出理由：内容不为空时按标的存本地草稿，切换股票 / 推进训练日 / 关闭面板都不会丢，
+ * 下次自动回填；执行买入或卖出后，文本作为 `reason` 写入操作记录并清空草稿。
+ * 面板最后按标的列出操作记录（训练买卖点 / 手工交易记录），逐条显示理由。
  */
-const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, klines }) => {
+const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, klines, currentPrice, intradayReady }) => {
   const dispatch = useDispatch();
   const { ontrain, trainDate, trainStartDate, initialCapital, commissionRate, kLineApiSourceSetting } = useSelector(
     (state: StoreState) => state.setting.systemSetting
@@ -64,11 +120,45 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
   const config = stockConfigsMapping?.[secid];
 
   const [tradeType, setTradeType] = useState<'buy' | 'sell'>('buy');
-  /** 非训练模式的委托价（训练模式按训练日收盘价成交，不可改） */
-  const [price, setPrice] = useState<number | null>(null);
   const [ratio, setRatio] = useState<number>(POSITION_RATIOS[0].value);
   const [amount, setAmount] = useState<number | null>(null);
   const [reason, setReason] = useState('');
+
+  // ===== 买入/卖出理由草稿（按标的保存，切换股票 / 推进训练日后自动回填）=====
+  /** 草稿归属的标的、训练日与最新内容（换股/换日/卸载时按它落盘）；初始为空，首次渲染即回填 */
+  const reasonDraftRef = useRef({ secid: '', date: '', text: '' });
+
+  // 换股：先把上一只标的已填写的内容存下来，再把该标的上次记录的理由回填到输入框
+  // 换训练日：同样先把内容存下来，下次（同标的）自动带出
+  useEffect(() => {
+    const prev = reasonDraftRef.current;
+    const day = trainDate || '';
+    const stockChanged = prev.secid !== secid;
+    if (prev.secid && (stockChanged || prev.date !== day || prev.text)) {
+      writeReasonDraft(prev.secid, prev.text);
+    }
+    if (stockChanged) {
+      const draft = readReasonDraft(secid);
+      setReason(draft);
+      reasonDraftRef.current = { secid, date: day, text: draft };
+      return;
+    }
+    reasonDraftRef.current = { secid, date: day, text: prev.text };
+  }, [secid, trainDate]);
+
+  // 卸载（关闭右侧面板）时也把没提交的内容存下来
+  useEffect(
+    () => () => {
+      const prev = reasonDraftRef.current;
+      writeReasonDraft(prev.secid, prev.text);
+    },
+    []
+  );
+
+  // 输入内容随时同步到草稿引用，保证换股/换日/卸载时存的是最新文本
+  useEffect(() => {
+    reasonDraftRef.current = { secid, date: trainDate || '', text: reason };
+  }, [secid, trainDate, reason]);
 
   const commission =
     Number.isFinite(Number(commissionRate)) && Number(commissionRate) >= 0
@@ -114,9 +204,25 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
     return klines.find((k) => String(k.date).substring(0, 10) === trainDate) || null;
   }, [ontrain, trainDate, klines, lastBar]);
 
-  const tradePrice = ontrain ? Number(trainBar?.sp) || 0 : Number(price) || 0;
+  /** 当前分时价：买入、卖出都按它成交 */
+  const trendPrice = Number(currentPrice) || 0;
+  /** 兜底：没有分时数据时用日K收盘价（训练模式为训练日收盘，非训练模式为最新收盘） */
+  const closePrice = ontrain ? Number(trainBar?.sp) || 0 : Number(lastBar?.sp) || 0;
+  const tradePrice = trendPrice > 0 ? trendPrice : closePrice;
   const limitBar = ontrain ? trainBar : lastBar;
-  const limitUpToday = !!limitBar && IsLimitUpKline(limitBar, secid, name);
+  /**
+   * 当日是否已涨停：按「当前分时价」相对昨收判断
+   *
+   * 之前按日K收盘价 + 最高价判断，训练模式下用的是收盘后的未来数据：
+   * 盘中并未涨停也会被判定成「涨停买不进」，反之也可能漏判。
+   */
+  const limitUpToday = useMemo(() => {
+    const prevClose = Number(limitBar?.zs) || 0;
+    if (tradePrice <= 0 || prevClose <= 0) {
+      return false;
+    }
+    return (tradePrice / prevClose) * 100 - 100 >= GetLimitUpPct(secid, name) - 0.3;
+  }, [tradePrice, limitBar, secid, name]);
 
   const cashBase = ontrain ? trainCash : availableCash;
   /** 可卖股数：训练模式为训练账户持仓，非训练模式为手工持仓 */
@@ -127,9 +233,16 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
   // 仓位 / 买卖方向 / 基数变化时，按仓位比例重新换算委托金额。
   // 换股也要重算：训练模式的可用资金是共享的，换股后 positionBase 往往不变，
   // 不重算会把上一只股票手填的金额带过来（可能超过可用资金，按钮就一直不可点）。
+  // 现价（分时每分钟刷新）不触发重算：否则会不断覆盖手填的委托金额。
+  const amountBaseRef = useRef('');
   useEffect(() => {
+    const key = `${secid}_${tradeType}_${ratio}_${cashBase}_${sellSharesBase}`;
+    if (amountBaseRef.current === key) {
+      return;
+    }
+    amountBaseRef.current = key;
     setAmount(positionBase > 0 ? Math.floor(positionBase / ratio) : null);
-  }, [ratio, tradeType, positionBase, secid]);
+  }, [ratio, tradeType, positionBase, secid, cashBase, sellSharesBase]);
 
   const tradeAmount = Number(amount) || 0;
   const shares = useMemo(() => {
@@ -177,22 +290,16 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
     }
   }, [secid, klines, dispatch, trainDate]);
 
-  // 换股：重置表单（价格等K线回来后再填）
+  // 换股：重置表单（成交价随分时/日K自动更新；理由由上面的草稿逻辑回填，这里不动）
   useEffect(() => {
     setTradeType('buy');
-    setReason('');
     setRatio(POSITION_RATIOS[0].value);
-    setPrice(null);
   }, [secid]);
 
-  // 非训练模式：最新收盘价作为默认委托价
-  useEffect(() => {
-    if (!ontrain && lastBar) {
-      setPrice(Number(lastBar.sp) || null);
-    }
-  }, [ontrain, lastBar]);
-
   const canSubmit = (() => {
+    if (intradayReady === false) {
+      return false;
+    }
     if (ontrain) {
       // 不再要求已在自选股：买入时会自动加入（见 ensureTrainConfig）
       if (!trainBar || tradePrice <= 0) {
@@ -324,11 +431,73 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
             )}）`
       );
     }
+    // 理由已经写进操作记录，草稿清空（输入框里不再留着上一笔的理由）
+    writeReasonDraft(secid, '');
+    reasonDraftRef.current = { secid, date: trainDate || '', text: '' };
     setReason('');
   };
 
   const noConfig = ontrain && !config;
   const suspended = ontrain && !!trainDate && !!lastBar && !trainBar;
+
+  /**
+   * 该标的的操作记录（面板最后展示，带买入/卖出理由）
+   *
+   * - 训练模式：取训练买卖点（`buyPoints/sellPoints` 中 t='train' 的点），与详情页共用；
+   * - 非训练模式：取手工交易记录（`tradings`），待成交委托也列出来。
+   */
+  const tradeRecords = useMemo<TradeRecordRow[]>(() => {
+    if (ontrain) {
+      const rows: TradeRecordRow[] = [];
+      // 训练日之后的买卖点不展示（属于还没走到的未来）
+      const inRange = (p: { x: string }) => !trainDate || String(p.x).substring(0, 10) <= trainDate;
+      (config?.buyPoints || []).forEach((p, i) => {
+        const price = Number(p.y) || 0;
+        if (!IsTrainMark(p.t) || price <= 0 || !inRange(p)) {
+          return;
+        }
+        const budget = Number(p.a) || 0;
+        rows.push({
+          key: `buy_${p.x}_${i}`,
+          date: String(p.x).substring(0, 10),
+          type: 'buy',
+          price,
+          detail: budget > 0 ? formatMoney(budget) : '按可用资金',
+          reason: String(p.reason || ''),
+        });
+      });
+      (config?.sellPoints || []).forEach((p, i) => {
+        const price = Number(p.y) || 0;
+        if (!IsTrainMark(p.t) || price <= 0 || !inRange(p)) {
+          return;
+        }
+        rows.push({
+          key: `sell_${p.x}_${i}`,
+          date: String(p.x).substring(0, 10),
+          type: 'sell',
+          price,
+          detail: '一次清仓',
+          reason: String(p.reason || ''),
+        });
+      });
+      // 最近的交易排最前；同一天先买后卖
+      return rows.sort((a, b) =>
+        a.date < b.date ? 1 : a.date > b.date ? -1 : a.type === b.type ? 0 : a.type === 'buy' ? -1 : 1
+      );
+    }
+    return [...(tradings || [])]
+      .filter((t) => t.secid === secid)
+      .sort((a, b) => (String(a.time) < String(b.time) ? 1 : String(a.time) > String(b.time) ? -1 : 0))
+      .map((t) => ({
+        key: `trade_${t.id}`,
+        date: String(t.time || '').substring(0, 10),
+        type: (t.type === 'sell' ? 'sell' : 'buy') as 'buy' | 'sell',
+        price: Number(t.price) || 0,
+        detail: t.pending ? `${formatMoney(Number(t.pendingAmount) || 0)} 待成交` : `${Number(t.count) || 0} 股`,
+        reason: String(t.reason || t.explain || ''),
+        pending: !!t.pending,
+      }));
+  }, [ontrain, config, tradings, secid, trainDate]);
 
   /**
    * 「确认买入/清仓」按钮不可点的原因（就绪时为空串）
@@ -337,6 +506,10 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
    * 委托金额超可用资金、当天没有行情、T+1 这些情况点了没反应又看不出原因。
    */
   const disabledReason = (() => {
+    if (intradayReady === false) {
+      // 分时还没取回来：此时只能拿到日K收盘价，训练模式下那是收盘后的未来数据，不能成交
+      return '分时价加载中，稍等一下再下单（成交价按当前分时价计算）';
+    }
     if (ontrain) {
       if (!trainBar || tradePrice <= 0) {
         return suspended ? '训练日当天停牌，无法交易' : '训练日当天没有该股行情，无法交易';
@@ -388,7 +561,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
         rows={5}
         value={reason}
         onChange={(e) => setReason(e.target.value)}
-        placeholder="买入/卖出理由（会记录到交易理由里）"
+        placeholder="买入/卖出理由（记录到操作记录；切换股票/下一日会自动保留）"
         maxLength={200}
         style={{ fontSize: 12 }}
       />
@@ -410,21 +583,16 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
         >
           卖出
         </Button>
-        {ontrain ? (
-          <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>
-            收盘 {tradePrice > 0 ? tradePrice.toFixed(2) : '--'}
-          </span>
-        ) : (
-          <InputNumber
-            size="small"
-            style={{ width: 88 }}
-            placeholder="价格"
-            step={0.01}
-            min={0}
-            value={price}
-            onChange={setPrice}
-          />
-        )}
+        <span
+          style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}
+          title={
+            trendPrice > 0
+              ? '按当前分时价成交（买入、卖出一致）'
+              : '暂无分时数据，按日K收盘价成交（买入、卖出一致）'
+          }
+        >
+          {trendPrice > 0 ? '现价' : '收盘'} {tradePrice > 0 ? tradePrice.toFixed(2) : '--'}
+        </span>
         {tradeType === 'buy' || !ontrain ? (
           <>
             <Select size="small" style={{ width: 82 }} value={ratio} onChange={(v) => setRatio(Number(v))}>
@@ -491,7 +659,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
       ) : null}
       {tradeType === 'buy' && limitUpToday ? (
         <div style={{ fontSize: 11, color: '#faad14', marginTop: 2 }}>
-          当日涨停（收盘 {Number(limitBar?.sp).toFixed(2)}）买不进，买入将按下一交易日开盘价成交
+          当前已涨停（现价 {tradePrice.toFixed(2)}）买不进，买入将按下一交易日开盘价成交
         </div>
       ) : null}
       {pendingBuys.length ? (
@@ -507,7 +675,62 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
           ))}
         </div>
       ) : null}
-      <div style={{ height: 30}}>
+      {/* 该标的的操作记录：买入/卖出/价格/股数或金额，并显示下单时填写的理由 */}
+      <div style={{ marginTop: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+          操作记录
+          <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 'normal', color: 'var(--hint-color)' }}>
+            {ontrain ? '训练买卖点 · 与详情页共用' : '手工交易记录'}
+          </span>
+        </div>
+        {tradeRecords.length ? (
+          <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+            {tradeRecords.map((r) => (
+              <div
+                key={r.key}
+                style={{
+                  display: 'flex',
+                  alignItems: 'baseline',
+                  gap: 6,
+                  fontSize: 11,
+                  lineHeight: 2,
+                  borderBottom: '1px dashed var(--border-color)',
+                }}
+              >
+                <span style={{ width: 72, flex: '0 0 auto', color: 'var(--secondary-text-color)' }}>{r.date}</span>
+                <span
+                  style={{
+                    flex: '0 0 auto',
+                    fontWeight: 600,
+                    color:
+                      r.type === 'buy' ? 'var(--increase-color, #d32f2f)' : 'var(--reduce-color, #388e3c)',
+                  }}
+                >
+                  {r.pending ? '买入(待成交)' : r.type === 'buy' ? '买入' : '卖出'}
+                </span>
+                <span style={{ flex: '0 0 auto' }}>{r.price.toFixed(2)}</span>
+                <span style={{ flex: '0 0 auto', color: 'var(--secondary-text-color)' }}>{r.detail}</span>
+                <span
+                  style={{
+                    flex: '1 1 auto',
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    color: 'var(--secondary-text-color)',
+                  }}
+                  title={r.reason}
+                >
+                  {r.reason || '—'}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: 'var(--hint-color)' }}>暂无操作记录</div>
+        )}
+      </div>
+      <div style={{ height: 30 }}>
       </div>
     </div>
   );
