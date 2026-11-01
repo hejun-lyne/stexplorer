@@ -201,6 +201,8 @@ const nameOfListItem = (item: any): string => {
   return String(item.name ?? item.stockName ?? '');
 };
 
+/** 每只股票「所属板块」只用前 3 个：列展示、表头统计、筛选统一这个口径 */
+const BOARD_COLUMN_LIMIT = 3;
 /** 「所属板块」批量取数并发数（东财 slist 是逐只接口，控制并发避免被限流） */
 const BANKUAI_FETCH_CONCURRENCY = 4;
 /** 所属板块取数为空（多为并发被限流）时的重试次数 */
@@ -2616,13 +2618,14 @@ const STList: React.FC<STListProps> = ({
       list = list.filter((row: any) => isFavorited(row) || rsiSet.has(normalizeRsiShape(row.rsiPattern)));
     }
     // 板块筛选：股票所属板块（东财所属板块，与详情页 BanKuai 同源）与勾选板块有交集即显示
+    // 只看每只股票的前 3 个板块，与列里展示、表头选项的统计口径保持一致
     if (shortScoreBoards.length) {
       const boardSet = new Set(shortScoreBoards);
       list = list.filter((row: any) => {
         if (isFavorited(row)) {
           return true;
         }
-        const boards = stockBankuaisMap[codeOfListItem(row)] || [];
+        const boards = (stockBankuaisMap[codeOfListItem(row)] || []).slice(0, BOARD_COLUMN_LIMIT);
         return boards.some((b) => boardSet.has(b.code));
       });
     }
@@ -2744,11 +2747,13 @@ const STList: React.FC<STListProps> = ({
    * 统计口径同 K线形态 / RSI形态：基于 visibleShowList（不含其它列的表头勾选），
    * 勾选后各项数量保持稳定。只列出当前结果里出现过的板块（按股票数降序），
    * 避免把几十个板块全塞进下拉。值用板块代码（BKxxxx），展示用板块名称。
+   *
+   * 每只股票只统计前 3 个板块（与列里展示的一致），保证「勾选后看到的股票」都在这 3 个里。
    */
   const boardFilterItems = React.useMemo(() => {
     const counts: Record<string, { label: string; count: number }> = {};
     (visibleShowList as any[]).forEach((row: any) => {
-      (stockBankuaisMap[codeOfListItem(row)] || []).forEach((b) => {
+      (stockBankuaisMap[codeOfListItem(row)] || []).slice(0, BOARD_COLUMN_LIMIT).forEach((b) => {
         if (!b?.code) {
           return;
         }
@@ -3642,7 +3647,7 @@ const STList: React.FC<STListProps> = ({
           <Col span={9} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="股票所属板块（东财「所属板块」，与详情页板块列表同一接口）。每只股票只显示前 3 个板块。点漏斗可按板块勾选过滤（Excel 式多选，属于任一所选板块即显示；仅影响列表显示，不影响「当日评分」的候选股票）"
+              title="股票所属板块（东财「所属板块」，与详情页板块列表同一接口）。每只股票只取前 3 个板块（列展示、筛选项统计、过滤都按这 3 个）。点漏斗可按板块勾选过滤（Excel 式多选，属于任一所选板块即显示；仅影响列表显示，不影响「当日评分」的候选股票）"
             >
               <span className={styles.klineShapeHeaderText}>所属板块</span>
               <Dropdown
@@ -4042,7 +4047,7 @@ const STList: React.FC<STListProps> = ({
                         </span>
                       );
                     }
-                    const names = bks.map((b) => b.name).slice(0, 3);
+                    const names = bks.map((b) => b.name).slice(0, BOARD_COLUMN_LIMIT);
                     return <span title={`所属板块：${names.join('、')}`}>{names.join('、')}</span>;
                   })()}
                 </Col>
