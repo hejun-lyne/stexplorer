@@ -372,11 +372,12 @@ const QHistTrendBrief: React.FC<QHistTrendBriefProps> = React.memo(({ secid, tic
   const { darkMode } = useHomeContext();
   const [trendData, setTrendData] = useState<Stock.TrendItem[]>([]);
   const [flowsData, setFlowsData] = useState<Stock.FlowTrendItem[]>([]);
-  const { run: runGetTrends } = useRequest(Services.Stock.requestDealDay, {
+  // 历史分时：Tushare 1 分钟线合成（原历史分时缓存源已下线）
+  const { run: runGetTrends } = useRequest(Services.Stock.requestHistTrends, {
     throwOnError: true,
     manual: true,
     onSuccess: setTrendData,
-    cacheKey: `requestDealDay/${secid}`,
+    cacheKey: `requestHistTrends/${secid}/${nexDate || 'live'}`,
   });
   const { run: runDownloadFlows } = useRequest(Helpers.Stock.downloadStockFFlows, {
     throwOnError: true,
@@ -411,7 +412,8 @@ const QHistTrendBrief: React.FC<QHistTrendBriefProps> = React.memo(({ secid, tic
           }
         }
         let trends = trendData.slice(0, tIdx + 1);
-        const cjl = trends.reduce((a, s) => a + s.vol / 100, 0);
+        // 分时的 vol 已是「手」，日K的 cjl 同为「手」，直接累加
+        const cjl = trends.reduce((a, s) => a + s.vol, 0);
         // 只保留分钟
         trends = trends.filter(
           (t, i) => i == trends.length - 1 || trends[i + 1].datetime.substring(3, 5) != trends[i].datetime.substring(3, 5)

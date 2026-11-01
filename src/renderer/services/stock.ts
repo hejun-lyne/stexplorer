@@ -4478,6 +4478,35 @@ export async function requestDealDay(secid: string, date: string) {
   }
 }
 
+/**
+ * 获取「历史交易日」的分时（训练 / 回测模式下详情页的分时图走这里）
+ *
+ * 训练日期当天的分时属于「当日数据」，实时接口拿不到；原历史分时缓存源
+ * （opensourcecache.zealink.com/cache/dealday）已不可用。
+ * 现在优先用 Tushare 1 分钟线合成（本地分钟库命中时零请求），
+ * 取不到（无分钟权限 / 板块指数等）再回退到原历史分时接口。
+ *
+ * 返回结构与 requestDealDay 一致（datetime 为 "HH:MM:SS"），调用方可直接复用；
+ * 成交量统一换算成「手」（与实时分时接口/分时图口径一致，tooltip 按「万手」展示）。
+ *
+ * @param secid 标的ID
+ * @param date 交易日，yyyyMMdd（也接受 yyyy-MM-dd）
+ */
+export async function requestHistTrends(secid: string, date: string) {
+  const day = String(date).replace(/-/g, '');
+  try {
+    const { trends } = await TushareAPI.GetHistTrendFromTushare(secid, day);
+    if (trends.length > 0) {
+      return trends;
+    }
+  } catch (error) {
+    console.log('tushare 历史分时取数失败', error);
+  }
+  // 兜底接口的 vol 是「股」，统一成「手」
+  const fallback = await requestDealDay(secid, day);
+  return fallback.map((t) => ({ ...t, vol: Math.round((t.vol || 0) / 100) }));
+}
+
 export async function GetFutureDetailFromSina(symbol: string) {
   try {
     const { body } =

@@ -1757,8 +1757,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const [requestKLines, setRequestKLines] = useState(DefaultKTypes.map(() => false));
     const { run: updateTrendsOption } = useThrottleFn(
       (data: any) => {
-        // 需要更新zs
-        let tzs = zs;
+        // 需要更新zs（训练模式用当日分时自带的昨收，避免用未来数据的昨收）
+        let tzs = calcTrendZs(data.trends || []);
         if (trendDates.length > 1 && currentTrendDate != trendDates[trendDates.length - 1]) {
           const idx = trendDates.indexOf(currentTrendDate);
           const prevK = klineData.klines[DefaultKTypes.indexOf(KLineType.Day)][idx - 1];
@@ -1880,6 +1880,42 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       () => filterKlinesByToDate(klineData.klines[typeIndex], displayToDate) || [],
       [klineData.klines, typeIndex, displayToDate]
     );
+    /** 训练日「昨收」兜底：图表展示到的最后一个交易日的前一交易日收盘价（日K补齐前先用它） */
+    const trendZsFromKlines = useMemo(() => {
+      const ks = filterKlinesByToDate(dayKlines, displayToDate) || [];
+      if (!ks.length) {
+        return zs;
+      }
+      const bar = ks[ks.length - 1];
+      const prev = ks.length > 1 ? ks[ks.length - 2] : undefined;
+      const value = Number(bar.zs || (prev ? prev.sp : 0));
+      return value > 0 ? value : zs;
+    }, [dayKlines, displayToDate, zs]);
+    /**
+     * 分时图的「昨收」基准。
+     *
+     * 训练模式下不能直接用详情里的 zs：那是真实最新交易的昨收（属于未来数据），
+     * 会让分时图的涨跌幅、涨跌配色、昨收基准线全部错位。
+     * 优先取分时数据自带的昨收（首根的 last，与分时价格同为不复权口径），
+     * 取不到时退回日K推算值。
+     */
+    const calcTrendZs = (trends: Stock.TrendItem[]) => {
+      if (!trainView) {
+        return zs;
+      }
+      const first = trends && trends[0];
+      const base = first ? Number(first.last) : 0;
+      return base > 0 ? base : trendZsFromKlines;
+    };
+    const trendZs = calcTrendZs(trendData.trends);
+    // 昨收基准变化（训练日切换 / 日K补齐）后重画分时图：涨跌幅、涨跌配色、昨收基准线都依赖它
+    useEffect(() => {
+      const trends = trendDataRef.current.trends;
+      if (!trends.length) {
+        return;
+      }
+      updateTrendsOption({ trends });
+    }, [trendZs]);
     const [linePoints, setLinePoints] = useState([] as { x: any; y: any }[]);
     const { run: runCalculateTech } = useRequest((ks: Stock.KLineItem[], kIndex:number, tt:TechIndicatorType) => makeWorkerExec('calculateIndicators', [ks, tt, kIndex,]), {
       throwOnError: true,
@@ -2173,35 +2209,45 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     }, [handeKline, flushHandeKline]);
 
     // 训练模式：分时图展示训练日期的历史分时（当日分时属于未来数据，已被数据层过滤掉）
-    const { run: runGetTrainTrends } = useRequest(Services.Stock.requestDealDay, {
+    // 数据来源：Tushare 1 分钟线合成（requestHistTrends），不再依赖已下线的历史分时缓存源
+    const { run: runGetTrainTrends } = useRequest(Services.Stock.requestHistTrends, {
       manual: true,
       onSuccess: (data: Stock.TrendItem[]) => {
         if (!data || !data.length) {
           return;
         }
-        // 与历史分时保持一致：按分钟合并
+        // 与历史分时保持一致：按分钟合并（1 分钟线本身就是每分钟一根，这里只是兼容更细的数据源）
         const processed = [] as Stock.TrendItem[];
-        let item = data[0];
-        for (let i = 1; i < data.length; i++) {
-          const pMin = item.datetime.substring(3, 5);
-          const nMin = data[i].datetime.substring(3, 5);
-          if (pMin == nMin) {
-            data[i].vol += item.vol;
-            data[i].last = item.last;
-          } else {
-            processed.push(item);
-          }
-          item = data[i];
-          if (i == data.length - 1) {
-            processed.push(data[i]);
+        if (data.length === 1) {
+          processed.push(data[0]);
+        } else {
+          let item = data[0];
+          for (let i = 1; i < data.length; i++) {
+            const pMin = item.datetime.substring(3, 5);
+            const nMin = data[i].datetime.substring(3, 5);
+            if (pMin == nMin) {
+              data[i].vol += item.vol;
+              data[i].last = item.last;
+            } else {
+              processed.push(item);
+            }
+            item = data[i];
+            if (i == data.length - 1) {
+              processed.push(data[i]);
+            }
           }
         }
         processed.forEach((_) => {
           _.datetime = `${trainDate} ${_.datetime.substring(0, 5)}`;
         });
+        // 同步到 trendData：分时图的昨收基准（涨跌幅 / 涨跌配色 / 昨收线）从首根的 last 取
+        setTrendData({ trends: processed });
         updateTrendsOption({ trends: processed });
+        if (updateTrendData) {
+          updateTrendData(processed);
+        }
       },
-      cacheKey: `requestDealDay/train/${secid}/${trainDate || 'live'}`,
+      cacheKey: `requestHistTrends/train/${secid}/${trainDate || 'live'}`,
     });
 
     // 训练模式：进入训练 / 训练日期推进 / 「忽略训练」开关切换后重新取数
@@ -2806,7 +2852,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
               const yMin = opts.yAxis[0].min ?? (trendData.length > 0 ? Math.min(...trendData) * 0.999 : 0);
               const yMax = opts.yAxis[0].max ?? (trendData.length > 0 ? Math.max(...trendData) * 1.001 : 0);
               const currentPrice = trendData.length > 0 ? trendData[trendData.length - 1] : 0;
-              const baseMarkLines = getMarkLineData(darkMode, zs, undefined);
+              const baseMarkLines = getMarkLineData(darkMode, trendZs, undefined);
               if (config?.markLines && config.markLines.length > 0) {
                 config.markLines.forEach((m) => {
                   if (m >= yMin && m <= yMax) {
@@ -3003,6 +3049,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         outRange,
         fractal,
         zs,
+        trendZs,
         selectedArea,
         config?.markLines,
         config?.buyPoints,

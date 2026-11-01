@@ -1,5 +1,20 @@
 import React, { useEffect } from 'react';
-import { Button, List, Row, Col, Radio, Select, Checkbox, InputNumber, Input, Pagination, Modal, message, Dropdown } from 'antd';
+import {
+  Button,
+  List,
+  Row,
+  Col,
+  Radio,
+  Select,
+  Checkbox,
+  InputNumber,
+  Input,
+  Pagination,
+  Modal,
+  message,
+  Dropdown,
+  Tooltip,
+} from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -26,8 +41,11 @@ import {
   CaretRightOutlined,
   CaretUpOutlined,
   FilterOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined,
   StarFilled,
   StarOutlined,
+  StepForwardOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
@@ -102,6 +120,37 @@ const ROW_MARK_ALIASES: Record<string, string> = {
   '回调': '回调-长下影线',
   '反弹': '反弹-放量阳线',
 };
+
+/**
+ * 训练模式「时间推进」的时间轴：09:25 ~ 11:30、13:00 ~ 15:00
+ *
+ * 跳过午休与非交易时间，每格一分钟（09:25 含集合竞价）。
+ * 「时间推进」按训练日内的时间走动，而不是按分时根数：倍速只影响真实耗时。
+ */
+const TRAIN_TIME_LIST: string[] = (() => {
+  const list: string[] = [];
+  const pushRange = (fromH: number, fromM: number, toH: number, toM: number) => {
+    let h = fromH;
+    let m = fromM;
+    while (h < toH || (h === toH && m <= toM)) {
+      list.push(`${`${h}`.padStart(2, '0')}:${`${m}`.padStart(2, '0')}`);
+      m += 1;
+      if (m >= 60) {
+        m = 0;
+        h += 1;
+      }
+    }
+  };
+  pushRange(9, 25, 11, 30);
+  pushRange(13, 0, 15, 0);
+  return list;
+})();
+/** 时间轴默认位置：开盘第一分钟（09:25 集合竞价可手动回退查看） */
+const TRAIN_TIME_DEFAULT_IDX = Math.max(0, TRAIN_TIME_LIST.indexOf('09:30'));
+/** 时间推进倍速（1 = 按真实时间推进：1 个交易分钟 = 1 分钟真实时间） */
+const TRAIN_TIME_SPEEDS = [1, 2, 5, 10];
+/** 一个交易分钟对应的真实毫秒 */
+const TRAIN_MINUTE_MS = 60 * 1000;
 
 /**
  * 「选择概念板块」下拉里的伪选项：只看题材
@@ -328,6 +377,13 @@ const STList: React.FC<STListProps> = ({
    * 「当前看到的是哪一天算出来的分」（重算进行中为空）。
    */
   const [shortScoreDate, setShortScoreDate] = useState('');
+  /**
+   * 当前评分结果是「按哪个训练日」算出来的
+   *
+   * 训练日推进后不再自动重算：两者不一致时列表只保留收藏股票，
+   * 点「短线评分」才会重新拉取板块股票、按新训练日重算。
+   */
+  const [shortScoreTrainDate, setShortScoreTrainDate] = useState('');
   /** 历史缺口补算进度：执行短线评分时顺带补齐近 N 个交易日缺的评分 */
   const [shortScoreBackfill, setShortScoreBackfill] = useState<{ done: number; total: number } | null>(null);
   // 过滤：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的股票
@@ -559,6 +615,57 @@ const STList: React.FC<STListProps> = ({
    * 但成分股缓存按交易日分片，前端不显式带日期就可能一直复用同一份列表（切训练日不刷新）。
    */
   const trainDay = ontrain && trainDate ? String(trainDate).replace(/-/g, '') : '';
+
+  // ========== 训练时间推进（09:25 ~ 15:00，跳过非交易时间） ==========
+  // 时间轴按训练日内的「时刻」推进：列表的 K线形态、右侧面板的分时与日K都只展示到这个时刻为止。
+  const [timeIdx, setTimeIdx] = useState(TRAIN_TIME_DEFAULT_IDX);
+  const [timePlaying, setTimePlaying] = useState(false);
+  const [timeSpeed, setTimeSpeed] = useState(TRAIN_TIME_SPEEDS[0]);
+  const trainTime = TRAIN_TIME_LIST[Math.min(Math.max(timeIdx, 0), TRAIN_TIME_LIST.length - 1)];
+
+  // 训练日推进 / 退出训练：时间轴回到开盘，避免停在上一日的 15:00
+  useEffect(() => {
+    setTimePlaying(false);
+    setTimeIdx(TRAIN_TIME_DEFAULT_IDX);
+  }, [trainDate, ontrain]);
+
+  // 定时推进：1 倍速 = 1 个交易分钟对应 1 分钟真实时间
+  useEffect(() => {
+    if (!timePlaying || !ontrain) {
+      return () => {};
+    }
+    const timer = window.setInterval(
+      () => setTimeIdx((idx) => Math.min(idx + 1, TRAIN_TIME_LIST.length - 1)),
+      Math.max(120, TRAIN_MINUTE_MS / timeSpeed)
+    );
+    return () => window.clearInterval(timer);
+  }, [timePlaying, timeSpeed, ontrain]);
+
+  // 推进到收盘自动暂停
+  useEffect(() => {
+    if (timePlaying && timeIdx >= TRAIN_TIME_LIST.length - 1) {
+      setTimePlaying(false);
+    }
+  }, [timePlaying, timeIdx]);
+
+  /** 开始 / 暂停时间推进（已到收盘再点一次则回到开盘重新推进） */
+  const toggleTimePlay = useCallback(() => {
+    setTimeIdx((idx) => (idx >= TRAIN_TIME_LIST.length - 1 ? TRAIN_TIME_DEFAULT_IDX : idx));
+    setTimePlaying((p) => !p);
+  }, []);
+
+  /** 按指定倍速推进（点倍速即按该倍速开始播放） */
+  const playTimeAtSpeed = useCallback((s: number) => {
+    setTimeSpeed(s);
+    setTimeIdx((idx) => (idx >= TRAIN_TIME_LIST.length - 1 ? TRAIN_TIME_DEFAULT_IDX : idx));
+    setTimePlaying(true);
+  }, []);
+
+  /** 完成：直接到收盘 15:00 */
+  const finishTimePlay = useCallback(() => {
+    setTimePlaying(false);
+    setTimeIdx(TRAIN_TIME_LIST.length - 1);
+  }, []);
 
   /**
    * 跳到指定训练日并落盘（「上一天」/「下一天」共用）
@@ -1570,10 +1677,18 @@ const STList: React.FC<STListProps> = ({
     /**
      * 是否「全新一轮评分」
      *
-     * - 训练日推进自动更新（传入 candidateItems）沿用原逻辑，不重拉成分股；
-     * - 暂停后再次点击是「继续剩余队列」，同样不重拉，否则会打乱暂停续跑。
+     * - 传入 candidateItems（指定候选池）时沿用原逻辑，不重拉成分股；
+     * - 暂停后再次点击是「继续剩余队列」，同样不重拉，否则会打乱暂停续跑；
+     * - 训练日已经推进（上一轮是上一交易日算的）：**强制开新一轮**——丢掉旧队列，
+     *   重新拉取板块成分股并按新训练日重算（训练日推进本身不再自动重算）。
      */
-    const startNewRound = !candidateItems?.length && shortScoreRemainingRef.current.length === 0;
+    const trainDateChanged = ontrain && !!trainDate && shortScoreTrainDate !== trainDate;
+    if (trainDateChanged) {
+      shortScoreRemainingRef.current = [];
+      isShortScorePausedRef.current = false;
+    }
+    const startNewRound =
+      (!candidateItems?.length && shortScoreRemainingRef.current.length === 0) || trainDateChanged;
     // 板块切换/增删后立刻点击：先等已选板块的股票列表到位，否则会漏评或评出上一组板块的股票。
     // 全新一轮评分则改为「强制重拉成分股」：按最新列表重算，时间点上的新进/调出股票都能反映出来。
     scoreStartingRef.current = true;
@@ -1625,6 +1740,8 @@ const STList: React.FC<STListProps> = ({
       }
       setShortScoreData([]);
       setShortScoreDate('');
+      // 这一轮结果属于当前训练日（非训练模式为空）：列表用它判断「评分是否已过期」
+      setShortScoreTrainDate(ontrain ? trainDate : '');
       setShortScoreProgress(0);
       setShortScoreBackfill(null);
       shortScoreTotalRef.current = currentItems.length;
@@ -1723,6 +1840,9 @@ const STList: React.FC<STListProps> = ({
     refreshBoardsStocks,
     waitBoardStocks,
     boardsReady,
+    ontrain,
+    trainDate,
+    shortScoreTrainDate,
   ]);
 
   // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
@@ -1778,6 +1898,8 @@ const STList: React.FC<STListProps> = ({
     shortScorePoolRef.current = boardsKeyRef.current;
     shortScoreSourceRef.current = 'today';
     setShortScoreSeries({});
+    // 当日评分同样属于「当前训练日」，避免刚算完就被判定为过期
+    setShortScoreTrainDate(ontrain ? trainDate : '');
     setDisplayMode('shortScore');
     setCurrentPage(1);
     try {
@@ -2100,52 +2222,15 @@ const STList: React.FC<STListProps> = ({
   }, [boardsKey, effectiveBoardsKey]);
 
   // 用 ref 持有最新的 handleShortScore：
-  // 自动重算场景（切板块、训练日推进）要读最新闭包，又不希望把它写进依赖导致 effect 反复重跑。
+  // 自动重算场景（切板块）要读最新闭包，又不希望把它写进依赖导致 effect 反复重跑。
   const handleShortScoreRef = React.useRef<(items?: ShortTermScoreItem[]) => void>(() => {});
   useEffect(() => {
     handleShortScoreRef.current = handleShortScore;
   }, [handleShortScore]);
 
-  // 训练日推进（训练工具栏或列表里的「下一天」）→ 若正在展示短线评分结果列表，自动按新训练日重算。
-  // 评分池必须是「整个板块股票池」，不能用当前过滤后的结果：
-  // 评分过滤 / RSI 过滤 / 市值 / 形态等条件在展示层重新生效，推进交易日后
-  // 新满足条件的股票才能进入列表、不再满足的会退出，否则列表永远是前一天那批股票的子集。
-  const prevTrainDateRef = React.useRef(trainDate);
-  useEffect(() => {
-    const prev = prevTrainDateRef.current;
-    prevTrainDateRef.current = trainDate;
-    if (!ontrain || !trainDate || prev === trainDate) {
-      return () => {};
-    }
-    if (displayMode !== 'shortScore') {
-      return () => {};
-    }
-    // 上一轮还在跑（含刚开始取板块成分股的阶段）时先等它收尾，否则这次推进会被当成「暂停」吞掉，
-    // 列表就停在上一交易日的评分上。
-    let canceled = false;
-    const startedAt = Date.now();
-    const trigger = () => {
-      if (canceled) {
-        return;
-      }
-      const busy = isShortScoreRunningRef.current || todayScoreRunningRef.current || scoreStartingRef.current;
-      if (busy) {
-        if (Date.now() - startedAt < 20000) {
-          setTimeout(trigger, 300);
-        }
-        return;
-      }
-      // 丢掉上一轮可能残留的暂停队列，强制开新的一轮（否则会接着续跑旧队列，评分池还是旧的）
-      shortScoreRemainingRef.current = [];
-      isShortScorePausedRef.current = false;
-      console.log(`[短线评分] 训练日推进到 ${trainDate} → 按板块全量股票重算评分，再重新过滤`);
-      handleShortScoreRef.current();
-    };
-    setTimeout(trigger, 0);
-    return () => {
-      canceled = true;
-    };
-  }, [ontrain, trainDate, displayMode]);
+  // 训练日推进后**不再自动重算评分**（避免每推进一天就把整池股票重跑一遍）：
+  // 结果列表只保留「已收藏」的股票（见 showList 里的 scoreStale），
+  // 需要按新训练日更新时点「短线评分」——那会重新拉取板块成分股并按新日重算。
 
   // 训练日推进后回填「涨停挂单」的待成交买入（按新训练日的开盘价成交）。
   // 不能只依赖右侧面板：面板可能没打开 / 结果列表正在重算 / 面板日K还没刷新，
@@ -2342,6 +2427,14 @@ const STList: React.FC<STListProps> = ({
     return codes;
   }, [displayMode, shortScoreData, shortScoreFilterDays, shortScoreSeries, newEntryScore]);
 
+  /**
+   * 评分是否「已过期」：训练日推进了，但结果还是上一交易日算出来的
+   *
+   * 训练日推进不再自动重算，过期期间列表只展示收藏股票（不展示上一日那批已经不成立的结果），
+   * 点「短线评分」按新训练日重算后恢复完整列表。
+   */
+  const scoreStale = ontrain && !!trainDate && !!shortScoreTrainDate && shortScoreTrainDate !== trainDate;
+
   // 使用 useMemo 在 render 阶段计算 showList，避免 useLayoutEffect 中 setState 导致的无限循环
   const showList = React.useMemo(() => {
     if (displayMode === 'leaders') {
@@ -2406,6 +2499,10 @@ const STList: React.FC<STListProps> = ({
 
     if (displayMode === 'shortScore') {
       let list = [...shortScoreData];
+      // 训练日推进后评分已过期：只保留收藏股票，点了「短线评分」按新训练日重算后才恢复完整列表
+      if (scoreStale) {
+        list = list.filter((s: any) => isFavorited(s));
+      }
       // 默认隐藏「评分基准日尚未上市」的股票（可用「显示未上市」开关恢复）
       // 注意：收藏的股票一律放行，忽略所有过滤条件（见 isFavorited）
       if (!shortScoreShowNotListed) {
@@ -2470,7 +2567,7 @@ const STList: React.FC<STListProps> = ({
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, isFavorited]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, scoreStale, isFavorited]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」「市值区间」和「名字过滤」过滤（对所有展示模式生效）
@@ -2664,6 +2761,95 @@ const STList: React.FC<STListProps> = ({
   const panelStockCode = panelRow ? codeOfListItem(panelRow) : '';
   const panelStockSecid = panelStockCode ? `${panelStockCode.startsWith('6') ? '1' : '0'}.${panelStockCode}` : '';
 
+  // ========== 时间推进：联动刷新列表 K线形态 ==========
+  /** 当页股票在训练日的全部分时缓存（secid -> 分时），整轮训练内复用，推进不重复取数 */
+  const intradayTrendsRef = React.useRef<Record<string, Stock.TrendItem[]>>({});
+  /** 当页股票的日K缓存（secid -> 日K），同上 */
+  const intradayKlinesRef = React.useRef<Record<string, Stock.KLineItem[]>>({});
+  /** 刷新序号：时间又往前走了就丢弃上一轮还没回来的结果，避免形态回退 */
+  const intradaySeqRef = React.useRef(0);
+  /** 依赖 ref 读最新的展示列表：写成依赖会在每次合并形态后触发自身重跑 */
+  const displayListRef = React.useRef<any[]>([]);
+  displayListRef.current = displayList as any[];
+
+  useEffect(() => {
+    if (!ontrain || !trainDate || displayMode !== 'shortScore') {
+      return () => {};
+    }
+    // 整轮评分 / 当日评分进行中先不抢接口，等它收尾（依赖里的 loading 变化会重新触发）
+    if (shortScoreLoading || todayScoreLoading || !shortScoreData.length) {
+      return () => {};
+    }
+    // 评分已过期（训练日推进了还没重算）：不能把新训练日的盘中形态刷到旧评分行上
+    if (scoreStale) {
+      return () => {};
+    }
+    // 集合竞价阶段（09:30 之前）分时还没有数据，保持上一次的形态
+    if (trainTime < '09:30') {
+      return () => {};
+    }
+    const rows = displayListRef.current.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+    const items: ShortTermScoreItem[] = rows
+      .map((row: any) => ({ code: codeOfListItem(row), name: nameOfListItem(row) }))
+      .filter((i) => !!i.code);
+    if (!items.length) {
+      return () => {};
+    }
+    const seq = intradaySeqRef.current + 1;
+    intradaySeqRef.current = seq;
+    let canceled = false;
+    // 防抖：连续推进时只在停顿后再算，避免每一格都打一轮接口
+    const timer = window.setTimeout(() => {
+      computeTodayScoreRows(items, {
+        source: SHORT_SCORE_SOURCE,
+        concurrency: 3,
+        // 只用到当前时刻为止的分时；且强制按分时重建当日K（官方日K是收盘口径，属于未来数据）
+        cutoffTime: trainTime,
+        forceIntraday: true,
+        trendsMap: intradayTrendsRef.current,
+        klinesMap: intradayKlinesRef.current,
+        onRow: (row) => {
+          if (canceled || seq !== intradaySeqRef.current || row.error) {
+            return;
+          }
+          // 只覆盖「只依赖K线」的展示字段，综合分/等级等整轮评分结果保持不动
+          setShortScoreData((prev) =>
+            prev.map((r) =>
+              r.code === row.code
+                ? {
+                    ...r,
+                    intraday: row.intraday,
+                    klineShape: row.klineShape,
+                    klineYin: row.klineYin,
+                    klineSize: row.klineSize,
+                    klineUpperShadow: row.klineUpperShadow,
+                    klineLowerShadow: row.klineLowerShadow,
+                    volumeExpanded: row.volumeExpanded,
+                    rsiScore: row.rsiScore,
+                    rsiPattern: row.rsiPattern,
+                  }
+                : r
+            )
+          );
+        },
+      }).catch(() => {
+        // 取数失败保持原形态即可
+      });
+    }, 300);
+    return () => {
+      canceled = true;
+      window.clearTimeout(timer);
+    };
+    // displayList / shortScoreData 故意不进依赖（由 ref 读取），否则合并形态会触发自身重跑
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ontrain, trainDate, displayMode, trainTime, timeIdx, currentPage, pageSize, shortScoreLoading, todayScoreLoading, shortScoreTrainDate, scoreStale]);
+
+  // 换训练日 / 退出训练：清空分钟缓存，避免下一日复用上一日的数据
+  useEffect(() => {
+    intradayTrendsRef.current = {};
+    intradayKlinesRef.current = {};
+  }, [trainDate, ontrain]);
+
   return (
     <>
       {/* 操作区占满整行；下方「评分结果列表 | 个股信息面板」平分宽度 */}
@@ -2839,10 +3025,11 @@ const STList: React.FC<STListProps> = ({
           </Button>
           {displayMode === 'shortScore' && shortScoreDate && (
             <span
-              style={{ marginLeft: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}
+              style={{ marginLeft: 8, fontSize: 12, color: scoreStale ? '#faad14' : 'var(--secondary-text-color)' }}
               title="当前结果列表对应的评分基准日；训练日推进不会自动重算，点「短线评分」才会按新训练日更新"
             >
               评分日期 {shortScoreDate}
+              {scoreStale ? '（已过期，仅显示收藏股票，点「短线评分」重算）' : ''}
             </span>
           )}
           {displayMode === 'shortScore' && (
@@ -2956,6 +3143,30 @@ const STList: React.FC<STListProps> = ({
               {trainFinished && (
                 <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>（已到窗口最后一天）</span>
               )}
+            </span>
+          )}
+          {ontrain && (
+            <span style={{ marginLeft: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>训练时间</span>
+              <span style={{ fontSize: 12, fontWeight: 'bold', fontVariantNumeric: 'tabular-nums' }}>{trainTime}</span>
+              <Tooltip title={timePlaying ? '暂停时间推进' : '开始推进时间（09:25 → 11:30 → 13:00 → 15:00）'}>
+                <Button
+                  size="small"
+                  type={timePlaying ? 'primary' : 'text'}
+                  icon={timePlaying ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+                  onClick={toggleTimePlay}
+                />
+              </Tooltip>
+              {TRAIN_TIME_SPEEDS.map((s) => (
+                <Tooltip key={`ts_${s}`} title={s === 1 ? '按真实时间推进（1分钟/分钟）' : `${s} 倍速推进`}>
+                  <Button size="small" type={timeSpeed === s ? 'primary' : 'text'} onClick={() => playTimeAtSpeed(s)}>
+                    {`X${s}`}
+                  </Button>
+                </Tooltip>
+              ))}
+              <Tooltip title="完成（直接到收盘 15:00，显示完整分时与日K）">
+                <Button size="small" type="text" icon={<StepForwardOutlined />} onClick={finishTimePlay} />
+              </Tooltip>
             </span>
           )}
           {ontrain && (
@@ -3721,6 +3932,7 @@ const STList: React.FC<STListProps> = ({
             secid={panelStockSecid}
             name={nameOfListItem(panelRow)}
             trainDate={ontrain ? trainDate : ''}
+            trainTime={ontrain ? trainTime : ''}
             onOpenStock={onOpenStock}
           />
         ) : null}

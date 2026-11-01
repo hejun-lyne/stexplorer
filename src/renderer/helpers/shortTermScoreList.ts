@@ -1350,6 +1350,34 @@ interface ComputeOptions {
    * 供历史列 / 其他入口使用）；历史补算只补缺的交易日，不会重复重算刚算完的基准日。
    */
   ignoreCache?: boolean;
+  /**
+   * 时间推进（训练模式）：只用「<= 该时刻」的分时合成当日K（HH:MM，如 "10:30"）
+   *
+   * 不传 = 用当日全部分时（收盘口径）。时间推进时 K线形态 / 量能 / RSI 都按盘中已发生的部分算。
+   */
+  cutoffTime?: string;
+  /**
+   * 强制用分时合成当日K（默认 false）
+   *
+   * 训练模式下官方日K本来就是「收盘后」的完整数据（对盘中时点属于未来数据），
+   * 时间推进时必须按分时重建当日K，不能因为日K已覆盖当日就跳过。
+   */
+  forceIntraday?: boolean;
+  /**
+   * 复用的当日分时（secid -> 当日全部分时）
+   *
+   * 时间推进每分钟都要重算一遍，传入这份缓存后只做「按时间截断 + 重算形态」，
+   * 不再重复取数；对象会被就地填充（调用方可长期持有）。
+   */
+  trendsMap?: Record<string, Stock.TrendItem[]>;
+  /** 复用的个股日K（secid -> 日K），同上，避免时间推进时反复取数 */
+  klinesMap?: Record<string, Stock.KLineItem[]>;
+}
+
+/** 分时时间（HH:MM）：兼容 "YYYY-MM-DD HH:MM[:SS]" 与 "HH:MM[:SS]" */
+export function trendClockOf(datetime?: string): string {
+  const s = String(datetime || '');
+  return s.length >= 16 ? s.substring(11, 16) : s.substring(0, 5);
 }
 
 /**
@@ -1871,7 +1899,17 @@ export async function computeTodayScoreRows(
   items: ShortTermScoreItem[],
   options: ComputeOptions
 ): Promise<ComputeTodayRowsResult> {
-  const { source, concurrency = 4, shouldStop, onRow, historyDays = 15 } = options;
+  const {
+    source,
+    concurrency = 4,
+    shouldStop,
+    onRow,
+    historyDays = 15,
+    cutoffTime,
+    forceIntraday = false,
+    trendsMap,
+    klinesMap,
+  } = options;
   const results: ShortTermScoreRow[] = [];
   const total = items.length;
   let done = 0;
@@ -1894,20 +1932,29 @@ export async function computeTodayScoreRows(
   }
 
   const ctx = createScoreContext(source);
+  // 时间推进场景由调用方持有跨轮次的日K缓存，直接挂到 ctx 上复用
+  if (klinesMap) {
+    ctx.stockKlinesMap = klinesMap;
+  }
 
   // ---- 批量预取个股日K ----
   // 逐只打接口极易触发限流（「短线评分」同样先批量取一次），批量失败 / 个股停牌时仍由 processOne 逐只兜底。
   const secidOfItem = (code: string) => (code.startsWith('6') ? `1.${code}` : `0.${code}`);
   if (source === FundApiType.Tushare) {
     try {
-      const secids = items.map((i) => secidOfItem(i.code));
-      const batch = await Services.Tushare.BatchGetKFromTushare(secids, dayKey, SCORE_KLINES_PER_STOCK, KLineType.Day);
-      secids.forEach((secid) => {
-        const ks = batch?.[secid];
-        if (Array.isArray(ks) && ks.length) {
-          ctx.stockKlinesMap[secid] = ks;
-        }
-      });
+      // 已有缓存的（时间推进复用）跳过，别每一分钟都把整页日K重取一遍
+      const secids = items
+        .map((i) => secidOfItem(i.code))
+        .filter((secid) => !ctx.stockKlinesMap[secid] || !ctx.stockKlinesMap[secid].length);
+      if (secids.length) {
+        const batch = await Services.Tushare.BatchGetKFromTushare(secids, dayKey, SCORE_KLINES_PER_STOCK, KLineType.Day);
+        secids.forEach((secid) => {
+          const ks = batch?.[secid];
+          if (Array.isArray(ks) && ks.length) {
+            ctx.stockKlinesMap[secid] = ks;
+          }
+        });
+      }
     } catch {
       // 批量取数失败时退回逐只取数，不影响主流程
     }
@@ -1916,13 +1963,23 @@ export async function computeTodayScoreRows(
   // ---- 批量预取当日分时：只取「日K还没覆盖到当日」的股票 ----
   // 逐只调用会被常驻 python 进程串行处理（JS 侧并发不起作用），一只 0.1~2s；
   // 这里一次 IPC 走批量入口（python 侧线程池并发），整体从「分钟级」压到「秒级」。
-  const trendMap: Record<string, Stock.TrendItem[]> = {};
+  // 时间推进时这层缓存由调用方持有（trendsMap），已取过的股票不会再请求。
+  const trendMap: Record<string, Stock.TrendItem[]> = trendsMap || {};
   const needTrendSecids = items
     .map((i) => secidOfItem(i.code))
-    .filter((secid) => !klinesCoverDay(ctx.stockKlinesMap[secid], dayKey));
+    .filter((secid) => {
+      if (trendMap[secid]?.length) {
+        return false;
+      }
+      return forceIntraday || !klinesCoverDay(ctx.stockKlinesMap[secid], dayKey);
+    });
   if (source === FundApiType.Tushare && needTrendSecids.length) {
     try {
-      const batchTrends = await Services.Tushare.GetTrendsBatchFromTushare(needTrendSecids);
+      // 训练模式：当日分时是历史数据，必须按训练日取 1 分钟线；
+      // 实时批量分时接口给的是「真实今天」，训练回看时会串到别的交易日。
+      const batchTrends = trainDayKey
+        ? await Services.Tushare.GetHistTrendsBatchFromTushare(needTrendSecids, dayKey)
+        : await Services.Tushare.GetTrendsBatchFromTushare(needTrendSecids);
       needTrendSecids.forEach((secid) => {
         const ts = batchTrends?.[secid];
         if (Array.isArray(ts) && ts.length) {
@@ -1976,14 +2033,21 @@ export async function computeTodayScoreRows(
         ctx.stockKlinesMap[secid] = bars;
       }
       let intraday = false;
-      if (!klinesCoverDay(bars, dayKey)) {
-        // 官方日K还没到当日：用当日分时合成一根日K补在末尾（优先用批量预取的结果）
+      if (forceIntraday || !klinesCoverDay(bars, dayKey)) {
+        // 官方日K还没到当日（或时间推进要求按盘中口径重建）：用当日分时合成一根日K补在末尾
+        // （优先用批量预取 / 调用方持有的结果）
         const prefetched = trendMap[secid];
-        const trends = prefetched ? TrainFilter.CutTrends(prefetched) : await fetchTrendsOfSource(ctx.source, secid);
+        const full = prefetched ? TrainFilter.CutTrends(prefetched) : await fetchTrendsOfSource(ctx.source, secid);
+        // 时间推进：只保留 <= 当前时刻的分时，盘中形态/量能/RSI 才不会被收盘数据提前泄漏
+        const trends = cutoffTime ? full.filter((t) => trendClockOf(t.datetime) <= cutoffTime) : full;
         const bar = buildTrendBar({ secid, trends, klines: bars, dayKey, circMv: item.circMv });
         if (!bar) {
           skipped += 1;
-          return klineOnlyRow(item, undefined, `当日分时不可用，无法补全 ${scoreDay} 的K线`);
+          return klineOnlyRow(
+            item,
+            undefined,
+            cutoffTime ? `当日分时尚未到 ${cutoffTime}，无盘中K线` : `当日分时不可用，无法补全 ${scoreDay} 的K线`
+          );
         }
         bars = mergeTrendBar(bars, bar);
         intraday = true;

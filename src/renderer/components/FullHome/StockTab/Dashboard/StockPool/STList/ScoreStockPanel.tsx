@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Select, Slider, Spin, Switch, Tooltip } from 'antd';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Button, Radio, Select, Slider, Spin, Switch, Tooltip } from 'antd';
 import { ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
@@ -15,6 +15,7 @@ import {
 import { useNativeThemeColor, useRenderEcharts, useResizeEchart } from '@/utils/hooks';
 import { Stock } from '@/types/stock';
 import { computeShortTermScoreCurve, SHORT_SCORE_SOURCE } from '@/helpers/shortTermScoreList';
+import { BuildDailyKFromTrends } from '@/helpers/stock';
 import { GetCompanyFromTushare } from '@/services/tushare';
 import ScoreStockTrade from './ScoreStockTrade';
 
@@ -32,10 +33,22 @@ const DEFAULT_RANGE = { start: 50, end: 100 };
 const ZOOM_STEP = 5;
 /** 关闭技术指标时 Select 的取值 */
 const TECH_NONE = -1;
+/** 面板图表类型：分时走势 / 日K线 */
+type PanelChartMode = 'trend' | 'kline';
 
 interface RangeArea {
   start: number;
   end: number;
+}
+
+interface TrendOptionParams {
+  /** 当天完整分时 */
+  trends: Stock.TrendItem[];
+  /** 可见的分钟数（训练模式回放：未推进到的时间点不画） */
+  visibleCount: number;
+  showVolume: boolean;
+  /** 昨收（涨跌基准），<=0 表示未知 */
+  zs: number;
 }
 
 interface KlineOptionParams {
@@ -400,6 +413,204 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
   };
 }
 
+/** 分时时间标签：兼容 "YYYY-MM-DD HH:MM[:SS]" 与 "HH:MM[:SS]" 两种格式 */
+function trendTimeLabel(datetime: string) {
+  return datetime && datetime.length >= 16 ? datetime.substring(11, 16) : String(datetime || '').substring(0, 5);
+}
+
+/**
+ * 分时走势 option：价格 + 均价 + 成交量，支持「回放」（只画到第 visibleCount 根）
+ *
+ * 训练模式下分时是逐分钟推进的：坐标轴始终是整日长度，未推进到的时间点用 null 占位，
+ * 曲线随时间一点点「长出来」；价格轴固定为整日区间（含昨收），避免回放时反复缩放。
+ */
+function buildTrendOption({ trends, visibleCount, showVolume, zs }: TrendOptionParams) {
+  const colors = Utils.getVariablesColor(CONST.VARIABLES);
+  const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
+  const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
+  const textColor = colors['--main-text-color'] || '#666';
+  const secondaryColor = colors['--hint-color'] || '#999';
+  const splitColor = 'rgba(128, 128, 128, 0.25)';
+  const tooltipBg = colors['--inner-color'] || colors['--background-color'] || '#fff';
+  const tooltipBorder = colors['--border-color'] || 'rgba(128, 128, 128, 0.35)';
+  const pointerLabelBg = colors['--primary-color'] || '#888';
+
+  const visible = Math.max(0, Math.min(visibleCount, trends.length));
+  const dates = trends.map((t) => trendTimeLabel(t.datetime));
+  const hasAverage = trends.some((t) => !!t.average);
+  const prices = trends.map((t, i) => (i < visible ? t.current : null));
+  const averages = trends.map((t, i) => (i < visible ? t.average : null));
+  const vols = trends.map((t, i) =>
+    i < visible ? [i, t.vol, t.current >= t.last ? 1 : -1] : null
+  );
+
+  const chartHeight = 400;
+  const TOP = 6;
+  const BOTTOM = 20;
+  const GAP = 6;
+  const VOL_H = 54;
+  const priceH = chartHeight - TOP - BOTTOM - (showVolume ? VOL_H + GAP : 0);
+  const gridWidth = { left: 6, right: 46 };
+
+  const grids: any[] = [{ ...gridWidth, top: TOP, height: priceH }];
+  if (showVolume) {
+    grids.push({ ...gridWidth, top: TOP + priceH + GAP, height: VOL_H });
+  }
+  const lastGridIndex = grids.length - 1;
+
+  const xAxis = grids.map((_, i) => ({
+    type: 'category',
+    data: dates,
+    gridIndex: i,
+    boundaryGap: false,
+    axisTick: { show: false },
+    axisLine: { lineStyle: { color: splitColor } },
+    axisLabel: { show: i === lastGridIndex, fontSize: 9, color: secondaryColor, hideOverlap: true },
+    splitLine: { show: false },
+  }));
+
+  // 价格轴固定到整日区间（含昨收）：回放过程中不会因数据变多而反复缩放
+  const rangeValues = trends.map((t) => t.current).concat(hasAverage ? trends.map((t) => t.average) : []);
+  if (zs > 0) {
+    rangeValues.push(zs);
+  }
+  const minVal = Math.min(...rangeValues);
+  const maxVal = Math.max(...rangeValues);
+  const yAxis: any[] = [
+    {
+      scale: true,
+      gridIndex: 0,
+      position: 'right',
+      min: minVal * 0.999,
+      max: maxVal * 1.001,
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { fontSize: 9, color: secondaryColor, formatter: (v: number) => Number(v).toFixed(2) },
+      splitLine: { lineStyle: { color: splitColor, type: 'dashed' } },
+    },
+  ];
+  if (showVolume) {
+    yAxis.push({
+      scale: true,
+      gridIndex: 1,
+      position: 'right',
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { show: false },
+      splitLine: { show: false },
+    });
+  }
+
+  const currentIdx = Math.max(0, visible - 1);
+  const lastVisible = trends[currentIdx];
+  const lastPrice = Number(lastVisible?.current ?? trends[0].current);
+  const priceColor = zs > 0 && lastPrice < zs ? downColor : upColor;
+  // 回放中：标记「当前推进到的位置」，并说明这不是完整分时
+  const replaying = visible > 0 && visible < trends.length;
+  const markLines: any[] = [];
+  if (zs > 0) {
+    markLines.push({ yAxis: zs, lineStyle: { color: secondaryColor, type: 'dashed', width: 1 } });
+  }
+  if (replaying && dates[currentIdx]) {
+    markLines.push({ xAxis: dates[currentIdx], lineStyle: { color: secondaryColor, opacity: 0.5, width: 1 } });
+  }
+
+  const series: any[] = [
+    {
+      name: '价格',
+      type: 'line',
+      data: prices,
+      showSymbol: false,
+      symbol: 'none',
+      connectNulls: false,
+      lineStyle: { width: 1.5, color: priceColor },
+      // 昨收基准线（涨跌都对照它）+ 回放进度线
+      markLine: markLines.length ? { symbol: 'none', silent: true, label: { show: false }, data: markLines } : undefined,
+    },
+    {
+      // 回放不到一整根时也要有可见的「当前价」点
+      name: '当前价',
+      type: 'scatter',
+      data: visible > 0 ? [[currentIdx, lastPrice]] : [],
+      symbolSize: 4,
+      itemStyle: { color: priceColor },
+      silent: true,
+      z: 3,
+    },
+  ];
+  if (hasAverage) {
+    series.push({
+      name: '均价',
+      type: 'line',
+      data: averages,
+      showSymbol: false,
+      symbol: 'none',
+      connectNulls: false,
+      lineStyle: { width: 1, color: MA_COLORS[0] },
+    });
+  }
+  if (showVolume) {
+    series.push({
+      name: '成交量',
+      type: 'bar',
+      xAxisIndex: 1,
+      yAxisIndex: 1,
+      data: vols,
+      itemStyle: { color: (p: any) => (p.data?.[2] === -1 ? downColor : upColor) },
+    });
+  }
+
+  return {
+    chartHeight,
+    option: {
+      animation: false,
+      grid: grids,
+      xAxis,
+      yAxis,
+      axisPointer: { link: [{ xAxisIndex: grids.map((_, i) => i) }] },
+      tooltip: {
+        trigger: 'axis',
+        confine: true,
+        axisPointer: {
+          type: 'cross',
+          label: { backgroundColor: pointerLabelBg, color: '#fff', fontSize: 10, borderWidth: 0 },
+        },
+        backgroundColor: tooltipBg,
+        borderColor: tooltipBorder,
+        borderWidth: 1,
+        padding: [6, 8],
+        textStyle: { fontSize: 11, color: textColor },
+        extraCssText: 'box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2); border-radius: 4px;',
+        formatter: (params: any) => {
+          // 未推进到的时间点 data 为 null，直接跳过
+          const list: any[] = (params || []).filter((p: any) => p && p.data !== null && p.data !== undefined);
+          if (!list.length) {
+            return '';
+          }
+          const price = list.find((p) => p.seriesName === '价格');
+          const avg = list.find((p) => p.seriesName === '均价');
+          const vol = list.find((p) => p.seriesName === '成交量');
+          const rows: string[] = [`<div style="font-weight:bold;margin-bottom:4px">${list[0].axisValue}</div>`];
+          if (price) {
+            const value = Number(price.data);
+            const chg = zs > 0 ? (value / zs) * 100 - 100 : 0;
+            rows.push(`现价 <b>${value.toFixed(2)}</b>`);
+            rows.push(`涨跌 <b>${chg.toFixed(2)}%</b>`);
+          }
+          if (avg) {
+            rows.push(`均价 <b>${Number(avg.data).toFixed(2)}</b>`);
+          }
+          if (vol && Array.isArray(vol.data)) {
+            rows.push(`成交量 <b>${(Number(vol.data[1]) / 10000).toFixed(2)}万手</b>`);
+          }
+          return rows.join('<br/>');
+        },
+      },
+      series,
+    },
+  };
+}
+
 export interface ScoreStockPanelProps {
   code: string;
   secid: string;
@@ -411,6 +622,13 @@ export interface ScoreStockPanelProps {
    * 交易区表现为「训练日当天停牌 / 预计成交 0 股」，涨停挂单也不会回填成交。
    */
   trainDate?: string;
+  /**
+   * 训练日内的「推进时刻」（HH:MM，09:25 ~ 15:00）；非训练模式为空
+   *
+   * 由顶部操作区的时间推进统一驱动：分时只画到这个时刻，日K的当日那根也按分时重建，
+   * 保证面板看到的和当时的盘面一致（不会提前看到收盘后的数据）。
+   */
+  trainTime?: string;
   /** 点击名字/代码打开股票详情 */
   onOpenStock: (secid: string, name: string) => void;
 }
@@ -421,12 +639,21 @@ export interface ScoreStockPanelProps {
  * 从上往下：名字+代码（点击打开详情）→ 公司简介 → 日K线（可缩放/成交量/技术指标）→ 买入卖出操作。
  * 日K线与短线评分同源（Tushare），训练模式下由取数层自动截断到训练日。
  */
-const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, trainDate, onOpenStock }) => {
+const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, trainDate, trainTime, onOpenStock }) => {
   const [intro, setIntro] = useState('');
   const [introLoading, setIntroLoading] = useState(false);
   const [klines, setKlines] = useState<Stock.KLineItem[]>([]);
   const [klineLoading, setKlineLoading] = useState(false);
   const [klineError, setKlineError] = useState('');
+
+  const inTraining = !!trainDate;
+
+  // ===== 分时走势 =====
+  const [trends, setTrends] = useState<Stock.TrendItem[]>([]);
+  const [trendLoading, setTrendLoading] = useState(false);
+  const [trendError, setTrendError] = useState('');
+  // 训练模式默认看分时（只显示到「训练时间」为止，不显示完整分时）
+  const [chartMode, setChartMode] = useState<PanelChartMode>(trainDate ? 'trend' : 'kline');
 
   // ===== 图表控制（与详情页 PriceTrend 对齐）=====
   const [range, setRange] = useState<RangeArea>(DEFAULT_RANGE);
@@ -542,6 +769,123 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     };
   }, [techType, code, name]);
 
+  // 训练模式默认看分时：只在「进入/退出训练」时同步默认视图，训练日推进不打断用户当前选择
+  const wasTrainingRef = useRef(inTraining);
+  useEffect(() => {
+    if (wasTrainingRef.current !== inTraining) {
+      wasTrainingRef.current = inTraining;
+      setChartMode(inTraining ? 'trend' : 'kline');
+    }
+  }, [inTraining]);
+
+  // 分时取数：训练模式取训练日的历史分时（Tushare 1 分钟线），非训练模式取实时分时。
+  // 训练模式下即使当前看的是日K也要取：当日那根K线要按分时重建（见 displayKlines）。
+  useEffect(() => {
+    if (chartMode !== 'trend' && !inTraining) {
+      return () => {};
+    }
+    let canceled = false;
+    setTrends([]);
+    setTrendError('');
+    setTrendLoading(true);
+    const loader: Promise<Stock.TrendItem[]> = trainDate
+      ? Services.Stock.requestHistTrends(secid, trainDate.replace(/-/g, ''))
+      : Services.Stock.GetTrendFromDataSource(SHORT_SCORE_SOURCE, secid).then(
+          (r: any) => (r?.trends || []) as Stock.TrendItem[]
+        );
+    Promise.resolve(loader)
+      .then((list) => {
+        if (!canceled) {
+          setTrends(list || []);
+        }
+      })
+      .catch((e: any) => {
+        if (!canceled) {
+          setTrendError(e?.message || '分时取数失败');
+        }
+      })
+      .finally(() => {
+        if (!canceled) {
+          setTrendLoading(false);
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [chartMode, secid, trainDate, inTraining]);
+
+  /** 训练时间内已经走出来的分时（<= 当前时刻）；非训练模式/未推进时用全部分时 */
+  const visibleTrends = useMemo(() => {
+    if (!inTraining || !trainTime) {
+      return trends;
+    }
+    return trends.filter((t) => trendTimeLabel(t.datetime) <= trainTime);
+  }, [trends, trainTime, inTraining]);
+
+  const trendTotal = trends.length;
+  // 训练模式只画到「训练时间」为止，不显示完整分时；非训练模式直接看完整分时
+  const visibleCount = inTraining ? Math.min(visibleTrends.length, trendTotal) : trendTotal;
+
+  /** 分时昨收：训练模式取历史分时首根的 last（该交易日 pre_close，与分时同为不复权口径） */
+  const trendZs = useMemo(() => {
+    if (!trends.length) {
+      return 0;
+    }
+    const first = trends[0];
+    const firstLast = Number(first.last) || 0;
+    if (inTraining && firstLast > 0) {
+      return firstLast;
+    }
+    // 实时分时的首根 last 就是现价（接口不给昨收），退化用日K推算
+    const day = String(first.datetime || '').substring(0, 10);
+    if (klines.length) {
+      const lastK = klines[klines.length - 1];
+      const isSameDay = !!day && String(lastK.date || '').substring(0, 10) === day;
+      if (isSameDay && klines.length > 1) {
+        return Number(klines[klines.length - 2].sp) || 0;
+      }
+      if (!isSameDay) {
+        return Number(lastK.sp) || 0;
+      }
+    }
+    return firstLast && firstLast !== Number(first.current) ? firstLast : 0;
+  }, [trends, klines, inTraining]);
+
+  /** 分时状态文字：当前训练时刻 / 现价 / 涨跌幅 */
+  const trendStatus = useMemo(() => {
+    if (!trends.length) {
+      return '';
+    }
+    if (inTraining && visibleCount <= 0) {
+      // 集合竞价阶段（09:30 之前）还没有分钟数据
+      return `${trainTime || ''} 未开盘`;
+    }
+    const bar = trends[Math.max(0, visibleCount - 1)];
+    const price = Number(bar?.current) || 0;
+    const chg = trendZs > 0 ? (price / trendZs) * 100 - 100 : 0;
+    const progress = inTraining && visibleCount < trendTotal ? ` · ${visibleCount}/${trendTotal}分钟` : '';
+    return `${trendTimeLabel(bar?.datetime)} 现价 ${price.toFixed(2)}（${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%）${progress}`;
+  }, [trends, visibleCount, trendZs, inTraining, trendTotal, trainTime]);
+
+  /**
+   * 训练模式下日K的「当日那根」按分时重建
+   *
+   * 训练日的官方日K是收盘口径（对盘中时点属于未来数据）；时间推进时用分时合成一根
+   * 「截至当前时刻」的K线替换掉它，还没开盘（无分时）时当日的K直接不显示。
+   */
+  const displayKlines = useMemo(() => {
+    if (!inTraining || !trainTime || !trainDate || !trends.length) {
+      return klines;
+    }
+    const day = String(trainDate).substring(0, 10);
+    const base = klines.filter((k) => String(k?.date || '').substring(0, 10) !== day);
+    if (!visibleTrends.length) {
+      return base;
+    }
+    const bar = BuildDailyKFromTrends({ secid, trends: visibleTrends, date: day, prevClose: trendZs });
+    return bar ? [...base, bar] : base;
+  }, [inTraining, trainTime, trainDate, trends, visibleTrends, klines, trendZs, secid]);
+
   // 切换股票：重置缩放区间
   useEffect(() => {
     setRange(DEFAULT_RANGE);
@@ -562,13 +906,28 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
 
   // 图表配色取自 CSS 变量：切主题（深/浅、低饱和度）后必须重算 option，否则 tooltip 底色会停在旧主题
   const { darkMode, lowKey } = useNativeThemeColor([]);
-  const { option, chartHeight } = useMemo(
-    () =>
-      klines.length
-        ? buildKlineOption({ klines, range, showVolume, techType, shortScoreScores })
-        : { option: null, chartHeight: techType === TECH_NONE ? 400 : 480 },
-    [klines, range, showVolume, techType, shortScoreScores, darkMode, lowKey]
-  );
+  const { option, chartHeight } = useMemo(() => {
+    if (chartMode === 'trend') {
+      return trends.length
+        ? buildTrendOption({ trends, visibleCount, showVolume, zs: trendZs })
+        : { option: null, chartHeight: 400 };
+    }
+    return displayKlines.length
+      ? buildKlineOption({ klines: displayKlines, range, showVolume, techType, shortScoreScores })
+      : { option: null, chartHeight: techType === TECH_NONE ? 400 : 480 };
+  }, [
+    chartMode,
+    trends,
+    visibleCount,
+    trendZs,
+    showVolume,
+    displayKlines,
+    range,
+    techType,
+    shortScoreScores,
+    darkMode,
+    lowKey,
+  ]);
   const { ref: chartRef, chartInstance } = useResizeEchart(-1);
   useRenderEcharts(
     () => {
@@ -630,7 +989,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
       </div>
 
       <div style={{ marginTop: 12 }}>
-        {/* 图表工具栏：技术指标 / 成交量 / 缩放（与详情页 PriceTrend 一致） */}
+        {/* 图表工具栏：分时/日K切换；日K下为技术指标 / 成交量 / 缩放；训练模式分时另带回放操作 */}
         <div
           style={{
             display: 'flex',
@@ -640,49 +999,86 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
             marginBottom: 4,
           }}
         >
-          <span style={{ fontSize: 12, fontWeight: 600 }}>
-            日K线{klines.length ? `（${klines.length}个交易日）` : ''}
-          </span>
-          <Select size="small" style={{ width: 100 }} value={techType} onChange={(v) => setTechType(Number(v))}>
-            <Select.Option value={TECH_NONE}>无指标</Select.Option>
-            {DefaultTechIndicatorTypes.map((v) => (
-              <Select.Option value={v} key={`tit_${v}`}>
-                {(TechIndicatorNames as Record<number, string>)[v]}
-              </Select.Option>
-            ))}
-          </Select>
-          <Tooltip title="成交量">
-            <Switch size="small" checked={showVolume} onChange={setShowVolume} />
-          </Tooltip>
-          <Slider
-            range
-            min={0}
-            max={100}
-            style={{ width: 110, margin: '0 2px' }}
-            value={[range.start, range.end]}
-            onChange={updateRange}
-            tipFormatter={null}
-          />
-          <Button size="small" type="text" icon={<ZoomInOutlined />} onClick={zoomIn} title="放大" />
-          <Button size="small" type="text" icon={<ZoomOutOutlined />} onClick={zoomOut} title="缩小" />
+          <Radio.Group
+            size="small"
+            value={chartMode}
+            onChange={(e) => setChartMode(e.target.value as PanelChartMode)}
+          >
+            <Radio.Button value="trend">分时</Radio.Button>
+            <Radio.Button value="kline">日K线</Radio.Button>
+          </Radio.Group>
+          {chartMode === 'kline' ? (
+            <>
+              <span style={{ fontSize: 12, fontWeight: 600 }}>
+                日K线{displayKlines.length ? `（${displayKlines.length}个交易日）` : ''}
+              </span>
+              <Select size="small" style={{ width: 100 }} value={techType} onChange={(v) => setTechType(Number(v))}>
+                <Select.Option value={TECH_NONE}>无指标</Select.Option>
+                {DefaultTechIndicatorTypes.map((v) => (
+                  <Select.Option value={v} key={`tit_${v}`}>
+                    {(TechIndicatorNames as Record<number, string>)[v]}
+                  </Select.Option>
+                ))}
+              </Select>
+              <Tooltip title="成交量">
+                <Switch size="small" checked={showVolume} onChange={setShowVolume} />
+              </Tooltip>
+              <Slider
+                range
+                min={0}
+                max={100}
+                style={{ width: 110, margin: '0 2px' }}
+                value={[range.start, range.end]}
+                onChange={updateRange}
+                tipFormatter={null}
+              />
+              <Button size="small" type="text" icon={<ZoomInOutlined />} onClick={zoomIn} title="放大" />
+              <Button size="small" type="text" icon={<ZoomOutOutlined />} onClick={zoomOut} title="缩小" />
+            </>
+          ) : (
+            <>
+              <Tooltip title="成交量">
+                <Switch size="small" checked={showVolume} onChange={setShowVolume} />
+              </Tooltip>
+              <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{trendStatus}</span>
+            </>
+          )}
         </div>
         <div ref={chartRef} style={{ width: '100%', height: chartHeight }} />
-        {klineLoading ? (
-          <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
-            <Spin size="small" /> 日K加载中...
-          </div>
-        ) : null}
-        {shortScoreCurveLoading ? (
-          <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
-            <Spin size="small" /> 短线评分曲线现取数计算中（最近 {PANEL_KLINE_LIMIT} 个交易日）...
-          </div>
-        ) : null}
-        {!klineLoading && klineError ? (
-          <div style={{ fontSize: 12, color: '#ff4d4f' }}>{klineError}</div>
-        ) : null}
-        {!klineLoading && !klineError && !klines.length ? (
-          <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>暂无日K数据</div>
-        ) : null}
+        {chartMode === 'trend' ? (
+          <>
+            {trendLoading ? (
+              <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
+                <Spin size="small" /> 分时加载中...
+              </div>
+            ) : null}
+            {!trendLoading && trendError ? (
+              <div style={{ fontSize: 12, color: '#ff4d4f' }}>{trendError}</div>
+            ) : null}
+            {!trendLoading && !trendError && !trends.length ? (
+              <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>暂无分时数据</div>
+            ) : null}
+          </>
+        ) : (
+          <>
+            {klineLoading ? (
+              <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
+                <Spin size="small" /> 日K加载中...
+              </div>
+            ) : null}
+            {shortScoreCurveLoading ? (
+              <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
+                <Spin size="small" /> 短线评分曲线现取数计算中（最近 {PANEL_KLINE_LIMIT} 个交易日）...
+              </div>
+            ) : null}
+            {!klineLoading && klineError ? (
+              <div style={{ fontSize: 12, color: '#ff4d4f' }}>{klineError}</div>
+            ) : null}
+            {!klineLoading && !klineError && !displayKlines.length ? (
+              <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>暂无日K数据</div>
+            ) : null}
+          </>
+        )}
       </div>
 
       {/* 买入卖出区域：训练模式与详情页共用同一个训练账户 */}

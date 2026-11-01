@@ -778,8 +778,47 @@ function mapTrendItems(list: any[]): Stock.TrendItem[] {
       vol: item.vol,
       average: item.average || 0,
       up: item.up !== undefined ? item.up : (item.current >= item.last ? 1 : -1),
+      holdPosition: item.holdPosition || 0,
     }))
     .filter((t: any) => t.current > 0);
+}
+
+/**
+ * 获取指定交易日的「历史分时」——由 Tushare 1 分钟线合成
+ *
+ * 训练 / 回测模式下，训练日期当天的分时属于「当日数据」，实时接口取不到；
+ * 原 opensourcecache 的历史分时源已不可用，改由 python 侧 stk_mins(1min) 生成
+ * （本地分钟库 minute_parquet / daily.db 命中时直接复用，不再请求上游）。
+ *
+ * 返回的 datetime 统一转成 "HH:MM:SS"（与 requestDealDay 口径一致），
+ * 调用方可以沿用原有的「按分钟合并 + 前缀交易日」处理逻辑。
+ *
+ * @param secid 标的ID，如 "1.600519"
+ * @param date 交易日，YYYYMMDD 或 YYYY-MM-DD
+ */
+export async function GetHistTrendFromTushare(
+  secid: string,
+  date: string
+): Promise<{ secid: string; trends: Stock.TrendItem[] }> {
+  try {
+    const result = await callTushare('get_stock_trend_by_date', {
+      secid,
+      trade_date: String(date).replace(/-/g, ''),
+    });
+    if (result?.error) {
+      console.warn('[历史分时] tushare 1 分钟数据不可用:', secid, date, result.error);
+      return { secid, trends: [] };
+    }
+    const trends = mapTrendItems(result).map((t) => ({
+      ...t,
+      // "YYYY-MM-DD HH:MM" → "HH:MM:SS"，与 requestDealDay 返回格式保持一致
+      datetime: t.datetime.length >= 16 ? `${t.datetime.substring(11, 16)}:00` : t.datetime,
+    }));
+    return { secid, trends };
+  } catch (error) {
+    logError(error, 'GetHistTrendFromTushare', '获取历史分时失败');
+    return { secid, trends: [] };
+  }
 }
 
 /**
@@ -812,6 +851,48 @@ export async function GetTrendsBatchFromTushare(secids: string[]): Promise<Recor
     });
   } catch (error) {
     logError(error, 'GetTrendsBatchFromTushare', '批量获取分时失败');
+  }
+  return map;
+}
+
+/**
+ * 批量获取「指定交易日」的历史分时（训练模式时间推进用）
+ *
+ * 时间推进时整页股票的 K线形态都要刷新，逐只取数会被常驻 python 服务串行化，
+ * 因此走批量入口（python 侧线程池 + 本地分钟缓存）。
+ *
+ * 注意：返回的 datetime 保留完整日期（"YYYY-MM-DD HH:MM"），
+ * 时间推进要按时刻截断、按日期合成当日K线，不能只留 "HH:MM:SS"。
+ */
+export async function GetHistTrendsBatchFromTushare(
+  secids: string[],
+  date: string
+): Promise<Record<string, Stock.TrendItem[]>> {
+  const map: Record<string, Stock.TrendItem[]> = {};
+  if (!secids || !secids.length || !date) {
+    return map;
+  }
+  try {
+    const result = await callTushare('get_stock_trend_by_date_batch', {
+      secids,
+      trade_date: String(date).replace(/-/g, ''),
+    });
+    if (result?.error) {
+      console.warn('[历史分时] 批量 1 分钟数据不可用:', date, result.error);
+      return map;
+    }
+    Object.keys(result || {}).forEach((secid) => {
+      const v = (result as any)[secid];
+      if (!Array.isArray(v)) {
+        return;
+      }
+      const trends = mapTrendItems(v);
+      if (trends.length) {
+        map[secid] = trends;
+      }
+    });
+  } catch (error) {
+    logError(error, 'GetHistTrendsBatchFromTushare', '批量获取历史分时失败');
   }
   return map;
 }

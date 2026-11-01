@@ -2360,6 +2360,204 @@ class TushareAPI:
         except Exception:
             pass
 
+    @staticmethod
+    def _get_pre_close(secid: str, day: str) -> float:
+        """取指定交易日的昨收价（不复权口径，与分钟线一致），取不到返回 0"""
+        ts_code = convert_secid_to_ts_code(secid)
+        day_norm = day.replace('-', '')
+        # 1. tushare daily 的 pre_close 最准确（含除权除息日的参考价）
+        try:
+            pro = get_pro()
+            df = safe_api_call(pro.daily, ts_code=ts_code, trade_date=day_norm)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                val = _to_float(df.iloc[0].get('pre_close'))
+                if val > 0:
+                    return val
+        except Exception:
+            pass
+        # 2. 本地日K（不复权口径）取该日之前最后一根收盘价兜底
+        try:
+            rows = _db_read_kline('stock', ts_code, 'daily', '') or []
+            prev = 0.0
+            for rec in rows:
+                d = str(rec.get('date', '')).replace('-', '')[:8]
+                if d and d < day_norm:
+                    prev = _to_float(rec.get('sp'))
+            return prev
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def get_stock_trend_by_date(secid: str, trade_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取「指定交易日」的历史分时（由 Tushare 1 分钟线合成）
+
+        训练 / 回测模式下详情页要看训练日期当天的分时，原来的历史分时缓存源
+        （opensourcecache.zealink.com/cache/dealday）已不可用，这里改用 tushare
+        ``stk_mins(freq='1min')`` 合成，字段口径与 ``get_stock_trend`` 完全一致
+        （datetime/current/last/vol/average/up），前端图表可直接使用。
+
+        本地优先：命中 meta.db/api_cache(``trend_1min_v2_{code}_{day}``) 时不再请求上游
+        （训练日反复切换不会重复取数）；取到后同时归档到 minute_kline / minute_parquet。
+
+        口径：``vol`` 为「手」（与实时分时接口一致，分时图 tooltip 按「万手」展示），
+        ``average`` 为当日累计成交均价（元）。
+
+        参数:
+            secid: 标的ID，如 "1.600519"
+            trade_date: 交易日，YYYYMMDD 或 YYYY-MM-DD；不传时取数据截止日（训练日期）
+        """
+        day = _standardize_date(trade_date) if trade_date else _now('%Y-%m-%d')
+        if not day or len(day) < 10:
+            return {"error": "缺少交易日参数"}
+        day = day[:10]
+        if day > datetime.now().strftime('%Y-%m-%d'):
+            return {"error": f"交易日 {day} 晚于当前日期"}
+        if is_board_code(secid):
+            return {"error": "板块暂无 1 分钟历史分时"}
+        code = convert_secid_to_pure_code(secid)
+        if not code:
+            return {"error": "无效的标的代码"}
+
+        today = datetime.now().strftime('%Y-%m-%d')
+        # 分钟库按纯代码分区（minute_kline 主键 code+trade_date+trade_time），
+        # 指数代码与个股会撞车（1.000001 上证指数 / 0.000001 平安银行），只有个股落库
+        is_stock = not is_index_code(secid)
+
+        # 1. 本地缓存（历史交易日的分钟数据不再变化，命中即复用）
+        #
+        # 键里带 v2：这个接口对外是「成交量=手 / 均价=元」的口径，而 minute_kline 里
+        # 同时存在实时分时（手）和历史分时（旧版按股）两种行，直接读库会拿到 100 倍偏差的量；
+        # 这里用独立版本化缓存保存归一化后的结果，不会与库里的旧行混淆。
+        cache_key = f"trend_1min_v2_{code}_{day.replace('-', '')}"
+        if is_stock and day < today:
+            try:
+                cached = read_cache(cache_key, max_age_hours=24 * 365 * 10)
+                if isinstance(cached, list) and cached:
+                    _db_log_update("minute", f"{code} {day}", "hit", len(cached))
+                    return cached
+            except Exception:
+                pass
+
+        # 2. 请求 tushare 1 分钟线（需要分钟线权限）
+        try:
+            pro = get_pro()
+        except Exception as e:
+            return {"error": str(e)}
+        ts_code = convert_secid_to_ts_code(secid)
+        df = safe_api_call(
+            pro.stk_mins,
+            ts_code=ts_code,
+            freq='1min',
+            start_date=f"{day} 09:00:00",
+            end_date=f"{day} 15:30:00",
+        )
+        if isinstance(df, dict) and df.get("error"):
+            return df
+        if df is None or getattr(df, "empty", True):
+            return {"error": f"{day} 无 1 分钟数据"}
+
+        try:
+            df = df.sort_values("trade_time")
+        except Exception:
+            pass
+
+        # 均价 = 累计成交额 / 累计成交量。成交额单位（元 / 千元）随接口版本可能有差异，
+        # 用「成交额/成交量」与收盘价的比值中位数校准一次，避免均价线整体偏移 100 / 1000 倍
+        ratio_samples = []
+        for _, row in df.iterrows():
+            v, p, a = _to_float(row.get("vol")), _to_float(row.get("close")), _to_float(row.get("amount"))
+            if v > 0 and p > 0 and a > 0:
+                ratio_samples.append((a / v) / p)
+                if len(ratio_samples) >= 20:
+                    break
+        amount_scale = 1.0
+        # 成交量口径：tushare 分钟线 vol 是「股」，而实时分时接口 / 分时图统一按「手」展示
+        # （tooltip 按 vol/1e4 显示「万手」），这里默认 /100 换算成手；
+        # 若比值≈100（说明 vol 已经是手）则不换算
+        vol_div = 100
+        if ratio_samples:
+            median = sorted(ratio_samples)[len(ratio_samples) // 2]
+            if median > 0:
+                amount_scale = 10 ** round(math.log10(median))
+                if round(math.log10(median)) == 2:
+                    vol_div = 1
+
+        pre_close = TushareAPI._get_pre_close(secid, day)
+        trends: List[Dict[str, Any]] = []
+        cum_vol = 0.0
+        cum_amount = 0.0
+        last = pre_close
+        for _, row in df.iterrows():
+            trade_time = str(row.get("trade_time") or "")
+            hhmm = trade_time[11:16] if len(trade_time) >= 16 else trade_time[:5]
+            # 只保留连续竞价时段（09:30-11:30 / 13:00-15:00），剔除集合竞价与盘后
+            if not (("09:30" <= hhmm <= "11:30") or ("13:00" <= hhmm <= "15:00")):
+                continue
+            current = _to_float(row.get("close"))
+            if current <= 0:
+                continue
+            raw_vol = max(_to_int(row.get("vol")), 0)
+            amount = max(_to_float(row.get("amount")), 0) / amount_scale
+            cum_vol += raw_vol
+            cum_amount += amount
+            # 均价 = 累计成交额 / 累计成交量（分时图上的黄线）
+            average = round(cum_amount / cum_vol, 3) if cum_vol > 0 else current
+            prev = last if last and last > 0 else current
+            trends.append({
+                "datetime": f"{day} {hhmm}",
+                "current": current,
+                "last": prev,
+                "vol": int(raw_vol / vol_div),  # 手
+                "average": average,
+                "up": 1 if current >= prev else -1,
+            })
+            last = current
+
+        if not trends:
+            return {"error": f"{day} 无有效 1 分钟数据"}
+
+        # 3. 落本地缓存，下次直接命中（指数不落库，避免与个股纯代码撞车）
+        if is_stock:
+            try:
+                write_cache(cache_key, trends)
+            except Exception:
+                pass
+            # 同时归档到分钟库（分钟线按「手」写入，与实时分时口径一致）
+            TushareAPI._persist_trend(code, day, trends)
+        return trends
+
+    @staticmethod
+    def get_stock_trend_by_date_batch(secids: List[str], trade_date: Optional[str] = None) -> Dict[str, Any]:
+        """批量取「指定交易日」的历史分时（Tushare 1 分钟线）
+
+        训练模式「时间推进」每推进一分钟就要刷新整页股票的 K线形态，逐只 IPC 会被常驻进程
+        串行处理（一页 20 只 → 十几秒），这里一次调用在 python 侧并发取数；
+        单只仍走 ``get_stock_trend_by_date`` 的本地缓存，重复推进不会重复请求上游。
+
+        返回: {secid: [分时记录, ...]}，取不到的直接不出现在结果里（前端保持原值）
+        """
+        if not secids:
+            return {}
+        day = _standardize_date(trade_date) if trade_date else _now('%Y-%m-%d')
+        if not day or len(day) < 10:
+            return {"error": "缺少交易日参数"}
+        day = day[:10]
+
+        def one(secid: str):
+            try:
+                return secid, TushareAPI.get_stock_trend_by_date(secid, day)
+            except Exception as e:  # 单只失败不影响整批
+                return secid, {"error": str(e)}
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        result: Dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for secid, trends in executor.map(one, list(secids)):
+                if isinstance(trends, list) and trends:
+                    result[secid] = trends
+        return result
+
 
     @staticmethod
     def get_sector_boards(bk_type: str = "industry", data_source: str = "dc") -> List[Dict[str, Any]]:

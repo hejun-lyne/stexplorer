@@ -1006,7 +1006,8 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
       },
       cacheKey: `GetStockTrendsAndFlows/${secid}`,
     });
-    const { run: runGetHistTrends } = useRequest(Services.Stock.requestDealDay, {
+    // 训练模式：历史分时由 Tushare 1 分钟线合成（原历史分时缓存源已下线）
+    const { run: runGetHistTrends } = useRequest(Services.Stock.requestHistTrends, {
       throwOnError: true,
       manual: true,
       onSuccess: (data) => {
@@ -1035,7 +1036,7 @@ const BKStockBrief: React.FC<BKStockBriefProps> = React.memo(
         });
         handleTrends(processed);
       },
-      cacheKey: `requestDealDay/${secid}`,
+      cacheKey: `requestHistTrends/${secid}/${trainDate || 'live'}`,
     });
     useLayoutEffect(() => {
       if (ontrain && trainDate) {
