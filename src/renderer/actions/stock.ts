@@ -1069,7 +1069,17 @@ export function deleteStockMarkLineAction(value: number, sid: string): ThunkActi
   };
 }
 
-/** amount：买入金额（模拟训练用），不传表示用全部可用资金；卖出一律清仓，不需要金额 */
+/**
+ * 添加训练买卖点
+ *
+ * amount：买入金额（模拟训练用），不传表示用全部可用资金；卖出一律清仓，不需要金额
+ *
+ * 买入点允许「同一天多笔」（分批建仓 / 加仓）：每笔委托各自记一个点，金额互不覆盖，
+ * 训练账户回放时按点逐笔扣款（见 helpers/trainAccount 的 ComputeTrainAccount）。
+ * 唯一会复用旧点的情况是「待补成交价的占位点」（旧版本遗留的 y<=0 委托）：
+ * 用成交价补掉占位本身，否则占位会残留、补单逻辑还会反复触发。
+ * 卖出仍保持「一天一个点」：卖出一律清仓，同一天再卖没有意义。
+ */
 export function addStockTradePointAction(secid: string, date: string, value: number, isBuy: boolean, type:string, amount?: number, reason?: string): ThunkAction {
   return (dispatch, getState) => {
     try {
@@ -1079,7 +1089,6 @@ export function addStockTradePointAction(secid: string, date: string, value: num
       const ss = stockConfigs.find((s) => s.secid === secid);
       if (ss) {
         if (isBuy) {
-          // 同一天只允许一个买入点：金额以最新一次委托为准
           const point = {
             x: date,
             y: value,
@@ -1087,10 +1096,18 @@ export function addStockTradePointAction(secid: string, date: string, value: num
             a: amount && amount > 0 ? amount : undefined,
             reason: reason || undefined,
           };
-          if (ss.buyPoints) {
-            ss.buyPoints = ss.buyPoints.filter((p) => p.x != date);
-            ss.buyPoints.push(point);
-          } else ss.buyPoints = [point];
+          // 复制一份再改：不要直接 push 到 state 里的数组
+          const points = ss.buyPoints ? [...ss.buyPoints] : [];
+          // 同类型 + 同一天 + 还没有成交价 视为占位点，直接补价（避免遗留占位被反复补单）
+          const placeholderIdx = points.findIndex(
+            (p) => p.x == date && p.t == type && !(Number(p.y) > 0)
+          );
+          if (placeholderIdx >= 0) {
+            points[placeholderIdx] = point;
+          } else {
+            points.push(point);
+          }
+          ss.buyPoints = points;
         } else {
           const point = { x: date, y: value, t: type, reason: reason || undefined };
           if (ss.sellPoints) {

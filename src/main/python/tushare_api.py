@@ -264,6 +264,55 @@ def get_adj_factors_full(ts_code: str):
     return _ADJ_FACTOR_MEMO[ts_code]
 
 
+def qfq_price_scale(ts_code: str, day: str) -> float:
+    """某交易日「不复权价 → 日K前复权口径」的缩放系数（基准与日K一致：最新复权因子）
+
+    分钟线（stk_mins / 腾讯分时）是不复权原始成交价，日K是前复权（``adj_factor / 最新因子``）。
+    除权之后回看除权之前的交易日，两者差一个固定系数（如 10 转 5 ≈ 1.5），不换算就会出现
+    「分时重建的当日K / 分时昨收 / 涨跌幅」与日K完全对不上——同一天两个价格的问题。
+
+    因子取不到时返回 1.0（保持原始价，不阻断取数）。
+    """
+    try:
+        factors = get_adj_factors_full(ts_code)
+        if factors is None or getattr(factors, 'empty', True):
+            return 1.0
+        key = str(day).replace('-', '')[:8]
+        fmap = {
+            str(k): float(v)
+            for k, v in zip(factors['trade_date'].astype(str), factors['adj_factor'])
+        }
+        base = float(factors['adj_factor'].iloc[-1])
+        f_day = fmap.get(key)
+        if f_day is None:
+            # 因子表缺该日（停牌 / 未更新）：与日K一致，取该日之前最近的因子；之前没有则取最早一个
+            before = [k for k in fmap if k <= key]
+            f_day = fmap[max(before)] if before else float(factors['adj_factor'].iloc[0])
+        if base > 0 and f_day and f_day > 0:
+            return f_day / base
+    except Exception as e:
+        print(f"[分钟线复权失败] {ts_code} {day}: {e}")
+    return 1.0
+
+
+def _scale_trends_to_qfq(trends, scale: float):
+    """把分时价格按前复权系数缩放（成交量/涨跌方向不受影响）"""
+    if not trends or not isinstance(trends, list) or abs(scale - 1.0) < 1e-9:
+        return trends
+    out = []
+    for t in trends:
+        if not isinstance(t, dict):
+            out.append(t)
+            continue
+        item = dict(t)
+        for field in ('current', 'last', 'average'):
+            v = _to_float(item.get(field))
+            if v:
+                item[field] = round(v * scale, 3)
+        out.append(item)
+    return out
+
+
 def _to_float(val) -> float:
     try:
         if val is None:
@@ -2402,6 +2451,9 @@ class TushareAPI:
         口径：``vol`` 为「手」（与实时分时接口一致，分时图 tooltip 按「万手」展示），
         ``average`` 为当日累计成交均价（元）。
 
+        价格口径：分钟线本身是不复权原始成交价，返回前统一按 ``qfq_price_scale`` 换算成
+        与日K一致的前复权口径（缓存/分钟库仍存原始价，复权基准变化后不会失效）。
+
         参数:
             secid: 标的ID，如 "1.600519"
             trade_date: 交易日，YYYYMMDD 或 YYYY-MM-DD；不传时取数据截止日（训练日期）
@@ -2422,19 +2474,25 @@ class TushareAPI:
         # 分钟库按纯代码分区（minute_kline 主键 code+trade_date+trade_time），
         # 指数代码与个股会撞车（1.000001 上证指数 / 0.000001 平安银行），只有个股落库
         is_stock = not is_index_code(secid)
+        ts_code = convert_secid_to_ts_code(secid)
+        # 与日K对齐的复权系数：除权后回看除权前的交易日时 ≠ 1（如 10 转 5 ≈ 1.5）
+        qfq_scale = qfq_price_scale(ts_code, day) if is_stock else 1.0
 
         # 1. 本地缓存（历史交易日的分钟数据不再变化，命中即复用）
         #
         # 键里带 v2：这个接口对外是「成交量=手 / 均价=元」的口径，而 minute_kline 里
         # 同时存在实时分时（手）和历史分时（旧版按股）两种行，直接读库会拿到 100 倍偏差的量；
         # 这里用独立版本化缓存保存归一化后的结果，不会与库里的旧行混淆。
+        #
+        # 缓存存的是「原始价」，复权系数每次读取时现算：后续再发生除权、复权基准变化时，
+        # 照样能换算成当时正确的前复权价，不用重新请求上游。
         cache_key = f"trend_1min_v2_{code}_{day.replace('-', '')}"
         if is_stock and day < today:
             try:
                 cached = read_cache(cache_key, max_age_hours=24 * 365 * 10)
                 if isinstance(cached, list) and cached:
                     _db_log_update("minute", f"{code} {day}", "hit", len(cached))
-                    return cached
+                    return _scale_trends_to_qfq(cached, qfq_scale)
             except Exception:
                 pass
 
@@ -2443,7 +2501,6 @@ class TushareAPI:
             pro = get_pro()
         except Exception as e:
             return {"error": str(e)}
-        ts_code = convert_secid_to_ts_code(secid)
         df = safe_api_call(
             pro.stk_mins,
             ts_code=ts_code,
@@ -2516,15 +2573,16 @@ class TushareAPI:
         if not trends:
             return {"error": f"{day} 无有效 1 分钟数据"}
 
-        # 3. 落本地缓存，下次直接命中（指数不落库，避免与个股纯代码撞车）
+        # 3. 落本地缓存 + 归档到分钟库（统一存「原始价 / 手」，与实时分时口径一致；
+        #    复权换算只在返回时做，避免分钟库与缓存被某个时间点的复权基准固化住）
         if is_stock:
             try:
                 write_cache(cache_key, trends)
             except Exception:
                 pass
-            # 同时归档到分钟库（分钟线按「手」写入，与实时分时口径一致）
             TushareAPI._persist_trend(code, day, trends)
-        return trends
+        # 4. 返回前换算成与日K一致的前复权口径
+        return _scale_trends_to_qfq(trends, qfq_scale)
 
     @staticmethod
     def get_stock_trend_by_date_batch(secids: List[str], trade_date: Optional[str] = None) -> Dict[str, Any]:

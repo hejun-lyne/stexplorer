@@ -1896,8 +1896,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
      *
      * 训练模式下不能直接用详情里的 zs：那是真实最新交易的昨收（属于未来数据），
      * 会让分时图的涨跌幅、涨跌配色、昨收基准线全部错位。
-     * 优先取分时数据自带的昨收（首根的 last，与分时价格同为不复权口径），
-     * 取不到时退回日K推算值。
+     * 优先取分时数据自带的昨收（首根的 last，与分时价格同口径——后端已统一换算成
+     * 与日K一致的前复权价），取不到时退回日K推算值。
      */
     const calcTrendZs = (trends: Stock.TrendItem[]) => {
       if (!trainView) {

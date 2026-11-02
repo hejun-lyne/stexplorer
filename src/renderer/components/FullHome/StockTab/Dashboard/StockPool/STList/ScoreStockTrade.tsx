@@ -33,6 +33,8 @@ const POSITION_RATIOS = [
 ];
 /** 「买入/卖出理由」草稿的本地存储键（按标的分开存） */
 const REASON_DRAFT_KEY = 'scoreStockTradeReasonDrafts';
+/** 「复盘」记录的本地存储键（按标的分开存） */
+const REVIEW_RECORD_KEY = 'scoreStockTradeReviewRecords';
 
 function formatMoney(v: number) {
   const n = Math.abs(Math.round(Number(v) || 0));
@@ -68,17 +70,61 @@ function writeReasonDraft(secid: string, text: string) {
   }
 }
 
-/** 操作记录行（训练买卖点 / 手工交易记录统一成同一形态） */
+/** 复盘记录（只保存理由，不产生买卖点 / 交易记录） */
+interface ReviewRecord {
+  id: string;
+  /** 复盘所属日期（训练模式为训练日） */
+  date: string;
+  /** 保存时间 HH:mm:ss */
+  time: string;
+  reason: string;
+  /** 保存时的价格，0 表示暂无行情 */
+  price: number;
+}
+
+/** 读取该标的的复盘记录 */
+function readReviewRecords(secid: string): ReviewRecord[] {
+  try {
+    const all = GetStorage<Record<string, ReviewRecord[]>>(REVIEW_RECORD_KEY, {}) || {};
+    const list = all[secid];
+    return Array.isArray(list) ? list : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/** 覆盖保存该标的的复盘记录 */
+function writeReviewRecords(secid: string, records: ReviewRecord[]) {
+  if (!secid) {
+    return;
+  }
+  try {
+    const all = GetStorage<Record<string, ReviewRecord[]>>(REVIEW_RECORD_KEY, {}) || {};
+    all[secid] = records;
+    SetStorage(REVIEW_RECORD_KEY, all);
+  } catch (e) {
+    console.log('保存复盘记录出错', e);
+  }
+}
+
+/** 操作记录行（训练买卖点 / 手工交易记录 / 复盘统一成同一形态） */
 interface TradeRecordRow {
   key: string;
   /** 记录时间（日期部分） */
   date: string;
-  type: 'buy' | 'sell';
+  /** 记录时间（时分秒，仅复盘记录有） */
+  time?: string;
+  type: 'buy' | 'sell' | 'review';
   price: number;
   /** 股数 / 委托金额等补充信息 */
   detail: string;
   reason: string;
   pending?: boolean;
+}
+
+/** 记录排序键：日期 + 时分秒（买卖点为纯日期，复盘带时间） */
+function getRecordSortKey(r: { date: string; time?: string }) {
+  return `${r.date} ${r.time || '00:00:00'}`;
 }
 
 export interface ScoreStockTradeProps {
@@ -109,7 +155,9 @@ export interface ScoreStockTradeProps {
  *
  * 买入/卖出理由：内容不为空时按标的存本地草稿，切换股票 / 推进训练日 / 关闭面板都不会丢，
  * 下次自动回填；执行买入或卖出后，文本作为 `reason` 写入操作记录并清空草稿。
- * 面板最后按标的列出操作记录（训练买卖点 / 手工交易记录），逐条显示理由。
+ * 另有「复盘」操作：不产生买卖点 / 交易记录，只把当前理由按标的存成复盘记录（本地存储），
+ * 与买卖记录一起列在操作记录里。
+ * 面板最后按标的列出操作记录（训练买卖点 / 手工交易记录 / 复盘），逐条显示理由。
  */
 const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, klines, currentPrice, intradayReady }) => {
   const dispatch = useDispatch();
@@ -123,6 +171,12 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
   const [ratio, setRatio] = useState<number>(POSITION_RATIOS[0].value);
   const [amount, setAmount] = useState<number | null>(null);
   const [reason, setReason] = useState('');
+  // ===== 复盘记录（按标的存本地，不参与训练账户 / 交易记录计算）=====
+  const [reviewRecords, setReviewRecords] = useState<ReviewRecord[]>([]);
+
+  useEffect(() => {
+    setReviewRecords(readReviewRecords(secid));
+  }, [secid]);
 
   // ===== 买入/卖出理由草稿（按标的保存，切换股票 / 推进训练日后自动回填）=====
   /** 草稿归属的标的、训练日与最新内容（换股/换日/卸载时按它落盘）；初始为空，首次渲染即回填 */
@@ -441,14 +495,56 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
   const suspended = ontrain && !!trainDate && !!lastBar && !trainBar;
 
   /**
-   * 该标的的操作记录（面板最后展示，带买入/卖出理由）
+   * 复盘：只把当前理由存成一条复盘记录（不产生买卖点 / 交易记录，不影响训练账户）
+   *
+   * 训练模式下日期取训练日（而不是真实日期），方便和当天的买卖点对上；保存后清空草稿。
+   */
+  const handleReview = () => {
+    const reasonText = reason.trim();
+    if (!reasonText) {
+      message.info('请先填写复盘内容');
+      return;
+    }
+    const record: ReviewRecord = {
+      id: `${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      date: ontrain
+        ? trainDate || String(trainBar?.date).substring(0, 10) || moment().format('YYYY-MM-DD')
+        : moment().format('YYYY-MM-DD'),
+      time: moment().format('HH:mm:ss'),
+      reason: reasonText,
+      price: tradePrice > 0 ? tradePrice : 0,
+    };
+    const next = [...readReviewRecords(secid), record];
+    writeReviewRecords(secid, next);
+    setReviewRecords(next);
+    // 内容已经写进复盘记录，草稿清空
+    writeReasonDraft(secid, '');
+    reasonDraftRef.current = { secid, date: trainDate || '', text: '' };
+    setReason('');
+    message.success(`复盘已保存到操作记录：${name || code}`);
+  };
+
+  /**
+   * 该标的的操作记录（面板最后展示，带买入/卖出/复盘理由）
    *
    * - 训练模式：取训练买卖点（`buyPoints/sellPoints` 中 t='train' 的点），与详情页共用；
-   * - 非训练模式：取手工交易记录（`tradings`），待成交委托也列出来。
+   * - 非训练模式：取手工交易记录（`tradings`），待成交委托也列出来；
+   * - 两种模式都追加该标的的复盘记录（本地存储，只按日期过滤未来记录）。
    */
   const tradeRecords = useMemo<TradeRecordRow[]>(() => {
+    const reviewRows: TradeRecordRow[] = reviewRecords
+      .filter((r) => !ontrain || !trainDate || r.date <= trainDate)
+      .map((r) => ({
+        key: `review_${r.id}`,
+        date: r.date,
+        time: r.time,
+        type: 'review' as 'review',
+        price: Number(r.price) || 0,
+        detail: '复盘',
+        reason: r.reason,
+      }));
+    const rows: TradeRecordRow[] = [];
     if (ontrain) {
-      const rows: TradeRecordRow[] = [];
       // 训练日之后的买卖点不展示（属于还没走到的未来）
       const inRange = (p: { x: string }) => !trainDate || String(p.x).substring(0, 10) <= trainDate;
       (config?.buyPoints || []).forEach((p, i) => {
@@ -480,24 +576,35 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
           reason: String(p.reason || ''),
         });
       });
-      // 最近的交易排最前；同一天先买后卖
-      return rows.sort((a, b) =>
-        a.date < b.date ? 1 : a.date > b.date ? -1 : a.type === b.type ? 0 : a.type === 'buy' ? -1 : 1
+    } else {
+      rows.push(
+        ...[...(tradings || [])]
+          .filter((t) => t.secid === secid)
+          .map((t) => ({
+            key: `trade_${t.id}`,
+            date: String(t.time || '').substring(0, 10),
+            time: String(t.time || '').substring(11, 19),
+            type: (t.type === 'sell' ? 'sell' : 'buy') as 'buy' | 'sell',
+            price: Number(t.price) || 0,
+            detail: t.pending ? `${formatMoney(Number(t.pendingAmount) || 0)} 待成交` : `${Number(t.count) || 0} 股`,
+            reason: String(t.reason || t.explain || ''),
+            pending: !!t.pending,
+          }))
       );
     }
-    return [...(tradings || [])]
-      .filter((t) => t.secid === secid)
-      .sort((a, b) => (String(a.time) < String(b.time) ? 1 : String(a.time) > String(b.time) ? -1 : 0))
-      .map((t) => ({
-        key: `trade_${t.id}`,
-        date: String(t.time || '').substring(0, 10),
-        type: (t.type === 'sell' ? 'sell' : 'buy') as 'buy' | 'sell',
-        price: Number(t.price) || 0,
-        detail: t.pending ? `${formatMoney(Number(t.pendingAmount) || 0)} 待成交` : `${Number(t.count) || 0} 股`,
-        reason: String(t.reason || t.explain || ''),
-        pending: !!t.pending,
-      }));
-  }, [ontrain, config, tradings, secid, trainDate]);
+    // 最近的排最前；同一天按时间倒序（复盘带时分秒），同一时刻先买后卖
+    return [...rows, ...reviewRows].sort((a, b) => {
+      const ka = getRecordSortKey(a);
+      const kb = getRecordSortKey(b);
+      if (ka !== kb) {
+        return ka < kb ? 1 : -1;
+      }
+      if (a.type === b.type) {
+        return 0;
+      }
+      return a.type === 'buy' ? -1 : 1;
+    });
+  }, [ontrain, config, tradings, secid, trainDate, reviewRecords]);
 
   /**
    * 「确认买入/清仓」按钮不可点的原因（就绪时为空串）
@@ -561,7 +668,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
         rows={5}
         value={reason}
         onChange={(e) => setReason(e.target.value)}
-        placeholder="买入/卖出理由（记录到操作记录；切换股票/下一日会自动保留）"
+        placeholder="买入/卖出理由或复盘内容（记录到操作记录；切换股票/下一日会自动保留）"
         maxLength={200}
         style={{ fontSize: 12 }}
       />
@@ -624,6 +731,15 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
           danger={tradeType === 'sell'}
         >
           确认{tradeType === 'buy' ? (limitUpToday ? '买入(次日开盘)' : '买入') : ontrain ? '清仓' : '卖出'}
+        </Button>
+        <Button
+          size="small"
+          type="dashed"
+          onClick={handleReview}
+          disabled={!reason.trim()}
+          title="只把当前内容存成一条复盘记录（不产生买卖点 / 交易记录），列在下方操作记录里"
+        >
+          复盘
         </Button>
       </div>
 
@@ -703,13 +819,19 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
                     flex: '0 0 auto',
                     fontWeight: 600,
                     color:
-                      r.type === 'buy' ? 'var(--increase-color, #d32f2f)' : 'var(--reduce-color, #388e3c)',
+                      r.type === 'review'
+                        ? '#1677ff'
+                        : r.type === 'buy'
+                        ? 'var(--increase-color, #d32f2f)'
+                        : 'var(--reduce-color, #388e3c)',
                   }}
                 >
-                  {r.pending ? '买入(待成交)' : r.type === 'buy' ? '买入' : '卖出'}
+                  {r.type === 'review' ? '复盘' : r.pending ? '买入(待成交)' : r.type === 'buy' ? '买入' : '卖出'}
                 </span>
-                <span style={{ flex: '0 0 auto' }}>{r.price.toFixed(2)}</span>
-                <span style={{ flex: '0 0 auto', color: 'var(--secondary-text-color)' }}>{r.detail}</span>
+                <span style={{ flex: '0 0 auto' }}>{r.price > 0 ? r.price.toFixed(2) : '—'}</span>
+                <span style={{ flex: '0 0 auto', color: 'var(--secondary-text-color)' }}>
+                  {r.type === 'review' && r.time ? `${r.detail} · ${String(r.time).substring(0, 5)}` : r.detail}
+                </span>
                 <span
                   style={{
                     flex: '1 1 auto',

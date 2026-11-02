@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Radio, Select, Slider, Spin, Switch, Tooltip } from 'antd';
 import { ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import * as CONST from '@/constants';
@@ -27,6 +28,10 @@ const DOWN_COLOR_FALLBACK = '#388e3c';
 const MA_COLORS = ['#00b4d8', '#06d6a0', '#e76f51'];
 const TECH_LINE_COLORS = ['#0099DD', '#FF9933', '#00ABBD'];
 const MA_PERIODS = [5, 10, 20];
+/** 分时上「昨日最低价」参考线颜色 */
+const PREV_LOW_COLOR = '#13c2c2';
+/** 分时上「昨日开盘价」参考线颜色 */
+const PREV_OPEN_COLOR = '#faad14';
 /** 图表默认显示区间（与详情页 PriceTrend 一致：默认看最近一半） */
 const DEFAULT_RANGE = { start: 50, end: 100 };
 /** 缩放步长（%） */
@@ -49,6 +54,8 @@ interface TrendOptionParams {
   showVolume: boolean;
   /** 昨收（涨跌基准），<=0 表示未知 */
   zs: number;
+  /** 昨日的日K（用于标出昨日最低价、昨日开盘价），为空表示取不到 */
+  prevBar?: Stock.KLineItem | null;
 }
 
 interface KlineOptionParams {
@@ -386,15 +393,21 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
           if (!bar) {
             return '';
           }
-          const [open, close, low, high] = bar.data;
+          // 开/收/高/低一律按 dataIndex 从日K数组取：candlestick 的维度是 [x, 开, 收, 低, 高]，
+          // echarts 会在数据项前面补一个下标，直接解构 bar.data 会整体错位（开=下标、收=开盘…）
+          const k = klines[Number(bar.dataIndex)];
+          const open = k ? Number(k.kp) : Number(bar.data?.[0]);
+          const close = k ? Number(k.sp) : Number(bar.data?.[1]);
+          const low = k ? Number(k.zd) : Number(bar.data?.[2]);
+          const high = k ? Number(k.zg) : Number(bar.data?.[3]);
           const rows: string[] = [
             `<div style="font-weight:bold;margin-bottom:4px">${bar.axisValue}</div>`,
-            `开 <b>${Number(open).toFixed(2)}</b>　收 <b>${Number(close).toFixed(2)}</b>`,
-            `高 <b>${Number(high).toFixed(2)}</b>　低 <b>${Number(low).toFixed(2)}</b>`,
+            `开 <b>${open.toFixed(2)}</b>　收 <b>${close.toFixed(2)}</b>`,
+            `高 <b>${high.toFixed(2)}</b>　低 <b>${low.toFixed(2)}</b>`,
           ];
           list.forEach((p) => {
             if (p.seriesName === '成交量') {
-              const vol = Number(p.data?.[1]);
+              const vol = Number(klines[Number(p.dataIndex)]?.cjl ?? p.data?.[1]);
               if (!Number.isNaN(vol)) {
                 rows.push(`${p.seriesName} <b>${(vol / 10000).toFixed(2)}万手</b>`);
               }
@@ -419,12 +432,24 @@ function trendTimeLabel(datetime: string) {
 }
 
 /**
+ * 日期归一成 YYYYMMDD
+ *
+ * 分时（"HH:MM:SS"）与日K（"YYYY-MM-DD" / "YYYYMMDD"）的格式不一致，
+ * 直接做字符串比较会全部判成「未来日期」，导致找不到前一日K线。
+ */
+function dateKey(d: any) {
+  return String(d || '').replace(/[^0-9]/g, '').substring(0, 8);
+}
+
+/**
  * 分时走势 option：价格 + 均价 + 成交量，支持「回放」（只画到第 visibleCount 根）
  *
  * 训练模式下分时是逐分钟推进的：坐标轴始终是整日长度，未推进到的时间点用 null 占位，
  * 曲线随时间一点点「长出来」；价格轴固定为整日区间（含昨收），避免回放时反复缩放。
+ *
+ * 参考线：昨收（虚横线）+ 昨日K线的最低价 / 开盘价，方便对照今天有没有跌破昨低、高开还是低开。
  */
-function buildTrendOption({ trends, visibleCount, showVolume, zs }: TrendOptionParams) {
+function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar }: TrendOptionParams) {
   const colors = Utils.getVariablesColor(CONST.VARIABLES);
   const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
   const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
@@ -469,10 +494,19 @@ function buildTrendOption({ trends, visibleCount, showVolume, zs }: TrendOptionP
     splitLine: { show: false },
   }));
 
-  // 价格轴固定到整日区间（含昨收）：回放过程中不会因数据变多而反复缩放
+  // 价格轴固定到整日区间（含昨收 / 昨低 / 昨开）：回放过程中不会因数据变多而反复缩放，
+  // 跳空开盘时也能保证昨日最低价、开盘价的参考线落在可视范围内
+  const prevOpen = Number(prevBar?.kp) || 0;
+  const prevLow = Number(prevBar?.zd) || 0;
   const rangeValues = trends.map((t) => t.current).concat(hasAverage ? trends.map((t) => t.average) : []);
   if (zs > 0) {
     rangeValues.push(zs);
+  }
+  if (prevLow > 0) {
+    rangeValues.push(prevLow);
+  }
+  if (prevOpen > 0) {
+    rangeValues.push(prevOpen);
   }
   const minVal = Math.min(...rangeValues);
   const maxVal = Math.max(...rangeValues);
@@ -510,6 +544,35 @@ function buildTrendOption({ trends, visibleCount, showVolume, zs }: TrendOptionP
   const markLines: any[] = [];
   if (zs > 0) {
     markLines.push({ yAxis: zs, lineStyle: { color: secondaryColor, type: 'dashed', width: 1 } });
+  }
+  // 昨日K线的最低价 / 开盘价：带文字标签，方便一眼看出今天是否跌破昨低、高开还是低开
+  if (prevLow > 0) {
+    markLines.push({
+      name: '昨低',
+      yAxis: prevLow,
+      label: {
+        show: true,
+        position: 'insideStartTop',
+        formatter: `昨低 ${prevLow.toFixed(2)}`,
+        color: PREV_LOW_COLOR,
+        fontSize: 9,
+      },
+      lineStyle: { color: PREV_LOW_COLOR, type: 'dotted', width: 1, opacity: 0.9 },
+    });
+  }
+  if (prevOpen > 0) {
+    markLines.push({
+      name: '昨开',
+      yAxis: prevOpen,
+      label: {
+        show: true,
+        position: 'insideStartBottom',
+        formatter: `昨开 ${prevOpen.toFixed(2)}`,
+        color: PREV_OPEN_COLOR,
+        fontSize: 9,
+      },
+      lineStyle: { color: PREV_OPEN_COLOR, type: 'dotted', width: 1, opacity: 0.9 },
+    });
   }
   if (replaying && dates[currentIdx]) {
     markLines.push({ xAxis: dates[currentIdx], lineStyle: { color: secondaryColor, opacity: 0.5, width: 1 } });
@@ -863,7 +926,18 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
   // 训练模式只画到「训练时间」为止，不显示完整分时；非训练模式直接看完整分时
   const visibleCount = inTraining ? Math.min(visibleTrends.length, trendTotal) : trendTotal;
 
-  /** 分时昨收：训练模式取历史分时首根的 last（该交易日 pre_close，与分时同为不复权口径） */
+  /**
+   * 分时所属交易日（YYYYMMDD）
+   *
+   * 分时的 `datetime` 只有 "HH:MM:SS"（实时与历史分时都一样），取不到日期，
+   * 所以训练模式取训练日，非训练模式取今天。
+   */
+  const trendDayKey = useMemo(() => {
+    const day = dateKey(trainDate);
+    return day.length === 8 ? day : dateKey(dayjs().format('YYYY-MM-DD'));
+  }, [trainDate]);
+
+  /** 分时昨收：训练模式取历史分时首根的 last（该交易日 pre_close，后端已换算成与日K一致的前复权口径） */
   const trendZs = useMemo(() => {
     if (!trends.length) {
       return 0;
@@ -873,11 +947,10 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     if (inTraining && firstLast > 0) {
       return firstLast;
     }
-    // 实时分时的首根 last 就是现价（接口不给昨收），退化用日K推算
-    const day = String(first.datetime || '').substring(0, 10);
+    // 实时分时的首根 last 就是现价（接口不给昨收），退化用日K推算：最后一根若是分时当天，取它前一根收盘
     if (klines.length) {
       const lastK = klines[klines.length - 1];
-      const isSameDay = !!day && String(lastK.date || '').substring(0, 10) === day;
+      const isSameDay = dateKey(lastK.date) === trendDayKey;
       if (isSameDay && klines.length > 1) {
         return Number(klines[klines.length - 2].sp) || 0;
       }
@@ -886,7 +959,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
       }
     }
     return firstLast && firstLast !== Number(first.current) ? firstLast : 0;
-  }, [trends, klines, inTraining]);
+  }, [trends, klines, inTraining, trendDayKey]);
 
   /** 分时状态文字：当前训练时刻 / 现价 / 涨跌幅 */
   const trendStatus = useMemo(() => {
@@ -909,6 +982,9 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
    *
    * 训练日的官方日K是收盘口径（对盘中时点属于未来数据）；时间推进时用分时合成一根
    * 「截至当前时刻」的K线替换掉它，还没开盘（无分时）时当日的K直接不显示。
+   *
+   * 开盘价取当日日K的 kp（09:25 集合竞价已定，不属于未来数据）：分时首根是 09:30 的成交价，
+   * 秒板/跳空时会明显偏离真实开盘价（曾出现 34.61 vs 真实开盘 33.96 的偏差）。
    */
   const displayKlines = useMemo(() => {
     if (!inTraining || !trainTime || !trainDate || !trends.length) {
@@ -919,9 +995,33 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     if (!visibleTrends.length) {
       return base;
     }
-    const bar = BuildDailyKFromTrends({ secid, trends: visibleTrends, date: day, prevClose: trendZs });
+    const dayBar = klines.find((k) => String(k?.date || '').substring(0, 10) === day);
+    const bar = BuildDailyKFromTrends({
+      secid,
+      trends: visibleTrends,
+      date: day,
+      prevClose: trendZs,
+      openPrice: Number(dayBar?.kp) || 0,
+    });
     return bar ? [...base, bar] : base;
   }, [inTraining, trainTime, trainDate, trends, visibleTrends, klines, trendZs, secid]);
+
+  /**
+   * 昨日K线：分时所属交易日之前（含训练日口径）的最后一根日K
+   *
+   * 日K是按训练日截断的，训练模式取到的最后一根往往就是训练日自己，需要往前退一根才是昨天，
+   * 所以统一按「日期 < 分时所属日」筛，而不是直接取最后两根。
+   */
+  const prevDayBar = useMemo(() => {
+    if (trendDayKey.length !== 8 || !klines.length) {
+      return null;
+    }
+    const before = klines.filter((k) => {
+      const key = dateKey(k?.date);
+      return key.length === 8 && key < trendDayKey;
+    });
+    return before.length ? before[before.length - 1] : null;
+  }, [klines, trendDayKey]);
 
   // 切换股票：重置缩放区间
   useEffect(() => {
@@ -946,7 +1046,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
   const { option, chartHeight } = useMemo(() => {
     if (chartMode === 'trend') {
       return trends.length
-        ? buildTrendOption({ trends, visibleCount, showVolume, zs: trendZs })
+        ? buildTrendOption({ trends, visibleCount, showVolume, zs: trendZs, prevBar: prevDayBar })
         : { option: null, chartHeight: 400 };
     }
     return displayKlines.length
@@ -957,6 +1057,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     trends,
     visibleCount,
     trendZs,
+    prevDayBar,
     showVolume,
     displayKlines,
     range,
