@@ -56,6 +56,13 @@ export interface IntradayPatternResult {
   features: IntradayPatternFeatures;
   /** 命中的判据说明（便于核对） */
   reason: string;
+  /**
+   * 分时是否已走完当天（收盘口径）
+   *
+   * 盘中也会随分时推进动态出形态，但此时只是「截至当前时刻」的临时结论，
+   * 收盘前可能变化，展示时需要标注。
+   */
+  complete: boolean;
 }
 
 /** C5b 量能签名 */
@@ -122,10 +129,10 @@ export const INTRADAY_CONFIG = {
   gapTh: 0.01,
   /** 尾盘偷袭：尾盘涨幅占比下限 */
   tailShare: 0.5,
-  /** 开盘 30 分钟窗口 */
+  /** 开盘预测的最大评估窗口（分钟） */
   early30Window: 30,
-  /** 开盘预测的评估步长（分钟）：每 10 分钟出一档结果，30 分钟后固定 */
-  early30Step: 10,
+  /** 开盘预测的最小评估窗口（分钟）：开盘不足 5 分钟样本太少，先不出结果 */
+  early30MinWindow: 5,
   /** 量能签名分段数（5 分钟一段） */
   early30VolSegments: 6,
   /** 量能签名倍数 */
@@ -238,9 +245,12 @@ function minuteReturns(list: Stock.TrendItem[]) {
 }
 
 /**
- * 计算 C5a 全天分时特征与形态（盘后）
+ * 计算 C5a 分时特征与形态（随分时推进动态计算）
  *
- * @param params.trends 当天完整分时（>= 30 点，收盘口径时最好 240 点）
+ * 传入「截至当前时刻」的分时即可：盘中每来一根新分时都会重新判一次，
+ * 结果是「截至当前时刻」的临时形态（`complete=false`），收盘后才是最终形态。
+ *
+ * @param params.trends 当天分时（至少 30 点；收盘口径时为完整 240 点）
  * @param params.prevClose 昨收（强弱与振幅基准）
  * @param params.indexTrends 可选，指数分时，用于 f9 独立性
  */
@@ -254,6 +264,7 @@ export function ComputeIntradayPattern(params: {
   if (list.length < 30 || prevClose <= 0) {
     return null;
   }
+  const complete = IsIntradayComplete(list);
   const cfg = INTRADAY_CONFIG;
   const prices = list.map((t) => Number(t.current) || 0);
   const n = prices.length;
@@ -433,7 +444,7 @@ export function ComputeIntradayPattern(params: {
   }
 
   if (!candidates.length) {
-    return { pattern: '无明显形态', confidence: 0, features, reason: '未命中任何形态规则' };
+    return { pattern: '无明显形态', confidence: 0, features, reason: '未命中任何形态规则', complete };
   }
 
   // 多条命中时取置信度最高的一条（置信度 = 0.5 + 满足程度均值的一半）
@@ -447,14 +458,15 @@ export function ComputeIntradayPattern(params: {
     }
   });
 
-  return { pattern: best.pattern, confidence: bestConf, features, reason: best.reason };
+  return { pattern: best.pattern, confidence: bestConf, features, reason: best.reason, complete };
 }
 
 /**
- * 量能签名（固定 5 分钟一段，段数随评估窗口长度变化）
+ * 量能签名（按约 5 分钟一段等分，最多 6 段）
  *
- * 30 分钟窗口 = 6 段（与规格一致）；20 分钟 = 4 段；10 分钟 = 2 段。
- * 判据统一按「前半段量 / 后半段量」，保证不同窗口之间口径一致、可比较。
+ * 窗口随分时推进变长：5~9 分钟 = 2 段、10~14 分钟 = 2 段、15~19 分钟 = 3 段 …
+ * 30 分钟 = 6 段（与规格一致）。判据统一按「前半段量 / 后半段量」，
+ * 保证不同窗口之间口径一致、可比较。
  */
 function detectVolSignature(list: Stock.TrendItem[], windowMinutes: number): Early30VolSignature {
   const cfg = INTRADAY_CONFIG;
@@ -490,13 +502,13 @@ function detectVolSignature(list: Stock.TrendItem[], windowMinutes: number): Ear
 }
 
 /**
- * 计算 C5b 开盘预测：滚动 10 / 20 / 30 分钟三档，特征 / 量能签名 / T1-T3 概率
+ * 计算 C5b 开盘预测：窗口随分时推进动态增长（5 分钟起，最多 30 分钟）
  *
- * 为什么要分档：只等 30 分钟会错过开盘的第一波拉升。这里每 10 分钟更新一档，
- * 用「已走出的分钟」当评估窗口，30 分钟后固定用前 30 分钟（规格口径）。
+ * 只等 30 分钟会错过开盘第一波，所以每来一根新分时就用「已走出的分钟」重算一次：
+ * 窗口从 5 分钟一路长到 30 分钟，之后固定用前 30 分钟（规格口径）。
  * 窗口越短样本越少，概率会向 0.5 收缩（见下方的 damp），不做过度解读。
  *
- * @param params.trends 当天分时（从 09:25/09:30 开始）
+ * @param params.trends 当天分时（从 09:25/09:30 开始，传「截至当前时刻」的部分即可）
  * @param params.prevDayVol 昨日全天成交量（与分时 vol 同口径：手）
  * @param params.indexTrends 可选，指数分时，用于 f8 独立性
  */
@@ -510,20 +522,19 @@ export function ComputeEarly30Prediction(params: {
   if (!all.length) {
     return null;
   }
-  const step = cfg.early30Step;
   const minutes = all.map((t) => minuteOfDay(t.datetime));
   const hasTime = minutes.every((v) => Number.isFinite(v));
   const n = all.length;
   // 已走出的分钟数：有分时时间就按「距 09:30 多少分钟」算（09:25 的竞价点不重复计）
   const elapsed = hasTime ? Math.max(0, minutes[minutes.length - 1] - (9 * 60 + 30)) : n;
-  const buckets = Math.min(Math.floor(cfg.early30Window / step), Math.floor(elapsed / step));
-  const ready = buckets >= 1;
-  const windowMinutes = ready ? buckets * step : step;
+  const ready = elapsed >= cfg.early30MinWindow;
+  // 动态窗口：够 5 分钟就出结果，随时间逐分钟变长，到 30 分钟为止
+  const windowMinutes = clamp(elapsed, cfg.early30MinWindow, cfg.early30Window);
 
   // 只取该窗口内的分时（含 09:25 竞价点）
   const list = hasTime
     ? all.filter((_, i) => minutes[i] <= 9 * 60 + 30 + windowMinutes)
-    : all.slice(0, windowMinutes);
+    : all.slice(0, Math.min(n, windowMinutes + 1));
   if (!list.length) {
     return null;
   }

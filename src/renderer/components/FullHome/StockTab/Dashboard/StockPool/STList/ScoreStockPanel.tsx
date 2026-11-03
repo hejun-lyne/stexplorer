@@ -30,7 +30,6 @@ import {
   Early30VolSignatureNames,
   IntradayPatternFeatures,
   Early30Features,
-  IsIntradayComplete,
 } from '@/helpers/intradayPattern';
 import { GetCompanyFromTushare } from '@/services/tushare';
 import ScoreStockTrade from './ScoreStockTrade';
@@ -1289,20 +1288,17 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
   const prevDayVol = Number(prevDayBar?.cjl) || 0;
 
   /**
-   * C5a 全天分时形态（盘后口径）
+   * C5a 分时形态：随分时推进动态计算
    *
-   * 需要完整交易日分时：训练回放还没推到收盘（< 15:00）时不给结论，
-   * 避免拿半天的分时判「全天形态」。
+   * 盘中就用「截至当前时刻」的分时判形态，每来一根新分时重算一次；
+   * 没走完当天时结果标为盘中临时结论（收盘后可能变化）。
    */
-  const intradayComplete = useMemo(() => IsIntradayComplete(patternTrends), [patternTrends]);
-  const c5a = useMemo(() => {
-    if (!intradayComplete) {
-      return null;
-    }
-    return ComputeIntradayPattern({ trends: patternTrends, prevClose: trendZs });
-  }, [patternTrends, trendZs, intradayComplete]);
+  const c5a = useMemo(
+    () => ComputeIntradayPattern({ trends: patternTrends, prevClose: trendZs }),
+    [patternTrends, trendZs]
+  );
 
-  /** C5b 开盘 30 分钟预测（10:00 后可用，不足 30 个分时点时 ready=false） */
+  /** C5b 开盘预测（窗口随分时推进动态变长：5 分钟起，30 分钟封顶） */
   const c5b = useMemo(
     () => ComputeEarly30Prediction({ trends: patternTrends, prevDayVol }),
     [patternTrends, prevDayVol]
@@ -1430,25 +1426,28 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
           <Tooltip
             title={
               <div style={{ fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-line' }}>
-                {`${patternFeatureText(c5a.features)}\n判据：${c5a.reason}`}
+                {`${patternFeatureText(c5a.features)}\n判据：${c5a.reason}\n${
+                  c5a.complete
+                    ? '口径：全天分时（收盘）'
+                    : `口径：盘中临时（已走 ${visibleCount}/${trendTotal} 分钟，收盘后可能变化）`
+                }`}
               </div>
             }
           >
             <Tag
               style={{ marginInlineEnd: 0, cursor: 'help' }}
-              color={
-                c5a.pattern === '无明显形态' ? undefined : c5a.confidence >= 0.7 ? 'success' : 'processing'
-              }
+              color={c5a.pattern === '无明显形态' ? undefined : c5a.confidence >= 0.7 ? 'success' : 'processing'}
             >
               {c5a.pattern} {(c5a.confidence * 100).toFixed(0)}%
+              {c5a.complete ? '' : ' · 盘中'}
             </Tag>
           </Tooltip>
         ) : (
           <span style={{ color: 'var(--hint-color)' }}>
             {!patternTrends.length
               ? '暂无分时数据'
-              : !intradayComplete
-              ? `分时未走完（${visibleCount}/${trendTotal} 分钟），收盘后可用`
+              : patternTrends.length < 30
+              ? `分时不足 30 分钟（${patternTrends.length} 分钟）`
               : '缺少昨收，无法判定形态'}
           </span>
         )}
@@ -1456,14 +1455,14 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
         {!c5b ? (
           <span style={{ color: 'var(--hint-color)' }}>暂无分时数据</span>
         ) : !c5b.ready ? (
-          <span style={{ color: 'var(--hint-color)' }}>开盘满 10 分钟才出结果</span>
+          <span style={{ color: 'var(--hint-color)' }}>开盘满 5 分钟才出结果</span>
         ) : (
           <Tooltip
             title={
               <div style={{ fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-line' }}>
                 {`${early30FeatureText(c5b.features)}\n量能签名 ${Early30VolSignatureNames[c5b.volSignature]}\n评估窗口 ${
                   c5b.windowMinutes
-                } 分钟（每 10 分钟更新，30 分钟后固定）\n窗口涨幅 ${(c5b.ret30 * 100).toFixed(
+                } 分钟（随分时动态变长，30 分钟封顶）\n窗口涨幅 ${(c5b.ret30 * 100).toFixed(
                   2
                 )}%\n最小规则版 ${c5b.ruleHit ? '命中（早盘强势）' : '未命中'}`}
               </div>
@@ -1491,7 +1490,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
             </span>
           </Tooltip>
         )}
-        <span style={{ marginLeft: 'auto', color: 'var(--hint-color)' }}>C5a 盘后 · C5b 每 10 分钟</span>
+        <span style={{ marginLeft: 'auto', color: 'var(--hint-color)' }}>C5a 随分时动态 · C5b 每分钟更新</span>
       </div>
 
       <div style={{ marginTop: 12 }}>
