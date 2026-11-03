@@ -70,14 +70,14 @@ export const DEFAULT_SHORT_SCORE_BACKTEST: ShortScoreBacktestParams = {
   limitDays: 240,
   cooldownDays: 3,
   maxGapPct: 2,
-  // 与离线脚本默认值一致：低位 ≤40 持续 3 日 + 回撤 10 分止盈
+  // 低位启动：突变前 3 个评分日都 ≤45（= 启动地板 riseMinScore，起点高于地板就不算低位启动）
   lowBaseDays: 3,
-  lowBaseMax: 40,
+  lowBaseMax: 45,
   trailDrop: 10,
   // 默认仍是跳升口径（与板块回测的信号扫描一致）；
-  // 详情页面板可切到 rise：自近 10 日低点抬升 ≥35 分、地板 45 分
+  // 详情页面板可切到 rise：自近 10 日低点抬升 ≥20 分、地板 45 分
   buyMode: 'jump',
-  minRise: 35,
+  minRise: 20,
   riseRefDays: 10,
   riseMinScore: 45,
 };
@@ -93,10 +93,10 @@ export const DEFAULT_SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = {
   buyMode: 'rise',
 };
 
-/** 图表上「买入信号日」柱子的标记色（与红绿突变柱、金色评分线、蓝色抬升线都区分开） */
-export const SHORT_SCORE_BUY_MARK_COLOR = '#722ed1';
-/** 图表上「卖出信号日」柱子的标记色 */
-export const SHORT_SCORE_SELL_MARK_COLOR = '#13c2c2';
+/** 图表上「买入信号日」柱子的标记色：橙色（与红绿突变柱、金色评分线都区分开） */
+export const SHORT_SCORE_BUY_MARK_COLOR = '#fa8c16';
+/** 图表上「卖出信号日」柱子的标记色：亮绿色 */
+export const SHORT_SCORE_SELL_MARK_COLOR = '#00e676';
 
 /** computeShortScoreSignalSeries 的缓存：评分对象 -> 参数签名 -> 信号表（对象变了自然回收） */
 const signalSeriesCache = new WeakMap<object, Map<string, Record<string, ShortScoreSignal>>>();
@@ -308,7 +308,7 @@ function signalContext(
  * **启动有两种形态，rise 口径两者都认**：
  *   - 自低点抬升：近 riseRefDays 日最低分 → 当日评分抬升 ≥ minRise（分几天完成的低位启动）；
  *   - 单日跳升：当日 Δ ≥ buyDelta（一根大阳柱就是启动日本身）。
- * 只认累计抬升会把「单日跳升 +26 但累计还没到 35 分」的启动日漏掉、延后一天才出信号，
+ * 只认累计抬升会把「单日跳升 +26 但累计还没到 20 分」的启动日漏掉、延后一天才出信号，
  * 所以 rise 口径按「或」处理；两套口径各自带自己的评分地板与低位条件。
  */
 export function evaluateShortScoreSignal(args: {

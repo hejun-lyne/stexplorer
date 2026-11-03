@@ -100,7 +100,7 @@ const SHORT_SCORE_LINE_COLOR = '#faad14';
  */
 const SHORT_SCORE_RISE_DAYS = 10;
 /** 「自低点抬升」达到该值即视为启动（= 信号规则的 minRise；单日跳升另有 20 分阈值） */
-const SHORT_SCORE_RISE_THRESHOLD = 35;
+const SHORT_SCORE_RISE_THRESHOLD = 20;
 
 /** 公司简介内存缓存（secid -> 简介），来回切换股票时不重复取数 */
 const introCache = new Map<string, string>();
@@ -167,17 +167,19 @@ function buildShortScoreLines(
     if (typeof v !== 'number') {
       return null;
     }
+    const sig = signals[i];
+    const sigKind = sig && sig.kind !== '观察' ? sig.kind : '';
     const delta = deltas[i];
     if (typeof delta !== 'number') {
-      return v;
+      // 前一日没有评分时变化值算不出来，但当天仍可能是信号日（tooltip 照样要能显示）
+      return { value: v, signalKind: sigKind, signalReason: sig?.reason || '' };
     }
     const j = jumpByIdx[i];
-    const sig = signals[i];
     return {
       value: v,
       delta,
       jumpDesc: j ? describeScoreJump(j) : '',
-      signalKind: sig && sig.kind !== '观察' ? sig.kind : '',
+      signalKind: sigKind,
       signalReason: sig?.reason || '',
     };
   });
@@ -241,22 +243,24 @@ function buildTechSeries(
   // 「突变柱 + 自低点抬升 + 评分曲线」三层，画法与详情页 PriceTrend 保持一致
   if (techType === TechIndicatorType.SHORT_SCORE) {
     const lines = shortScoreLines || buildShortScoreLines(klines, {});
+    // 买卖点柱子至少要有这点高度，否则当日变化很小（或前一日没评分）时看不出标记
+    const signalBarMinHeight = Math.max(0.5, lines.deltaAxisMax * 0.06);
     const deltaBars = lines.deltas.map((delta, i) => {
-      if (typeof delta !== 'number') {
-        return null;
-      }
       const sigKind = lines.signals[i]?.kind;
-      if (sigKind === '买入' || sigKind === '卖出') {
-        // 买卖点当天的柱子换色标记（紫=买入、青=卖出），并用描边压过普通红绿柱
-        return {
-          value: Math.abs(delta),
-          itemStyle: {
-            color: sigKind === '买入' ? SHORT_SCORE_BUY_MARK_COLOR : SHORT_SCORE_SELL_MARK_COLOR,
-            borderColor: 'rgba(255,255,255,0.9)',
-            borderWidth: 1,
-            opacity: 1,
-          },
-        };
+      const isSignal = sigKind === '买入' || sigKind === '卖出';
+      const signalStyle = {
+        color: sigKind === '买入' ? SHORT_SCORE_BUY_MARK_COLOR : SHORT_SCORE_SELL_MARK_COLOR,
+        borderColor: 'rgba(255,255,255,0.9)',
+        borderWidth: 1,
+        opacity: 1,
+      };
+      if (typeof delta !== 'number') {
+        // 前一日评分缺失时柱高算不出来：仍然画一根标记柱，保证买卖点不会被漏标
+        return isSignal ? { value: signalBarMinHeight, itemStyle: signalStyle } : null;
+      }
+      if (isSignal) {
+        // 买卖点当天的柱子换色标记（橙=买入、亮绿=卖出），并用描边压过普通红绿柱
+        return { value: Math.max(Math.abs(delta), signalBarMinHeight), itemStyle: signalStyle };
       }
       return {
         value: Math.abs(delta),
@@ -295,7 +299,7 @@ function buildTechSeries(
           symbol: 'none',
           silent: true,
           label: { show: false },
-          // minRise（35 分）是「自近 N 根低点抬升」的买入阈值，作为参考线
+          // minRise（20 分）是「自近 N 根低点抬升」的买入阈值，作为参考线
           data: [{ yAxis: SHORT_SCORE_RISE_THRESHOLD, lineStyle: { color: hintColor, opacity: 0.5, type: 'dotted' } }],
         },
       },
@@ -1578,13 +1582,13 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
               {techType === TechIndicatorType.SHORT_SCORE && !shortScoreCurveLoading ? (
                 <span
                   style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}
-                  title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。紫柱=买入信号日、青柱=卖出信号日（与列表「信号」列同一套规则，悬停曲线上可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
+                  title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。橙柱=买入信号日、亮绿柱=卖出信号日（与列表「信号」列同一套规则，悬停曲线上可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
                 >
                   红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
                   <span style={{ marginLeft: 4 }}>
-                    <span style={{ color: SHORT_SCORE_BUY_MARK_COLOR, fontWeight: 600 }}>紫柱=买入信号</span>
+                    <span style={{ color: SHORT_SCORE_BUY_MARK_COLOR, fontWeight: 600 }}>橙柱=买入信号</span>
                     {'、'}
-                    <span style={{ color: SHORT_SCORE_SELL_MARK_COLOR, fontWeight: 600 }}>青柱=卖出信号</span>
+                    <span style={{ color: SHORT_SCORE_SELL_MARK_COLOR, fontWeight: 600 }}>亮绿柱=卖出信号</span>
                   </span>
                   <span style={{ marginLeft: 4 }}>蓝虚线=自近{SHORT_SCORE_RISE_DAYS}根低点抬升</span>
                 </span>
