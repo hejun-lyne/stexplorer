@@ -2180,6 +2180,8 @@ export const SHORT_SCORE_CURVE_MAX_DAYS = 120;
 export interface ShortTermScoreCurve {
   /** 评分基准日（YYYYMMDD）；未能确定时为空串 */
   scoreDayKey: string;
+  /** 评分用的个股日K（升序，已截断到评分基准日）；回测按它对齐成交价 */
+  klines: Stock.KLineItem[];
   /** YYYYMMDD -> 综合评分（0~100）；未上市 / 停牌 / 数据不足的交易日不会出现在这里 */
   scores: Record<string, number>;
   /** 未能算出分数的交易日数量 */
@@ -2201,28 +2203,48 @@ export async function computeShortTermScoreCurve(params: {
   circMv?: number;
   /** 最多计算多少个交易日（默认 120，最大 240） */
   limit?: number;
+  /**
+   * 忽略训练模式：true 时按「最新交易日」算到底（回测用）
+   *
+   * 训练模式下评分基准日会被归位到训练日，回测窗口就停在训练日那天；
+   * 回测面板需要覆盖训练日之后的数据时传 true。
+   */
+  ignoreTrain?: boolean;
   source?: FundApiType;
   shouldStop?: () => boolean;
+  /**
+   * 复用外部评分上下文（批量回测按板块逐只跑时传同一个 ctx）
+   *
+   * 不传 = 每次自建 ctx（个股详情页口径，公共数据每次都重新取）。
+   * 传入后指数日K / 涨跌比 / 市值档 / 板块K线在整批股票间共享，
+   * 避免 N 只股票各拉一遍（板块批量回测的主要耗时来源）。
+   */
+  ctx?: ScoreSharedContext;
+  /** 是否强制重取指数日K（默认 true；传共享 ctx 时调用方一般传 false） */
+  forceIndex?: boolean;
 }): Promise<ShortTermScoreCurve> {
-  const { code, name, hybk, circMv, shouldStop } = params;
+  const { code, name, hybk, circMv, shouldStop, ignoreTrain } = params;
   const source = params.source || SHORT_SCORE_SOURCE;
   const limit = Math.max(1, Math.min(240, Math.floor(Number(params.limit) || SHORT_SCORE_CURVE_MAX_DAYS)));
-  const empty: ShortTermScoreCurve = { scoreDayKey: '', scores: {}, skipped: 0 };
+  const empty: ShortTermScoreCurve = { scoreDayKey: '', klines: [], scores: {}, skipped: 0 };
   if (!/^\d{6}$/.test(String(code || ''))) {
     return empty;
   }
 
   // 板块日K按「窗口 + 60」取：窗口最早那几天也要能看到板块行情，否则板块维度会被误判为缺失
-  const ctx = createScoreContext(source, { boardKlineLimit: limit + 60 });
+  const sharedCtx = params.ctx;
+  const ctx = sharedCtx || createScoreContext(source, { boardKlineLimit: limit + 60 });
   try {
     // 指数日K同理：多 60 根用于「每天往前 60 根」的大盘对比
-    await ensureIndexKlines(ctx, limit + 60, true);
+    // 共享 ctx 时由调用方先取一次，之后逐只复用，不再每只都强制重取
+    await ensureIndexKlines(ctx, limit + 60, sharedCtx ? params.forceIndex === true : true);
   } catch {
     // 取不到时后续按维度缺失处理
   }
 
   // 评分基准日：训练模式跟随训练日（归位到真实交易日），否则取指数数据里的最后一个交易日
-  const trainKey = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
+  // ignoreTrain=true（回测）时忽略训练日，直接算到最新交易日
+  const trainKey = ignoreTrain ? '' : (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
   let scoreDayKey = '';
   if (trainKey) {
     try {
@@ -2352,5 +2374,5 @@ export async function computeShortTermScoreCurve(params: {
       skipped += 1;
     }
   }
-  return { scoreDayKey, scores, skipped };
+  return { scoreDayKey, klines: ctx.stockKlinesMap[secid] || [], scores, skipped };
 }

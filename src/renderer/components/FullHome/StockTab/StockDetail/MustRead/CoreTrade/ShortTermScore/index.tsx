@@ -9,6 +9,7 @@ import styles from '../../index.scss';
 import * as Score from '@/helpers/shortTermScore';
 import * as ScoreList from '@/helpers/shortTermScoreList';
 import MoneyFlowChart from '../MoneyFlowChart';
+import BacktestModal from './BacktestModal';
 
 export interface ShortTermScoreProps {
   code: string;
@@ -778,6 +779,8 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
   // （与列表点「短线评分」看到的是同一行数据，天然一致）；
   // 未命中才现算，算完写回序列。想看逐日明细时可点「重新计算明细」强制现算。
   const [scoreData, setScoreData] = useState<ScoreComputeResult | null>(null);
+  /** 突变策略回测弹窗 */
+  const [backtestOpen, setBacktestOpen] = useState(false);
   const [scoreError, setScoreError] = useState<string | null>(null);
   const [cachedScore, setCachedScore] = useState<{ row: ScoreList.ShortTermScoreRow; day: string } | null>(null);
   const [forceLive, setForceLive] = useState(false);
@@ -1166,8 +1169,19 @@ const ShortTermScore: React.FC<ShortTermScoreProps> = React.memo(({ code, moneyF
 
   return (
     <div>
+      <div style={{ marginBottom: 8 }}>
+        <Button size="small" onClick={() => setBacktestOpen(true)}>
+          回测「评分突变」策略
+        </Button>
+      </div>
       {strip}
       <div style={{ marginTop: strip ? 12 : 0 }}>{content}</div>
+      <BacktestModal
+        open={backtestOpen}
+        onClose={() => setBacktestOpen(false)}
+        code={code}
+        circMv={circMv}
+      />
     </div>
   );
 });

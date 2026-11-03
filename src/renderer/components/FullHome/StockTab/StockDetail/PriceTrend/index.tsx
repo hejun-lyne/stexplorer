@@ -31,6 +31,13 @@ import * as Helpers from '@/helpers';
 import * as Services from '@/services';
 import * as Tech from '@/helpers/tech';
 import { computeShortTermScoreCurve, SHORT_SCORE_CURVE_MAX_DAYS } from '@/helpers/shortTermScoreList';
+import {
+  computeScoreJumps,
+  describeScoreJump,
+  formatScoreDelta,
+  SCORE_JUMP_CONFIG,
+} from '@/helpers/shortTermScoreJump';
+import type { ScoreJumpPoint } from '@/helpers/shortTermScoreJump';
 import { useHomeContext } from '@/components/FullHome';
 import styles from './index.scss';
 import { Tag, Switch, Input, Select, Slider, Form } from 'antd';
@@ -948,6 +955,22 @@ function baseKChartOptions(darkMode: boolean, range?: { start: number; end: numb
             text += `<div style="display: flex; justify-content: space-between;"><span>成交量:</span><span>${
               (p.data[1] / 10000).toFixed(2) + '万手'
             }</span></div>`;
+          } else if (p.seriesName == '短线评分' && p.data && typeof p.data === 'object') {
+            // 短线评分：带出当日变化值（红绿柱）与突变程度（见 helpers/shortTermScoreJump）
+            const d: any = p.data;
+            const delta = typeof d.delta === 'number' ? d.delta : null;
+            const cls = delta === null ? '' : delta > 0 ? 'text-up' : 'text-down';
+            text += `<div style="display: flex; justify-content: space-between;" class="${cls}"><span>短线评分:</span><span>${Number(
+              d.value
+            ).toFixed(1)}</span></div>`;
+            if (delta !== null) {
+              text += `<div style="display: flex; justify-content: space-between;" class="${cls}"><span>较前一日:</span><span>${formatScoreDelta(
+                delta
+              )}</span></div>`;
+            }
+            if (d.jumpDesc) {
+              text += `<div style="display: flex; justify-content: space-between;" class="${cls}"><span>突变:</span><span>${d.jumpDesc}</span></div>`;
+            }
           } else if (!isNaN(p.data)) {
             text += `<div style="display: flex; justify-content: space-between;"><span>${p.seriesName}:</span><span>${p.data.toFixed(
               2
@@ -2514,6 +2537,14 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const onTechIndicatorTypeChange = useCallback((value: TechIndicatorType) => {
       if (chartOptions[typeIndex]) {
         chartOptions[typeIndex][0].techType = value;
+        // 短线评分的红绿柱占用了技术指标区的右侧隐藏轴（yAxis 4），并把它固定成 [0, maxAbs]：
+        // 切到别的指标时要还原自适应，否则 ADV 的 DI+/DI- 等会沿用被压扁的固定刻度。
+        const techAxis = chartOptions[typeIndex][0].yAxis?.[4];
+        if (techAxis) {
+          delete techAxis.min;
+          delete techAxis.max;
+          techAxis.scale = true;
+        }
         if (value === TechIndicatorType.SHORT_SCORE) {
           // 短线评分曲线要现取数逐日计算（见下方 effect）：
           // 先把旧指标序列清掉，避免算完之前还显示上一个指标的线；worker 侧对该指标只返回空序列
@@ -2568,7 +2599,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         const xs = ((target.xAxis?.[0]?.data || []) as string[]) || [];
         const isDaily = DefaultKTypes[typeIndex] === KLineType.Day;
         const scoreDays = Object.keys(scores).sort();
-        const data = xs.map((x) => {
+        const values = xs.map((x) => {
           const key = String(x || '').replace(/-/g, '').substring(0, 8);
           let day = '';
           if (isDaily) {
@@ -2584,7 +2615,72 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           const v = day ? scores[day] : undefined;
           return typeof v === 'number' ? Number(v.toFixed(1)) : null;
         });
+        // ---- 突变识别：在「图上实际显示的逐点序列」上算单日变化 ----
+        // 这样柱子一定落在看得见的点上（周/月K 的相邻 bar 就是相邻比较对象），
+        // 且缺失日会断开比较，不会把跨多日的累计变化当成单日突变。
+        const jumps = computeScoreJumps(values, xs);
+        const jumpByIdx: Record<number, ScoreJumpPoint> = {};
+        jumps.forEach((j) => {
+          jumpByIdx[j.index] = j;
+        });
+        /** 逐日变化（正=跳升，负=跳降）；缺失日 / 首日 / 前一日无分数时为 null */
+        const deltas = values.map((v, i) => {
+          const prev = i > 0 ? values[i - 1] : null;
+          if (typeof v !== 'number' || typeof prev !== 'number') {
+            return null;
+          }
+          return Number((v - prev).toFixed(1));
+        });
+        // 曲线点带出变化信息（提示框展示变化值与突变程度），其余点保持纯数值
+        const data = values.map((v, i) => {
+          if (typeof v !== 'number') {
+            return null;
+          }
+          const delta = deltas[i];
+          if (typeof delta !== 'number') {
+            return v;
+          }
+          const j = jumpByIdx[i];
+          return { value: v, delta, jumpDesc: j ? describeScoreJump(j) : '' };
+        });
+        // ---- 突变用红绿柱表示：红=跳升、绿=跳降，柱越高变化越大 ----
+        // 柱子挂在技术指标区的右侧隐藏轴上（yAxisIndex 4），0 基线落在区域底部，
+        // 因此高度只表达「变化幅度」的相对大小，不与左侧评分刻度混用。
+        const jumpUpColor = variableColors['--increase-color'] || '#f5222d';
+        const jumpDownColor = variableColors['--reduce-color'] || '#52c41a';
+        const deltaBars = deltas.map((delta, i) => {
+          if (typeof delta !== 'number') {
+            return null;
+          }
+          const isJump = !!jumpByIdx[i];
+          return {
+            value: Math.abs(delta),
+            // 达到突变阈值的柱子加重显示，普通波动只作淡淡的背景
+            itemStyle: { color: delta > 0 ? jumpUpColor : jumpDownColor, opacity: isJump ? 0.9 : 0.28 },
+          };
+        });
+        const maxAbsDelta = deltas.reduce((m: number, d) => (typeof d === 'number' ? Math.max(m, Math.abs(d)) : m), 0);
+        // 最高柱约占技术指标区一半高度，给上方曲线留出可读空间
+        const deltaAxisMax = maxAbsDelta > 0 ? Number((maxAbsDelta * 1.9).toFixed(1)) : 1;
+        const deltaAxis = target.yAxis?.[4];
+        if (deltaAxis) {
+          deltaAxis.min = 0;
+          deltaAxis.max = deltaAxisMax;
+          deltaAxis.scale = false;
+        }
         target.series = (target.series || []).filter((_: any) => _.stype !== 'tech');
+        // 柱子先入列（画在曲线下方），曲线后入列保证压在最上层
+        target.series.push({
+          name: '评分突变',
+          type: 'bar',
+          stype: 'tech',
+          xAxisIndex: 2,
+          yAxisIndex: 4,
+          barWidth: '55%',
+          silent: true,
+          z: 1,
+          data: deltaBars,
+        });
         target.series.push({
           name: TechIndicatorSeriesNames[TechIndicatorType.SHORT_SCORE][0],
           type: 'line',
@@ -2592,6 +2688,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           symbol: 'none',
           xAxisIndex: 2,
           yAxisIndex: 2,
+          z: 3,
           data,
           connectNulls: false,
           lineStyle: { color: '#faad14', width: 1.2 },
@@ -3234,10 +3331,19 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                       <Select.Option value={v} key={"tit_" + v}>{TechIndicatorNames[v]}</Select.Option>
                     ))}
                   </Select>
-                  {techType === TechIndicatorType.SHORT_SCORE && shortScoreCurveLoading ? (
-                    <span style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}>
-                      短线评分计算中（最近 {SHORT_SCORE_CURVE_MAX_DAYS} 个交易日）...
-                    </span>
+                  {techType === TechIndicatorType.SHORT_SCORE ? (
+                    shortScoreCurveLoading ? (
+                      <span style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}>
+                        短线评分计算中（最近 {SHORT_SCORE_CURVE_MAX_DAYS} 个交易日）...
+                      </span>
+                    ) : (
+                      <span
+                        style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}
+                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动`}
+                      >
+                        红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
+                      </span>
+                    )
                   ) : null}
                   &nbsp;
                   <Select value={currentBK || ''} onChange={onBKChange} size="small">

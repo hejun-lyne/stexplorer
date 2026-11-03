@@ -14,6 +14,8 @@ import {
   message,
   Dropdown,
   Tooltip,
+  DatePicker,
+  Progress,
 } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
@@ -330,6 +332,15 @@ const STList: React.FC<STListProps> = ({
 
   // 短线评分
   const [shortScoreLoading, setShortScoreLoading] = useState(false);
+  // 短线评分「历史补全」：按用户选的区间，对当前股票列表逐日补算评分并写入缓存
+  const [historyFillOpen, setHistoryFillOpen] = useState(false);
+  const [historyFillRange, setHistoryFillRange] = useState<any>(null);
+  const [historyFilling, setHistoryFilling] = useState(false);
+  const [historyFillDone, setHistoryFillDone] = useState(0);
+  const [historyFillTotal, setHistoryFillTotal] = useState(0);
+  const [historyFillMsg, setHistoryFillMsg] = useState('');
+  const [historyFillResult, setHistoryFillResult] = useState<any>(null);
+  const isHistoryFillPausedRef = React.useRef(false);
   const [shortScoreData, setShortScoreData] = useState<ShortTermScoreRow[]>([]);
   const [shortScoreProgress, setShortScoreProgress] = useState(0);
   const isShortScorePausedRef = React.useRef(false);
@@ -2092,6 +2103,95 @@ const STList: React.FC<STListProps> = ({
     waitBoardStocks,
   ]);
 
+  // ========== 短线评分「历史补全」（任意区间补算，不只是最近 N 个交易日） ==========
+  // 与「短线评分」共用同一个评分池与同一套评分实现（precomputeShortTermScores），
+  // 区别只在于：这里按用户选择的起止日期整段补算，而不是只补最近 N 天，算完直接写进评分序列缓存。
+  const openHistoryFill = useCallback(() => {
+    // 默认：今年年初 ~ 昨天（补全后即可用离线脚本按 --version current 回测）
+    setHistoryFillRange([dayjs().startOf('year'), dayjs().subtract(1, 'day')]);
+    setHistoryFillResult(null);
+    setHistoryFillDone(0);
+    setHistoryFillTotal(0);
+    setHistoryFillMsg('');
+    isHistoryFillPausedRef.current = false;
+    setHistoryFillOpen(true);
+  }, []);
+
+  /** 本次会补算的股票数（Modal 里展示，口径与「短线评分」一致） */
+  const historyFillStockCount = React.useMemo(
+    () => (historyFillOpen ? collectCurrentItems({ ignoreReuse: true }).length : 0),
+    [historyFillOpen, collectCurrentItems]
+  );
+
+  const handleHistoryFill = useCallback(async () => {
+    if (historyFilling) {
+      // 再次点击 = 停止：当前交易日算完后结束（已算完的已落盘，重跑会自动增量续算）
+      isHistoryFillPausedRef.current = true;
+      setHistoryFillMsg('正在停止（当前交易日算完后结束）...');
+      return;
+    }
+    const range = historyFillRange;
+    if (!range || !range[0] || !range[1]) {
+      message.warning('请选择要补全的时间区间');
+      return;
+    }
+    // 板块刚切换就点：等股票列表到位，否则补的是上一组板块的股票
+    if (!(await waitBoardStocks())) {
+      message.warning('当前板块的股票列表还在加载，请稍后再试');
+      return;
+    }
+    const items = collectCurrentItems({ ignoreReuse: true });
+    if (!items.length) {
+      message.warning('当前没有可补全的股票');
+      return;
+    }
+    const startDate = range[0].format('YYYY-MM-DD');
+    const endDate = range[1].format('YYYY-MM-DD');
+    if (startDate > endDate) {
+      message.warning('开始日期不能晚于结束日期');
+      return;
+    }
+    isHistoryFillPausedRef.current = false;
+    setHistoryFilling(true);
+    setHistoryFillResult(null);
+    setHistoryFillDone(0);
+    setHistoryFillTotal(0);
+    setHistoryFillMsg(`准备中...（${items.length} 只）`);
+    try {
+      const res = await precomputeShortTermScores({
+        items,
+        startDate,
+        endDate,
+        // 列表「近 N 日评分」历史列/过滤窗口要往前多覆盖，否则补完点评分还要再补一次
+        historyDays: shortScoreHistoryDays,
+        source: SHORT_SCORE_SOURCE,
+        shouldStop: () => isHistoryFillPausedRef.current,
+        onProgress: (done, total, msg) => {
+          setHistoryFillDone(done);
+          setHistoryFillTotal(total);
+          setHistoryFillMsg(msg);
+        },
+      });
+      setHistoryFillResult(res);
+      const head = isHistoryFillPausedRef.current ? '已停止' : '完成';
+      setHistoryFillMsg(
+        `${head}：新算 ${res.dates} 天 / 复用 ${res.reused} 天（共 ${res.totalDates} 天），写入 ${res.rows} 行` +
+          (res.missingRows
+            ? `；${res.missingRows} 个「交易日×股票」未覆盖（停牌/日K不足）`
+            : '；整段窗口已全部覆盖')
+      );
+      if (!isHistoryFillPausedRef.current) {
+        message.success(`历史补全完成：写入 ${res.rows} 行评分`);
+      }
+    } catch (e: any) {
+      console.error('[历史补全] 失败:', e);
+      setHistoryFillMsg(`失败：${e?.message || e}`);
+      message.error('历史补全失败，详情见控制台');
+    } finally {
+      setHistoryFilling(false);
+    }
+  }, [historyFilling, historyFillRange, waitBoardStocks, collectCurrentItems, shortScoreHistoryDays]);
+
   // 外部（板块列表 / 行业入口）指定了单个板块 → 同步为「单选」；多选由下拉框直接维护
   useEffect(() => {
     if (!secid) {
@@ -3205,6 +3305,19 @@ const STList: React.FC<STListProps> = ({
           </Button>
           <Button
             size="small"
+            onClick={openHistoryFill}
+            loading={historyFilling && historyFillTotal === 0}
+            style={{ marginLeft: 4 }}
+            title="按选择的时间区间，把当前股票列表的短线评分逐日补算进缓存（增量：已覆盖的交易日直接跳过，中断后再次点击可续算）"
+          >
+            {historyFilling
+              ? historyFillTotal
+                ? `补全 ${historyFillDone}/${historyFillTotal}`
+                : '补全准备中...'
+              : '短线评分（历史补全）'}
+          </Button>
+          <Button
+            size="small"
             onClick={handleTodayScore}
             loading={todayScoreLoading}
             style={{ marginLeft: 4 }}
@@ -4278,6 +4391,78 @@ const STList: React.FC<STListProps> = ({
         </div>
         <div style={{ fontSize: 12, color: 'var(--hint-color)', padding: '8px 10px 0' }}>
           点击股票名称可打开对应详情；训练账户为所有标的共享（资金共用），持仓与个股详情页训练工具栏一致
+        </div>
+      </Modal>
+      <Modal
+        title="短线评分 · 历史补全"
+        visible={historyFillOpen}
+        footer={null}
+        width={600}
+        maskClosable={!historyFilling}
+        onCancel={() => {
+          if (historyFilling) {
+            isHistoryFillPausedRef.current = true;
+          }
+          setHistoryFillOpen(false);
+        }}
+      >
+        <div style={{ fontSize: 12, color: 'var(--secondary-text-color)', lineHeight: 1.7, marginBottom: 12 }}>
+          对「当前股票列表」逐日补算短线评分并写入评分序列缓存，口径与「短线评分 / 个股详情页」完全一致。
+          <br />
+          已覆盖的交易日会自动跳过；中断后再次点击可增量续算。补全后即可用离线脚本按当前评分版本回测。
+        </div>
+        <Row gutter={8} align="middle" style={{ marginBottom: 10 }}>
+          <Col span={5}>补全区间</Col>
+          <Col span={19}>
+            <DatePicker.RangePicker
+              style={{ width: '100%' }}
+              value={historyFillRange}
+              onChange={(v: any) => setHistoryFillRange(v)}
+              allowClear={false}
+              disabled={historyFilling}
+            />
+          </Col>
+        </Row>
+        <div style={{ fontSize: 12, marginBottom: 8 }}>
+          股票数量：<strong>{historyFillStockCount}</strong> 只
+          <span style={{ color: 'var(--secondary-text-color)' }}>
+            （当前列表口径，已排除科创板/北交所与市值过滤）
+          </span>
+        </div>
+        <Progress
+          percent={historyFillTotal ? Math.round((historyFillDone / historyFillTotal) * 100) : 0}
+          status={historyFilling ? 'active' : 'normal'}
+          format={() => (historyFillTotal ? `${historyFillDone}/${historyFillTotal} 天` : '—')}
+        />
+        <div style={{ fontSize: 12, color: 'var(--secondary-text-color)', minHeight: 20 }}>{historyFillMsg}</div>
+        {historyFillResult ? (
+          <div style={{ marginTop: 6, fontSize: 12, lineHeight: 1.8 }}>
+            <div>
+              新算 {historyFillResult.dates} 天 / 复用 {historyFillResult.reused} 天 / 窗口共{' '}
+              {historyFillResult.totalDates} 天
+            </div>
+            <div>
+              写入 {historyFillResult.rows} 行；未上市 {historyFillResult.notListed} 行；数据未就绪{' '}
+              {historyFillResult.skipped} 行
+              {historyFillResult.writeErrors ? `；写库失败 ${historyFillResult.writeErrors} 次（建议重跑）` : ''}
+            </div>
+            <div>
+              覆盖校验：
+              {historyFillResult.verifyFailed
+                ? '调用失败，无法判断'
+                : historyFillResult.missingRows
+                  ? `${historyFillResult.missingRows} 行未覆盖（涉及 ${historyFillResult.missingDays.length} 天，多为停牌/日K不足）`
+                  : '整段窗口已全部覆盖'}
+            </div>
+          </div>
+        ) : null}
+        <div style={{ marginTop: 14, textAlign: 'right' }}>
+          <Button onClick={() => setHistoryFillOpen(false)} style={{ marginRight: 8 }}>
+            关闭
+          </Button>
+          <Button type="primary" loading={historyFilling} onClick={() => void handleHistoryFill()}>
+            {historyFilling ? '停止补全' : '开始补全'}
+          </Button>
         </div>
       </Modal>
     </>
