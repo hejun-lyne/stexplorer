@@ -23,6 +23,13 @@ import {
   SCORE_JUMP_CONFIG,
 } from '@/helpers/shortTermScoreJump';
 import type { ScoreJumpPoint } from '@/helpers/shortTermScoreJump';
+import {
+  computeShortScoreSignalSeries,
+  DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
+  SHORT_SCORE_BUY_MARK_COLOR,
+  SHORT_SCORE_SELL_MARK_COLOR,
+} from '@/helpers/shortTermScoreBacktest';
+import type { ShortScoreSignal } from '@/helpers/shortTermScoreBacktest';
 import { BuildDailyKFromTrends } from '@/helpers/stock';
 import {
   ComputeEarly30Prediction,
@@ -89,10 +96,11 @@ const SHORT_SCORE_LINE_COLOR = '#faad14';
  *
  * 与详情页 PriceTrend、买入规则里的「低位抬升」同口径：
  * 抬升幅度 = 当日评分 - 前 N 根内的最低分。
+ * 取 10 根，与信号规则的 riseRefDays 一致（否则图上「抬升已过线」与「信号列没反应」会打架）。
  */
-const SHORT_SCORE_RISE_DAYS = 5;
-/** 「自低点抬升」达到该值即视为启动（与买入规则 --min-rise 默认值一致） */
-const SHORT_SCORE_RISE_THRESHOLD = 20;
+const SHORT_SCORE_RISE_DAYS = 10;
+/** 「自低点抬升」达到该值即视为启动（= 信号规则的 minRise；单日跳升另有 20 分阈值） */
+const SHORT_SCORE_RISE_THRESHOLD = 35;
 
 /** 公司简介内存缓存（secid -> 简介），来回切换股票时不重复取数 */
 const introCache = new Map<string, string>();
@@ -107,6 +115,8 @@ interface ShortScoreLines {
   jumpFlags: boolean[];
   /** 自近 N 根低点的累计抬升（恒 >= 0） */
   riseData: any[];
+  /** 与 deltas 对齐：该点是买入 / 卖出信号日（图表上给柱子换色并做标记） */
+  signals: (ShortScoreSignal | null)[];
   /** 突变柱 / 抬升线共用的隐藏轴上限 */
   deltaAxisMax: number;
 }
@@ -143,6 +153,16 @@ function buildShortScoreLines(
     return Number((v - prev).toFixed(1));
   });
 
+  // 逐日信号（买入 / 卖出 / 观察）：图表上给买卖点当天的柱子换色标记，与列表「信号」列同一套规则
+  const signalMap = computeShortScoreSignalSeries({
+    scores: shortScoreScores || {},
+    params: DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
+  });
+  const signals: (ShortScoreSignal | null)[] = xs.map((x) => {
+    const key = String(x || '').replace(/-/g, '').substring(0, 8);
+    return (key && signalMap[key]) || null;
+  });
+
   const scoreData = values.map((v, i) => {
     if (typeof v !== 'number') {
       return null;
@@ -152,7 +172,14 @@ function buildShortScoreLines(
       return v;
     }
     const j = jumpByIdx[i];
-    return { value: v, delta, jumpDesc: j ? describeScoreJump(j) : '' };
+    const sig = signals[i];
+    return {
+      value: v,
+      delta,
+      jumpDesc: j ? describeScoreJump(j) : '',
+      signalKind: sig && sig.kind !== '观察' ? sig.kind : '',
+      signalReason: sig?.reason || '',
+    };
   });
 
   const riseData = values.map((v, i) => {
@@ -185,6 +212,7 @@ function buildShortScoreLines(
     deltas,
     jumpFlags: deltas.map((_, i) => !!jumpByIdx[i]),
     riseData,
+    signals,
     deltaAxisMax: axisTop > 0 ? Number((axisTop * 1.9).toFixed(1)) : 1,
   };
 }
@@ -216,6 +244,19 @@ function buildTechSeries(
     const deltaBars = lines.deltas.map((delta, i) => {
       if (typeof delta !== 'number') {
         return null;
+      }
+      const sigKind = lines.signals[i]?.kind;
+      if (sigKind === '买入' || sigKind === '卖出') {
+        // 买卖点当天的柱子换色标记（紫=买入、青=卖出），并用描边压过普通红绿柱
+        return {
+          value: Math.abs(delta),
+          itemStyle: {
+            color: sigKind === '买入' ? SHORT_SCORE_BUY_MARK_COLOR : SHORT_SCORE_SELL_MARK_COLOR,
+            borderColor: 'rgba(255,255,255,0.9)',
+            borderWidth: 1,
+            opacity: 1,
+          },
+        };
       }
       return {
         value: Math.abs(delta),
@@ -254,7 +295,7 @@ function buildTechSeries(
           symbol: 'none',
           silent: true,
           label: { show: false },
-          // 20 分是「低位抬升」买入阈值，作为参考线
+          // minRise（35 分）是「自近 N 根低点抬升」的买入阈值，作为参考线
           data: [{ yAxis: SHORT_SCORE_RISE_THRESHOLD, lineStyle: { color: hintColor, opacity: 0.5, type: 'dotted' } }],
         },
       },
@@ -614,6 +655,15 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
               }
               if (d.jumpDesc) {
                 rows.push(`<span class="${cls}">突变 <b>${d.jumpDesc}</b></span>`);
+              }
+              if (d.signalKind) {
+                const sigCls = d.signalKind === '买入' ? 'text-up' : 'text-down';
+                rows.push(`<span class="${sigCls}">信号 <b>${d.signalKind}</b></span>`);
+                if (d.signalReason) {
+                  rows.push(
+                    `<span style="opacity:.72;font-size:11px;display:inline-block;max-width:240px;white-space:normal">${d.signalReason}</span>`
+                  );
+                }
               }
               return;
             }
@@ -1528,9 +1578,14 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
               {techType === TechIndicatorType.SHORT_SCORE && !shortScoreCurveLoading ? (
                 <span
                   style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}
-                  title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（低位横盘后启动的依据，${SHORT_SCORE_RISE_THRESHOLD} 分为买入阈值参考线）`}
+                  title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。紫柱=买入信号日、青柱=卖出信号日（与列表「信号」列同一套规则，悬停曲线上可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
                 >
                   红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
+                  <span style={{ marginLeft: 4 }}>
+                    <span style={{ color: SHORT_SCORE_BUY_MARK_COLOR, fontWeight: 600 }}>紫柱=买入信号</span>
+                    {'、'}
+                    <span style={{ color: SHORT_SCORE_SELL_MARK_COLOR, fontWeight: 600 }}>青柱=卖出信号</span>
+                  </span>
                   <span style={{ marginLeft: 4 }}>蓝虚线=自近{SHORT_SCORE_RISE_DAYS}根低点抬升</span>
                 </span>
               ) : null}

@@ -38,6 +38,13 @@ import {
   SCORE_JUMP_CONFIG,
 } from '@/helpers/shortTermScoreJump';
 import type { ScoreJumpPoint } from '@/helpers/shortTermScoreJump';
+import {
+  computeShortScoreSignalSeries,
+  DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
+  SHORT_SCORE_BUY_MARK_COLOR,
+  SHORT_SCORE_SELL_MARK_COLOR,
+} from '@/helpers/shortTermScoreBacktest';
+import type { ShortScoreSignal } from '@/helpers/shortTermScoreBacktest';
 import { useHomeContext } from '@/components/FullHome';
 import styles from './index.scss';
 import { Tag, Switch, Input, Select, Slider, Form } from 'antd';
@@ -53,8 +60,11 @@ const { makeWorkerExec } = window.contextModules.electron;
  *
  * 与买入规则里的「低位抬升」同口径：抬升幅度 = 当日评分 - 前 N 根内的最低分。
  * 日K时 N 就是 N 个交易日；周/月K 时是 N 根（即 N 周 / N 月）。
+ * 默认 10 根，与信号规则 DEFAULT_SHORT_SCORE_BACKTEST.riseRefDays 一致。
  */
-const SHORT_SCORE_RISE_DAYS = 5;
+const SHORT_SCORE_RISE_DAYS = 10;
+/** 「自低点抬升」买入阈值（与信号规则 minRise 一致）；单日跳升另有 20 分阈值 */
+const SHORT_SCORE_RISE_THRESHOLD = 35;
 import {
   DoubleLeftOutlined,
   DoubleRightOutlined,
@@ -980,6 +990,13 @@ function baseKChartOptions(darkMode: boolean, range?: { start: number; end: numb
             }
             if (d.jumpDesc) {
               text += `<div style="display: flex; justify-content: space-between;" class="${cls}"><span>突变:</span><span>${d.jumpDesc}</span></div>`;
+            }
+            if (d.signalKind) {
+              const sigCls = d.signalKind === '买入' ? 'text-up' : 'text-down';
+              text += `<div style="display: flex; justify-content: space-between;" class="${sigCls}"><span>信号:</span><span>${d.signalKind}</span></div>`;
+              if (d.signalReason) {
+                text += `<div style="opacity:.72;font-size:11px;margin-top:2px;max-width:420px;white-space:normal">${d.signalReason}</div>`;
+              }
             }
           } else if (p.seriesName == '自低点抬升' && p.data && typeof p.data === 'object') {
             // 自近 N 根低点抬升：低位横盘后启动时，这个值会比单日柱高更早给出方向
@@ -2649,6 +2666,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         const xs = ((target.xAxis?.[0]?.data || []) as string[]) || [];
         const isDaily = DefaultKTypes[typeIndex] === KLineType.Day;
         const scoreDays = Object.keys(scores).sort();
+        /** 与 values 对齐：该 bar 用的评分日（买卖点标记按这一天去查信号） */
+        const usedDays: string[] = [];
         const values = xs.map((x) => {
           const key = String(x || '').replace(/-/g, '').substring(0, 8);
           let day = '';
@@ -2662,9 +2681,14 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
               }
             }
           }
+          usedDays.push(day);
           const v = day ? scores[day] : undefined;
           return typeof v === 'number' ? Number(v.toFixed(1)) : null;
         });
+        // 逐日信号（买入 / 卖出 / 观察）：与列表「信号」列、回测同一套规则，
+        // 卖点/买点当天的柱子换色标记，便于在指标区直接看到信号落在哪一根
+        const signalMap = computeShortScoreSignalSeries({ scores, params: DEFAULT_SHORT_SCORE_SIGNAL_PARAMS });
+        const signals: (ShortScoreSignal | null)[] = usedDays.map((d) => (d ? signalMap[d] || null : null));
         // ---- 突变识别：在「图上实际显示的逐点序列」上算单日变化 ----
         // 这样柱子一定落在看得见的点上（周/月K 的相邻 bar 就是相邻比较对象），
         // 且缺失日会断开比较，不会把跨多日的累计变化当成单日突变。
@@ -2691,7 +2715,14 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             return v;
           }
           const j = jumpByIdx[i];
-          return { value: v, delta, jumpDesc: j ? describeScoreJump(j) : '' };
+          const sig = signals[i];
+          return {
+            value: v,
+            delta,
+            jumpDesc: j ? describeScoreJump(j) : '',
+            signalKind: sig && sig.kind !== '观察' ? sig.kind : '',
+            signalReason: sig?.reason || '',
+          };
         });
         // ---- 突变用红绿柱表示：红=跳升、绿=跳降，柱越高变化越大 ----
         // 柱子挂在技术指标区的右侧隐藏轴上（yAxisIndex 4），0 基线落在区域底部，
@@ -2703,6 +2734,19 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             return null;
           }
           const isJump = !!jumpByIdx[i];
+          const sigKind = signals[i]?.kind;
+          if (sigKind === '买入' || sigKind === '卖出') {
+            // 买卖点当天的柱子换色标记（紫=买入、青=卖出），描边让它在红绿柱里跳出来
+            return {
+              value: Math.abs(delta),
+              itemStyle: {
+                color: sigKind === '买入' ? SHORT_SCORE_BUY_MARK_COLOR : SHORT_SCORE_SELL_MARK_COLOR,
+                borderColor: 'rgba(255,255,255,0.9)',
+                borderWidth: 1,
+                opacity: 1,
+              },
+            };
+          }
           return {
             value: Math.abs(delta),
             // 达到突变阈值的柱子加重显示，普通波动只作淡淡的背景
@@ -2756,7 +2800,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         });
         target.series.push({
           // 低位横盘后启动：柱高可能一直很小，但「自低点抬升」会持续走高，
-          // 抬升到 20 分左右就是买入规则里的启动阈值（rise 口径）
+          // 抬升到 SHORT_SCORE_RISE_THRESHOLD（35 分）就是买入规则里的启动阈值（rise 口径）
           name: '自低点抬升',
           type: 'line',
           stype: 'tech',
@@ -2772,8 +2816,13 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             symbol: 'none',
             silent: true,
             label: { show: false },
-            // 20 分是「低位抬升」买入阈值（--min-rise 默认值），作为参考线
-            data: [{ yAxis: 20, lineStyle: { color: variableColors['--hint-color'] || '#999', opacity: 0.5, type: 'dotted' } }],
+            // 35 分是「自近 N 根低点抬升」的买入阈值（minRise），作为参考线
+            data: [
+              {
+                yAxis: SHORT_SCORE_RISE_THRESHOLD,
+                lineStyle: { color: variableColors['--hint-color'] || '#999', opacity: 0.5, type: 'dotted' },
+              },
+            ],
           },
         });
         target.series.push({
@@ -3463,9 +3512,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                     ) : (
                       <span
                         style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}
-                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（低位横盘后启动的依据，20 分为买入阈值参考线）`}
+                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。紫柱=买入信号日、青柱=卖出信号日（与列表「信号」列/回测同一套规则，悬停曲线可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
                       >
                         红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
+                        <span style={{ marginLeft: 4, color: SHORT_SCORE_BUY_MARK_COLOR, fontWeight: 600 }}>紫柱=买入信号</span>
+                        <span style={{ marginLeft: 4, color: SHORT_SCORE_SELL_MARK_COLOR, fontWeight: 600 }}>青柱=卖出信号</span>
                         <span style={{ color: 'var(--secondary-text-color)' }}>
                           　蓝虚线=自近{SHORT_SCORE_RISE_DAYS}根低点抬升
                         </span>

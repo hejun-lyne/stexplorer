@@ -11,6 +11,8 @@
  *   买入（buyMode=rise）：评分自近 riseRefDays 日最低点抬升 ≥ minRise 且 ≥ riseMinScore，
  *     当日不回落（Δ ≥ 0）→ 次日开盘买入。低位启动常分几天完成，单日 Δ 都不到 buyDelta，
  *     改成看「自低点抬升了多少」才不会把这类启动全部漏掉；
+ *     rise 口径同时认「单日跳升」（Δ ≥ buyDelta 且 评分 ≥ minScore，低位按突变前 N 日判）：
+ *     单日大幅跳升的启动日当天就该出信号，否则要等累计抬升补齐、晚一天才买；
  *   Δ ≤ sellDelta                                → 次日开盘卖出；
  *   评分自持仓期最高点回撤 ≥ trailDrop            → 次日开盘卖出（回撤止盈）。
  *
@@ -47,8 +49,9 @@ export interface ShortScoreBacktestParams {
   trailDrop: number;
   /**
    * 买入口径：
-   *   jump = 单日跳升达 buyDelta 且 评分 ≥ minScore（老口径）
-   *   rise = 评分自近 riseRefDays 日最低点抬升 ≥ minRise 且 ≥ riseMinScore（不看单日跳升）
+   *   jump = 只看单日跳升：Δ ≥ buyDelta 且 评分 ≥ minScore
+   *   rise = 主看累计抬升：评分自近 riseRefDays 日最低点抬升 ≥ minRise 且 ≥ riseMinScore；
+   *          同时认「单日跳升」（Δ ≥ buyDelta 且 评分 ≥ minScore）作为另一种启动形态，取并集
    */
   buyMode: 'jump' | 'rise';
   /** rise 模式：自低点抬升幅度下限（分） */
@@ -78,6 +81,76 @@ export const DEFAULT_SHORT_SCORE_BACKTEST: ShortScoreBacktestParams = {
   riseRefDays: 10,
   riseMinScore: 45,
 };
+
+/**
+ * 图表 / 列表「信号」共用的默认信号参数
+ *
+ * rise 口径（自低点抬升 + 单日跳升两种启动形态），列表「信号」列、评分曲线上的买卖点标记、
+ * 详情页回测面板的默认值都从这里取，避免各处自己拼一份参数导致口径打架。
+ */
+export const DEFAULT_SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = {
+  ...DEFAULT_SHORT_SCORE_BACKTEST,
+  buyMode: 'rise',
+};
+
+/** 图表上「买入信号日」柱子的标记色（与红绿突变柱、金色评分线、蓝色抬升线都区分开） */
+export const SHORT_SCORE_BUY_MARK_COLOR = '#722ed1';
+/** 图表上「卖出信号日」柱子的标记色 */
+export const SHORT_SCORE_SELL_MARK_COLOR = '#13c2c2';
+
+/** computeShortScoreSignalSeries 的缓存：评分对象 -> 参数签名 -> 信号表（对象变了自然回收） */
+const signalSeriesCache = new WeakMap<object, Map<string, Record<string, ShortScoreSignal>>>();
+
+/**
+ * 按评分序列逐日判定信号（图表打点用）
+ *
+ * 第 i 天只用第 i 天及之前的评分判定（与列表「信号」列、回测同一套规则），不会偷看未来数据。
+ * 返回 { [YYYYMMDD]: ShortScoreSignal }；评分缺失的交易日不出现在结果里，序列首日无法判定也不出。
+ * 计算量：每天都会重跑一次判定，窗口截断到「判定需要的历史长度」，图上一屏（≤240 根）的开销在毫秒级。
+ */
+export function computeShortScoreSignalSeries(args: {
+  scores: Record<string, number>;
+  params: ShortScoreBacktestParams;
+}): Record<string, ShortScoreSignal> {
+  const scores = args.scores || {};
+  // 图表每次重建都会调用，按「评分对象 + 参数」做一层缓存，避免同一份数据反复算
+  const paramKey = [
+    args.params.buyMode,
+    args.params.buyDelta,
+    args.params.minScore,
+    args.params.minRise,
+    args.params.riseRefDays,
+    args.params.riseMinScore,
+    args.params.lowBaseDays,
+    args.params.lowBaseMax,
+    args.params.sellDelta,
+    args.params.trailDrop,
+  ].join('|');
+  let byParam = signalSeriesCache.get(scores);
+  const cached = byParam?.get(paramKey);
+  if (cached) {
+    return cached;
+  }
+  if (!byParam) {
+    byParam = new Map();
+    signalSeriesCache.set(scores, byParam);
+  }
+  const keys = Object.keys(scores)
+    .filter((d) => typeof scores[d] === 'number' && Number.isFinite(scores[d]))
+    .sort();
+  const out: Record<string, ShortScoreSignal> = {};
+  const window = Math.max(30, Math.max(args.params.riseRefDays || 0, args.params.lowBaseDays || 0) + 5);
+  for (let i = 1; i < keys.length; i += 1) {
+    const start = Math.max(0, i - window);
+    const upto: Record<string, number> = {};
+    for (let k = start; k <= i; k += 1) {
+      upto[keys[k]] = scores[keys[k]];
+    }
+    out[keys[i]] = evaluateShortScoreSignal({ scores: upto, params: args.params });
+  }
+  byParam.set(paramKey, out);
+  return out;
+}
 
 export interface ShortScoreBacktestTrade {
   signalIn: string;
@@ -162,6 +235,8 @@ export interface ShortScoreSignal {
   kind: ShortScoreSignalKind;
   /** 判定依据（一句话，鼠标悬停展示，便于人工核对） */
   reason: string;
+  /** 买入信号按哪套口径成立：rise=自低点抬升 / jump=单日跳升（观察、卖出时为空） */
+  via?: 'rise' | 'jump';
 }
 
 /** 保留一位小数（-0 归零，避免显示 -0.0） */
@@ -229,6 +304,12 @@ function signalContext(
  *   1. 回撤止盈的基准取「近 riseRefDays 个评分日的最高分」，不是持仓期最高分；
  *   2. 没有冷却期与跳空过滤（那两项依赖卖出成交日与次日开盘价）。
  * 买入与卖出同时成立时按买入输出（reason 里仍会写明回撤值，便于自己判断）。
+ *
+ * **启动有两种形态，rise 口径两者都认**：
+ *   - 自低点抬升：近 riseRefDays 日最低分 → 当日评分抬升 ≥ minRise（分几天完成的低位启动）；
+ *   - 单日跳升：当日 Δ ≥ buyDelta（一根大阳柱就是启动日本身）。
+ * 只认累计抬升会把「单日跳升 +26 但累计还没到 35 分」的启动日漏掉、延后一天才出信号，
+ * 所以 rise 口径按「或」处理；两套口径各自带自己的评分地板与低位条件。
  */
 export function evaluateShortScoreSignal(args: {
   scores: Record<string, number>;
@@ -241,34 +322,41 @@ export function evaluateShortScoreSignal(args: {
   }
   const { cur, delta, lowRef, highRef, riseAmt, dropFromHigh, refDays, prevDays, map } = ctx;
 
+  // ---- 口径一：单日跳升（jump）：Δ 达阈值 + 评分下限 + 低位启动 ----
+  const lowBaseHigh = p.lowBaseDays > 0 ? Math.max(...prevDays.slice(-p.lowBaseDays).map((d) => map[d])) : NaN;
+  /** 低位上限判定：一律 ≤ lowBaseMax 才算低位（NaN/未启用时放行） */
+  const inLowBase = (v: number) => p.lowBaseDays <= 0 || !Number.isFinite(v) || v <= p.lowBaseMax;
+  // 跳升口径看「突变前 N 日最高」；并集口径（rise 模式）下，抬升起点在低位同样认，
+  // 避免两种口径差一两分时把当天明明已经启动的股票卡成观察
+  const jumpLowOk = inLowBase(lowBaseHigh) || (p.buyMode === 'rise' && inLowBase(lowRef));
+  let jumpOk = false;
+  let jumpReason = '';
+  if (delta < p.buyDelta) {
+    jumpReason = `单日跳升 ${f1(delta)} < +${p.buyDelta}`;
+  } else if (cur < p.minScore) {
+    jumpReason = `评分 ${f1(cur)} < 下限 ${p.minScore}`;
+  } else if (!jumpLowOk) {
+    jumpReason = `突变前 ${p.lowBaseDays} 日最高 ${f1(lowBaseHigh)} > 低位上限 ${p.lowBaseMax}`;
+  } else {
+    jumpOk = true;
+    jumpReason = `单日跳升 +${f1(delta)}，评分 ${f1(cur)}`;
+  }
 
-  let buyOk = false;
-  let buyReason = '';
+  // ---- 口径二：自近 N 日低点抬升（rise）：抬升达阈值 + 启动地板 + 抬升起点在低位 ----
+  let riseOk = false;
+  let riseReason = '';
   if (p.buyMode === 'rise') {
     if (delta < 0) {
-      buyReason = `当日回落 ${f1(delta)}（只认仍在抬升的日子）`;
+      riseReason = `当日回落 ${f1(delta)}（只认仍在抬升的日子）`;
     } else if (riseAmt < p.minRise) {
-      buyReason = `自近${refDays}日低点 ${f1(lowRef)} 抬升 +${f1(riseAmt)}（需 ≥${p.minRise}）`;
+      riseReason = `自近${refDays}日低点 ${f1(lowRef)} 抬升 +${f1(riseAmt)}（需 ≥${p.minRise}）`;
     } else if (cur < p.riseMinScore) {
-      buyReason = `评分 ${f1(cur)} < 启动地板 ${p.riseMinScore}`;
+      riseReason = `评分 ${f1(cur)} < 启动地板 ${p.riseMinScore}`;
     } else if (p.lowBaseDays > 0 && lowRef > p.lowBaseMax) {
-      buyReason = `近${refDays}日最低 ${f1(lowRef)} > 低位上限 ${p.lowBaseMax}（不算低位启动）`;
+      riseReason = `近${refDays}日最低 ${f1(lowRef)} > 低位上限 ${p.lowBaseMax}（不算低位启动）`;
     } else {
-      buyOk = true;
-      buyReason = `自近${refDays}日低点 ${f1(lowRef)} 抬升 +${f1(riseAmt)}，评分 ${f1(cur)}`;
-    }
-  } else {
-    // jump 口径：单日跳升达阈值 + 评分下限 + 突变前 N 日低位
-    const lowBaseHigh = p.lowBaseDays > 0 ? Math.max(...prevDays.slice(-p.lowBaseDays).map((d) => map[d])) : NaN;
-    if (delta < p.buyDelta) {
-      buyReason = `跳升 ${f1(delta)} < +${p.buyDelta}`;
-    } else if (cur < p.minScore) {
-      buyReason = `评分 ${f1(cur)} < 下限 ${p.minScore}`;
-    } else if (p.lowBaseDays > 0 && Number.isFinite(lowBaseHigh) && lowBaseHigh > p.lowBaseMax) {
-      buyReason = `突变前 ${p.lowBaseDays} 日最高 ${f1(lowBaseHigh)} > 低位上限 ${p.lowBaseMax}`;
-    } else {
-      buyOk = true;
-      buyReason = `跳升 +${f1(delta)}，评分 ${f1(cur)}`;
+      riseOk = true;
+      riseReason = `自近${refDays}日低点 ${f1(lowRef)} 抬升 +${f1(riseAmt)}，评分 ${f1(cur)}`;
     }
   }
 
@@ -281,14 +369,34 @@ export function evaluateShortScoreSignal(args: {
     sellOk = true;
     sellReason = `自近${refDays}日最高 ${f1(highRef)} 回撤 ${f1(dropFromHigh)} 分（≥${p.trailDrop}）`;
   }
+  const withSell = (reason: string) => (sellOk ? `${reason}；同时回撤 ${f1(dropFromHigh)} 分` : reason);
 
-  if (buyOk) {
-    return { kind: '买入', reason: sellOk ? `${buyReason}；同时回撤 ${f1(dropFromHigh)} 分` : buyReason };
+  if (p.buyMode === 'jump') {
+    if (jumpOk) {
+      return { kind: '买入', reason: withSell(jumpReason), via: 'jump' };
+    }
+  } else if (riseOk) {
+    return { kind: '买入', reason: withSell(riseReason), via: 'rise' };
+  } else if (jumpOk) {
+    // 累计抬升还没到阈值，但当日已经是一根明显的跳升柱：同样算启动，别等到第二天补齐累计抬升
+    return {
+      kind: '买入',
+      reason: withSell(`${jumpReason}（累计抬升 ${f1(riseAmt)} 未到 ${p.minRise}，按单日跳升口径）`),
+      via: 'jump',
+    };
   }
+
   if (sellOk) {
     return { kind: '卖出', reason: sellReason };
   }
-  return { kind: '观察', reason: buyReason };
+  // 观察：当日已经是明显的跳升柱却没成立时，把跳升口径的卡点一并写出来（避免只看到「抬升不足」）
+  const observeReason =
+    p.buyMode === 'jump'
+      ? jumpReason
+      : delta >= p.buyDelta
+        ? `${riseReason}；跳升口径：${jumpReason}`
+        : riseReason;
+  return { kind: '观察', reason: observeReason };
 }
 
 export interface ShortScoreSignalDim {
@@ -323,24 +431,32 @@ export function scoreShortScoreSignalQuality(args: {
   params: ShortScoreBacktestParams;
   /** 评分里的量能维度得分（0~30，列表行自带）；拿不到时按中性计 */
   volumeScore?: number | null;
+  /** 该信号实际按哪套口径成立（不传时按 params.buyMode）：决定强度 / 低位起点用哪组数 */
+  via?: 'rise' | 'jump';
 }): ShortScoreSignalQuality | null {
   const p = args.params;
   const ctx = signalContext(args.scores, p);
   if (!ctx) {
     return null;
   }
-  const { cur, delta, lowRef, highRef, riseAmt, dropFromHigh, refDays } = ctx;
+  const { cur, delta, lowRef, highRef, riseAmt, dropFromHigh, refDays, prevDays, map } = ctx;
   const dims: ShortScoreSignalDim[] = [];
+  const useJump = (args.via || (p.buyMode === 'jump' ? 'jump' : 'rise')) === 'jump';
+  /** 单日跳升口径的「低位起点」= 突变前 N 日最高分（rise 口径用近 N 日最低分） */
+  const jumpBaseHigh =
+    p.lowBaseDays > 0 && prevDays.length
+      ? Math.max(...prevDays.slice(-p.lowBaseDays).map((d) => map[d]))
+      : NaN;
 
   // 1. 抬升强度 15：超过门槛多少（rise 看抬升幅度，jump 看单日跳升）
-  const amount = p.buyMode === 'rise' ? riseAmt : delta;
-  const over = amount - (p.buyMode === 'rise' ? p.minRise : p.buyDelta);
+  const amount = useJump ? delta : riseAmt;
+  const over = amount - (useJump ? p.buyDelta : p.minRise);
   dims.push({
     key: 'strength',
     label: '抬升强度',
     max: 15,
     score: over >= 20 ? 15 : over >= 12 ? 12 : over >= 6 ? 9 : over >= 0 ? 6 : 2,
-    detail: `${p.buyMode === 'rise' ? '抬升' : '跳升'} ${f1(amount)}，超出门槛 ${f1(over)} 分`,
+    detail: `${useJump ? '跳升' : '抬升'} ${f1(amount)}，超出门槛 ${f1(over)} 分`,
   });
 
   // 2. 评分水平 10
@@ -353,13 +469,17 @@ export function scoreShortScoreSignalQuality(args: {
   });
 
   // 3. 低位起点 15：抬升的起点越低，越像「低位启动」而不是高位反抽
+  //    jump 口径的起点是「突变前 N 日最高分」，rise 口径是「近 N 日最低分」
+  const lowBaseVal = useJump ? jumpBaseHigh : lowRef;
   dims.push({
     key: 'lowBase',
     label: '低位起点',
     max: 15,
     score:
-      lowRef <= 15 ? 15 : lowRef <= 25 ? 12 : lowRef <= 30 ? 9 : lowRef <= 35 ? 6 : lowRef <= p.lowBaseMax ? 3 : 0,
-    detail: `近${refDays}日最低 ${f1(lowRef)}（低位上限 ${p.lowBaseMax}）`,
+      lowBaseVal <= 15 ? 15 : lowBaseVal <= 25 ? 12 : lowBaseVal <= 30 ? 9 : lowBaseVal <= 35 ? 6 : lowBaseVal <= p.lowBaseMax ? 3 : 0,
+    detail: useJump
+      ? `突变前 ${p.lowBaseDays} 日最高 ${Number.isFinite(jumpBaseHigh) ? f1(jumpBaseHigh) : '--'}（低位上限 ${p.lowBaseMax}）`
+      : `近${refDays}日最低 ${f1(lowRef)}（低位上限 ${p.lowBaseMax}）`,
   });
 
   // 4. 量能确认 15：用评分里的量能维度（0~30）等比折算
@@ -558,13 +678,16 @@ export function runShortScoreBacktest(args: {
       continue;
     }
     // rise：低位启动常分几天完成（22.9 → 31.2 → 47.8 → 52.3，单日都不到 20），
-    // 看「评分自近 N 日低点抬升了多少」比看单日 Δ 更贴近启动本身
+    // 看「评分自近 N 日低点抬升了多少」比看单日 Δ 更贴近启动本身；
+    // 但「单日就大幅跳升」的那种启动日也必须当天认（累计抬升可能还没到阈值），
+    // 所以 rise 口径按「累计抬升达标 或 单日跳升达标」取并集，与列表「信号」列同一套判定。
     const lowRef = params.buyMode === 'rise' ? recentLowOf(i, params.riseRefDays) : null;
     const riseAmt = lowRef === null ? 0 : cur - lowRef;
-    const hitBuy =
-      params.buyMode === 'rise'
-        ? lowRef !== null && delta >= 0 && riseAmt >= params.minRise && cur >= params.riseMinScore
-        : delta >= params.buyDelta && cur >= params.minScore;
+    const jumpHit = delta >= params.buyDelta && cur >= params.minScore;
+    const riseHit = lowRef !== null && delta >= 0 && riseAmt >= params.minRise && cur >= params.riseMinScore;
+    const hitBuy = params.buyMode === 'rise' ? riseHit || jumpHit : jumpHit;
+    /** 这一根是靠「单日跳升」成立的（低位过滤要按 jump 口径看突变前 N 日） */
+    const viaJump = params.buyMode === 'rise' ? !riseHit : true;
     if (hitBuy) {
       const signalBar = window[i];
       // 信号日收盘 → 次日开盘的跳空（次日开盘就是成交价）
@@ -572,42 +695,48 @@ export function runShortScoreBacktest(args: {
       const gapPct = gap * 100;
 
       // 低位启动过滤：
-      //   jump：突变前 N 个评分日都要在低位，排除「高位跌两天后的反抽」
       //   rise：抬升的起点（近 N 日最低分）本身要在低位
-      if (params.buyMode === 'rise') {
-        if (params.lowBaseDays > 0 && lowRef !== null && lowRef > params.lowBaseMax) {
-          skips.push({
-            date: signalBar.date,
-            score: Number(cur.toFixed(2)),
-            delta: Number(delta.toFixed(2)),
-            reason: '非低位启动',
-            gap: Number(gapPct.toFixed(2)),
-            prevHigh: Number(lowRef.toFixed(2)),
-          });
-          continue;
-        }
-      } else if (params.lowBaseDays > 0) {
-        const prevHigh = prevHighOf(i, params.lowBaseDays);
-        if (!prevHigh) {
-          skips.push({
-            date: signalBar.date,
-            score: Number(cur.toFixed(2)),
-            delta: Number(delta.toFixed(2)),
-            reason: '评分历史不足',
-            gap: Number(gapPct.toFixed(2)),
-          });
-          continue;
-        }
-        if (prevHigh.high > params.lowBaseMax) {
-          skips.push({
-            date: signalBar.date,
-            score: Number(cur.toFixed(2)),
-            delta: Number(delta.toFixed(2)),
-            reason: '非低位启动',
-            gap: Number(gapPct.toFixed(2)),
-            prevHigh: Number(prevHigh.high.toFixed(2)),
-          });
-          continue;
+      //   jump：突变前 N 个评分日都要在低位，排除「高位跌两天后的反抽」；
+      //         rise 模式下靠单日跳升成立的信号，抬升起点在低位也算低位启动
+      if (params.lowBaseDays > 0) {
+        if (!viaJump) {
+          if (lowRef !== null && lowRef > params.lowBaseMax) {
+            skips.push({
+              date: signalBar.date,
+              score: Number(cur.toFixed(2)),
+              delta: Number(delta.toFixed(2)),
+              reason: '非低位启动',
+              gap: Number(gapPct.toFixed(2)),
+              prevHigh: Number(lowRef.toFixed(2)),
+            });
+            continue;
+          }
+        } else {
+          const riseLowOk = params.buyMode === 'rise' && lowRef !== null && lowRef <= params.lowBaseMax;
+          if (!riseLowOk) {
+            const prevHigh = prevHighOf(i, params.lowBaseDays);
+            if (!prevHigh) {
+              skips.push({
+                date: signalBar.date,
+                score: Number(cur.toFixed(2)),
+                delta: Number(delta.toFixed(2)),
+                reason: '评分历史不足',
+                gap: Number(gapPct.toFixed(2)),
+              });
+              continue;
+            }
+            if (prevHigh.high > params.lowBaseMax) {
+              skips.push({
+                date: signalBar.date,
+                score: Number(cur.toFixed(2)),
+                delta: Number(delta.toFixed(2)),
+                reason: '非低位启动',
+                gap: Number(gapPct.toFixed(2)),
+                prevHigh: Number(prevHigh.high.toFixed(2)),
+              });
+              continue;
+            }
+          }
         }
       }
 

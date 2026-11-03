@@ -1081,6 +1081,52 @@ export async function resolveScoreDate(source: FundApiType, date: string, ctx?: 
   return date.replace(/-/g, '');
 }
 
+/**
+ * 取某交易日之前的一个交易日（YYYYMMDD）；取不到返回空串
+ *
+ * 给「分时推进还没走完 15:00」的口径用：此时只能用上一交易日的日K算评分。
+ * 优先用已有的指数日K（resolveScoreDate 通常会先把 30 根塞进 ctx），避免多打一次接口；
+ * 指数取不到时退回交易日历，再不行由调用方保持原基准日。
+ */
+export async function resolvePrevTradeDay(source: FundApiType, dayKey: string, ctx?: ScoreSharedContext): Promise<string> {
+  const canonical = toDay(dayKey);
+  if (!canonical) {
+    return '';
+  }
+  const before = (ks: Stock.KLineItem[] | undefined) =>
+    [...new Set((ks || []).map((k) => toDay(k?.date)).filter(Boolean))]
+      .sort()
+      .filter((d) => d < canonical)
+      .pop() || '';
+  const cached = ctx?.indexKlinesMap['1.000001'];
+  const fromCache = before(cached);
+  if (fromCache) {
+    return fromCache.replace(/-/g, '');
+  }
+  try {
+    const ks = await fetchDayKlines(source, '1.000001', 30);
+    if (ctx && !(ctx.indexKlinesMap['1.000001'] || []).length) {
+      ctx.indexKlinesMap['1.000001'] = ks;
+    }
+    const fromIndex = before(ks);
+    if (fromIndex) {
+      return fromIndex.replace(/-/g, '');
+    }
+  } catch {
+    // 指数取数失败时退回交易日历
+  }
+  try {
+    const dates = await fetchTradeCalendar(source, canonical.substring(0, 4));
+    const prev = dates.filter((d) => d < dayKey.replace(/-/g, '')).pop();
+    if (prev) {
+      return prev;
+    }
+  } catch {
+    // 交易日历也取不到：交给调用方
+  }
+  return '';
+}
+
 /** 取某年交易日历（返回 YYYYMMDD 升序；取数失败返回空数组） */
 async function fetchTradeCalendar(source: FundApiType, year: string): Promise<string[]> {
   try {
@@ -1378,6 +1424,15 @@ interface ComputeOptions {
   trendsMap?: Record<string, Stock.TrendItem[]>;
   /** 复用的个股日K（secid -> 日K），同上，避免时间推进时反复取数 */
   klinesMap?: Record<string, Stock.KLineItem[]>;
+  /**
+   * 评分基准日口径（默认 'trainDay'）
+   *
+   * - 'trainDay'：按训练日（基准日）当天的完整日K计算 —— 分时推进已走到 15:00 收盘后用这个；
+   * - 'prevDay'：基准日取「上一交易日」，按上一交易日的日K计算 —— 分时推进还没开始 / 还没走完时用这个，
+   *   否则会拿到训练日收盘（对盘中时点属于未来数据）的K线，评分与形态都会「预知」当天结果。
+   *   结果的缓存键随基准日一起前移，写的是上一交易日那一行（与历史补算同口径）。
+   */
+  scoreDayMode?: 'trainDay' | 'prevDay';
 }
 
 /** 分时时间（HH:MM）：兼容 "YYYY-MM-DD HH:MM[:SS]" 与 "HH:MM[:SS]" */
@@ -1631,7 +1686,16 @@ async function backfillScores(params: {
 }
 
 export async function computeShortTermScoreRows(items: ShortTermScoreItem[], options: ComputeOptions): Promise<ComputeRowsResult> {
-  const { source, concurrency = 3, shouldStop, onRow, backfillDays = 0, onBackfill, ignoreCache = false } = options;
+  const {
+    source,
+    concurrency = 3,
+    shouldStop,
+    onRow,
+    backfillDays = 0,
+    onBackfill,
+    ignoreCache = false,
+    scoreDayMode = 'trainDay',
+  } = options;
   const results: ShortTermScoreRow[] = [];
   if (!items || items.length === 0) {
     return { rows: results, scoreDayKey: '', recentDays: [] };
@@ -1655,6 +1719,24 @@ export async function computeShortTermScoreRows(items: ShortTermScoreItem[], opt
   // ---- 评分基准日：训练模式用训练日（归位到真实交易日），非训练模式取行情最后交易日 ----
   const trainDateKey = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
   let scoreDayKey = trainDateKey ? await resolveScoreDate(source, trainDateKey, ctx) : '';
+  /**
+   * 分时推进还没走完 15:00 时，基准日前移到上一交易日
+   *
+   * 训练日当天的完整日K是「收盘后」的数据，对盘中时点属于未来数据：只有推进到 15:00 收盘后执行，
+   * 才允许用当天数据算分。归位后等于训练日本身（训练日是交易日）才前移；
+   * 训练日落在非交易日时 resolveScoreDate 已经把基准日退到上一个交易日，不需要再退一天。
+   */
+  if (scoreDayMode === 'prevDay' && scoreDayKey && scoreDayKey === trainDateKey) {
+    const prevDayKey = await resolvePrevTradeDay(source, scoreDayKey, ctx);
+    if (prevDayKey) {
+      console.log(
+        `[短线评分] 分时推进未到 15:00 收盘：基准日 ${scoreDayKey} → 上一交易日 ${prevDayKey}（按上一交易日日K计算）`
+      );
+      scoreDayKey = prevDayKey;
+    } else {
+      console.warn(`[短线评分] 取不到 ${scoreDayKey} 的上一交易日，仍按当日口径计算（可能含当天收盘数据）`);
+    }
+  }
 
   const codes = allItems.map((i) => i.code);
 

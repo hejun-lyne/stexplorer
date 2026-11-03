@@ -62,7 +62,7 @@ import {
 } from '@/helpers/shortTermScoreList';
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
 import {
-  DEFAULT_SHORT_SCORE_BACKTEST,
+  DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
   evaluateShortScoreSignal,
   scoreShortScoreSignalQuality,
   ShortScoreBacktestParams,
@@ -232,11 +232,10 @@ const SIGNAL_FILTER_OPTIONS = [
  *
  * 与详情页回测面板 / 离线脚本的默认口径保持一致：自低点抬升（近 10 日低点抬升 ≥35 分、
  * 地板 45 分、抬升起点 ≤40 分）、卖出 Δ≤-15、自高点回撤 ≥10 分止盈。
+ * 买入同时认「单日跳升」（Δ≥20 分且评分≥60、突变前 3 日 ≤40）：单日就大幅跳升的启动日
+ * 累计抬升可能还没到 35，只认累计抬升会晚一天才出信号（见 evaluateShortScoreSignal）。
  */
-const SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = {
-  ...DEFAULT_SHORT_SCORE_BACKTEST,
-  buyMode: 'rise',
-};
+const SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = DEFAULT_SHORT_SCORE_SIGNAL_PARAMS;
 /** 「所属板块」批量取数并发数（东财 slist 是逐只接口，控制并发避免被限流） */
 const BANKUAI_FETCH_CONCURRENCY = 4;
 /** 所属板块取数为空（多为并发被限流）时的重试次数 */
@@ -388,6 +387,13 @@ const STList: React.FC<STListProps> = ({
   const shortScoreRemainingRef = React.useRef<ShortTermScoreItem[]>([]);
   const shortScoreTotalRef = React.useRef(0);
   const shortScoreCodesRef = React.useRef<string[]>([]);
+  /**
+   * 上一轮使用的评分基准日口径（空 = 还没跑过）
+   *
+   * 训练时间推进到 15:00 收盘会改变口径（未收盘按上一交易日、收盘按当日），
+   * 口径变了就不能接着上一轮的剩余队列续跑，否则两套口径的行会混在同一张表里。
+   */
+  const shortScoreModeRef = React.useRef<'trainDay' | 'prevDay' | ''>('');
   // 评分序列：交易日列表 + 每只股票的每日评分（供过滤窗口 / 「新出现」标记使用，不渲染成历史列）
   const [shortScoreDays, setShortScoreDays] = useState<string[]>([]);
   const [shortScoreSeries, setShortScoreSeries] = useState<ShortTermScoreSeries>({});
@@ -405,6 +411,20 @@ const STList: React.FC<STListProps> = ({
    * 点「短线评分」才会重新拉取板块股票、按新训练日重算。
    */
   const [shortScoreTrainDate, setShortScoreTrainDate] = useState('');
+  /**
+   * 本轮评分是否按「上一交易日日K」算出
+   *
+   * 训练模式下分时推进还没走到 15:00 收盘时只能用上一交易日的数据（当天的完整日K属于未来数据），
+   * 工具栏据此提示「推进到收盘后重新执行才会用当天数据」。
+   */
+  const [shortScorePrevBase, setShortScorePrevBase] = useState(false);
+  /**
+   * 本行 `total` 对应的评分基准日（YYYYMMDD）
+   *
+   * 训练模式下「分时推进」没走完 15:00 时基准日是上一交易日，不再是历史列的最后一天，
+   * 「信号」列要按这个日期把这行分数放进评分序列，否则会把昨天的分当成今天的分算信号。
+   */
+  const [shortScoreBaseDay, setShortScoreBaseDay] = useState('');
   /** 历史缺口补算进度：执行短线评分时顺带补齐近 N 个交易日缺的评分 */
   const [shortScoreBackfill, setShortScoreBackfill] = useState<{ done: number; total: number } | null>(null);
   // 过滤：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的股票
@@ -680,6 +700,14 @@ const STList: React.FC<STListProps> = ({
   const [timePlaying, setTimePlaying] = useState(false);
   const [timeSpeed, setTimeSpeed] = useState(TRAIN_TIME_SPEEDS[0]);
   const trainTime = TRAIN_TIME_LIST[Math.min(Math.max(timeIdx, 0), TRAIN_TIME_LIST.length - 1)];
+  /**
+   * 分时推进是否已经开始（点过播放 / 倍速 / 完成）
+   *
+   * 未开始时列表不能拿训练日当天的收盘数据：评分按上一交易日日K算，K线形态也保持上一交易日的形态。
+   */
+  const timeStarted = timePlaying || timeIdx > TRAIN_TIME_DEFAULT_IDX;
+  /** 分时推进是否已走到终末 15:00：只有这时执行短线评分才会用训练日当天（已收盘）的完整日K */
+  const timeFinished = timeIdx >= TRAIN_TIME_LIST.length - 1;
 
   // 训练日推进 / 退出训练：时间轴回到开盘，避免停在上一日的 15:00
   useEffect(() => {
@@ -1733,20 +1761,33 @@ const STList: React.FC<STListProps> = ({
       return;
     }
     /**
+     * 评分基准日口径（训练模式）
+     *
+     * 训练日当天的完整日K是「收盘后」的数据，分时推进还没走完 15:00 时不能用：
+     * - 未开始推进 / 推进中 → 'prevDay'：按上一交易日的日K算分（K线形态由时间推进单独更新）；
+     * - 推进到 15:00 收盘 → 'trainDay'：按训练日当天数据算分。
+     * 非训练模式没有「未来数据」问题，始终按行情最后交易日。
+     */
+    const scoreDayMode: 'trainDay' | 'prevDay' = ontrain && !timeFinished ? 'prevDay' : 'trainDay';
+    const modeChanged = shortScoreModeRef.current !== scoreDayMode;
+    shortScoreModeRef.current = scoreDayMode;
+    const trainDateChanged = ontrain && !!trainDate && shortScoreTrainDate !== trainDate;
+    if (trainDateChanged || modeChanged) {
+      shortScoreRemainingRef.current = [];
+      isShortScorePausedRef.current = false;
+    }
+    /**
      * 是否「全新一轮评分」
      *
      * - 传入 candidateItems（指定候选池）时沿用原逻辑，不重拉成分股；
      * - 暂停后再次点击是「继续剩余队列」，同样不重拉，否则会打乱暂停续跑；
      * - 训练日已经推进（上一轮是上一交易日算的）：**强制开新一轮**——丢掉旧队列，
-     *   重新拉取板块成分股并按新训练日重算（训练日推进本身不再自动重算）。
+     *   重新拉取板块成分股并按新训练日重算（训练日推进本身不再自动重算）；
+     * - 评分口径变了（推进到 15:00 收盘 ↔ 未走完）：已有结果与剩余队列属于旧口径，
+     *   两套口径的行混在一张表里没法看，同样强制开新一轮。
      */
-    const trainDateChanged = ontrain && !!trainDate && shortScoreTrainDate !== trainDate;
-    if (trainDateChanged) {
-      shortScoreRemainingRef.current = [];
-      isShortScorePausedRef.current = false;
-    }
     const startNewRound =
-      (!candidateItems?.length && shortScoreRemainingRef.current.length === 0) || trainDateChanged;
+      (!candidateItems?.length && shortScoreRemainingRef.current.length === 0) || trainDateChanged || modeChanged;
     // 板块切换/增删后立刻点击：先等已选板块的股票列表到位，否则会漏评或评出上一组板块的股票。
     // 全新一轮评分则改为「强制重拉成分股」：按最新列表重算，时间点上的新进/调出股票都能反映出来。
     scoreStartingRef.current = true;
@@ -1823,12 +1864,14 @@ const STList: React.FC<STListProps> = ({
     setDisplayMode('shortScore');
     setCurrentPage(1);
 
+    setShortScorePrevBase(scoreDayMode === 'prevDay');
     try {
       const computed = await computeShortTermScoreRows(shortScoreRemainingRef.current, {
         source: SHORT_SCORE_SOURCE,
         concurrency: 3,
         // 不使用评分缓存：每次点「短线评分」都重新取数计算（算完仍回写序列供历史列使用）
         ignoreCache: true,
+        scoreDayMode,
         shouldStop: () => isShortScorePausedRef.current,
         // 近 N 个交易日的历史列有缺口时顺带补算（列表缺哪天补哪天）
         backfillDays: shortScoreHistoryDays,
@@ -1858,6 +1901,8 @@ const STList: React.FC<STListProps> = ({
       if (sameBoard && computed.scoreDayKey) {
         const k = computed.scoreDayKey;
         setShortScoreDate(`${k.substring(0, 4)}-${k.substring(4, 6)}-${k.substring(6, 8)}`);
+        // 这一行的 total 属于哪一天：分时推进没走完 15:00 时是上一交易日，不是历史列的最后一天
+        setShortScoreBaseDay(k);
       }
       // 历史列交易日：优先用评分流程内部（已按训练日收敛）的交易日，避免单独取数失败导致历史列消失
       if (sameBoard && computed.recentDays.length) {
@@ -1901,6 +1946,7 @@ const STList: React.FC<STListProps> = ({
     ontrain,
     trainDate,
     shortScoreTrainDate,
+    timeFinished,
   ]);
 
   // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
@@ -2595,15 +2641,20 @@ const STList: React.FC<STListProps> = ({
         return null;
       }
       const byDay = shortScoreSeries?.[code] || {};
+      // 基准日以列表上展示的评分为准：序列里这一行可能是旧值，或当日还没写回。
+      // 本轮评分实际写入的基准日优先（分时推进没走完 15:00 时是上一交易日，可能不在历史列窗口里）
+      const baseDay = shortScoreBaseDay || days[days.length - 1];
       const scores: Record<string, number> = {};
       days.forEach((d) => {
+        // 基准日之后的评分属于未来数据（预计算可能已写入训练日），不参与信号判定
+        if (!d || d > baseDay) {
+          return;
+        }
         const v = byDay?.[d]?.total;
         if (typeof v === 'number' && Number.isFinite(v)) {
           scores[d] = v;
         }
       });
-      // 基准日以列表上展示的评分为准：序列里这一行可能是旧值，或当日还没写回
-      const baseDay = days[days.length - 1];
       if (typeof row.total === 'number' && Number.isFinite(row.total)) {
         scores[baseDay] = row.total;
       }
@@ -2616,10 +2667,12 @@ const STList: React.FC<STListProps> = ({
               scores,
               params: SHORT_SCORE_SIGNAL_PARAMS,
               volumeScore: row.volumeScore,
+              // 按实际成立的口径算「抬升强度 / 低位起点」（单日跳升成立的信号按跳升算）
+              via: signal.via,
             });
       return { signal, quality };
     },
-    [shortScoreFilterDays, shortScoreSeries]
+    [shortScoreFilterDays, shortScoreSeries, shortScoreBaseDay]
   );
 
   /**
@@ -3213,8 +3266,8 @@ const STList: React.FC<STListProps> = ({
     if (scoreStale) {
       return () => {};
     }
-    // 集合竞价阶段（09:30 之前）分时还没有数据，保持上一次的形态
-    if (trainTime < '09:30') {
+    // 分时推进还没开始：K线形态保持评分基准日（上一交易日）的形态，不提前把当天数据刷上列表
+    if (!timeStarted) {
       return () => {};
     }
     const rows = displayListRef.current.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -3271,7 +3324,7 @@ const STList: React.FC<STListProps> = ({
     };
     // displayList / shortScoreData 故意不进依赖（由 ref 读取），否则合并形态会触发自身重跑
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ontrain, trainDate, displayMode, trainTime, timeIdx, currentPage, pageSize, shortScoreLoading, todayScoreLoading, shortScoreTrainDate, scoreStale]);
+  }, [ontrain, trainDate, displayMode, trainTime, timeIdx, timeStarted, currentPage, pageSize, shortScoreLoading, todayScoreLoading, shortScoreTrainDate, scoreStale]);
 
   // 换训练日 / 退出训练：清空分钟缓存，避免下一日复用上一日的数据
   useEffect(() => {
@@ -3436,6 +3489,13 @@ const STList: React.FC<STListProps> = ({
             onClick={() => handleShortScore()}
             loading={shortScoreLoading}
             style={{ marginLeft: 4 }}
+            title={
+              !ontrain
+                ? '按行情最后一个交易日的日K计算评分'
+                : timeFinished
+                  ? '训练时间已到 15:00 收盘：按训练日当天的完整日K计算评分'
+                  : '训练时间还没走到 15:00 收盘：本次按上一交易日的日K计算评分（推进到收盘后再执行才用当天数据）'
+            }
           >
             {shortScoreLoading
               ? shortScoreBackfill
@@ -3471,7 +3531,13 @@ const STList: React.FC<STListProps> = ({
               title="当前结果列表对应的评分基准日；训练日推进不会自动重算，点「短线评分」才会按新训练日更新"
             >
               评分日期 {shortScoreDate}
-              {scoreStale ? '（已过期，仅显示收藏股票，点「短线评分」重算）' : ''}
+              {scoreStale
+                ? '（已过期，仅显示收藏股票，点「短线评分」重算）'
+                : shortScorePrevBase
+                  ? timeFinished
+                    ? '（上一交易日口径，推进已到收盘，点「短线评分」可按当天数据重算）'
+                    : '（上一交易日口径，训练时间走到 15:00 后再执行才用当天数据）'
+                  : ''}
             </span>
           )}
           {displayMode === 'shortScore' && (
@@ -3754,7 +3820,7 @@ const STList: React.FC<STListProps> = ({
           <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="信号（按评分序列逐日判定，与回测同一套阈值）：买入=自近10日低点抬升≥35分且评分≥45、抬升起点≤40；卖出=单日Δ≤-15 或 自近10日最高分回撤≥10；观察=其余情况。信号后的数字是该信号的质量分（0~100）与等级 A/B/C/D：抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20，按满分归一到 100；悬停单元格可看分项与判定依据。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
+              title="信号（按评分序列逐日判定，与回测同一套阈值）：买入=①自近10日低点抬升≥35分且评分≥45、抬升起点≤40，或②单日跳升≥20分且评分≥60、突变前3日≤40（单日大幅跳升的启动日不等累计抬升）；卖出=单日Δ≤-15 或 自近10日最高分回撤≥10；观察=其余情况。悬停单元格可看判定依据（②成立时会注明「单日跳升达 +20」）。信号后的数字是该信号的质量分（0~100）与等级 A/B/C/D：抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20，按满分归一到 100。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
             >
               <span className={styles.klineShapeHeaderText}>信号 / 质量</span>
               <Dropdown
@@ -4304,59 +4370,72 @@ const STList: React.FC<STListProps> = ({
                 </Col>
                 <Col
                   span={3}
-                  title={
-                    sig
-                      ? [
-                          `${sig.signal.kind}：${sig.signal.reason}`,
-                          sig.quality
-                            ? `质量 ${sig.quality.total} 分（${sig.quality.grade}）：${sig.quality.dims
-                                .map((d) => `${d.label} ${d.score}/${d.max}`)
-                                .join('、')}`
-                            : '',
-                        ]
-                          .filter(Boolean)
-                          .join('\n')
-                      : '信号：评分历史不足，暂不判定'
-                  }
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12 }}
                 >
                   {sig ? (
-                    <>
+                    // 买入 / 卖出：悬停展示该信号的具体产生原因（以及信号质量的各维度依据）
+                    // 观察：原因较短，沿用原生 title，避免整列都弹浮层
+                    <Tooltip
+                      title={
+                        sig.signal.kind === '观察' ? undefined : (
+                          <div style={{ fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-line' }}>
+                            {[
+                              `${sig.signal.kind}：${sig.signal.reason}`,
+                              sig.quality
+                                ? `信号质量 ${sig.quality.total} 分（${sig.quality.grade}）：${sig.quality.dims
+                                    .map((d) => `${d.label} ${d.score}/${d.max}`)
+                                    .join('、')}`
+                                : '',
+                            ]
+                              .filter(Boolean)
+                              .join('\n')}
+                          </div>
+                        )
+                      }
+                      placement="topLeft"
+                    >
                       <span
-                        style={{
-                          color:
-                            sig.signal.kind === '买入'
-                              ? 'var(--increase-color)'
-                              : sig.signal.kind === '卖出'
-                                ? 'var(--reduce-color)'
-                                : 'var(--reverse-text-color)',
-                          fontWeight: sig.signal.kind === '买入' ? 'bold' : 'normal',
-                        }}
+                        title={sig.signal.kind === '观察' ? sig.signal.reason : undefined}
+                        style={{ cursor: sig.signal.kind === '观察' ? 'default' : 'help' }}
                       >
-                        {sig.signal.kind}
-                      </span>
-                      {sig.quality ? (
                         <span
                           style={{
-                            marginLeft: 4,
-                            fontSize: 11,
                             color:
-                              sig.quality.grade === 'A'
-                                ? '#52c41a'
-                                : sig.quality.grade === 'B'
-                                  ? '#1890ff'
-                                  : sig.quality.grade === 'C'
-                                    ? '#faad14'
-                                    : '#ff4d4f',
+                              sig.signal.kind === '买入'
+                                ? 'var(--increase-color)'
+                                : sig.signal.kind === '卖出'
+                                  ? 'var(--reduce-color)'
+                                  : 'var(--reverse-text-color)',
+                            fontWeight: sig.signal.kind === '买入' ? 'bold' : 'normal',
                           }}
                         >
-                          {sig.quality.total}
-                          {sig.quality.grade}
+                          {sig.signal.kind}
                         </span>
-                      ) : null}
-                    </>
+                        {sig.quality ? (
+                          <span
+                            style={{
+                              marginLeft: 4,
+                              fontSize: 11,
+                              color:
+                                sig.quality.grade === 'A'
+                                  ? '#52c41a'
+                                  : sig.quality.grade === 'B'
+                                    ? '#1890ff'
+                                    : sig.quality.grade === 'C'
+                                      ? '#faad14'
+                                      : '#ff4d4f',
+                            }}
+                          >
+                            {sig.quality.total}
+                            {sig.quality.grade}
+                          </span>
+                        ) : null}
+                      </span>
+                    </Tooltip>
                   ) : (
-                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
+                    <span style={{ color: 'var(--reverse-text-color)' }} title="信号：评分历史不足，暂不判定">
+                      --
+                    </span>
                   )}
                 </Col>
                 <Col

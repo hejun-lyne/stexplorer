@@ -245,7 +245,7 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
       }
     >
       <Space wrap size={12} style={{ marginBottom: 12 }}>
-        <span title="自低点抬升：不看单日跳升，只看评分自近 N 个评分日最低点抬了多少（适合分几天完成的低位启动）">
+        <span title="自低点抬升：评分自近 N 个评分日最低点抬了多少（适合分几天完成的低位启动）；另认可「单日跳升」达标作为另一种启动形态，避免单日大幅跳升的启动日要等累计抬升补齐、晚一天才买">
           买入口径
           <Radio.Group
             size="small"
@@ -281,6 +281,12 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
             <span title="评分绝对地板：当日评分低于该值不算启动">
               启动地板 ≥
               <InputNumber size="small" value={params.riseMinScore} step={5} onChange={setParam('riseMinScore')} style={{ width: 70 }} />
+            </span>
+            <span title="另一种启动形态：当日评分跳升达该幅度且评分不低于下限，同样算买入信号（低位条件按「突变前 N 日」判）">
+              或单日跳升 Δ≥
+              <InputNumber size="small" value={params.buyDelta} step={1} onChange={setParam('buyDelta')} style={{ width: 70 }} />
+              评分≥
+              <InputNumber size="small" value={params.minScore} step={5} onChange={setParam('minScore')} style={{ width: 70 }} />
             </span>
           </>
         ) : (
