@@ -282,11 +282,9 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
               启动地板 ≥
               <InputNumber size="small" value={params.riseMinScore} step={5} onChange={setParam('riseMinScore')} style={{ width: 70 }} />
             </span>
-            <span title="另一种启动形态：当日评分跳升达该幅度且评分不低于下限，同样算买入信号（低位条件按「突变前 N 日」判）">
+            <span title="另一种启动形态（标记为「跳升买入」）：当日评分跳升达该幅度且不低于上面的启动地板，同样算买入信号；低位条件按「突变前 N 日」判">
               或单日跳升 Δ≥
               <InputNumber size="small" value={params.buyDelta} step={1} onChange={setParam('buyDelta')} style={{ width: 70 }} />
-              评分≥
-              <InputNumber size="small" value={params.minScore} step={5} onChange={setParam('minScore')} style={{ width: 70 }} />
             </span>
           </>
         ) : (

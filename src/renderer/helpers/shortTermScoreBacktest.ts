@@ -14,7 +14,7 @@
  *     rise 口径同时认「单日跳升」（Δ ≥ buyDelta 且 评分 ≥ minScore，低位按突变前 N 日判）：
  *     单日大幅跳升的启动日当天就该出信号，否则要等累计抬升补齐、晚一天才买；
  *   Δ ≤ sellDelta                                → 次日开盘卖出；
- *   评分自持仓期最高点回撤 ≥ trailDrop            → 次日开盘卖出（回撤止盈）。
+ *   评分自持仓期最高点回撤 ≥ trailDrop 且 Δ ≤ 0   → 次日开盘卖出（回撤止盈，反弹当天不卖）。
  *
  * 三个入场过滤（均为 0 时关闭）：
  *   低位启动 lowBaseDays/lowBaseMax：jump 口径要求突变前 N 个评分日都 ≤ lowBaseMax；
@@ -333,7 +333,8 @@ function signalContext(
  * 买入与卖出同时成立时按买入输出（reason 里仍会写明回撤值，便于自己判断）。
  *
  * **启动有两种形态，rise 口径两者都认，且分两类信号标记**：
- *   - 跳升买入（前置判断）：当日 Δ ≥ buyDelta 且 评分 ≥ minScore（一根大跳升柱就是启动日本身）；
+ *   - 跳升买入（前置判断）：当日 Δ ≥ buyDelta 且 评分 ≥（rise 口径取 riseMinScore，jump 口径取 minScore），
+ *     一根大跳升柱就是启动日本身；
  *   - 抬升买入：近 riseRefDays 日最低分 → 当日评分抬升 ≥ minRise（分几天磨出来的低位启动）。
  * 只认累计抬升会把「单日跳升 +26 但累计还没到 20 分」的启动日漏掉、延后一天才出信号，
  * 所以 rise 口径按「或」处理；两套口径各自带自己的评分地板与低位条件。
@@ -357,12 +358,20 @@ export function evaluateShortScoreSignal(args: {
   // 跳升口径看「突变前 N 日最高」；并集口径（rise 模式）下，抬升起点在低位同样认，
   // 避免两种口径差一两分时把当天明明已经启动的股票卡成观察
   const jumpLowOk = inLowBase(lowBaseHigh) || (p.buyMode === 'rise' && inLowBase(lowRef));
+  /**
+   * 跳升分支的评分下限
+   *
+   * rise 口径下与「抬升」共用同一个绝对地板（riseMinScore），否则会出现
+   * 「单日 Δ 明明跳了 20+ 分，却因为评分 58 < 60 被判成抬升」这种自相矛盾的结果。
+   * jump 口径仍用 minScore（经典跳升策略的 60 分下限）。
+   */
+  const jumpMinScore = p.buyMode === 'rise' ? p.riseMinScore : p.minScore;
   let jumpOk = false;
   let jumpReason = '';
   if (delta < p.buyDelta) {
     jumpReason = `单日跳升 ${f1(delta)} < +${p.buyDelta}`;
-  } else if (cur < p.minScore) {
-    jumpReason = `评分 ${f1(cur)} < 下限 ${p.minScore}`;
+  } else if (cur < jumpMinScore) {
+    jumpReason = `评分 ${f1(cur)} < 下限 ${jumpMinScore}`;
   } else if (!jumpLowOk) {
     jumpReason = `突变前 ${p.lowBaseDays} 日最高 ${f1(lowBaseHigh)} > 低位上限 ${p.lowBaseMax}`;
   } else {
@@ -384,7 +393,8 @@ export function evaluateShortScoreSignal(args: {
       riseReason = `近${refDays}日最低 ${f1(lowRef)} > 低位上限 ${p.lowBaseMax}（不算低位启动）`;
     } else {
       riseOk = true;
-      riseReason = `自近${refDays}日低点 ${f1(lowRef)} 抬升 +${f1(riseAmt)}，评分 ${f1(cur)}`;
+      // 归到「抬升」而不是「跳升」时，把跳升口径卡在哪一条写出来（Δ 没到门槛 / 评分不够 / 起点不低）
+      riseReason = `自近${refDays}日低点 ${f1(lowRef)} 抬升 +${f1(riseAmt)}，评分 ${f1(cur)}（未按跳升：${jumpReason}）`;
     }
   }
 
@@ -393,9 +403,11 @@ export function evaluateShortScoreSignal(args: {
   if (delta <= p.sellDelta) {
     sellOk = true;
     sellReason = `绿柱：单日 ${f1(delta)} ≤ ${p.sellDelta}`;
-  } else if (p.trailDrop > 0 && dropFromHigh >= p.trailDrop) {
+  } else if (p.trailDrop > 0 && dropFromHigh >= p.trailDrop && delta <= 0) {
+    // 回撤止盈只在「当日评分没有继续走高」时才算卖点：
+    // 评分还在往上冲（比如 34.2 → 53.4）说明只是还没回到前高，不是走弱，不能给卖出信号
     sellOk = true;
-    sellReason = `自近${refDays}日最高 ${f1(highRef)} 回撤 ${f1(dropFromHigh)} 分（≥${p.trailDrop}）`;
+    sellReason = `自近${refDays}日最高 ${f1(highRef)} 回撤 ${f1(dropFromHigh)} 分（≥${p.trailDrop}，当日未走高）`;
   }
   const withSell = (reason: string) => (sellOk ? `${reason}；同时回撤 ${f1(dropFromHigh)} 分` : reason);
 
@@ -681,7 +693,8 @@ export function runShortScoreBacktest(args: {
       }
       const drop = pos.peak - cur;
       const hitSellDelta = delta <= params.sellDelta;
-      const hitTrail = params.trailDrop > 0 && drop >= params.trailDrop;
+      // 回撤止盈要求当日评分没有继续走高：评分还在反弹时只是「离前高还远」，不是走弱，不该卖
+      const hitTrail = params.trailDrop > 0 && drop >= params.trailDrop && delta <= 0;
       if (hitSellDelta || hitTrail) {
         const entry = window[pos.entryIdx];
         const exit = window[i + 1];
@@ -714,7 +727,9 @@ export function runShortScoreBacktest(args: {
     // 所以 rise 口径按「累计抬升达标 或 单日跳升达标」取并集，与列表「信号」列同一套判定。
     const lowRef = params.buyMode === 'rise' ? recentLowOf(i, params.riseRefDays) : null;
     const riseAmt = lowRef === null ? 0 : cur - lowRef;
-    const jumpHit = delta >= params.buyDelta && cur >= params.minScore;
+    // 跳升的评分下限：rise 口径与抬升共用绝对地板（否则「Δ 跳了 20 分但评分 58 < 60」会被判成抬升）
+    const jumpMinScore = params.buyMode === 'rise' ? params.riseMinScore : params.minScore;
+    const jumpHit = delta >= params.buyDelta && cur >= jumpMinScore;
     const riseHit = lowRef !== null && delta >= 0 && riseAmt >= params.minRise && cur >= params.riseMinScore;
     const hitBuy = params.buyMode === 'rise' ? riseHit || jumpHit : jumpHit;
     /** 这一根是靠「单日跳升」成立的（低位过滤要按 jump 口径看突变前 N 日） */
