@@ -359,6 +359,34 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
           卖出 Δ≤
           <InputNumber size="small" value={params.sellDelta} step={1} onChange={setParam('sellDelta')} style={{ width: 70 }} />
         </span>
+        <span title="突变前 N 个评分日必须都 ≤ 该上限；天数填 0 关闭">
+          低位 ≤
+          <InputNumber size="small" value={params.lowBaseMax} step={5} onChange={setParam('lowBaseMax')} style={{ width: 70 }} />
+          持续
+          <InputNumber
+            size="small"
+            value={params.lowBaseDays}
+            min={0}
+            max={20}
+            step={1}
+            onChange={setParam('lowBaseDays')}
+            style={{ width: 60 }}
+          />
+          日
+        </span>
+        <span title="评分自持仓期最高点回撤达到该分数即卖出；填 0 关闭">
+          回撤 ≥
+          <InputNumber
+            size="small"
+            value={params.trailDrop}
+            min={0}
+            max={60}
+            step={1}
+            onChange={setParam('trailDrop')}
+            style={{ width: 60 }}
+          />
+          分止盈
+        </span>
         <span>
           冷却
           <InputNumber
@@ -391,7 +419,7 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
             size="small"
             value={limit}
             min={20}
-            max={120}
+            max={240}
             step={20}
             onChange={(v) => setLimit(Number(v) || 120)}
             style={{ width: 70 }}
@@ -473,7 +501,7 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
             <Col span={8}>
               <Descriptions size="small" column={1}>
                 <Descriptions.Item label="参数">
-                  {`Δ≥${result.params.buyDelta} / 评分≥${result.params.minScore} / 卖出Δ≤${result.params.sellDelta} / 冷却${result.params.cooldownDays}日 / 跳空±${result.params.maxGapPct}%`}
+                  {`Δ≥${result.params.buyDelta} / 评分≥${result.params.minScore} / 卖出Δ≤${result.params.sellDelta} / 低位≤${result.params.lowBaseMax}持续${result.params.lowBaseDays}日 / 回撤${result.params.trailDrop}分止盈 / 冷却${result.params.cooldownDays}日 / 跳空±${result.params.maxGapPct}%`}
                 </Descriptions.Item>
                 <Descriptions.Item label="生成时间">{result.generatedAt.replace('T', ' ').substring(0, 19)}</Descriptions.Item>
               </Descriptions>

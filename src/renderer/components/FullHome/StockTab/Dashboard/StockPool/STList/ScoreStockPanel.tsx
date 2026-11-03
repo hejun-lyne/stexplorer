@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Radio, Select, Slider, Spin, Switch, Tooltip } from 'antd';
+import { Button, Radio, Select, Slider, Spin, Switch, Tag, Tooltip } from 'antd';
 import { ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import * as Services from '@/services';
@@ -16,7 +16,22 @@ import {
 import { useNativeThemeColor, useRenderEcharts, useResizeEchart } from '@/utils/hooks';
 import { Stock } from '@/types/stock';
 import { computeShortTermScoreCurve, SHORT_SCORE_SOURCE } from '@/helpers/shortTermScoreList';
+import {
+  computeScoreJumps,
+  describeScoreJump,
+  formatScoreDelta,
+  SCORE_JUMP_CONFIG,
+} from '@/helpers/shortTermScoreJump';
+import type { ScoreJumpPoint } from '@/helpers/shortTermScoreJump';
 import { BuildDailyKFromTrends } from '@/helpers/stock';
+import {
+  ComputeEarly30Prediction,
+  ComputeIntradayPattern,
+  Early30VolSignatureNames,
+  IntradayPatternFeatures,
+  Early30Features,
+  IsIntradayComplete,
+} from '@/helpers/intradayPattern';
 import { GetCompanyFromTushare } from '@/services/tushare';
 import ScoreStockTrade from './ScoreStockTrade';
 
@@ -70,35 +85,180 @@ interface KlineOptionParams {
 
 /** 短线评分曲线的线色（与评分等级色区分，保持中性金色） */
 const SHORT_SCORE_LINE_COLOR = '#faad14';
+/**
+ * 短线评分「自低点抬升」叠加线回看多少根
+ *
+ * 与详情页 PriceTrend、买入规则里的「低位抬升」同口径：
+ * 抬升幅度 = 当日评分 - 前 N 根内的最低分。
+ */
+const SHORT_SCORE_RISE_DAYS = 5;
+/** 「自低点抬升」达到该值即视为启动（与买入规则 --min-rise 默认值一致） */
+const SHORT_SCORE_RISE_THRESHOLD = 20;
 
 /** 公司简介内存缓存（secid -> 简介），来回切换股票时不重复取数 */
 const introCache = new Map<string, string>();
+
+/** 短线评分的三条叠加序列（与详情页 PriceTrend 同口径） */
+interface ShortScoreLines {
+  /** 评分曲线：点带单日变化/突变描述，供 tooltip 展示 */
+  scoreData: any[];
+  /** 逐点单日变化（正=跳升，负=跳降；null=缺失或首点） */
+  deltas: (number | null)[];
+  /** 与 deltas 对齐：该点是否达到突变阈值 */
+  jumpFlags: boolean[];
+  /** 自近 N 根低点的累计抬升（恒 >= 0） */
+  riseData: any[];
+  /** 突变柱 / 抬升线共用的隐藏轴上限 */
+  deltaAxisMax: number;
+}
+
+/**
+ * 短线评分的三条序列（评分曲线 + 评分突变柱 + 自低点抬升）
+ *
+ * 口径与详情页 PriceTrend 完全一致：
+ * - 突变在「图上实际显示的逐点序列」上按单日变化识别，缺失日断开比较，不会把跨多日的变化当成单日突变；
+ * - 抬升 = 当日评分 - 前 N 根内的最低分，低位横盘后启动时它比单日柱更早给出方向。
+ */
+function buildShortScoreLines(
+  klines: Stock.KLineItem[],
+  shortScoreScores?: Record<string, number>
+): ShortScoreLines {
+  const xs = klines.map((k) => String(k?.date || ''));
+  const values: (number | null)[] = klines.map((k) => {
+    const key = String(k?.date || '').replace(/-/g, '').substring(0, 8);
+    const v = shortScoreScores?.[key];
+    return typeof v === 'number' ? Number(v.toFixed(1)) : null;
+  });
+
+  const jumps = computeScoreJumps(values, xs);
+  const jumpByIdx: Record<number, ScoreJumpPoint> = {};
+  jumps.forEach((j) => {
+    jumpByIdx[j.index] = j;
+  });
+
+  const deltas = values.map((v, i) => {
+    const prev = i > 0 ? values[i - 1] : null;
+    if (typeof v !== 'number' || typeof prev !== 'number') {
+      return null;
+    }
+    return Number((v - prev).toFixed(1));
+  });
+
+  const scoreData = values.map((v, i) => {
+    if (typeof v !== 'number') {
+      return null;
+    }
+    const delta = deltas[i];
+    if (typeof delta !== 'number') {
+      return v;
+    }
+    const j = jumpByIdx[i];
+    return { value: v, delta, jumpDesc: j ? describeScoreJump(j) : '' };
+  });
+
+  const riseData = values.map((v, i) => {
+    if (typeof v !== 'number') {
+      return null;
+    }
+    let low: number | null = null;
+    for (let k = Math.max(0, i - SHORT_SCORE_RISE_DAYS); k < i; k += 1) {
+      const p = values[k];
+      if (typeof p === 'number' && (low === null || p < low)) {
+        low = p;
+      }
+    }
+    if (low === null) {
+      return null;
+    }
+    return { value: Number((v - low).toFixed(1)), low: Number(low.toFixed(1)) };
+  });
+
+  const maxAbsDelta = deltas.reduce((m: number, d) => (typeof d === 'number' ? Math.max(m, Math.abs(d)) : m), 0);
+  const maxRise = riseData.reduce(
+    (m: number, r: any) => (r && typeof r.value === 'number' ? Math.max(m, r.value) : m),
+    0
+  );
+  // 最高柱/最高抬升约占技术指标区一半高度，给上方曲线留出可读空间
+  const axisTop = Math.max(maxAbsDelta, maxRise);
+
+  return {
+    scoreData,
+    deltas,
+    jumpFlags: deltas.map((_, i) => !!jumpByIdx[i]),
+    riseData,
+    deltaAxisMax: axisTop > 0 ? Number((axisTop * 1.9).toFixed(1)) : 1,
+  };
+}
 
 /**
  * 技术指标 series（与详情页 PriceTrend 的指标画法保持一致）
  *
  * MACD 为柱状 + 两条线；其余指标为多条线，超买/超卖线用 markLine 标注。
+ * 短线评分为「评分突变柱 + 自低点抬升 + 评分曲线」三层，口径见 buildShortScoreLines。
  */
 function buildTechSeries(
   techType: TechIndicatorType,
   klines: Stock.KLineItem[],
   axisIndex: number,
   altAxisIndex = -1,
-  shortScoreScores?: Record<string, number>
+  shortScoreLines?: ShortScoreLines | null,
+  shortScoreDeltaAxisIndex = -1
 ) {
   const colors = Utils.getVariablesColor(CONST.VARIABLES);
   const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
   const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
   const hintColor = colors['--hint-color'] || '#999';
+  const linkColor = colors['--link-color'] || '#1677ff';
 
-  // 短线评分：分数由外部现取数算好后传进来（不走评分缓存），这里只按交易日对齐成曲线
+  // 短线评分：分数由外部现取数算好后传进来（不走评分缓存），这里按交易日对齐成
+  // 「突变柱 + 自低点抬升 + 评分曲线」三层，画法与详情页 PriceTrend 保持一致
   if (techType === TechIndicatorType.SHORT_SCORE) {
-    const data = klines.map((k) => {
-      const key = String(k?.date || '').replace(/-/g, '').substring(0, 8);
-      const v = shortScoreScores?.[key];
-      return typeof v === 'number' ? Number(v.toFixed(1)) : null;
+    const lines = shortScoreLines || buildShortScoreLines(klines, {});
+    const deltaBars = lines.deltas.map((delta, i) => {
+      if (typeof delta !== 'number') {
+        return null;
+      }
+      return {
+        value: Math.abs(delta),
+        // 达到突变阈值的柱子加重显示，普通波动只作淡淡的背景
+        itemStyle: { color: delta > 0 ? upColor : downColor, opacity: lines.jumpFlags[i] ? 0.9 : 0.28 },
+      };
     });
+
     return [
+      {
+        // 柱子先入列（画在曲线下方）
+        name: '评分突变',
+        type: 'bar',
+        stype: 'tech',
+        xAxisIndex: axisIndex,
+        yAxisIndex: shortScoreDeltaAxisIndex >= 0 ? shortScoreDeltaAxisIndex : axisIndex,
+        barWidth: '55%',
+        silent: true,
+        z: 1,
+        data: deltaBars,
+      },
+      {
+        // 低位横盘后启动：柱高可能一直很小，但「自低点抬升」会持续走高
+        name: '自低点抬升',
+        type: 'line',
+        stype: 'tech',
+        xAxisIndex: axisIndex,
+        yAxisIndex: shortScoreDeltaAxisIndex >= 0 ? shortScoreDeltaAxisIndex : axisIndex,
+        symbol: 'none',
+        z: 2,
+        data: lines.riseData,
+        connectNulls: false,
+        lineStyle: { color: linkColor, width: 1, type: 'dashed' },
+        itemStyle: { color: linkColor },
+        markLine: {
+          symbol: 'none',
+          silent: true,
+          label: { show: false },
+          // 20 分是「低位抬升」买入阈值，作为参考线
+          data: [{ yAxis: SHORT_SCORE_RISE_THRESHOLD, lineStyle: { color: hintColor, opacity: 0.5, type: 'dotted' } }],
+        },
+      },
       {
         name: TechIndicatorSeriesNames[TechIndicatorType.SHORT_SCORE][0],
         type: 'line',
@@ -106,7 +266,8 @@ function buildTechSeries(
         symbol: 'none',
         xAxisIndex: axisIndex,
         yAxisIndex: axisIndex,
-        data,
+        z: 3,
+        data: lines.scoreData,
         connectNulls: false,
         lineStyle: { color: SHORT_SCORE_LINE_COLOR, width: 1.2 },
         itemStyle: { color: SHORT_SCORE_LINE_COLOR },
@@ -207,6 +368,11 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
   const pointerLabelBg = colors['--primary-color'] || '#888';
 
   const showTech = techType !== TECH_NONE;
+  // 短线评分：曲线 + 突变柱 + 自低点抬升三条序列一次算好（突变轴上限要用）
+  const shortScoreLines =
+    showTech && techType === TechIndicatorType.SHORT_SCORE
+      ? buildShortScoreLines(klines, shortScoreScores)
+      : null;
   const dates = klines.map((k) => k.date);
   // candlestick 数据顺序：[开盘, 收盘, 最低, 最高]
   const values = klines.map((k) => [k.kp, k.sp, k.zd, k.zg]);
@@ -301,6 +467,22 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
       });
     }
   }
+  // 短线评分的突变柱 / 抬升线挂在技术指标区的隐藏轴上：0 基线在区域底部，高度只表达幅度
+  let shortScoreDeltaAxisIndex = -1;
+  if (showTech && techType === TechIndicatorType.SHORT_SCORE) {
+    shortScoreDeltaAxisIndex = yAxis.length;
+    yAxis.push({
+      scale: false,
+      min: 0,
+      max: shortScoreLines?.deltaAxisMax || 1,
+      gridIndex: techGridIndex,
+      position: 'right',
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { show: false },
+      splitLine: { show: false },
+    });
+  }
 
   // 价格轴按「当前显示区间」定 min/max：放大后 K 线不会被压成一条直线
   const total = klines.length;
@@ -347,7 +529,14 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
   }
   if (showTech) {
     series.push(
-      ...buildTechSeries(techType as TechIndicatorType, klines, techGridIndex, techAltAxisIndex, shortScoreScores)
+      ...buildTechSeries(
+        techType as TechIndicatorType,
+        klines,
+        techGridIndex,
+        techAltAxisIndex,
+        shortScoreLines,
+        shortScoreDeltaAxisIndex
+      )
     );
   }
 
@@ -413,6 +602,35 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
               }
               return;
             }
+            // 短线评分：带出当日变化值（红绿柱）与突变程度（与详情页 PriceTrend 同口径）
+            if (p.seriesName === '短线评分' && p.data && typeof p.data === 'object') {
+              const d: any = p.data;
+              const delta = typeof d.delta === 'number' ? d.delta : null;
+              const cls = delta === null ? '' : delta > 0 ? 'text-up' : 'text-down';
+              rows.push(
+                `<span class="${cls}">短线评分 <b>${Number(d.value).toFixed(1)}</b></span>`
+              );
+              if (delta !== null) {
+                rows.push(`<span class="${cls}">较前一日 <b>${formatScoreDelta(delta)}</b></span>`);
+              }
+              if (d.jumpDesc) {
+                rows.push(`<span class="${cls}">突变 <b>${d.jumpDesc}</b></span>`);
+              }
+              return;
+            }
+            // 自近 N 根低点抬升：低位横盘后启动时，它比单日柱更早给出方向
+            if (p.seriesName === '自低点抬升' && p.data && typeof p.data === 'object') {
+              const r: any = p.data;
+              const lowTxt = typeof r.low === 'number' ? `（低点 ${r.low.toFixed(1)}）` : '';
+              rows.push(
+                `自近${SHORT_SCORE_RISE_DAYS}根低点${lowTxt}抬升 <b>+${Number(r.value).toFixed(1)}</b>`
+              );
+              return;
+            }
+            // 突变柱只表达幅度，细节看「短线评分 / 较前一日」两行
+            if (p.seriesName === '评分突变') {
+              return;
+            }
             const value = Number(p.data);
             if (!Number.isNaN(value)) {
               rows.push(`${p.seriesName} <b>${value.toFixed(2)}</b>`);
@@ -439,6 +657,35 @@ function trendTimeLabel(datetime: string) {
  */
 function dateKey(d: any) {
   return String(d || '').replace(/[^0-9]/g, '').substring(0, 8);
+}
+
+/** C5a 特征明细（悬浮提示） */
+function patternFeatureText(f: IntradayPatternFeatures) {
+  return [
+    `f1 均价线上方占比 ${(f.f1 * 100).toFixed(0)}%`,
+    `f2 收盘位置 ${f.f2.toFixed(2)}`,
+    `f3 穿越均价线 ${f.f3} 次`,
+    `f4 分段斜率 ${f.f4.map((v) => v.toFixed(2)).join(' / ')}%`,
+    `f5 量价比 ${f.f5.toFixed(2)}`,
+    `f6 日内振幅 ${(f.f6 * 100).toFixed(2)}%`,
+    `f7 最大回撤 ${(f.f7 * 100).toFixed(2)}%`,
+    `f8 尾盘涨幅占比 ${(f.f8 * 100).toFixed(0)}%`,
+    `f9 分时独立性 ${f.f9 == null ? '无指数分钟数据' : f.f9.toFixed(2)}`,
+  ].join('\n');
+}
+
+/** C5b 特征明细（悬浮提示） */
+function early30FeatureText(f: Early30Features) {
+  return [
+    `f1 开盘5分钟 ${(f.f1 * 100).toFixed(2)}%`,
+    `f2 窗口量/昨量 ${(f.f2 * 100).toFixed(1)}%`,
+    `f3 均价线上方占比 ${(f.f3 * 100).toFixed(0)}%`,
+    `f4 前后半段波动率比 ${f.f4.toFixed(2)}`,
+    `f5 窗口内回撤 ${(f.f5 * 100).toFixed(2)}%`,
+    `f6 上影线比例 ${f.f6.toFixed(2)}`,
+    `f7 分钟收益自相关 ${f.f7.toFixed(2)}`,
+    `f8 分时独立性 ${f.f8 == null ? '无指数分钟数据' : f.f8.toFixed(2)}`,
+  ].join('\n');
 }
 
 /**
@@ -804,14 +1051,27 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
   // 短线评分曲线：选中该技术指标时现取数逐日计算（不读评分缓存），算完再画线
   const [shortScoreScores, setShortScoreScores] = useState<Record<string, number>>({});
   const [shortScoreCurveLoading, setShortScoreCurveLoading] = useState(false);
+  /** 本次评分曲线实际覆盖的交易日数（0=还在等 K 线，用于 loading 文案） */
+  const [shortScoreCurveDaysUsed, setShortScoreCurveDaysUsed] = useState(0);
+  /** 评分曲线覆盖天数跟随日K长度（与详情页 PriceTrend 一致，不再固定 120 个交易日） */
+  const shortScoreCurveDays = useMemo(() => Math.max(20, klines.length), [klines.length]);
   useEffect(() => {
     if (techType !== TechIndicatorType.SHORT_SCORE) {
       return () => {};
     }
     let canceled = false;
     setShortScoreScores({});
+    // 日K还没到就先不算：否则会先用默认窗口跑一遍，界面上看起来仍是固定天数
+    if (!klines.length) {
+      setShortScoreCurveDaysUsed(0);
+      setShortScoreCurveLoading(true);
+      return () => {
+        canceled = true;
+      };
+    }
+    setShortScoreCurveDaysUsed(shortScoreCurveDays);
     setShortScoreCurveLoading(true);
-    computeShortTermScoreCurve({ code, name, limit: PANEL_KLINE_LIMIT })
+    computeShortTermScoreCurve({ code, name, limit: shortScoreCurveDays })
       .then((curve) => {
         if (!canceled) {
           setShortScoreScores(curve.scores);
@@ -830,7 +1090,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     return () => {
       canceled = true;
     };
-  }, [techType, code, name]);
+  }, [techType, code, name, shortScoreCurveDays, klines.length]);
 
   // 默认看日K线：只在「进入/退出训练」时回到日K，训练日推进不打断用户当前选择
   const wasTrainingRef = useRef(inTraining);
@@ -1023,6 +1283,31 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     return before.length ? before[before.length - 1] : null;
   }, [klines, trendDayKey]);
 
+  /** C5a/C5b 的输入分时：训练回放取「已走到」的分时，实时取全部分时 */
+  const patternTrends = inTraining ? visibleTrends : trends;
+  /** 昨日全天成交量（手，C5b 的 f2 分母） */
+  const prevDayVol = Number(prevDayBar?.cjl) || 0;
+
+  /**
+   * C5a 全天分时形态（盘后口径）
+   *
+   * 需要完整交易日分时：训练回放还没推到收盘（< 15:00）时不给结论，
+   * 避免拿半天的分时判「全天形态」。
+   */
+  const intradayComplete = useMemo(() => IsIntradayComplete(patternTrends), [patternTrends]);
+  const c5a = useMemo(() => {
+    if (!intradayComplete) {
+      return null;
+    }
+    return ComputeIntradayPattern({ trends: patternTrends, prevClose: trendZs });
+  }, [patternTrends, trendZs, intradayComplete]);
+
+  /** C5b 开盘 30 分钟预测（10:00 后可用，不足 30 个分时点时 ready=false） */
+  const c5b = useMemo(
+    () => ComputeEarly30Prediction({ trends: patternTrends, prevDayVol }),
+    [patternTrends, prevDayVol]
+  );
+
   // 切换股票：重置缩放区间
   useEffect(() => {
     setRange(DEFAULT_RANGE);
@@ -1126,6 +1411,89 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
         </div>
       </div>
 
+      {/* C5a 全天分时形态 + C5b 开盘 30 分钟预测（规格 M7a / M7b），图表上方一行展示 */}
+      <div
+        style={{
+          marginTop: 12,
+          border: '1px solid var(--border-color)',
+          borderRadius: 4,
+          padding: '4px 6px',
+          display: 'flex',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 6,
+          fontSize: 11,
+        }}
+      >
+        <span style={{ fontWeight: 600 }}>分时形态</span>
+        {c5a ? (
+          <Tooltip
+            title={
+              <div style={{ fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-line' }}>
+                {`${patternFeatureText(c5a.features)}\n判据：${c5a.reason}`}
+              </div>
+            }
+          >
+            <Tag
+              style={{ marginInlineEnd: 0, cursor: 'help' }}
+              color={
+                c5a.pattern === '无明显形态' ? undefined : c5a.confidence >= 0.7 ? 'success' : 'processing'
+              }
+            >
+              {c5a.pattern} {(c5a.confidence * 100).toFixed(0)}%
+            </Tag>
+          </Tooltip>
+        ) : (
+          <span style={{ color: 'var(--hint-color)' }}>
+            {!patternTrends.length
+              ? '暂无分时数据'
+              : !intradayComplete
+              ? `分时未走完（${visibleCount}/${trendTotal} 分钟），收盘后可用`
+              : '缺少昨收，无法判定形态'}
+          </span>
+        )}
+        <span style={{ fontWeight: 600, marginLeft: 8 }}>开盘预测</span>
+        {!c5b ? (
+          <span style={{ color: 'var(--hint-color)' }}>暂无分时数据</span>
+        ) : !c5b.ready ? (
+          <span style={{ color: 'var(--hint-color)' }}>开盘满 10 分钟才出结果</span>
+        ) : (
+          <Tooltip
+            title={
+              <div style={{ fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-line' }}>
+                {`${early30FeatureText(c5b.features)}\n量能签名 ${Early30VolSignatureNames[c5b.volSignature]}\n评估窗口 ${
+                  c5b.windowMinutes
+                } 分钟（每 10 分钟更新，30 分钟后固定）\n窗口涨幅 ${(c5b.ret30 * 100).toFixed(
+                  2
+                )}%\n最小规则版 ${c5b.ruleHit ? '命中（早盘强势）' : '未命中'}`}
+              </div>
+            }
+          >
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'help' }}>
+              <span style={{ color: 'var(--hint-color)' }}>前{c5b.windowMinutes}′</span>
+              <Tag style={{ marginInlineEnd: 0 }} color={c5b.probs.T1 >= 0.5 ? 'success' : undefined}>
+                T1 {(c5b.probs.T1 * 100).toFixed(0)}%
+              </Tag>
+              <Tag style={{ marginInlineEnd: 0 }} color={c5b.probs.T2 >= 0.5 ? 'warning' : undefined}>
+                T2 {(c5b.probs.T2 * 100).toFixed(0)}%
+              </Tag>
+              <Tag style={{ marginInlineEnd: 0 }} color={c5b.probs.T3 >= 0.5 ? 'processing' : undefined}>
+                T3 {(c5b.probs.T3 * 100).toFixed(0)}%
+              </Tag>
+              <span style={{ color: 'var(--secondary-text-color)' }}>
+                量能 {Early30VolSignatureNames[c5b.volSignature]}
+              </span>
+              {c5b.ruleHit ? (
+                <Tag style={{ marginInlineEnd: 0 }} color="success">
+                  早盘强势
+                </Tag>
+              ) : null}
+            </span>
+          </Tooltip>
+        )}
+        <span style={{ marginLeft: 'auto', color: 'var(--hint-color)' }}>C5a 盘后 · C5b 每 10 分钟</span>
+      </div>
+
       <div style={{ marginTop: 12 }}>
         {/* 图表工具栏：分时/日K切换；日K下为技术指标 / 成交量 / 缩放；训练模式分时另带回放操作 */}
         <div
@@ -1158,6 +1526,15 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
                   </Select.Option>
                 ))}
               </Select>
+              {techType === TechIndicatorType.SHORT_SCORE && !shortScoreCurveLoading ? (
+                <span
+                  style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}
+                  title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（低位横盘后启动的依据，${SHORT_SCORE_RISE_THRESHOLD} 分为买入阈值参考线）`}
+                >
+                  红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
+                  <span style={{ marginLeft: 4 }}>蓝虚线=自近{SHORT_SCORE_RISE_DAYS}根低点抬升</span>
+                </span>
+              ) : null}
               <Tooltip title="成交量">
                 <Switch size="small" checked={showVolume} onChange={setShowVolume} />
               </Tooltip>
@@ -1206,7 +1583,9 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
             ) : null}
             {shortScoreCurveLoading ? (
               <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
-                <Spin size="small" /> 短线评分曲线现取数计算中（最近 {PANEL_KLINE_LIMIT} 个交易日）...
+                <Spin size="small" /> 短线评分计算中（
+                {shortScoreCurveDaysUsed > 0 ? `最近 ${shortScoreCurveDaysUsed} 个交易日` : '等待 K 线加载'}
+                ）...
               </div>
             ) : null}
             {!klineLoading && klineError ? (

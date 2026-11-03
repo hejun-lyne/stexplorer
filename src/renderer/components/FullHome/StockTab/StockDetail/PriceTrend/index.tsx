@@ -47,6 +47,14 @@ import { getPreloadedDailyKline } from '@/helpers/klinePreload';
 import { Stock } from '@/types/stock';
 import { Button } from 'antd';
 const { makeWorkerExec } = window.contextModules.electron;
+
+/**
+ * 短线评分「自低点抬升」叠加线回看多少根
+ *
+ * 与买入规则里的「低位抬升」同口径：抬升幅度 = 当日评分 - 前 N 根内的最低分。
+ * 日K时 N 就是 N 个交易日；周/月K 时是 N 根（即 N 周 / N 月）。
+ */
+const SHORT_SCORE_RISE_DAYS = 5;
 import {
   DoubleLeftOutlined,
   DoubleRightOutlined,
@@ -918,11 +926,13 @@ function baseKChartOptions(darkMode: boolean, range?: { start: number; end: numb
           if (p.seriesName == '筹码') {
             // 筹码分布
             text += `<div style="display: flex; justify-content: space-between;"><span>价格:</span><span>${p.axisValue}</span></div>`;
-            text += `<div style="display: flex; justify-content: space-between;"><span>筹码占比:</span><span>${p.value.toFixed(
-              5
-            )}</span></div>`;
+            const cmVal = typeof p.value === 'number' && Number.isFinite(p.value) ? p.value.toFixed(5) : '--';
+            text += `<div style="display: flex; justify-content: space-between;"><span>筹码占比:</span><span>${cmVal}</span></div>`;
           } else if (p.seriesName == 'K线') {
-            const val = p.data.value;
+            const val = p.data && p.data.value;
+            if (!val || !val.length) {
+              return;
+            }
             const zs = val[6] || 0;
             text += `<div style="display: flex; justify-content: space-between;" class="${
               zs > 0 ? (val[1] > zs ? 'text-up' : 'text-down') : ''
@@ -948,9 +958,9 @@ function baseKChartOptions(darkMode: boolean, range?: { start: number; end: numb
               </span></div>`;
             }
           } else if (p.seriesName != 'MACD' && p.seriesName.indexOf('MA') != -1) {
-            text += `<div style="display: flex; justify-content: space-between;"><span>${p.seriesName}:</span><span>${p.data.toFixed(
-              2
-            )}</span></div>`;
+            // 均线在某些交易日没有值（null），直接 toFixed 会抛异常
+            const maVal = typeof p.data === 'number' && Number.isFinite(p.data) ? p.data.toFixed(2) : '--';
+            text += `<div style="display: flex; justify-content: space-between;"><span>${p.seriesName}:</span><span>${maVal}</span></div>`;
           } else if (p.seriesName == '成交量') {
             text += `<div style="display: flex; justify-content: space-between;"><span>成交量:</span><span>${
               (p.data[1] / 10000).toFixed(2) + '万手'
@@ -971,7 +981,15 @@ function baseKChartOptions(darkMode: boolean, range?: { start: number; end: numb
             if (d.jumpDesc) {
               text += `<div style="display: flex; justify-content: space-between;" class="${cls}"><span>突变:</span><span>${d.jumpDesc}</span></div>`;
             }
-          } else if (!isNaN(p.data)) {
+          } else if (p.seriesName == '自低点抬升' && p.data && typeof p.data === 'object') {
+            // 自近 N 根低点抬升：低位横盘后启动时，这个值会比单日柱高更早给出方向
+            const r: any = p.data;
+            const lowTxt = typeof r.low === 'number' ? `（低点 ${r.low.toFixed(1)}）` : '';
+            text += `<div style="display: flex; justify-content: space-between;"><span>自近${SHORT_SCORE_RISE_DAYS}根低点${lowTxt}抬升:</span><span>+${Number(
+              r.value
+            ).toFixed(1)}</span></div>`;
+          } else if (typeof p.data === 'number' && Number.isFinite(p.data)) {
+            // 注意别用 !isNaN(p.data)：isNaN(null) === false，会让 null 通过判断后 .toFixed 崩溃
             text += `<div style="display: flex; justify-content: space-between;"><span>${p.seriesName}:</span><span>${p.data.toFixed(
               2
             )}</span></div>`;
@@ -980,7 +998,10 @@ function baseKChartOptions(darkMode: boolean, range?: { start: number; end: numb
         });
         params.forEach((p) => {
           if (p.seriesName == 'K线') {
-            const val = p.data.value;
+            const val = p.data && p.data.value;
+            if (!val || !val.length) {
+              return;
+            }
             if (val[9]) {
               // K线形状标识
               let st = val[9].sshapeType as number;
@@ -1143,6 +1164,16 @@ function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[
   const dates = trends.map(({ datetime }) => datetime.length >= 10 ? datetime.split(' ')[1] : datetime);
   for (let i = 0; i < opts.xAxis.length; i++) {
     opts.xAxis[i].data = dates;
+  }
+  // 该交易日没有分时数据时清空图形（历史分时取不到 / 停牌），不能保留上一天的分时
+  if (!trends.length) {
+    opts.series[0].data = [];
+    opts.series[1].data = [];
+    if (opts.series.length > 2) {
+      opts.series[2].data = [];
+    }
+    opts.series[0].markLine.data = getMarkLineData(darkMode, zs, undefined);
+    return;
   }
   const vals = trends.map((t) => t.current).concat(trends[0].average ? trends.map((t) => t.average) : []);
   const yMin = Math.min(...vals) * 0.999;
@@ -1779,12 +1810,15 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const [requestTrends, setRequestTrends] = useState(false);
     const [requestKLines, setRequestKLines] = useState(DefaultKTypes.map(() => false));
     const { run: updateTrendsOption } = useThrottleFn(
-      (data: any) => {
+      (data: any, viewDate?: string) => {
         // 需要更新zs（训练模式用当日分时自带的昨收，避免用未来数据的昨收）
+        // viewDate：正在展示的历史交易日（异步回调里 state 可能还没更新，由调用方显式传入）
+        const date = viewDate || currentTrendDate;
         let tzs = calcTrendZs(data.trends || []);
-        if (trendDates.length > 1 && currentTrendDate != trendDates[trendDates.length - 1]) {
-          const idx = trendDates.indexOf(currentTrendDate);
-          const prevK = klineData.klines[DefaultKTypes.indexOf(KLineType.Day)][idx - 1];
+        if (trendDates.length > 1 && date != trendDates[trendDates.length - 1]) {
+          // 展示历史交易日时，昨收取该交易日前一根日K的收盘价
+          const idx = trendDates.indexOf(date);
+          const prevK = idx > 0 ? klineData.klines[DefaultKTypes.indexOf(KLineType.Day)][idx - 1] : undefined;
           if (prevK) tzs = prevK.sp;
         }
         if (chartOptions[0]) {
@@ -1903,6 +1937,20 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       () => filterKlinesByToDate(klineData.klines[typeIndex], displayToDate) || [],
       [klineData.klines, typeIndex, displayToDate]
     );
+    /**
+     * 短线评分曲线覆盖天数：跟随 K 线长度（不再固定最近 120 个交易日）
+     *
+     * 用「日K展示根数」而不是当前周期根数：评分本身是日频的，切到周/月线时若按
+     * 250 根周K 换算成 1200 个交易日，逐日现算会明显变慢。
+     */
+    const shortScoreCurveDays = useMemo(() => {
+      const dayIdx = DefaultKTypes.indexOf(KLineType.Day);
+      const all = klineData.klines[dayIdx] || [];
+      // 按展示区间截断后的根数；训练/回测日期把区间切空时退回全量日K根数，
+      // 不要退回固定 120（那会让「按 K 线长度算」失效）
+      const shown = (filterKlinesByToDate(all, displayToDate) || []).length;
+      return Math.max(20, shown || all.length || SHORT_SCORE_CURVE_MAX_DAYS);
+    }, [klineData.klines, klineData.klines[DefaultKTypes.indexOf(KLineType.Day)]?.length, displayToDate]);
     /** 训练日「昨收」兜底：图表展示到的最后一个交易日的前一交易日收盘价（日K补齐前先用它） */
     const trendZsFromKlines = useMemo(() => {
       const ks = filterKlinesByToDate(dayKlines, displayToDate) || [];
@@ -2567,6 +2615,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
      * 所以单独异步计算；不跟随 K 线定时刷新（分数本身只在收盘后才有意义）。
      */
     const [shortScoreCurveLoading, setShortScoreCurveLoading] = useState(false);
+    /** 本次评分曲线实际覆盖的交易日数（0=还在等 K 线，用于 loading 文案） */
+    const [shortScoreCurveDaysUsed, setShortScoreCurveDaysUsed] = useState(0);
     /** 异步回调里要读最新的 chartOptions（状态对象会被原地修改，不能依赖闭包里的旧值） */
     const chartOptionsRef = useRef(chartOptions);
     chartOptionsRef.current = chartOptions;
@@ -2660,8 +2710,31 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           };
         });
         const maxAbsDelta = deltas.reduce((m: number, d) => (typeof d === 'number' ? Math.max(m, Math.abs(d)) : m), 0);
-        // 最高柱约占技术指标区一半高度，给上方曲线留出可读空间
-        const deltaAxisMax = maxAbsDelta > 0 ? Number((maxAbsDelta * 1.9).toFixed(1)) : 1;
+        // ---- 自近 N 根低点抬升：单日柱看不出「低位横盘后启动」，这条线才是启动幅度 ----
+        // 口径与买入规则一致：value = 当日评分 - 前 N 根内的最低分（恒 >= 0）
+        const riseData = values.map((v, i) => {
+          if (typeof v !== 'number') {
+            return null;
+          }
+          let low: number | null = null;
+          for (let k = Math.max(0, i - SHORT_SCORE_RISE_DAYS); k < i; k += 1) {
+            const p = values[k];
+            if (typeof p === 'number' && (low === null || p < low)) {
+              low = p;
+            }
+          }
+          if (low === null) {
+            return null;
+          }
+          return { value: Number((v - low).toFixed(1)), low: Number(low.toFixed(1)) };
+        });
+        const maxRise = riseData.reduce(
+          (m: number, r) => (r && typeof r.value === 'number' ? Math.max(m, r.value) : m),
+          0
+        );
+        // 最高柱/最高抬升约占技术指标区一半高度，给上方曲线留出可读空间
+        const axisTop = Math.max(maxAbsDelta, maxRise);
+        const deltaAxisMax = axisTop > 0 ? Number((axisTop * 1.9).toFixed(1)) : 1;
         const deltaAxis = target.yAxis?.[4];
         if (deltaAxis) {
           deltaAxis.min = 0;
@@ -2680,6 +2753,28 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           silent: true,
           z: 1,
           data: deltaBars,
+        });
+        target.series.push({
+          // 低位横盘后启动：柱高可能一直很小，但「自低点抬升」会持续走高，
+          // 抬升到 20 分左右就是买入规则里的启动阈值（rise 口径）
+          name: '自低点抬升',
+          type: 'line',
+          stype: 'tech',
+          xAxisIndex: 2,
+          yAxisIndex: 4,
+          symbol: 'none',
+          z: 2,
+          data: riseData,
+          connectNulls: false,
+          lineStyle: { color: variableColors['--link-color'] || '#1677ff', width: 1, type: 'dashed' },
+          itemStyle: { color: variableColors['--link-color'] || '#1677ff' },
+          markLine: {
+            symbol: 'none',
+            silent: true,
+            label: { show: false },
+            // 20 分是「低位抬升」买入阈值（--min-rise 默认值），作为参考线
+            data: [{ yAxis: 20, lineStyle: { color: variableColors['--hint-color'] || '#999', opacity: 0.5, type: 'dotted' } }],
+          },
         });
         target.series.push({
           name: TechIndicatorSeriesNames[TechIndicatorType.SHORT_SCORE][0],
@@ -2704,6 +2799,18 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         setChartOptions({ ...chartOptionsRef.current });
       };
 
+      // 日K还没到就不要开算：否则会先用回退窗口（120）跑一遍，
+      // 界面上看起来仍是「只算最近 120 个交易日」。等 K 线就绪后由依赖触发重算。
+      const dayIdx = DefaultKTypes.indexOf(KLineType.Day);
+      const dayLen = (filterKlinesByToDate(klineData.klines[dayIdx], displayToDate) || []).length;
+      if (dayLen <= 0) {
+        setShortScoreCurveDaysUsed(0);
+        setShortScoreCurveLoading(true);
+        return undefined;
+      }
+      setShortScoreCurveDaysUsed(dayLen);
+      console.log(`[短线评分] 曲线窗口 = 日K根数 ${dayLen}（shortScoreCurveDays=${shortScoreCurveDays}）`);
+
       setShortScoreCurveLoading(true);
       computeShortTermScoreCurve({
         code,
@@ -2711,7 +2818,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         hybk: config?.hybk || null,
         // 列表里取到的流通市值（亿元）用来选市值档，和列表评分口径对齐
         circMv: stock?.lt ? Number(stock.lt) * 1e8 : undefined,
-        limit: SHORT_SCORE_CURVE_MAX_DAYS,
+        // 窗口跟 K 线长度走：K 线加载/滚动越多，评分曲线覆盖越多交易日
+        limit: shortScoreCurveDays,
       })
         .then((curve) => {
           if (canceled) {
@@ -2738,7 +2846,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       };
       // chartOptions / klineData 是原地修改的状态对象，不作为依赖；用长度判断图表是否已就绪
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [techType, typeIndex, displayToDate, secid, stock?.name, config?.hybk, klineData.klines[typeIndex]?.length]);
+    }, [techType, typeIndex, displayToDate, secid, stock?.name, config?.hybk, klineData.klines[typeIndex]?.length, shortScoreCurveDays]);
 
     const onMAPeriodTypeChange = useCallback(
       (value: MAPeriodType) => {
@@ -2774,48 +2882,62 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       },
       [typeIndex, chartOptions]
     );
-    const { run: runGetHistTrends } = useRequest(Services.Stock.requestDealDay, {
-      throwOnError: true,
+    // 历史交易日的分时：与 ScoreStockPanel 一致，由 Tushare 1 分钟线合成
+    // （requestHistTrends → get_stock_trend_by_date，本地分钟库命中时零请求）。
+    // 原 opensourcecache 历史分时缓存源已下线，不能再作为数据来源。
+    const { run: runGetHistTrends } = useRequest(Services.Stock.requestHistTrends, {
       manual: true,
-      onSuccess: (data) => {
-        // 只保留分钟
-        const processed = [] as Stock.TrendItem[];
-        let item = data[0];
-        for (let i = 1; i < data.length; i++) {
-          const pMin = item.datetime.substring(3, 5);
-          const nMin = data[i].datetime.substring(3, 5);
-          if (pMin == nMin) {
-            data[i].vol += item.vol;
-            data[i].last = item.last;
+      onSuccess: (data: Stock.TrendItem[], params: any[]) => {
+        // 用发起请求时选中的交易日做时间前缀（异步回调里 currentTrendDate 可能还没更新）
+        const digits = String(params?.[1] ?? currentTrendDate ?? '').replace(/\D/g, '');
+        const day =
+          digits.length >= 8
+            ? `${digits.substring(0, 4)}-${digits.substring(4, 6)}-${digits.substring(6, 8)}`
+            : dayjs().format('YYYY-MM-DD');
+        // 1 分钟线本身每分钟一根；数据源更细时按分钟合并（成交量累加，价格取最后一根）
+        const byMinute = new Map<string, Stock.TrendItem>();
+        (data || []).forEach((t) => {
+          if (!t || !(Number(t.current) > 0)) {
+            return;
+          }
+          const raw = String(t.datetime || '');
+          const hhmm = raw.length >= 16 ? raw.substring(11, 16) : raw.substring(0, 5);
+          if (!hhmm) {
+            return;
+          }
+          const prev = byMinute.get(hhmm);
+          if (prev) {
+            prev.vol += t.vol || 0;
+            prev.current = t.current;
+            prev.up = t.up;
+            prev.average = t.average || prev.average;
           } else {
-            processed.push(item);
+            byMinute.set(hhmm, { ...t, datetime: `${day} ${hhmm}` });
           }
-          item = data[i];
-          if (i == data.length - 1) {
-            processed.push(data[i]);
-          }
-        }
-        // const trends = data.filter(
-        //   (t, i) => i == data.length - 1 || data[i + 1].datetime.substring(3, 5) != data[i].datetime.substring(3, 5)
-        // );
-        processed.forEach((_) => {
-          _.datetime = currentTrendDate + ' ' + _.datetime.substring(0, 5);
         });
-        handleTrends(processed);
+        const trends = Array.from(byMinute.values()).sort((a, b) =>
+          a.datetime < b.datetime ? -1 : a.datetime > b.datetime ? 1 : 0
+        );
+        // 直接整段替换（不能走 handleTrends 的实时拼接：它会把上一交易日的分时串进来）
+        setTrendData({ trends });
+        updateTrendsOption({ trends }, day);
+        if (updateTrendData) {
+          updateTrendData(trends);
+        }
       },
-      cacheKey: `requestDealDay/${secid}`,
     });
     const onTrendDateChange = useCallback(
       (date: string) => {
         setCurrentTrendDate(date);
         if (date == trendDates[trendDates.length - 1]) {
-          // 重新获取趋势
-          runGetTrends(secid);
+          // 最新交易日：回到实时分时
+          runGetTrends(kLineApiSourceSetting, secid);
         } else {
+          // 历史交易日：Tushare 1 分钟线合成
           runGetHistTrends(secid, date);
         }
       },
-      [secid, trendDates]
+      [secid, trendDates, kLineApiSourceSetting]
     );
     const { run: runGetBKKline } = useRequest(Services.Stock.GetKFromDataSource, {
       throwOnError: true,
@@ -3292,7 +3414,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           {typeIndex === 0 && (
             <>
               {trendDates.length > 0 && (
-                <Select size="small" defaultValue={currentTrendDate} onChange={onTrendDateChange}>
+                <Select size="small" value={currentTrendDate} onChange={onTrendDateChange}>
                   {trendDates.map((_, i) => (
                     <Select.Option value={_} key={i}>
                       {_}
@@ -3334,14 +3456,19 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                   {techType === TechIndicatorType.SHORT_SCORE ? (
                     shortScoreCurveLoading ? (
                       <span style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}>
-                        短线评分计算中（最近 {SHORT_SCORE_CURVE_MAX_DAYS} 个交易日）...
+                        短线评分计算中（
+                        {shortScoreCurveDaysUsed > 0 ? `最近 ${shortScoreCurveDaysUsed} 个交易日` : '等待 K 线加载'}
+                        ）...
                       </span>
                     ) : (
                       <span
                         style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}
-                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动`}
+                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（低位横盘后启动的依据，20 分为买入阈值参考线）`}
                       >
                         红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
+                        <span style={{ color: 'var(--secondary-text-color)' }}>
+                          　蓝虚线=自近{SHORT_SCORE_RISE_DAYS}根低点抬升
+                        </span>
                       </span>
                     )
                   ) : null}

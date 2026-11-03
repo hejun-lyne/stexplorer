@@ -1,5 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Col, Descriptions, InputNumber, Modal, Row, Space, Spin, Statistic, Switch, Table, Tag } from 'antd';
+import {
+  Alert,
+  Button,
+  Col,
+  Descriptions,
+  InputNumber,
+  Modal,
+  Radio,
+  Row,
+  Space,
+  Spin,
+  Statistic,
+  Switch,
+  Table,
+  Tag,
+} from 'antd';
 import * as ScoreList from '@/helpers/shortTermScoreList';
 import {
   DEFAULT_SHORT_SCORE_BACKTEST,
@@ -34,7 +49,11 @@ const numText = (v: number, digits = 2) => {
  * 结果可导出 JSON，便于外部复核/分析。
  */
 const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name, circMv }) => {
-  const [params, setParams] = useState<ShortScoreBacktestParams>(DEFAULT_SHORT_SCORE_BACKTEST);
+  // 默认用「自低点抬升」口径：低位启动常分几天完成，单日 Δ 到不了 20 分
+  const [params, setParams] = useState<ShortScoreBacktestParams>({
+    ...DEFAULT_SHORT_SCORE_BACKTEST,
+    buyMode: 'rise',
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<ShortScoreBacktestResult | null>(null);
@@ -158,7 +177,9 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
         title: '卖出原因',
         dataIndex: 'exitReason',
         width: 90,
-        render: (v: string) => <Tag color={v === '绿柱卖出' ? 'green' : 'default'}>{v}</Tag>,
+        render: (v: string) => (
+          <Tag color={v === '绿柱卖出' ? 'green' : v === '回撤止盈' ? 'blue' : 'default'}>{v}</Tag>
+        ),
       },
     ],
     []
@@ -184,7 +205,7 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
       },
       stats: result.stats,
       trades: result.trades,
-      // 被冷却期 / 跳空过滤拦下的信号，便于核对过滤是否误伤
+      // 被低位启动 / 冷却期 / 跳空过滤拦下的信号，便于核对过滤是否误伤
       skips: result.skips,
       // 供外部核对口径：完整评分序列与窗口内日K
       scores: result.scores,
@@ -224,17 +245,87 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
       }
     >
       <Space wrap size={12} style={{ marginBottom: 12 }}>
-        <span>
-          买入 Δ≥
-          <InputNumber size="small" value={params.buyDelta} step={1} onChange={setParam('buyDelta')} style={{ width: 70 }} />
+        <span title="自低点抬升：不看单日跳升，只看评分自近 N 个评分日最低点抬了多少（适合分几天完成的低位启动）">
+          买入口径
+          <Radio.Group
+            size="small"
+            style={{ marginLeft: 6 }}
+            value={params.buyMode}
+            onChange={(e) => setParams((prev) => ({ ...prev, buyMode: e.target.value }))}
+            optionType="button"
+            options={[
+              { label: '自低点抬升', value: 'rise' },
+              { label: '单日跳升', value: 'jump' },
+            ]}
+          />
         </span>
-        <span>
-          评分≥
-          <InputNumber size="small" value={params.minScore} step={5} onChange={setParam('minScore')} style={{ width: 70 }} />
-        </span>
+        {params.buyMode === 'rise' ? (
+          <>
+            <span title="评分自近 N 个评分日最低点抬升达到该分数即算启动">
+              自低点抬升 ≥
+              <InputNumber size="small" value={params.minRise} step={5} onChange={setParam('minRise')} style={{ width: 70 }} />
+            </span>
+            <span>
+              回看
+              <InputNumber
+                size="small"
+                value={params.riseRefDays}
+                min={1}
+                max={60}
+                step={1}
+                onChange={setParam('riseRefDays')}
+                style={{ width: 60 }}
+              />
+              个评分日
+            </span>
+            <span title="评分绝对地板：当日评分低于该值不算启动">
+              启动地板 ≥
+              <InputNumber size="small" value={params.riseMinScore} step={5} onChange={setParam('riseMinScore')} style={{ width: 70 }} />
+            </span>
+          </>
+        ) : (
+          <>
+            <span>
+              买入 Δ≥
+              <InputNumber size="small" value={params.buyDelta} step={1} onChange={setParam('buyDelta')} style={{ width: 70 }} />
+            </span>
+            <span>
+              评分≥
+              <InputNumber size="small" value={params.minScore} step={5} onChange={setParam('minScore')} style={{ width: 70 }} />
+            </span>
+          </>
+        )}
         <span>
           卖出 Δ≤
           <InputNumber size="small" value={params.sellDelta} step={1} onChange={setParam('sellDelta')} style={{ width: 70 }} />
+        </span>
+        <span title="单日跳升口径：突变前 N 个评分日必须都 ≤ 该上限；自低点抬升口径：近 N 日最低分（抬升起点）要 ≤ 该上限，排除高位反抽的伪信号；天数填 0 关闭">
+          低位 ≤
+          <InputNumber size="small" value={params.lowBaseMax} step={5} onChange={setParam('lowBaseMax')} style={{ width: 70 }} />
+          持续
+          <InputNumber
+            size="small"
+            value={params.lowBaseDays}
+            min={0}
+            max={20}
+            step={1}
+            onChange={setParam('lowBaseDays')}
+            style={{ width: 60 }}
+          />
+          日
+        </span>
+        <span title="评分自持仓期最高点回撤达到该分数即卖出，避免评分阴跌时一直不止盈；填 0 关闭">
+          回撤 ≥
+          <InputNumber
+            size="small"
+            value={params.trailDrop}
+            min={0}
+            max={60}
+            step={1}
+            onChange={setParam('trailDrop')}
+            style={{ width: 60 }}
+          />
+          分止盈
         </span>
         <span>
           卖出后冷却
@@ -358,7 +449,9 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
               {result.skips
                 .map(
                   (s) =>
-                    `${s.date} ${s.reason}（评分${s.score} / Δ${s.delta > 0 ? '+' : ''}${s.delta} / 跳空${
+                    `${s.date} ${s.reason}${
+                      typeof s.prevHigh === 'number' ? `（此前最高 ${s.prevHigh}）` : ''
+                    }（评分${s.score} / Δ${s.delta > 0 ? '+' : ''}${s.delta} / 跳空${
                       s.gap > 0 ? '+' : ''
                     }${s.gap}%）`
                 )

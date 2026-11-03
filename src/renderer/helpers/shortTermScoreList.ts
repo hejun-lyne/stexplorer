@@ -683,9 +683,15 @@ export async function ensureIndexKlines(
   /** 强制重取（已有的也覆盖）：训练日很久远时要按更长的窗口重取，才能覆盖到补算窗口 */
   force = false
 ): Promise<Record<string, Stock.KLineItem[]>> {
+  // 已有但根数不够时也要重取：上次可能只按 120 天取的指数日K，
+  // 放大评分窗口后若不复取，交易日列表（recentDaysOnOrBefore）会被旧数据截断
+  const need = Math.max(20, Math.floor(Number(limit) || 60));
   const missing = force
     ? INDEX_SECIDS.slice()
-    : INDEX_SECIDS.filter((s) => !ctx.indexKlinesMap[s] || !ctx.indexKlinesMap[s].length);
+    : INDEX_SECIDS.filter((s) => {
+        const list = ctx.indexKlinesMap[s];
+        return !list || !list.length || list.length < need;
+      });
   if (!missing.length) {
     return ctx.indexKlinesMap;
   }
@@ -709,14 +715,14 @@ export async function ensureUpRatio(ctx: ScoreSharedContext): Promise<Score.UpRa
   await ensureIndexKlines(ctx);
   const dates = new Set<string>();
   Object.keys(ctx.indexKlinesMap).forEach((s) => {
-    (ctx.indexKlinesMap[s] || [])
-      .slice(-Score.SHORT_TERM_SCORE_CONFIG.marketDays)
-      .forEach((k) => {
-        const d = String(k?.date || '').replace(/-/g, '').substring(0, 8);
-        if (d) {
-          dates.add(d);
-        }
-      });
+    // 覆盖指数日K的全部日期：评分窗口按 K 线长度放大后，早期交易日同样需要涨跌比，
+    // 否则那几天的大盘维度会被误判缺失、评分偏低
+    (ctx.indexKlinesMap[s] || []).forEach((k) => {
+      const d = String(k?.date || '').replace(/-/g, '').substring(0, 8);
+      if (d) {
+        dates.add(d);
+      }
+    });
   });
   const list = [...dates];
   if (!list.length) {
@@ -2173,8 +2179,16 @@ export async function computeStockScoreForCode(params: {
   };
 }
 
-/** 技术指标「短线评分」曲线上限（交易日数） */
+/** 技术指标「短线评分」曲线默认天数（调用方不传 limit 时使用） */
 export const SHORT_SCORE_CURVE_MAX_DAYS = 120;
+
+/**
+ * 短线评分曲线的硬上限（交易日数）
+ *
+ * 详情页会按当前 K 线长度传 limit（250 根日K ≈ 250 个交易日），这里只做防御，
+ * 避免误传超大值把逐日现算拖死。
+ */
+export const SHORT_SCORE_CURVE_HARD_MAX_DAYS = 1200;
 
 /** 短线评分曲线（技术指标用） */
 export interface ShortTermScoreCurve {
@@ -2193,7 +2207,8 @@ export interface ShortTermScoreCurve {
  *
  * 与列表评分同一套取数与评分内核，但**不读写评分缓存**：每次选中该指标都现取数、逐日重算，
  * 避免指标曲线受历史缓存口径（旧版本、旧板块）影响。
- * 单只股票逐日只在内存里切片，取数全部走上下文缓存 + 批量接口，窗口上限默认 120 个交易日。
+ * 单只股票逐日只在内存里切片，取数全部走上下文缓存 + 批量接口；N 由调用方给
+ * （详情页按当前 K 线长度传，默认 120，硬上限 SHORT_SCORE_CURVE_HARD_MAX_DAYS）。
  */
 export async function computeShortTermScoreCurve(params: {
   code: string;
@@ -2201,7 +2216,7 @@ export async function computeShortTermScoreCurve(params: {
   /** 手动设置的活跃板块（优先作为板块维度的所属板块） */
   hybk?: { code: string; name: string } | null;
   circMv?: number;
-  /** 最多计算多少个交易日（默认 120，最大 240） */
+  /** 最多计算多少个交易日（默认 120，硬上限 SHORT_SCORE_CURVE_HARD_MAX_DAYS） */
   limit?: number;
   /**
    * 忽略训练模式：true 时按「最新交易日」算到底（回测用）
@@ -2225,7 +2240,13 @@ export async function computeShortTermScoreCurve(params: {
 }): Promise<ShortTermScoreCurve> {
   const { code, name, hybk, circMv, shouldStop, ignoreTrain } = params;
   const source = params.source || SHORT_SCORE_SOURCE;
-  const limit = Math.max(1, Math.min(240, Math.floor(Number(params.limit) || SHORT_SCORE_CURVE_MAX_DAYS)));
+  const limit = Math.max(
+    1,
+    Math.min(
+      SHORT_SCORE_CURVE_HARD_MAX_DAYS,
+      Math.floor(Number(params.limit) || SHORT_SCORE_CURVE_MAX_DAYS)
+    )
+  );
   const empty: ShortTermScoreCurve = { scoreDayKey: '', klines: [], scores: {}, skipped: 0 };
   if (!/^\d{6}$/.test(String(code || ''))) {
     return empty;

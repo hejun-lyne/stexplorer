@@ -5,7 +5,22 @@
 思路（与图表上的红绿柱完全同口径）：
   评分序列按交易日算单日变化 delta = score(D) - score(D-1)；
   delta >= 买入阈值 且 score >= 评分下限  → 次日开盘买入；
-  delta <= 卖出阈值                      → 次日开盘卖出。
+  delta <= 卖出阈值                      → 次日开盘卖出；
+  score <= 持仓期最高分 - --trail-drop     → 次日开盘卖出（回撤止盈）。
+
+买入必须是「低位运行之后的突变」，而不是任意一次跳升：
+  突变前 --low-base-days 个评分日（默认 3）必须全部 <= --low-base-max（默认 40），
+  否则不算低位启动。理由：评分从高位两天跌下来再反抽，同样能凑出 +20 的跳升，
+  但那是下跌趋势里的伪信号（图上箭头处）。--low-base-days 0 可关闭该前置条件做对照。
+
+跳升可以按多日累计：--jump-window 2~3 用 score(D)-score(D-k) 判断（且当日不能回落），
+因为低位启动常分两天完成（+8 再 +17，单日都不到 20）。--min-rise 提供相对下限：
+评分自窗口低点抬升 >= 该值即算达标（与 --min-score 是「或」），低位启动当天往往到不了 60 分。
+
+--buy-mode rise 是另一套买入口径：完全不看单日跳升，只看「评分自近 --rise-ref-days 日
+最低点抬升了多少」（--min-rise），再加绝对地板 --rise-min-score、可选的当日跳升
+--rise-min-delta 与放量确认 --rise-volume。适合 22.9→31.2→47.8→52.3 这种分几天完成、
+单日都不够 20 分的缓慢启动，但信号量远大于 jump 模式。
 
 数据：**只读本地缓存**（不联网、不取数）
   - 评分序列：<data-dir>/meta.db 的 api_cache 表，key = short_term_score_series_{code}_{source}
@@ -15,6 +30,11 @@
       并支持参数扫描（买入阈值 × 评分下限 × 卖出阈值 × 止损 × 最长持有）。
 
 不需要启动应用：只读本地 stock_db（SQLite），命令行即可跑全量回测。
+
+评分口径默认与详情页对齐（无需额外参数）：
+  - 版本：只取当前行结构版本 v13（详情页 pickScoreRow 只认 v13，旧版本行视为未命中重算）
+  - 维度：只取六个维度齐全的行（缺维度时总分按剩余权重归一化，会虚高并造出假信号）
+  想放宽样本量做对照，可显式加 --version dominant / --allow-incomplete。
 
 数据目录自动探测（按优先级）：
   --data-dir 参数 > 环境变量 STEXPLORER_STOCK_DB > 应用「自定义存储目录」配置
@@ -53,6 +73,12 @@ TRADING_DAYS_PER_YEAR = 252
 
 # 与应用保持一致：shortTermScoreList.ts 的 SCORE_ROW_VERSION（旧版本缓存行会被应用视为失效并重算）
 SCORE_ROW_VERSION = 13
+
+# 参与总分归一化的六个维度（对应 composeShortTermScore 的 dims）。
+# 应用里维度 available=false 时 row 上存 null，且**不参与**归一化——剩余维度按剩余权重放大，
+# 总分因此虚高（资金项通常偏低分，缺它反而加分）。详情页「现算」这些维度大多能取到，
+# 所以回测要拿到与详情页一致的口径，就必须丢掉缺维度的行。
+SCORE_DIMS = ("marketScore", "sectorScore", "stockScore", "volumeScore", "rsiScore", "moneyScore")
 
 # ---------------------------------------------------------------- 数据目录
 
@@ -373,17 +399,22 @@ class Series:
 
 
 def load_scores(
-    meta: sqlite3.Connection, min_days: int, version_policy: str = "dominant"
+    meta: sqlite3.Connection, min_days: int, version_policy: str = "current",
+    complete_only: bool = True,
 ) -> Tuple[Dict[str, Series], Dict[str, Dict[str, int]]]:
     """读取全部评分序列，只保留「有效天数足够」的股票
 
     version_policy：缓存里同一条序列混着多个**评分行结构版本**（v9/v10/v11/v13）。
     应用自身只认当前版本（SCORE_ROW_VERSION=13），旧版本行会被当作未命中而重算
     （见 shortTermScoreList.ts「只认当前结构版本的缓存行」），所以：
+      - current ：只留**当前版本** v13 的行（默认，与详情页曲线/现算口径一致）
       - dominant：留行数最多的版本（样本量最大，但很可能不是当前公式，仅作参考）
-      - current ：只留**当前版本** v13 的行（与 StockDetail 曲线口径一致，但覆盖天数很少）
       - latest  ：留该股最新版本的行
       - any     ：不区分版本（仅用于对照，结论不可信）
+
+    complete_only：只留六个维度都齐全的行（默认开启，--allow-incomplete 关闭）。总分按
+    「剩余权重归一化」计算，缺维度（尤其 moneyScore/sectorScore）会把总分抬高，与详情页
+    现算口径不一致，还会凭空造出买入信号。
 
     返回 (序列, 版本体检统计)；统计不受 version_policy 影响，用来判断这批缓存到底是哪个版本算的。
     """
@@ -409,6 +440,10 @@ def load_scores(
             if not isinstance(total, (int, float)):
                 continue
             if total <= 0:  # 未上市 / 数据不足的占位行不参与
+                continue
+            # 维度缺失行不计入：总分按「剩余权重归一化」计算，缺维度会抬高总分
+            # （资金项通常偏低分），与详情页现算口径不一致，还会凭空造出买入信号
+            if complete_only and any(row.get(f) is None for f in SCORE_DIMS):
                 continue
             name = name or str(row.get("name") or "")
             by_version.setdefault(row.get("v"), []).append((fmt_date(d), float(total)))
@@ -436,6 +471,35 @@ def load_scores(
             continue
         out[code] = Series(code, name, [i[0] for i in items], [i[1] for i in items])
     return out, stats
+
+
+def load_export_series(path: str) -> Series:
+    """读取详情页「回测面板 → 导出JSON」，用其中的逐日现算评分构造单只股票序列
+
+    导出文件由 renderer/helpers/shortTermScoreBacktest.ts 生成，`scores` 来自
+    computeShortTermScoreCurve（现取数逐日重算，**不读评分缓存**），因此这份序列
+    与个股详情页走势完全同口径——缓存行的旧口径差异不会再影响回测。
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+    except Exception as exc:
+        raise SystemExit(f"读取导出 JSON 失败: {path}（{exc}）")
+    code = str(data.get("code") or "").strip()
+    name = str(data.get("name") or "")
+    raw = data.get("scores") or {}
+    items: List[Tuple[str, float]] = []
+    for key, val in raw.items():
+        if not isinstance(val, (int, float)):
+            continue
+        k = str(key).replace("-", "")
+        if len(k) != 8 or not k.isdigit():
+            continue
+        items.append((f"{k[:4]}-{k[4:6]}-{k[6:]}", float(val)))
+    items.sort()
+    if not code or not items:
+        raise SystemExit(f"导出 JSON 里没有可用的评分序列: {path}")
+    return Series(code, name, [i[0] for i in items], [i[1] for i in items])
 
 
 def pick_sample(series: Dict[str, Series], n: int, seed: int) -> List[str]:
@@ -473,15 +537,16 @@ def pick_sample(series: Dict[str, Series], n: int, seed: int) -> List[str]:
 
 
 class Bars:
-    __slots__ = ("dates", "opens", "closes", "highs", "zdf", "circ_mv", "ma20")
+    __slots__ = ("dates", "opens", "closes", "highs", "zdf", "circ_mv", "ma20", "ma60", "vols")
 
-    def __init__(self, dates, opens, closes, highs, zdf, circ_mv):
+    def __init__(self, dates, opens, closes, highs, zdf, circ_mv, vols=None):
         self.dates = dates
         self.opens = opens
         self.closes = closes
         self.highs = highs
         self.zdf = zdf            # 当日涨跌幅（%）
         self.circ_mv = circ_mv    # 推算流通市值（元）：成交额 /(换手率/100)
+        self.vols = vols or [0.0] * len(dates)  # 成交量（手），用于「启动日放量」确认
         # MA20（前复权收盘），用于「只在均线上方做多」的趋势过滤
         ma: List[Optional[float]] = []
         run = 0.0
@@ -491,6 +556,16 @@ class Bars:
                 run -= closes[i - 20]
             ma.append(run / 20 if i >= 19 else None)
         self.ma20 = ma
+        # MA60（前复权收盘）：判断个股是「长期下行（主要运行在 60 日线下方）」还是
+        # 「震荡/上行（主要在 60 日线上方）」，用于分组验证策略在两种环境下的表现
+        ma60: List[Optional[float]] = []
+        run60 = 0.0
+        for i, c in enumerate(closes):
+            run60 += c
+            if i >= 60:
+                run60 -= closes[i - 60]
+            ma60.append(run60 / 60 if i >= 59 else None)
+        self.ma60 = ma60
 
     def index_of(self, date: str) -> int:
         i = bisect.bisect_left(self.dates, date)
@@ -510,6 +585,29 @@ class Bars:
         return None
 
 
+def ma60_below_ratio(bars: Bars, idx: int, window: int = 20) -> Optional[float]:
+    """信号日起前 window 个交易日里，收盘价低于 MA60 的占比（0~1）
+
+    >=0.7 → 主要运行在 60 日线下方（长期下行）；<=0.3 → 主要在上方（震荡/上行）。
+    用于验证「下行环境里这套策略是否更差」。
+    """
+    if idx < 0:
+        return None
+    start = max(0, idx - window + 1)
+    below = 0
+    total = 0
+    for j in range(start, idx + 1):
+        ma = bars.ma60[j]
+        if ma is None:
+            continue
+        total += 1
+        if bars.closes[j] < ma:
+            below += 1
+    if total < 10:
+        return None
+    return below / total
+
+
 def limit_pct(code: str) -> float:
     """涨跌停幅度：创业板 20%，主板 10%（ST 已在选股阶段排除）"""
     return 0.20 if code.startswith("30") else 0.10
@@ -525,13 +623,13 @@ def is_limit_up(bars: Bars, idx: int, code: str, tol: float = 0.3) -> bool:
 
 def load_bars(daily: sqlite3.Connection, code: str, start: str, end: str) -> Optional[Bars]:
     rows = daily.execute(
-        "SELECT trade_date, kp, sp, zg, zdf, cje, hsl FROM daily_kline "
+        "SELECT trade_date, kp, sp, zg, zdf, cje, hsl, cjl FROM daily_kline "
         "WHERE kind='stock' AND ts_code=? AND period='daily' AND COALESCE(adjust,'')=? "
         "AND trade_date BETWEEN ? AND ? ORDER BY trade_date",
         (to_ts_code(code), ADJUST, start, end),
     ).fetchall()
-    dates, opens, closes, highs, zdfs, mvs = [], [], [], [], [], []
-    for d, kp, sp, zg, zdf, cje, hsl in rows:
+    dates, opens, closes, highs, zdfs, mvs, vols = [], [], [], [], [], [], []
+    for d, kp, sp, zg, zdf, cje, hsl, cjl in rows:
         if kp is None or sp is None:
             continue
         dates.append(str(d))
@@ -541,18 +639,54 @@ def load_bars(daily: sqlite3.Connection, code: str, start: str, end: str) -> Opt
         zdfs.append(float(zdf) if zdf is not None else None)
         # 流通市值反推：换手率 = 成交量 / 流通股本，成交额 ≈ 成交量 × 均价
         mvs.append((float(cje) / (float(hsl) / 100.0)) if cje and hsl else None)
+        vols.append(float(cjl) if cjl is not None else 0.0)
     if len(dates) < 30:
         return None
-    return Bars(dates, opens, closes, highs, zdfs, mvs)
+    return Bars(dates, opens, closes, highs, zdfs, mvs, vols)
 
 
 # ---------------------------------------------------------------- 回测引擎
+
+
+class LowBase:
+    """「低位运行后的突变」前置条件
+
+    只看单日突变会把「高位跌下来之后的第一次反抽」也算成买点（评分从 60 两天跌到 25，
+    第三天反弹 +20 触发阈值，但整段其实是下降趋势）。所以要求突变之前评分已经在低位
+    横了一段时间：前 days 个评分日（不含突变日）全部 <= max_score。
+
+    days=0 关闭该过滤（回到「只看单日突变」的老口径，便于对照）。
+    """
+
+    __slots__ = ("days", "max_score")
+
+    def __init__(self, days: int = 0, max_score: float = 40.0):
+        self.days = max(0, int(days))
+        self.max_score = float(max_score)
+
+    def blocked_reason(self, scores: Sequence[float], i: int) -> str:
+        """突变日 i 之前不满足「低位运行」时返回原因，满足返回空串"""
+        if self.days <= 0:
+            return ""
+        start = i - self.days
+        if start < 0:
+            return f"评分历史不足 {self.days} 日，无法确认低位运行"
+        high = max(scores[start:i])
+        if high > self.max_score:
+            return (
+                f"近{self.days}日最高 {high:.1f} > 低位上限 {self.max_score:g}"
+                "（高位跌落后的反抽，不算低位启动）"
+            )
+        return ""
 
 
 class Trade:
     __slots__ = (
         "code", "name", "signal_in", "entry_date", "entry_price",
         "signal_out", "exit_date", "exit_price", "exit_reason", "bars", "ret",
+        # 信号日前 20 个交易日里，收盘价在 MA60 下方的占比（0~1，None=数据不足）
+        # 用来验证「长期下行（主要运行在 60 日线下方）表现更差」的假设
+        "ma60_below",
     )
 
     def __init__(self, **kw):
@@ -576,11 +710,26 @@ def run_stock(
     min_mv: float = 0.0,
     trace: Optional[List[dict]] = None,
     trace_min_delta: float = 5.0,
+    *,
+    low_base: Optional[LowBase] = None,
+    jump_window: int = 1,
+    min_rise: float = 0.0,
+    trail_drop: float = 0.0,
+    rise_ref_days: int = 10,
+    rise_min_score: float = 45.0,
+    rise_min_delta: float = 0.0,
+    rise_vol_ratio: float = 0.0,
 ) -> Tuple[List[Trade], Dict[str, float], int]:
     """单只股票回测。
 
     exec_lag=1：信号日次日开盘成交（默认，贴近真实可执行性）
     exec_lag=0：信号日收盘成交（乐观口径，用于对照）
+
+    jump_window：跳升按「几个评分日累计」算（1=只看单日）。低位启动常常分两天完成
+    （+8 然后 +17，单日都不到 20），窗口 >1 才能识别这类信号。
+    min_rise：评分下限的「相对口径」——score >= 窗口内最低分 + min_rise 也算达标，
+    与绝对下限 --min-score 是「或」的关系。低位启动当天很难直接到 60 分，绝对下限
+    会把这类信号全部挡掉。
 
     trace 不为 None 时，把每个「跳变显著或发生交易」的决策点写入该列表，
     用于单只股票的人工核对（--code）。
@@ -612,13 +761,33 @@ def run_stock(
         # 「单日突变」必须是相邻交易日：缓存里因换主版本/停牌留下的缺口不算一次跳变，
         # 否则会凭空造出几十点的"突变"信号。
         delta = score - s.scores[i - 1] if (bi >= 0 and prev_bi >= 0 and bi - prev_bi == 1) else None
+        # 多日累计跳升：低位启动常分两天完成（+8 再 +17，单日都不到 20）。
+        # 窗口内每一步同样必须是相邻交易日，否则跨缺口的「累计涨幅」是假信号。
+        jump = None
+        if jump_window > 1 and delta is not None:
+            start = i - jump_window
+            if start >= 0:
+                contiguous = True
+                for j in range(start, i):
+                    bj = bars.index_of(s.dates[j])
+                    bn = bars.index_of(s.dates[j + 1])
+                    if bj < 0 or bn < 0 or bn - bj != 1:
+                        contiguous = False
+                        break
+                if contiguous:
+                    jump = score - s.scores[start]
 
         rec = None
-        if trace is not None and delta is not None and abs(delta) >= trace_min_delta:
+        notable = abs(delta) >= trace_min_delta if delta is not None else False
+        # 累计跳升达标的日子也要列出（单日 Δ 可能很小，比如 +8 再 +17）
+        if jump is not None and abs(jump) >= trace_min_delta:
+            notable = True
+        if trace is not None and delta is not None and notable:
             rec = {
                 "date": d,
                 "score": score,
                 "delta": delta,
+                "jump": jump,
                 "limit_up": is_limit_up(bars, bi, s.code),
                 "zdf": bars.zdf[bi] if bi >= 0 else None,
                 "mv": bars.mv_at(bi) if bi >= 0 else None,
@@ -635,8 +804,15 @@ def run_stock(
         if pos is not None:
             held_bars += 1
             reason = None
+            # 持仓期最高评分（含买入信号日）：评分从高位阴跌时，单日 Δ 往往很小，
+            # 光靠「单日跳降 -15」会一路坐电梯，所以按「自最高点回撤」止盈。
+            if score > pos["peak"]:
+                pos["peak"] = score
+            drop = pos["peak"] - score
             if delta is not None and delta <= sell_delta:
                 reason = "绿柱卖出"
+            elif trail_drop > 0 and drop >= trail_drop:
+                reason = "回撤止盈"  # 具体回撤值写进明细，避免卖出原因表被数值打散
             else:
                 close = bars.closes[bi] if bi >= 0 else None
                 if stop_loss > 0 and close is not None and close / pos["price"] - 1 <= -stop_loss:
@@ -661,9 +837,13 @@ def run_stock(
                     entry_date=pos["date"], entry_price=pos["price"],
                     signal_out=d, exit_date=exit_date, exit_price=exit_price,
                     exit_reason=reason, bars=exit_idx - pos["idx"], ret=ret,
+                    ma60_below=ma60_below_ratio(bars, bars.index_of(pos["signal_date"])),
                 )
             )
-            mark("卖出", f"{reason}，{exit_date} 开盘 {exit_price:.2f} 卖出，收益 {ret*100:+.2f}%")
+            reason_txt = (
+                f"{reason}（峰值 {pos['peak']:.1f}，回撤 {drop:.1f}）" if reason == "回撤止盈" else reason
+            )
+            mark("卖出", f"{reason_txt}，{exit_date} 开盘 {exit_price:.2f} 卖出，收益 {ret*100:+.2f}%")
             # 槽位逐日收益：买入日(收盘/买入价)、持有日(收盘/前收)、卖出日(卖价/前收)
             _accumulate_daily(daily, bars, pos["idx"], exit_idx, pos["price"], exit_price, fee)
             pos, held_bars = None, 0
@@ -675,19 +855,71 @@ def run_stock(
         if buy_mode == "cross":
             ok = score >= min_score and s.scores[i - 1] < min_score
             fail = "未上穿评分下限"
+        elif buy_mode == "rise":
+            # 「低位抬升」模式：不看单日跳升幅度，只看「评分从近期低位抬到了多高」。
+            # 低位启动往往分几天完成（22.9 → 31.2 → 47.8 → 52.3），单日都不到 20，
+            # 但自低点已经抬升 29 分，这才是「启动」的本质。
+            ref_start = max(i - rise_ref_days, 0)
+            low_ref = min(s.scores[ref_start:i])
+            rise_amt = score - low_ref
+            fail = ""
+            ok = True
+            if delta is None:
+                ok, fail = False, "评分序列有缺口，无法确认当日方向"
+            elif delta < 0:
+                ok, fail = False, f"当日回落 {delta:+.1f}（只认仍在抬升的日子）"
+            elif rise_amt < min_rise:
+                ok = False
+                fail = f"自近{rise_ref_days}日低点 {low_ref:.1f} 抬升 {rise_amt:+.1f}（需 ≥{min_rise:g}）"
+            elif score < rise_min_score:
+                ok, fail = False, f"评分 {score:.1f} < 启动地板 {rise_min_score:g}"
+            elif low_base is not None and low_ref > low_base.max_score:
+                ok = False
+                fail = f"近{rise_ref_days}日最低 {low_ref:.1f} > 低位上限 {low_base.max_score:g}（不算低位启动）"
+            elif rise_min_delta > 0 and delta < rise_min_delta:
+                ok, fail = False, f"当日仅 {delta:+.1f}（启动日需 ≥{rise_min_delta:g}）"
+            # 放量确认：只看评分抬升会被下跌趋势里的日常波动打满信号，价格必须配合
+            if ok and rise_vol_ratio > 0 and bi >= 5:
+                base_vol = sum(bars.vols[bi - 5:bi]) / 5
+                if base_vol > 0 and bars.vols[bi] < base_vol * rise_vol_ratio:
+                    ok = False
+                    fail = f"未放量（{bars.vols[bi] / base_vol:.2f} 倍 5 日均量，需 ≥{rise_vol_ratio:g}）"
         else:
-            ok = delta >= buy_delta and score >= min_score
-            if delta < buy_delta:
-                if delta <= sell_delta:
-                    fail = f"跳降 {delta:+.1f}（空仓，无可卖出）"
-                elif delta > 0:
-                    fail = f"跳升不足（{delta:+.1f} < +{buy_delta:g}）"
+            rise = jump if jump_window > 1 else delta
+            # 相对下限的参照用独立的 --rise-ref-days 窗口（不是 jump_window）：
+            # 参照只取前一日时，「自低点抬升 >= X」会退化成「单日 Δ >= X」，失去意义
+            score_ref = min(s.scores[max(i - max(rise_ref_days, 1), 0):i])
+            rel_ok = min_rise > 0 and score >= score_ref + min_rise
+            ok = rise is not None and rise >= buy_delta and (score >= min_score or rel_ok)
+            # 累计跳升还要求当日不回落：前两天暴涨、今天转跌的形态不能算「仍在启动」
+            if jump_window > 1 and delta is not None and delta < 0:
+                ok = False
+            if rise is None:
+                fail = f"近{jump_window}日有数据缺口，无法确认跳升"
+            elif jump_window > 1 and delta is not None and delta < 0:
+                fail = f"当日回落 {delta:+.1f}（近{jump_window}日累计 {rise:+.1f} 不作数）"
+            elif rise < buy_delta:
+                if rise <= sell_delta:
+                    fail = f"跳降 {rise:+.1f}（空仓，无可卖出）"
+                elif rise > 0:
+                    fail = f"跳升不足（近{jump_window}日 {rise:+.1f} < +{buy_delta:g}）"
                 else:
-                    fail = f"小幅回落（{delta:+.1f}）"
-            elif score < min_score:
-                fail = f"评分 {score:.1f} < 下限 {min_score:g}"
+                    fail = f"小幅回落（{rise:+.1f}）"
+            elif score < min_score and not rel_ok:
+                if min_rise > 0:
+                    fail = (
+                        f"评分 {score:.1f} < 下限 {min_score:g}，自低点 {score_ref:.1f} "
+                        f"仅抬升 {score - score_ref:+.1f}（需 ≥{min_rise:g}）"
+                    )
+                else:
+                    fail = f"评分 {score:.1f} < 下限 {min_score:g}"
             else:
                 fail = ""
+        # rise 模式的低位判定已用「近 N 日最低分」表达，不再要求前 days 日连续低位
+        if ok and low_base is not None and buy_mode == "jump":
+            why = low_base.blocked_reason(s.scores, i)
+            if why:
+                ok, fail = False, why
         if ok and trend_filter and bi >= 0 and bars.ma20[bi] is not None:
             if bars.closes[bi] < bars.ma20[bi]:  # type: ignore[operator]
                 ok, fail = False, f"收盘 {bars.closes[bi]:.2f} < MA20 {bars.ma20[bi]:.2f}"
@@ -714,9 +946,13 @@ def run_stock(
                 if prev_close > 0 and entry_price / prev_close - 1 >= limit - 0.003:
                     mark("跳过", f"次日 {entry_date} 一字涨停开盘 {entry_price:.2f}，买不进")
                     continue
-            pos = {"signal_date": d, "date": entry_date, "price": entry_price, "idx": entry_idx}
+            pos = {
+                "signal_date": d, "date": entry_date, "price": entry_price, "idx": entry_idx,
+                "peak": score,  # 持仓期最高评分从买入信号日的评分起算
+            }
             held_bars = 0
-            mark("买入", f"{entry_date} 开盘 {entry_price:.2f} 买入")
+            cum_txt = f"（近{jump_window}日 {jump:+.1f}）" if jump_window > 1 and jump is not None else ""
+            mark("买入", f"{entry_date} 开盘 {entry_price:.2f} 买入{cum_txt}")
             continue
         if rec is not None:
             mark("观察", fail)
@@ -732,6 +968,7 @@ def run_stock(
                 entry_date=pos["date"], entry_price=pos["price"],
                 signal_out="", exit_date=bars.dates[exit_idx], exit_price=exit_price,
                 exit_reason="未平仓", bars=exit_idx - pos["idx"], ret=ret,
+                ma60_below=ma60_below_ratio(bars, bars.index_of(pos["signal_date"])),
             )
         )
         _accumulate_daily(daily, bars, pos["idx"], exit_idx, pos["price"], exit_price, fee)
@@ -800,6 +1037,27 @@ def summarize(trades: List[Trade], active_years: float) -> dict:
     }
 
 
+def ma60_groups(trades: List[Trade], years: float) -> List[Tuple[str, Optional[dict]]]:
+    """按「信号日前 20 个交易日相对 MA60 的位置」分组
+
+    验证假设：长期下行（主要运行在 60 日线下方）里这套策略是否明显更差。
+    """
+    defs = [
+        ("长期下行（≥70% 日在 MA60 下方）", lambda r: r >= 0.7),
+        ("震荡/混合（30%~70% 在下方）", lambda r: 0.3 < r < 0.7),
+        ("上行/强势（≤30% 日在下方）", lambda r: r <= 0.3),
+        ("数据不足（MA60 覆盖不够）", None),
+    ]
+    out: List[Tuple[str, Optional[dict]]] = []
+    for label, pred in defs:
+        if pred is None:
+            sub = [t for t in trades if t.ma60_below is None]
+        else:
+            sub = [t for t in trades if t.ma60_below is not None and pred(t.ma60_below)]
+        out.append((label, summarize(sub, years) if sub else None))
+    return out
+
+
 def _compound(rets: List[float]) -> float:
     eq = 1.0
     for r in rets:
@@ -843,9 +1101,16 @@ def portfolio_stats(daily_by_stock: List[Dict[str, float]], active_days: List[Li
 
 def prepare(
     sample: List[str], series: Dict[str, Series], daily: sqlite3.Connection,
-    warmup: int = 10, exclude_boards: bool = False, exclude_st: bool = False,
+    # warmup 至少 60：MA60 趋势分组要求评分首日开始就算得出 60 日均线，
+    # 否则样本早期会被归到「MA60 数据不足」，污染分组结论
+    warmup: int = 70, exclude_boards: bool = False, exclude_st: bool = False,
+    start_date: str = "", end_date: str = "",
 ):
-    """载入样本日K；exclude_boards 排除北交所/科创板，exclude_st 排除 ST/*ST"""
+    """载入样本日K；exclude_boards 排除北交所/科创板，exclude_st 排除 ST/*ST
+
+    start_date / end_date 用于把回测窗口夹到指定区间（含端点）。
+    注意评分序列本身会带着补全时多算的前置交易日，不夹的话回测会从更早的日子开始。
+    """
     data = []
     skipped = 0
     dropped_board = 0
@@ -858,6 +1123,15 @@ def prepare(
         if exclude_st and "ST" in (s.name or "").upper():
             dropped_st += 1
             continue
+        dates, scores = s.dates, s.scores
+        if start_date or end_date:
+            i0 = bisect.bisect_left(dates, start_date) if start_date else 0
+            i1 = bisect.bisect_right(dates, end_date) if end_date else len(dates)
+            if i1 - i0 < 2:
+                skipped += 1
+                continue
+            dates, scores = dates[i0:i1], scores[i0:i1]
+            s = Series(s.code, s.name, dates, scores)
         start = s.dates[0]
         i = daily.execute(
             "SELECT trade_date FROM daily_kline WHERE kind='stock' AND ts_code=? AND period='daily' "
@@ -880,6 +1154,10 @@ def evaluate(
     fee: float, stop_loss: float = 0.0, max_hold: int = 0, exec_lag: int = 1,
     buy_mode: str = "jump", trend_filter: bool = False,
     require_limit_up: bool = False, min_mv: float = 0.0,
+    low_base: Optional[LowBase] = None,
+    jump_window: int = 1, min_rise: float = 0.0, trail_drop: float = 0.0,
+    rise_ref_days: int = 10, rise_min_score: float = 45.0,
+    rise_min_delta: float = 0.0, rise_vol_ratio: float = 0.0,
 ) -> dict:
     all_trades: List[Trade] = []
     daily_by_stock, active_days = [], []
@@ -887,7 +1165,10 @@ def evaluate(
     for s, bars in data:
         trades, daily, ndays = run_stock(
             s, bars, buy_delta, sell_delta, min_score, fee, stop_loss, max_hold, exec_lag,
-            buy_mode, trend_filter, require_limit_up, min_mv,
+            buy_mode, trend_filter, require_limit_up, min_mv, low_base=low_base,
+            jump_window=jump_window, min_rise=min_rise, trail_drop=trail_drop,
+            rise_ref_days=rise_ref_days, rise_min_score=rise_min_score,
+            rise_min_delta=rise_min_delta, rise_vol_ratio=rise_vol_ratio,
         )
         all_trades.extend(trades)
         daily_by_stock.append(daily)
@@ -899,6 +1180,7 @@ def evaluate(
     stats["years"] = years
     active_all = sum(len(d) for d in active_days)
     stats["exposure"] = (sum(t.bars for t in all_trades) / active_all) if active_all else 0.0
+    stats["ma60_groups"] = ma60_groups(all_trades, years)
     return stats
 
 
@@ -924,6 +1206,21 @@ def print_stats(title: str, st: dict) -> None:
         f"组合: 年化收益 {st['ann_ret']*100:+.1f}%  年化波动 {st['ann_vol']*100:.1f}%  "
         f"夏普 {st['sharpe']:.2f}  最大回撤 {st['max_dd']*100:.1f}%  累计 {st['total']*100:+.1f}%"
     )
+    groups = st.get("ma60_groups") or []
+    if groups:
+        print("  趋势环境分组（信号日前 20 个交易日相对 MA60）：")
+        for label, g in groups:
+            if not g:
+                print(f"    {label}: 0 笔")
+                continue
+            g_pf = g["profit_factor"]
+            g_pf_txt = "∞" if g_pf == float("inf") else f"{g_pf:.2f}"
+            g_po = g["payoff"]
+            g_po_txt = "∞" if g_po == float("inf") else f"{g_po:.2f}"
+            print(
+                f"    {label}: {g['trades']:>4} 笔  胜率 {g['win_rate']*100:5.1f}%  "
+                f"期望 {g['avg_ret']*100:+.2f}%/笔  盈亏比 {g_po_txt}  盈利因子 {g_pf_txt}"
+            )
 
 
 def benchmark_hold(data) -> dict:
@@ -963,6 +1260,142 @@ def monthly_table(trades: List[Trade]) -> None:
             f"{min(rets) * 100:+.1f}",
         ])
     print("\n" + render_table(["月份", "交易", "胜率%", "期望%", "最好%", "最差%"], rows, "lrrrrr"))
+
+
+def stock_ranking(trades: List[Trade], min_trades: int = 1) -> List[dict]:
+    """按股票聚合表现（累计用逐笔复利，与组合口径一致），按累计收益降序"""
+    by: Dict[str, List[Trade]] = {}
+    for t in trades:
+        by.setdefault(t.code, []).append(t)
+    rows = []
+    for code, ts in by.items():
+        if len(ts) < min_trades:
+            continue
+        rets = [t.ret for t in ts]
+        cum = 1.0
+        for r in rets:
+            cum *= 1 + r
+        rows.append({
+            "code": code,
+            "name": ts[0].name,
+            "trades": len(ts),
+            "win": sum(1 for r in rets if r > 0) / len(rets),
+            "avg": statistics.fmean(rets),
+            "cum": cum - 1,
+            "best": max(rets),
+            "worst": min(rets),
+            "list": sorted(ts, key=lambda t: t.entry_date),
+        })
+    rows.sort(key=lambda r: r["cum"], reverse=True)
+    return rows
+
+
+def print_stock_detail(
+    trades: List[Trade], top_n: int = 3, max_trades: int = 5, min_trades: int = 2
+) -> None:
+    """表现最好 / 最差的个股+逐笔明细（便于拿行情K线逐笔复核）"""
+    rows = stock_ranking(trades, min_trades)
+    if not rows:
+        return
+    side = min(top_n, len(rows))
+    print(f"\n=== 个股表现（按区间累计收益排序：{len(rows)} 只有交易，每侧 {side} 只）===")
+    for label, group in (("最好", rows[:top_n]), ("最差", list(reversed(rows[-top_n:])))):
+        head = [
+            [
+                r["code"], r["name"], r["trades"], f"{r['win'] * 100:.0f}%",
+                f"{r['avg'] * 100:+.2f}", f"{r['cum'] * 100:+.1f}",
+                f"{r['best'] * 100:+.1f}", f"{r['worst'] * 100:+.1f}",
+            ]
+            for r in group
+        ]
+        print(f"\n--- {label} ---")
+        print(
+            render_table(
+                ["代码", "名称", "笔数", "胜率", "期望/笔", "累计", "最好", "最差"],
+                head, "llrrrrrr",
+            )
+        )
+        for r in group:
+            print(f"\n  {r['code']} {r['name']} 逐笔明细（显示前 {max_trades} 笔，共 {r['trades']} 笔）:")
+            detail = [
+                [
+                    t.signal_in, t.entry_date, f"{t.entry_price:.2f}",
+                    t.signal_out, t.exit_date, f"{t.exit_price:.2f}",
+                    t.bars, f"{t.ret * 100:+.2f}", t.exit_reason,
+                ]
+                for t in r["list"][:max_trades]
+            ]
+            print(
+                render_table(
+                    ["入信号", "买入日", "买入价", "出信号", "卖出日", "卖出价", "持仓", "收益%", "原因"],
+                    detail, "llrllrrrr",
+                )
+            )
+
+
+def stock_year_ranking(trades: List[Trade], min_trades: int = 1) -> List[dict]:
+    """按「股票 + 买入年份」聚合，按累计收益降序
+
+    同一只股票跨年拆开看：样本区间跨年时，把各年混在一起会让「某一年赚得多」
+    掩盖「其余年份都在亏」，也就看不出策略是否只在特定年份有效。
+    """
+    by: Dict[Tuple[str, str], List[Trade]] = {}
+    for t in trades:
+        by.setdefault((t.code, t.entry_date[:4]), []).append(t)
+    rows = []
+    for (code, year), ts in by.items():
+        if len(ts) < min_trades:
+            continue
+        ts = sorted(ts, key=lambda t: t.entry_date)
+        rets = [t.ret for t in ts]
+        cum = 1.0
+        for r in rets:
+            cum *= 1 + r
+        rows.append({
+            "code": code,
+            "name": ts[0].name,
+            "year": year,
+            "trades": len(ts),
+            "win": sum(1 for r in rets if r > 0) / len(rets),
+            "avg": statistics.fmean(rets),
+            "cum": cum - 1,
+            "best": max(rets),
+            "worst": min(rets),
+            "first": ts[0].entry_date,
+            "last": ts[-1].entry_date,
+        })
+    rows.sort(key=lambda r: r["cum"], reverse=True)
+    return rows
+
+
+def print_stock_year_detail(
+    trades: List[Trade], top_n: int = 5, min_trades: int = 2
+) -> None:
+    """表现最好 / 最差的「股票 × 年份」明细（每行=一只股票的一整年交易结果）"""
+    rows = stock_year_ranking(trades, min_trades)
+    if not rows:
+        return
+    side = min(top_n, len(rows))
+
+    def fmt(items: List[dict]) -> List[List]:
+        return [
+            [
+                r["code"], r["name"], r["year"], r["trades"], f"{r['win'] * 100:.0f}%",
+                f"{r['avg'] * 100:+.2f}", f"{r['cum'] * 100:+.1f}",
+                f"{r['best'] * 100:+.1f}", f"{r['worst'] * 100:+.1f}",
+                f"{r['first'][5:]}~{r['last'][5:]}",
+            ]
+            for r in items
+        ]
+
+    headers = ["代码", "名称", "年份", "笔数", "胜率", "期望/笔", "累计", "最好", "最差", "首末笔"]
+    aligns = "lllrrrrrrl"
+    print(
+        f"\n=== 股票×年份表现（{len(rows)} 个股票年有 ≥{min_trades} 笔交易，"
+        f"按年内累计收益排序，每侧 {side} 个）==="
+    )
+    print(f"\n--- 最好 ---\n{render_table(headers, fmt(rows[:side]), aligns)}")
+    print(f"\n--- 最差 ---\n{render_table(headers, fmt(list(reversed(rows[-side:]))), aligns)}")
 
 
 def exit_reason_table(trades: List[Trade]) -> None:
@@ -1062,6 +1495,10 @@ def print_detail(data, args, mv_limit: float, lag: int) -> None:
         s, bars, args.buy, args.sell, args.min_score, args.fee,
         args.stop_loss, args.max_hold, lag, args.buy_mode, args.trend_filter,
         args.require_limit_up, mv_limit, trace, args.trace_min,
+        low_base=args.low_base, jump_window=args.jump_window, min_rise=args.min_rise,
+        trail_drop=args.trail_drop, rise_ref_days=args.rise_ref_days,
+        rise_min_score=args.rise_min_score, rise_min_delta=args.rise_min_delta,
+        rise_vol_ratio=args.rise_vol_ratio,
     )
     print(
         f"\n=== {s.code} {s.name} 决策明细（评分区间 {s.dates[0]} ~ {s.dates[-1]}，"
@@ -1117,12 +1554,30 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description="短线评分突变策略离线回测")
     ap.add_argument("--data-dir", help="stock_db 目录（含 meta.db / daily.db），可省略自动探测")
+    ap.add_argument(
+        "--series-json",
+        help="详情页回测面板「导出JSON」的文件：用它的逐日现算评分回测（与详情页曲线同口径，不读缓存）",
+    )
     ap.add_argument("--list-data-dirs", action="store_true", help="只打印检测到的 stock_db 目录后退出")
     ap.add_argument(
         "--sample", type=int, default=None,
         help="抽样股票数（默认 300；0=全部；指定 --board 时默认回测该板块全部成分股）",
     )
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--stock-top", type=int, default=3,
+        help="输出表现最好/最差的个股各 N 只（0=关闭；按区间累计收益排序）",
+    )
+    ap.add_argument("--stock-trades", type=int, default=5, help="每只股票最多列几笔交易明细")
+    ap.add_argument("--stock-min-trades", type=int, default=2, help="只统计交易笔数 >= 该值的股票")
+    ap.add_argument(
+        "--stock-year-top", type=int, default=5,
+        help="输出表现最好/最差的「股票×年份」各 N 个（0=关闭；按年内累计收益排序）",
+    )
+    ap.add_argument(
+        "--stock-year-min-trades", type=int, default=2,
+        help="股票年只统计年内交易笔数 >= 该值的（默认 2）",
+    )
     ap.add_argument(
         "--board", action="append", default=[], metavar="名称|BK代码",
         help="只回测该板块成分股（可重复传，如 --board 小盘成长；支持 BK1667）",
@@ -1134,20 +1589,71 @@ def main() -> None:
         "--min-last-date", default="auto",
         help="评分序列最后一天不早于该日期；auto=以数据里最新评分日往前推 170 天（默认）",
     )
+    ap.add_argument("--start", default="", help="回测起始日 YYYY-MM-DD（含），默认不限（评分序列首日）")
+    ap.add_argument("--end", default="", help="回测截止日 YYYY-MM-DD（含），默认不限（评分序列最后一天）")
     ap.add_argument(
-        "--version", choices=["dominant", "current", "latest", "any"], default="dominant",
-        help="评分行版本口径：dominant=只用主导版本（默认，避免跨版本假突变）/ latest / any（对照）",
+        "--version", choices=["current", "dominant", "latest", "any"], default="current",
+        help="评分行版本口径：current=只用当前版本 v%d（默认，与详情页一致）/ dominant（旧公式，仅参考）/ latest / any"
+        % SCORE_ROW_VERSION,
     )
-    ap.add_argument("--buy", type=float, default=20.0, help="买入：单日评分跳升阈值")
+    ap.add_argument(
+        "--complete-only", dest="complete_only", action="store_true", default=True,
+        help="【默认】只取六个维度齐全的评分行（缺维度会按剩余权重归一化抬高总分，与详情页现算不一致）",
+    )
+    ap.add_argument(
+        "--allow-incomplete", dest="complete_only", action="store_false",
+        help="保留缺维度的评分行（仅用于对照；这些行总分虚高，会造出详情页没有的买入信号）",
+    )
+    ap.add_argument(
+        "--buy", type=float, default=20.0,
+        help="买入：评分跳升阈值（按 --jump-window 决定单日还是多日累计）",
+    )
     ap.add_argument("--sell", type=float, default=-15.0, help="卖出：单日评分跳降阈值")
+    ap.add_argument(
+        "--trail-drop", type=float, default=10.0,
+        help="持仓止盈：评分自持仓最高点回撤 >= 该值即卖出（默认 10；0=关闭）",
+    )
     ap.add_argument("--min-score", type=float, default=60.0, help="买入时评分下限")
+    ap.add_argument(
+        "--low-base-days", type=int, default=3,
+        help="突变前需连续处于低位的评分日数（默认 3；0=关闭，只看单日突变）",
+    )
+    ap.add_argument(
+        "--low-base-max", type=float, default=40.0,
+        help="低位上限分：突变前 --low-base-days 个评分日都要 <= 该值（默认 40）",
+    )
+    ap.add_argument(
+        "--jump-window", type=int, default=1,
+        help="跳升按几个评分日累计算（默认 1=单日；2~3 可识别分两天完成的低位启动）",
+    )
+    ap.add_argument(
+        "--min-rise", type=float, default=0.0,
+        help="相对下限：评分自窗口内低点抬升 >= 该值也算达标（与 --min-score 是「或」；0=关闭）",
+    )
     ap.add_argument("--fee", type=float, default=0.0012, help="单次交易综合成本（买+卖，默认 0.12%%）")
     ap.add_argument("--stop-loss", type=float, default=0.0, help="止损比例（如 0.08，0=不启用）")
     ap.add_argument("--max-hold", type=int, default=0, help="最长持有交易日（0=不限制）")
     ap.add_argument("--exec", choices=["open", "close"], default="open", help="成交价：次日开盘 / 当日收盘")
     ap.add_argument(
-        "--buy-mode", choices=["jump", "cross"], default="jump",
-        help="买入触发：jump=单日跳升达阈值（默认）/ cross=评分上穿下限",
+        "--buy-mode", choices=["jump", "cross", "rise"], default="jump",
+        help="买入触发：jump=跳升达阈值（默认）/ cross=评分上穿下限 / "
+             "rise=评分自近 N 日低位抬升达 --min-rise（不要求单日跳升，适合分几天完成的低位启动）",
+    )
+    ap.add_argument(
+        "--rise-ref-days", type=int, default=10,
+        help="rise 模式：低位参照窗口（近 N 个评分日的最低分，默认 10）",
+    )
+    ap.add_argument(
+        "--rise-min-score", type=float, default=45.0,
+        help="rise 模式：评分的绝对地板（默认 45，低于该值不算启动）",
+    )
+    ap.add_argument(
+        "--rise-min-delta", type=float, default=0.0,
+        help="rise 模式：启动日当日最小跳升（默认 0=不要求；设 10 可滤掉日常小波动）",
+    )
+    ap.add_argument(
+        "--rise-volume", dest="rise_vol_ratio", type=float, default=0.0,
+        help="rise 模式：启动日放量倍数下限（当日量 / 前 5 日均量，默认 0=不要求）",
     )
     ap.add_argument("--trend-filter", action="store_true", help="只在收盘价站上 MA20 时买入")
     ap.add_argument("--require-limit-up", action="store_true", help="买入信号日必须收盘涨停")
@@ -1163,6 +1669,22 @@ def main() -> None:
     ap.add_argument("--event", action="store_true", help="事件研究（信号后未来收益）")
     ap.add_argument("--trades", type=int, default=5, help="打印前 N 笔交易明细")
     args = ap.parse_args()
+    # 「低位运行后的突变」前置条件：只在低位横过一段之后才认买点（0 日=关闭）
+    args.low_base = LowBase(args.low_base_days, args.low_base_max)
+    # rise 模式必须有「自低点抬升」阈值，否则退化成「评分 >= 地板就买」，信号会爆量
+    if args.buy_mode == "rise" and args.min_rise <= 0:
+        args.min_rise = 20.0
+    # 买入侧统一参数（各 run_stock / evaluate 调用点解包传入）
+    rule_kw = {
+        "low_base": args.low_base,
+        "jump_window": args.jump_window,
+        "min_rise": args.min_rise,
+        "trail_drop": args.trail_drop,
+        "rise_ref_days": args.rise_ref_days,
+        "rise_min_score": args.rise_min_score,
+        "rise_min_delta": args.rise_min_delta,
+        "rise_vol_ratio": args.rise_vol_ratio,
+    }
 
     if args.list_data_dirs:
         print("候选 stock_db 目录（* = 自动探测会选中的那个）：")
@@ -1202,7 +1724,20 @@ def main() -> None:
         "  可选: " + " / ".join(f"{v or '(空)'} {c}行" for v, c in adjust_values) if len(adjust_values) > 1 else ""
     ))
 
-    series_all, ver_stats = load_scores(meta, args.min_days, args.version)
+    if args.series_json:
+        # 详情页导出的现算序列：与详情页曲线同口径，直接用它替换缓存序列
+        one = load_export_series(args.series_json)
+        if args.code and args.code.split(".")[0].strip() != one.code:
+            sys.exit(f"导出文件是 {one.code}，与 --code {args.code} 不一致")
+        series_all = {one.code: one}
+        args.code = one.code
+        ver_stats = {"rows": {}, "stocks": {}, "maxdays": {}}
+        print(f"评分序列来源: 导出 JSON（详情页逐日现算，不读缓存） {args.series_json}")
+        print(f"{one.code} {one.name} 评分区间 {one.dates[0]} ~ {one.dates[-1]}（{len(one.dates)} 个评分日）")
+    else:
+        series_all, ver_stats = load_scores(
+            meta, args.min_days, args.version, complete_only=args.complete_only
+        )
 
     # ---- 评分缓存版本体检：防止拿旧公式的结果当当前口径 ----
     cur_v = str(SCORE_ROW_VERSION)
@@ -1210,12 +1745,13 @@ def main() -> None:
     ver_stocks = ver_stats["stocks"]
     ver_max = ver_stats["maxdays"]
     dominant_v = max(rows_v, key=lambda k: rows_v[k]) if rows_v else ""
-    print(
-        f"评分缓存版本: 代码当前 v{cur_v}；缓存主导 v{dominant_v}"
-        f"（{rows_v.get(dominant_v, 0)} 行 / {ver_stocks.get(dominant_v, 0)} 只）；"
-        f"v{cur_v} {rows_v.get(cur_v, 0)} 行 / {ver_stocks.get(cur_v, 0)} 只 / 单股最多 {ver_max.get(cur_v, 0)} 天"
-    )
-    if args.version != "current" and dominant_v and dominant_v != cur_v:
+    if not args.series_json:
+        print(
+            f"评分缓存版本（只统计参与回测的行）: 代码当前 v{cur_v}；缓存主导 v{dominant_v}"
+            f"（{rows_v.get(dominant_v, 0)} 行 / {ver_stocks.get(dominant_v, 0)} 只）；"
+            f"v{cur_v} {rows_v.get(cur_v, 0)} 行 / {ver_stocks.get(cur_v, 0)} 只 / 单股最多 {ver_max.get(cur_v, 0)} 天"
+        )
+    if not args.series_json and args.version != "current" and dominant_v and dominant_v != cur_v:
         print(
             render_table(
                 ["版本", "行数", "股票数", "单股最多天数", ""],
@@ -1230,14 +1766,14 @@ def main() -> None:
             )
         )
         print(
-            f"[警告] 本次 --version {args.version} 取的是 v{dominant_v}（旧公式），不是当前 v{cur_v}："
-            "结果不能与详情页曲线/面板回测对齐！"
+            f"[警告] 本次 --version {args.version} 取的版本不是当前 v{cur_v}："
+            "结果不能与详情页曲线/现算口径对齐！"
         )
         print(
             "       写当前版本的办法：应用「板块股票」页选板块 → 短线评分（勾上历史补算 N 日），"
             "或用训练周期预计算；完成后用 --version current 重跑。"
         )
-    if args.version == "current" and ver_max.get(cur_v, 0) < args.min_days:
+    if not args.series_json and args.version == "current" and ver_max.get(cur_v, 0) < args.min_days:
         print(
             f"[提示] 当前版本单股最多只有 {ver_max.get(cur_v, 0)} 天评分，小于 --min-days {args.min_days}，"
             "样本会为空；可先降 --min-days，或按上面的办法补算历史评分。"
@@ -1250,16 +1786,21 @@ def main() -> None:
     else:
         threshold = args.min_last_date
     series = {k: v for k, v in series_all.items() if not threshold or v.dates[-1] >= threshold}
-    print(
-        f"评分序列: 缓存里 >= {args.min_days} 天的共 {len(series_all)} 只，"
-        f"最后一天 >= {threshold or '不限'} 的 {len(series)} 只（版本口径 {args.version}）"
-    )
+    if args.series_json:
+        print(f"评分序列: 导出 JSON 共 {len(series)} 只（现算口径）")
+    else:
+        print(
+            f"评分序列: 缓存里 >= {args.min_days} 天的共 {len(series_all)} 只，"
+            f"最后一天 >= {threshold or '不限'} 的 {len(series)} 只"
+            f"（版本口径 {args.version}，维度"
+            f"{'齐全' if args.complete_only else '不完整【总分虚高，仅供对照】'}）"
+        )
     if latest:
         print(f"数据里最新评分日: {latest}")
     if not series:
         sys.exit(
             "没有满足条件的评分序列。可尝试放宽：--min-days 20 / --min-last-date 2026-01-01 / "
-            "--version any（或先打开应用让评分缓存写入数据）"
+            "--version dominant（或先打开应用让评分缓存写入数据）"
         )
 
     sample_n = args.sample if args.sample is not None else (0 if args.board else 300)
@@ -1300,8 +1841,13 @@ def main() -> None:
     data, skipped = prepare(
         codes, series, daily,
         exclude_boards=args.exclude_boards, exclude_st=args.exclude_st,
+        start_date=args.start, end_date=args.end,
     )
+    win_start = min((s.dates[0] for s, _ in data), default="")
+    win_end = max((s.dates[-1] for s, _ in data), default="")
     print(f"抽样 {len(codes)} 只，可用 {len(data)} 只（无日K {skipped} 只）")
+    if win_start:
+        print(f"回测窗口: {win_start} ~ {win_end}")
     if not data:
         sys.exit("样本无可用日K数据")
 
@@ -1311,10 +1857,31 @@ def main() -> None:
     mv_limit = args.min_mv * 1e8
     base = evaluate(data, args.buy, args.sell, args.min_score, args.fee,
                     args.stop_loss, args.max_hold, lag, args.buy_mode, args.trend_filter,
-                    args.require_limit_up, mv_limit)
+                    args.require_limit_up, mv_limit, **rule_kw)
+    if args.buy_mode == "rise":
+        buy_txt = f"低位抬升（近{args.rise_ref_days}日低点）"
+        low_txt = (
+            f" / 近{args.rise_ref_days}日低位≤{args.low_base_max:g}"
+            f" / 抬升≥{args.min_rise:g} / 地板{args.rise_min_score:g}"
+        )
+        if args.rise_min_delta > 0:
+            low_txt += f" / 当日Δ≥{args.rise_min_delta:g}"
+        if args.rise_vol_ratio > 0:
+            low_txt += f" / 放量≥{args.rise_vol_ratio:g}倍"
+    else:
+        buy_txt = f"买入+{args.buy:g}（{args.buy_mode}{'，MA20过滤' if args.trend_filter else ''}）"
+        low_txt = (
+            f" / 低位≤{args.low_base_max:g}持续{args.low_base_days}日"
+            if args.low_base_days else " / 低位过滤关"
+        )
+        if args.jump_window > 1:
+            low_txt += f" / {args.jump_window}日累计跳升"
+        if args.min_rise > 0:
+            low_txt += f" / 自低点+{args.min_rise:g}亦可"
+    low_txt += f" / 回撤{args.trail_drop:g}分止盈" if args.trail_drop > 0 else " / 回撤止盈关"
     print_stats(
-        f"基准参数 买入+{args.buy:g}（{args.buy_mode}{'，MA20过滤' if args.trend_filter else ''}）"
-        f" / 卖出{args.sell:g} / 评分≥{args.min_score:g}"
+        f"基准参数 {buy_txt}"
+        f" / 卖出{args.sell:g} / 评分≥{args.min_score:g}{low_txt}"
         f" / 成本{args.fee*100:.2f}% / 止损{args.stop_loss*100:.0f}% / 持有上限{args.max_hold or '无'}"
         f"{' / 信号日涨停' if args.require_limit_up else ''}"
         f"{f' / 流通市值≥{args.min_mv:g}亿' if args.min_mv else ''}"
@@ -1328,8 +1895,15 @@ def main() -> None:
         t, _, _ = run_stock(s, bars, args.buy, args.sell, args.min_score,
                             args.fee, args.stop_loss, args.max_hold, lag,
                             args.buy_mode, args.trend_filter,
-                            args.require_limit_up, mv_limit)
+                            args.require_limit_up, mv_limit,
+                            **rule_kw)
         all_trades.extend(t)
+
+    if args.stock_top > 0:
+        print_stock_detail(all_trades, args.stock_top, args.stock_trades, args.stock_min_trades)
+
+    if args.stock_year_top > 0:
+        print_stock_year_detail(all_trades, args.stock_year_top, args.stock_year_min_trades)
 
     if args.code:
         print_detail(data, args, mv_limit, lag)
@@ -1364,28 +1938,31 @@ def main() -> None:
     print("\n=== 参数扫描：买入阈值 × 评分下限（卖出 %.0f，次日开盘成交）===" % args.sell)
     rows = []
     best = None
-    cell, cells = 0, 5 * 4
-    for buy in (10, 15, 20, 25, 30):
-        for mins in (0, 50, 60, 70):
+    # 买入阈值加密到 2 分一档：+20 对「低位缓慢启动」偏严格，需要在 6~20 之间找平衡
+    cell, cells = 0, 8 * 4
+    for buy in (6, 8, 10, 12, 14, 16, 18, 20):
+        for mins in (45, 50, 55, 60):
             cell += 1
             progress(cell, cells, f"买入+{buy} 评分≥{mins}")
             st = evaluate(data, buy, args.sell, mins, args.fee, args.stop_loss, args.max_hold, lag,
-                          args.buy_mode, args.trend_filter, args.require_limit_up, mv_limit)
+                          args.buy_mode, args.trend_filter, args.require_limit_up, mv_limit,
+                          **rule_kw)
             pf = st["payoff"]
             rows.append([
                 buy, mins, st["trades"], f"{st['win_rate']*100:.1f}", f"{st['avg_ret']*100:+.2f}",
                 "∞" if pf == float("inf") else f"{pf:.2f}", f"{st['sharpe']:.2f}",
                 f"{st['ann_ret']*100:+.1f}", f"{st['max_dd']*100:.1f}", f"{st['trades_per_stock_year']:.2f}",
             ])
-            if st["trades"] >= 30 and (best is None or st["sharpe"] > best[0]):
-                best = (st["sharpe"], buy, mins, st)
+            # 按「年化收益」选优（低频策略的组合夏普波动太大，容易选到只做 1 笔的格子）
+            if st["trades"] >= 30 and (best is None or st["ann_ret"] > best[0]):
+                best = (st["ann_ret"], buy, mins, st)
     print(render_table(
         ["买入", "评分≥", "交易数", "胜率%", "期望%", "盈亏比", "夏普", "年化%", "回撤%", "频率"],
         rows, "llrrrrrrrr",
     ))
     if best:
         _, buy, mins, st = best
-        print(f"\n该网格内夏普最优: 买入+{buy} 评分≥{mins}（夏普 {st['sharpe']:.2f}）")
+        print(f"\n该网格内年化最优: 买入+{buy} 评分≥{mins}（年化 {st['ann_ret']*100:+.1f}%）")
 
     # ---- 卖出阈值扫描（买入用基准） ----
     print(f"\n=== 参数扫描：卖出阈值（买入 +{args.buy:g}，评分≥{args.min_score:g}）===")
@@ -1395,7 +1972,8 @@ def main() -> None:
         cell += 1
         progress(cell, cells, f"卖出{sell}")
         st = evaluate(data, args.buy, sell, args.min_score, args.fee, args.stop_loss, args.max_hold, lag,
-                      args.buy_mode, args.trend_filter, args.require_limit_up, mv_limit)
+                      args.buy_mode, args.trend_filter, args.require_limit_up, mv_limit,
+                      **rule_kw)
         pf = st["payoff"]
         rows.append([
             sell, st["trades"], f"{st['win_rate']*100:.1f}", f"{st['avg_ret']*100:+.2f}",
@@ -1414,7 +1992,8 @@ def main() -> None:
     for cell, (sl, mh) in enumerate(variants, start=1):
         progress(cell, len(variants), f"止损{sl * 100:.0f}% 持有{mh or '无'}")
         st = evaluate(data, args.buy, args.sell, args.min_score, args.fee, sl, mh, lag,
-                      args.buy_mode, args.trend_filter, args.require_limit_up, mv_limit)
+                      args.buy_mode, args.trend_filter, args.require_limit_up, mv_limit,
+                      **rule_kw)
         pf = st["payoff"]
         rows.append([
             f"{sl * 100:.0f}%", mh or "无", st["trades"], f"{st['win_rate']*100:.1f}",
@@ -1436,7 +2015,8 @@ def main() -> None:
                 cell += 1
                 progress(cell, cells, f"买入+{buy} 卖出{sell} 持有{mh or '无'}")
                 st = evaluate(data, buy, sell, args.min_score, args.fee, args.stop_loss, mh, lag,
-                              args.buy_mode, args.trend_filter, args.require_limit_up, mv_limit)
+                              args.buy_mode, args.trend_filter, args.require_limit_up, mv_limit,
+                              **rule_kw)
                 if st["trades"] >= 100:
                     results.append((st["avg_ret"], buy, sell, mh, st))
     results.sort(key=lambda x: -x[0])

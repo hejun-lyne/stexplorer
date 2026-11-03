@@ -9,7 +9,8 @@
  *   评分来自 computeShortTermScoreCurve（逐日现算，不读评分缓存）；
  *   买入 Δ ≥ buyDelta 且 评分 ≥ minScore，次日开盘买；
  *   卖出 Δ ≤ sellDelta，次日开盘卖；
- *   冷却期 / 跳空过滤同样生效（被过滤的信号不会出现在今日信号里）。
+ *   低位启动过滤 / 回撤止盈 / 冷却期 / 跳空过滤同样生效（被过滤的信号不会出现在今日信号里）：
+ *   今日信号要求突变前 N 个评分日都 ≤ lowBaseMax，持仓提示同时覆盖「单日跳降」与「自峰值回撤」。
  *
  * 信号质量评分（满分 100）只评估「当前这个信号」，维度全部来自已有数据，不含未来数据：
  *   突变强度 15 + 评分水平 10 + 历史胜率 12 + 历史期望 8 + 盈亏比 5
@@ -271,7 +272,8 @@ export async function runBoardScoreBacktest(args: {
   onProgress?: (info: { done: number; total: number; code: string; name: string }) => void;
 }): Promise<BoardScoreBacktestResult> {
   const params: ShortScoreBacktestParams = { ...DEFAULT_SHORT_SCORE_BACKTEST, ...args.params };
-  const limit = Math.max(20, Math.min(120, Math.floor(Number(args.limit) || 120)));
+  // 窗口上限 240：与个股回测面板一致（详情页曲线已按 K 线长度算，最长 240 根日K）
+  const limit = Math.max(20, Math.min(240, Math.floor(Number(args.limit) || 120)));
   const maxStocks = Math.max(0, Math.floor(Number(args.maxStocks) || 0));
   const concurrency = Math.max(1, Math.min(4, Math.floor(Number(args.concurrency) || 2)));
 
@@ -337,12 +339,34 @@ export async function runBoardScoreBacktest(args: {
         }
         const delta = cur - prev;
         if (holding) {
-          // 持仓中：最后一根 K 线已出绿柱时提示（回测里这根不参与卖出，因为卖出要次日开盘）
-          out.exitSignal = delta <= params.sellDelta;
+          // 持仓中：最后一根 K 线已出绿柱、或评分自持仓期最高点回撤达标时提示
+          //（回测里这根不参与卖出，因为卖出要次日开盘）
+          const lastTrade = bt.trades[bt.trades.length - 1];
+          const sinceKey = dayKey(lastTrade?.signalIn || '');
+          let peak = cur;
+          Object.keys(curve.scores).forEach((k) => {
+            if (sinceKey && k >= sinceKey && k <= lastKey) {
+              peak = Math.max(peak, curve.scores[k]);
+            }
+          });
+          const drop = peak - cur;
+          out.exitSignal = delta <= params.sellDelta || (params.trailDrop > 0 && drop >= params.trailDrop);
           return out;
         }
         if (delta < params.buyDelta || cur < params.minScore) {
           return out;
+        }
+        // 低位启动：突变前 N 个评分日都要在低位（与回测循环 / 离线脚本同口径）
+        if (params.lowBaseDays > 0) {
+          const keys = Object.keys(curve.scores).sort();
+          const idx = keys.indexOf(lastKey);
+          if (idx < params.lowBaseDays) {
+            return out;
+          }
+          const prevHigh = Math.max(...keys.slice(idx - params.lowBaseDays, idx).map((k) => curve.scores[k]));
+          if (prevHigh > params.lowBaseMax) {
+            return out;
+          }
         }
         const metrics = liveMetrics(curve.klines, lastKey);
         out.live = {

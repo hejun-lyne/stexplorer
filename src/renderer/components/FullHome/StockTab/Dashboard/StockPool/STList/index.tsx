@@ -62,6 +62,14 @@ import {
 } from '@/helpers/shortTermScoreList';
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
 import {
+  DEFAULT_SHORT_SCORE_BACKTEST,
+  evaluateShortScoreSignal,
+  scoreShortScoreSignalQuality,
+  ShortScoreBacktestParams,
+  ShortScoreSignal,
+  ShortScoreSignalQuality,
+} from '@/helpers/shortTermScoreBacktest';
+import {
   compareKlineShape,
   KLINE_SHAPE_FILTER_OPTIONS,
   KLINE_SHAPE_SORT_KEY,
@@ -205,6 +213,30 @@ const nameOfListItem = (item: any): string => {
 
 /** 每只股票「所属板块」只用前 3 个：列展示、表头统计、筛选统一这个口径 */
 const BOARD_COLUMN_LIMIT = 3;
+
+/**
+ * 「信号」列表头筛选项
+ *
+ * 取值与 evaluateShortScoreSignal 的 kind 一一对应；'' 表示「未判定」
+ * （评分历史不足、该行还没算过评分，与单元格里的 -- 同义）。
+ */
+const SIGNAL_FILTER_OPTIONS = [
+  { label: '买入', value: '买入' },
+  { label: '卖出', value: '卖出' },
+  { label: '观察', value: '观察' },
+  { label: '（未判定）', value: '' },
+];
+
+/**
+ * 列表「信号」列使用的策略参数
+ *
+ * 与详情页回测面板 / 离线脚本的默认口径保持一致：自低点抬升（近 10 日低点抬升 ≥35 分、
+ * 地板 45 分、抬升起点 ≤40 分）、卖出 Δ≤-15、自高点回撤 ≥10 分止盈。
+ */
+const SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = {
+  ...DEFAULT_SHORT_SCORE_BACKTEST,
+  buyMode: 'rise',
+};
 /** 「所属板块」批量取数并发数（东财 slist 是逐只接口，控制并发避免被限流） */
 const BANKUAI_FETCH_CONCURRENCY = 4;
 /** 所属板块取数为空（多为并发被限流）时的重试次数 */
@@ -340,6 +372,14 @@ const STList: React.FC<STListProps> = ({
   const [historyFillTotal, setHistoryFillTotal] = useState(0);
   const [historyFillMsg, setHistoryFillMsg] = useState('');
   const [historyFillResult, setHistoryFillResult] = useState<any>(null);
+  /**
+   * 重算已有评分（覆盖旧缓存）
+   *
+   * 默认增量：只补缺失的「交易日 × 股票」。已有行即使是用旧数据/旧板块算的也会被跳过，
+   * 于是缓存与「个股详情页曲线（现取数逐日重算，不读缓存）」可能对不上——图上 6-4 是 50.5，
+   * 缓存里却还是 52.3。勾选后整段窗口全部重算并覆盖写入，回测读缓存即与详情页一致。
+   */
+  const [historyFillForce, setHistoryFillForce] = useState(false);
   const isHistoryFillPausedRef = React.useRef(false);
   const [shortScoreData, setShortScoreData] = useState<ShortTermScoreRow[]>([]);
   const [shortScoreProgress, setShortScoreProgress] = useState(0);
@@ -385,6 +425,10 @@ const STList: React.FC<STListProps> = ({
   const [shortScoreKlineShapes, setShortScoreKlineShapes] = useState<string[]>([]);
   // RSI形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；按归一化后的形态 key 过滤）
   const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
+  // 信号筛选：仅显示所选信号的股票（多选，空数组=不过滤；值为 买入/卖出/观察/''（未判定））
+  const [shortScoreSignals, setShortScoreSignals] = useState<string[]>([]);
+  // 信号筛选项的计数：打开漏斗时才统计（信号要逐行按评分序列判定，不能在评分过程中反复全表重算）
+  const [signalFilterCounts, setSignalFilterCounts] = useState<Record<string, number>>({});
   /** 右侧面板当前展示的股票代码（点列表里的名字切换；空 = 默认展示列表第一只） */
   const [panelCode, setPanelCode] = useState('');
   // 板块筛选：仅显示属于所选板块的股票（多选，空数组=不过滤；值为板块代码 BKxxxx）
@@ -2113,6 +2157,7 @@ const STList: React.FC<STListProps> = ({
     setHistoryFillDone(0);
     setHistoryFillTotal(0);
     setHistoryFillMsg('');
+    setHistoryFillForce(false);
     isHistoryFillPausedRef.current = false;
     setHistoryFillOpen(true);
   }, []);
@@ -2165,6 +2210,8 @@ const STList: React.FC<STListProps> = ({
         // 列表「近 N 日评分」历史列/过滤窗口要往前多覆盖，否则补完点评分还要再补一次
         historyDays: shortScoreHistoryDays,
         source: SHORT_SCORE_SOURCE,
+        // 勾选「重算已有评分」时整段窗口重算并覆盖写入，让缓存与详情页现算口径一致
+        ignoreCache: historyFillForce,
         shouldStop: () => isHistoryFillPausedRef.current,
         onProgress: (done, total, msg) => {
           setHistoryFillDone(done);
@@ -2190,7 +2237,7 @@ const STList: React.FC<STListProps> = ({
     } finally {
       setHistoryFilling(false);
     }
-  }, [historyFilling, historyFillRange, waitBoardStocks, collectCurrentItems, shortScoreHistoryDays]);
+  }, [historyFilling, historyFillRange, historyFillForce, waitBoardStocks, collectCurrentItems, shortScoreHistoryDays]);
 
   // 外部（板块列表 / 行业入口）指定了单个板块 → 同步为「单选」；多选由下拉框直接维护
   useEffect(() => {
@@ -2531,6 +2578,51 @@ const STList: React.FC<STListProps> = ({
   }, [displayMode, shortScoreData, shortScoreFilterDays, shortScoreSeries, newEntryScore]);
 
   /**
+   * 「信号」列的判定：基准日 买入 / 卖出 / 观察
+   *
+   * 用 shortScoreSeries（近 N 个交易日的评分，已按训练日收敛）+ 本行基准日评分拼出序列，
+   * 再套 evaluateShortScoreSignal（与回测同一套阈值，见 SHORT_SCORE_SIGNAL_PARAMS）。
+   * 训练模式下序列只到训练日，推进训练日不会看到未来评分。
+   *
+   * 按需计算（只对当前页可见行调用）：评分过程中行是逐条追加的，
+   * 若预先对整表建 Map，追加一行就要重算全表，几千行时会明显卡顿。
+   */
+  const signalOfShortScoreRow = React.useCallback(
+    (row: any): { signal: ShortScoreSignal; quality: ShortScoreSignalQuality | null } | null => {
+      const code = codeOfListItem(row);
+      const days = shortScoreFilterDays;
+      if (!code || !days.length) {
+        return null;
+      }
+      const byDay = shortScoreSeries?.[code] || {};
+      const scores: Record<string, number> = {};
+      days.forEach((d) => {
+        const v = byDay?.[d]?.total;
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          scores[d] = v;
+        }
+      });
+      // 基准日以列表上展示的评分为准：序列里这一行可能是旧值，或当日还没写回
+      const baseDay = days[days.length - 1];
+      if (typeof row.total === 'number' && Number.isFinite(row.total)) {
+        scores[baseDay] = row.total;
+      }
+      const signal = evaluateShortScoreSignal({ scores, params: SHORT_SCORE_SIGNAL_PARAMS });
+      // 质量分只对「有信号」的行有意义（观察行算出来的分数没有指导意义）
+      const quality =
+        signal.kind === '观察'
+          ? null
+          : scoreShortScoreSignalQuality({
+              scores,
+              params: SHORT_SCORE_SIGNAL_PARAMS,
+              volumeScore: row.volumeScore,
+            });
+      return { signal, quality };
+    },
+    [shortScoreFilterDays, shortScoreSeries]
+  );
+
+  /**
    * 评分是否「已过期」：训练日推进了，但结果还是上一交易日算出来的
    *
    * 训练日推进不再自动重算，过期期间列表只展示收藏股票（不展示上一日那批已经不成立的结果），
@@ -2696,7 +2788,21 @@ const STList: React.FC<STListProps> = ({
   }, [showList, excludeStarBse, marketCapFilterEnabled, marketCapRange, nameFilter, isFavorited]);
 
   /**
-   * 「K线形态 / RSI形态」表头勾选过滤（仅短线评分列表）
+   * 单行「信号」类型：买入 / 卖出 / 观察 / ''（未判定）
+   *
+   * 与单元格展示共用 signalOfShortScoreRow，保证筛选口径和列里显示的完全一致。
+   * 只在筛选生效时逐行计算（见 displayList），避免评分过程中每追加一行就重算全表。
+   */
+  const signalKindOfRow = React.useCallback(
+    (row: any): string => {
+      const sig = signalOfShortScoreRow(row);
+      return sig ? sig.signal.kind : '';
+    },
+    [signalOfShortScoreRow]
+  );
+
+  /**
+   * 「K线形态 / RSI形态 / 信号」表头勾选过滤（仅短线评分列表）
    *
    * 这是纯展示层过滤：只决定列表显示哪些行，**不参与** visibleShowList，
    * 因此不会影响「当日评分」的候选股票（见下方 collectVisibleItems / todayScoreCount）。
@@ -2717,6 +2823,11 @@ const STList: React.FC<STListProps> = ({
       const rsiSet = new Set(shortScoreRsiShapes);
       list = list.filter((row: any) => isFavorited(row) || rsiSet.has(normalizeRsiShape(row.rsiPattern)));
     }
+    // 信号筛选：买入 / 卖出 / 观察 / 未判定（未判定 = 评分历史不足或该行还没算过评分）
+    if (shortScoreSignals.length) {
+      const signalSet = new Set(shortScoreSignals);
+      list = list.filter((row: any) => isFavorited(row) || signalSet.has(signalKindOfRow(row)));
+    }
     // 板块筛选：股票所属板块（东财所属板块，与详情页 BanKuai 同源）与勾选板块有交集即显示
     // 只看每只股票的前 3 个板块，与列里展示、表头选项的统计口径保持一致
     if (shortScoreBoards.length) {
@@ -2735,6 +2846,8 @@ const STList: React.FC<STListProps> = ({
     displayMode,
     shortScoreKlineShapes,
     shortScoreRsiShapes,
+    shortScoreSignals,
+    signalKindOfRow,
     shortScoreBoards,
     stockBankuaisMap,
     isFavorited,
@@ -2766,6 +2879,25 @@ const STList: React.FC<STListProps> = ({
     return RSI_SHAPE_FILTER_OPTIONS.map((o) => ({ ...o, count: counts[o.value] || 0 }));
   }, [visibleShowList]);
 
+  /**
+   * 表头「信号」筛选项（带当前列表的股票数）：统计口径与 K线/RSI形态一致（基于 visibleShowList），
+   * 但信号要逐行按评分序列判定，因此改成「打开漏斗时统计一次」，
+   * 避免评分过程中每追加一行就全表重算（见 signalOfShortScoreRow 的注释）。
+   */
+  const refreshSignalFilterCounts = React.useCallback(() => {
+    const counts: Record<string, number> = {};
+    (visibleShowList as any[]).forEach((row: any) => {
+      const kind = signalKindOfRow(row);
+      counts[kind] = (counts[kind] || 0) + 1;
+    });
+    setSignalFilterCounts(counts);
+  }, [visibleShowList, signalKindOfRow]);
+
+  const signalFilterItems = React.useMemo(
+    () => SIGNAL_FILTER_OPTIONS.map((o) => ({ ...o, count: signalFilterCounts[o.value] || 0 })),
+    [signalFilterCounts]
+  );
+
   /** 表头勾选后统一回到第 1 页 */
   const handleKlineShapeFilterChange = useCallback((next: string[]) => {
     setShortScoreKlineShapes(next);
@@ -2775,6 +2907,12 @@ const STList: React.FC<STListProps> = ({
   /** RSI形态勾选后统一回到第 1 页 */
   const handleRsiShapeFilterChange = useCallback((next: string[]) => {
     setShortScoreRsiShapes(next);
+    setCurrentPage(1);
+  }, []);
+
+  /** 信号勾选后统一回到第 1 页 */
+  const handleSignalFilterChange = useCallback((next: string[]) => {
+    setShortScoreSignals(next);
     setCurrentPage(1);
   }, []);
 
@@ -2801,6 +2939,7 @@ const STList: React.FC<STListProps> = ({
         ` 评分过滤=${shortScoreFilterEnabled} RSI过滤=${shortScoreRsiFilterEnabled}` +
         ` K线形态过滤=${shortScoreKlineShapes.length ? shortScoreKlineShapes.join('/') : '无'}` +
         ` RSI形态过滤=${shortScoreRsiShapes.length ? shortScoreRsiShapes.join('/') : '无'}` +
+        ` 信号过滤=${shortScoreSignals.length ? shortScoreSignals.map((s) => s || '未判定').join('/') : '无'}` +
         ` 板块过滤=${shortScoreBoards.length ? shortScoreBoards.join('/') : '无'} 名字过滤="${nameFilter}"`
     );
   }, [
@@ -2810,6 +2949,7 @@ const STList: React.FC<STListProps> = ({
     visibleShowList,
     shortScoreKlineShapes,
     shortScoreRsiShapes,
+    shortScoreSignals,
     shortScoreBoards,
     shortScoreLoading,
     todayScoreLoading,
@@ -3611,6 +3751,77 @@ const STList: React.FC<STListProps> = ({
       ) : displayMode === 'shortScore' ? (
         <Row className={styles.header}>
           <Col span={4}>股票名称</Col>
+          <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span
+              className={styles.klineShapeHeader}
+              title="信号（按评分序列逐日判定，与回测同一套阈值）：买入=自近10日低点抬升≥35分且评分≥45、抬升起点≤40；卖出=单日Δ≤-15 或 自近10日最高分回撤≥10；观察=其余情况。信号后的数字是该信号的质量分（0~100）与等级 A/B/C/D：抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20，按满分归一到 100；悬停单元格可看分项与判定依据。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
+            >
+              <span className={styles.klineShapeHeaderText}>信号 / 质量</span>
+              <Dropdown
+                trigger={['click']}
+                placement="bottomLeft"
+                overlayClassName={styles.shapeFilterOverlay}
+                onOpenChange={(open) => {
+                  // 打开时才统计各信号的数量（信号判定比形态归一化重）
+                  if (open) {
+                    refreshSignalFilterCounts();
+                  }
+                }}
+                overlay={
+                  <div className={styles.shapeFilterPanel} onClick={(e) => e.stopPropagation()}>
+                    <div className={styles.shapeFilterActions}>
+                      <Checkbox
+                        checked={
+                          SIGNAL_FILTER_OPTIONS.length > 0 &&
+                          shortScoreSignals.length === SIGNAL_FILTER_OPTIONS.length
+                        }
+                        indeterminate={
+                          shortScoreSignals.length > 0 &&
+                          shortScoreSignals.length < SIGNAL_FILTER_OPTIONS.length
+                        }
+                        onChange={(e) =>
+                          handleSignalFilterChange(
+                            e.target.checked ? SIGNAL_FILTER_OPTIONS.map((o) => o.value) : []
+                          )
+                        }
+                      >
+                        全选
+                      </Checkbox>
+                      <a onClick={() => handleSignalFilterChange([])}>清空</a>
+                    </div>
+                    <Checkbox.Group
+                      value={shortScoreSignals}
+                      onChange={(v) => handleSignalFilterChange((v as string[]) || [])}
+                      className={styles.shapeFilterList}
+                    >
+                      {signalFilterItems.map((o) => (
+                        <Checkbox
+                          key={o.value || '__unknown__'}
+                          value={o.value}
+                          disabled={!o.count && shortScoreSignals.indexOf(o.value) < 0}
+                        >
+                          {o.label}
+                          <span className={styles.shapeFilterCount}>({o.count})</span>
+                        </Checkbox>
+                      ))}
+                    </Checkbox.Group>
+                  </div>
+                }
+              >
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<FilterOutlined />}
+                  className={classNames(styles.filterbtn, { [styles.filterbtnActive]: shortScoreSignals.length > 0 })}
+                  title={
+                    shortScoreSignals.length
+                      ? `已按 ${shortScoreSignals.length} 种信号过滤（点击修改）；不影响「当日评分」候选股票`
+                      : '按信号勾选过滤（Excel 式多选）；仅影响列表显示，不影响「当日评分」的候选股票'
+                  }
+                />
+              </Dropdown>
+            </span>
+          </Col>
           <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
@@ -3757,7 +3968,7 @@ const STList: React.FC<STListProps> = ({
               />
             </span>
           </Col>
-          <Col span={9} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Col span={6} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
               title="股票所属板块（东财「所属板块」，与详情页板块列表同一接口）。每只股票只取前 3 个板块（列展示、筛选项统计、过滤都按这 3 个）。点漏斗可按板块勾选过滤（Excel 式多选，属于任一所选板块即显示；仅影响列表显示，不影响「当日评分」的候选股票）"
@@ -4034,6 +4245,8 @@ const STList: React.FC<STListProps> = ({
             // 收藏统一按 6 位代码存取（行数据的 code 可能是 ts_code 形态）
             const rowCode = codeOfListItem(s);
             const rowFavorited = favoriteSet.has(rowCode);
+            // 信号：基准日按评分序列判定的买入/卖出/观察（与回测同一套阈值）
+            const sig = signalOfShortScoreRow(s);
             return (
               <Row
                 key={s.code}
@@ -4090,6 +4303,63 @@ const STList: React.FC<STListProps> = ({
                   </div>
                 </Col>
                 <Col
+                  span={3}
+                  title={
+                    sig
+                      ? [
+                          `${sig.signal.kind}：${sig.signal.reason}`,
+                          sig.quality
+                            ? `质量 ${sig.quality.total} 分（${sig.quality.grade}）：${sig.quality.dims
+                                .map((d) => `${d.label} ${d.score}/${d.max}`)
+                                .join('、')}`
+                            : '',
+                        ]
+                          .filter(Boolean)
+                          .join('\n')
+                      : '信号：评分历史不足，暂不判定'
+                  }
+                  style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12 }}
+                >
+                  {sig ? (
+                    <>
+                      <span
+                        style={{
+                          color:
+                            sig.signal.kind === '买入'
+                              ? 'var(--increase-color)'
+                              : sig.signal.kind === '卖出'
+                                ? 'var(--reduce-color)'
+                                : 'var(--reverse-text-color)',
+                          fontWeight: sig.signal.kind === '买入' ? 'bold' : 'normal',
+                        }}
+                      >
+                        {sig.signal.kind}
+                      </span>
+                      {sig.quality ? (
+                        <span
+                          style={{
+                            marginLeft: 4,
+                            fontSize: 11,
+                            color:
+                              sig.quality.grade === 'A'
+                                ? '#52c41a'
+                                : sig.quality.grade === 'B'
+                                  ? '#1890ff'
+                                  : sig.quality.grade === 'C'
+                                    ? '#faad14'
+                                    : '#ff4d4f',
+                          }}
+                        >
+                          {sig.quality.total}
+                          {sig.quality.grade}
+                        </span>
+                      ) : null}
+                    </>
+                  ) : (
+                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
+                  )}
+                </Col>
+                <Col
                   span={2}
                   title={s.error || undefined}
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -4139,7 +4409,7 @@ const STList: React.FC<STListProps> = ({
                   </span>
                 </Col>
                 <Col
-                  span={9}
+                  span={6}
                   style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
                   {(() => {
@@ -4409,7 +4679,9 @@ const STList: React.FC<STListProps> = ({
         <div style={{ fontSize: 12, color: 'var(--secondary-text-color)', lineHeight: 1.7, marginBottom: 12 }}>
           对「当前股票列表」逐日补算短线评分并写入评分序列缓存，口径与「短线评分 / 个股详情页」完全一致。
           <br />
-          已覆盖的交易日会自动跳过；中断后再次点击可增量续算。补全后即可用离线脚本按当前评分版本回测。
+          默认只补缺失的「交易日 × 股票」，已覆盖的交易日自动跳过（旧行不会更新）；中断后再次点击可增量续算。
+          <br />
+          详情页走势是<b>逐日现算</b>（不读缓存），若界面数值与缓存不一致，请勾选下面的「重算已有评分」。
         </div>
         <Row gutter={8} align="middle" style={{ marginBottom: 10 }}>
           <Col span={5}>补全区间</Col>
@@ -4421,6 +4693,18 @@ const STList: React.FC<STListProps> = ({
               allowClear={false}
               disabled={historyFilling}
             />
+          </Col>
+        </Row>
+        <Row gutter={8} align="middle" style={{ marginBottom: 10 }}>
+          <Col span={5}>重算口径</Col>
+          <Col span={19}>
+            <Checkbox
+              checked={historyFillForce}
+              disabled={historyFilling}
+              onChange={(e) => setHistoryFillForce(e.target.checked)}
+            >
+              重算已有评分（覆盖旧缓存行，与详情页现算口径对齐）
+            </Checkbox>
           </Col>
         </Row>
         <div style={{ fontSize: 12, marginBottom: 8 }}>
