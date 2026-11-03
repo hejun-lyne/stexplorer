@@ -41,7 +41,10 @@ import type { ScoreJumpPoint } from '@/helpers/shortTermScoreJump';
 import {
   computeShortScoreSignalSeries,
   DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
-  SHORT_SCORE_BUY_MARK_COLOR,
+  isBuySignalKind,
+  shortScoreSignalColor,
+  SHORT_SCORE_JUMP_BUY_MARK_COLOR,
+  SHORT_SCORE_RISE_BUY_MARK_COLOR,
   SHORT_SCORE_SELL_MARK_COLOR,
 } from '@/helpers/shortTermScoreBacktest';
 import type { ShortScoreSignal } from '@/helpers/shortTermScoreBacktest';
@@ -992,7 +995,7 @@ function baseKChartOptions(darkMode: boolean, range?: { start: number; end: numb
               text += `<div style="display: flex; justify-content: space-between;" class="${cls}"><span>突变:</span><span>${d.jumpDesc}</span></div>`;
             }
             if (d.signalKind) {
-              const sigCls = d.signalKind === '买入' ? 'text-up' : 'text-down';
+              const sigCls = isBuySignalKind(d.signalKind) ? 'text-up' : 'text-down';
               text += `<div style="display: flex; justify-content: space-between;" class="${sigCls}"><span>信号:</span><span>${d.signalKind}</span></div>`;
               if (d.signalReason) {
                 text += `<div style="opacity:.72;font-size:11px;margin-top:2px;max-width:420px;white-space:normal">${d.signalReason}</div>`;
@@ -2739,9 +2742,10 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         const deltaBars = deltas.map((delta, i) => {
           const isJump = !!jumpByIdx[i];
           const sigKind = signals[i]?.kind;
-          const isSignal = sigKind === '买入' || sigKind === '卖出';
+          const sigColor = shortScoreSignalColor(sigKind);
+          const isSignal = !!sigColor;
           const signalStyle = {
-            color: sigKind === '买入' ? SHORT_SCORE_BUY_MARK_COLOR : SHORT_SCORE_SELL_MARK_COLOR,
+            color: sigColor,
             borderColor: 'rgba(255,255,255,0.9)',
             borderWidth: 1,
             opacity: 1,
@@ -3519,11 +3523,12 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                     ) : (
                       <span
                         style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}
-                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。橙柱=买入信号日、亮绿柱=卖出信号日（与列表「信号」列/回测同一套规则，悬停曲线可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
+                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。橙柱=抬升买入、粉柱=跳升买入、亮绿柱=卖出（与列表「信号」列/回测同一套规则，悬停曲线可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
                       >
                         红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
-                        <span style={{ marginLeft: 4, color: SHORT_SCORE_BUY_MARK_COLOR, fontWeight: 600 }}>橙柱=买入信号</span>
-                        <span style={{ marginLeft: 4, color: SHORT_SCORE_SELL_MARK_COLOR, fontWeight: 600 }}>亮绿柱=卖出信号</span>
+                        <span style={{ marginLeft: 4, color: SHORT_SCORE_RISE_BUY_MARK_COLOR, fontWeight: 600 }}>橙柱=抬升买入</span>
+                        <span style={{ marginLeft: 4, color: SHORT_SCORE_JUMP_BUY_MARK_COLOR, fontWeight: 600 }}>粉柱=跳升买入</span>
+                        <span style={{ marginLeft: 4, color: SHORT_SCORE_SELL_MARK_COLOR, fontWeight: 600 }}>亮绿柱=卖出</span>
                         <span style={{ color: 'var(--secondary-text-color)' }}>
                           　蓝虚线=自近{SHORT_SCORE_RISE_DAYS}根低点抬升
                         </span>

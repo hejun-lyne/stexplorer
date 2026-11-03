@@ -64,7 +64,10 @@ import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
 import {
   DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
   evaluateShortScoreSignal,
+  isBuySignalKind,
   scoreShortScoreSignalQuality,
+  SHORT_SCORE_JUMP_BUY_MARK_COLOR,
+  SHORT_SCORE_RISE_BUY_MARK_COLOR,
   ShortScoreBacktestParams,
   ShortScoreSignal,
   ShortScoreSignalQuality,
@@ -221,7 +224,8 @@ const BOARD_COLUMN_LIMIT = 3;
  * （评分历史不足、该行还没算过评分，与单元格里的 -- 同义）。
  */
 const SIGNAL_FILTER_OPTIONS = [
-  { label: '买入', value: '买入' },
+  { label: '抬升买入', value: '抬升买入' },
+  { label: '跳升买入', value: '跳升买入' },
   { label: '卖出', value: '卖出' },
   { label: '观察', value: '观察' },
   { label: '（未判定）', value: '' },
@@ -445,7 +449,7 @@ const STList: React.FC<STListProps> = ({
   const [shortScoreKlineShapes, setShortScoreKlineShapes] = useState<string[]>([]);
   // RSI形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；按归一化后的形态 key 过滤）
   const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
-  // 信号筛选：仅显示所选信号的股票（多选，空数组=不过滤；值为 买入/卖出/观察/''（未判定））
+  // 信号筛选：仅显示所选信号的股票（多选，空数组=不过滤；值为 抬升买入/跳升买入/卖出/观察/''（未判定））
   const [shortScoreSignals, setShortScoreSignals] = useState<string[]>([]);
   // 信号筛选项的计数：打开漏斗时才统计（信号要逐行按评分序列判定，不能在评分过程中反复全表重算）
   const [signalFilterCounts, setSignalFilterCounts] = useState<Record<string, number>>({});
@@ -3820,7 +3824,7 @@ const STList: React.FC<STListProps> = ({
           <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="信号（按评分序列逐日判定，与回测同一套阈值）：买入=①自近10日低点抬升≥20分且评分≥45、抬升起点≤45，或②单日跳升≥20分且评分≥60、突变前3日≤45（单日大幅跳升的启动日不等累计抬升）；卖出=单日Δ≤-15 或 自近10日最高分回撤≥10；观察=其余情况。悬停单元格可看判定依据（②成立时会注明「单日跳升达 +20」）。信号后的数字是该信号的质量分（0~100）与等级 A/B/C/D：抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20，按满分归一到 100。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
+              title="信号（按评分序列逐日判定，与回测同一套阈值）：买入分两种形态——「跳升买入」（粉色，优先级更高）=单日跳升≥20分且评分≥60、突变前3日≤45，当日就是一根跳升柱；「抬升买入」（橙色）=自近10日低点累计抬升≥20分且评分≥45、抬升起点≤45（分几天磨出来的启动；当日若也跳升≥20则归为跳升买入）。卖出=单日Δ≤-15 或 自近10日最高分回撤≥10；观察=其余情况。悬停单元格可看判定依据。信号后的数字是该信号的质量分（0~100）与等级 A/B/C/D：抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20，按满分归一到 100。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
             >
               <span className={styles.klineShapeHeaderText}>信号 / 质量</span>
               <Dropdown
@@ -4400,13 +4404,16 @@ const STList: React.FC<STListProps> = ({
                       >
                         <span
                           style={{
+                            // 抬升买入=橙、跳升买入=粉、卖出=主题绿、观察=次要文字色，与图上柱子标记色一致
                             color:
-                              sig.signal.kind === '买入'
-                                ? 'var(--increase-color)'
-                                : sig.signal.kind === '卖出'
-                                  ? 'var(--reduce-color)'
-                                  : 'var(--reverse-text-color)',
-                            fontWeight: sig.signal.kind === '买入' ? 'bold' : 'normal',
+                              sig.signal.kind === '抬升买入'
+                                ? SHORT_SCORE_RISE_BUY_MARK_COLOR
+                                : sig.signal.kind === '跳升买入'
+                                  ? SHORT_SCORE_JUMP_BUY_MARK_COLOR
+                                  : sig.signal.kind === '卖出'
+                                    ? 'var(--reduce-color)'
+                                    : 'var(--reverse-text-color)',
+                            fontWeight: isBuySignalKind(sig.signal.kind) ? 'bold' : 'normal',
                           }}
                         >
                           {sig.signal.kind}

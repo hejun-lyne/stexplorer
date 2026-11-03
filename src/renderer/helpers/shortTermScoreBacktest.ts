@@ -93,10 +93,26 @@ export const DEFAULT_SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = {
   buyMode: 'rise',
 };
 
-/** 图表上「买入信号日」柱子的标记色：橙色（与红绿突变柱、金色评分线都区分开） */
-export const SHORT_SCORE_BUY_MARK_COLOR = '#fa8c16';
-/** 图表上「卖出信号日」柱子的标记色：亮绿色 */
+/** 「抬升买入」标记色：橙色 */
+export const SHORT_SCORE_RISE_BUY_MARK_COLOR = '#fa8c16';
+/** 「跳升买入」标记色：粉色 */
+export const SHORT_SCORE_JUMP_BUY_MARK_COLOR = '#eb2f96';
+/** 「卖出」标记色：亮绿色 */
 export const SHORT_SCORE_SELL_MARK_COLOR = '#00e676';
+
+/** 信号种类 -> 标记色（观察 / 空返回空串，表示不标记） */
+export function shortScoreSignalColor(kind?: string): string {
+  if (kind === '抬升买入') {
+    return SHORT_SCORE_RISE_BUY_MARK_COLOR;
+  }
+  if (kind === '跳升买入') {
+    return SHORT_SCORE_JUMP_BUY_MARK_COLOR;
+  }
+  if (kind === '卖出') {
+    return SHORT_SCORE_SELL_MARK_COLOR;
+  }
+  return '';
+}
 
 /** computeShortScoreSignalSeries 的缓存：评分对象 -> 参数签名 -> 信号表（对象变了自然回收） */
 const signalSeriesCache = new WeakMap<object, Map<string, Record<string, ShortScoreSignal>>>();
@@ -228,8 +244,14 @@ const dayStr = (d?: string) => {
 };
 const num = (v: any) => (typeof v === 'number' && Number.isFinite(v) ? v : Number(v));
 
-/** 列表「信号」列的取值 */
-export type ShortScoreSignalKind = '买入' | '卖出' | '观察';
+/**
+ * 列表「信号」列的取值
+ *
+ * 买入分两种启动形态，图/表上都分开标记，方便区分「分几天磨出来的」和「一天怼上去的」：
+ * - 抬升买入：自近 N 日低点累计抬升达标（rise）
+ * - 跳升买入：单日跳升达阈值（jump）
+ */
+export type ShortScoreSignalKind = '抬升买入' | '跳升买入' | '卖出' | '观察';
 
 export interface ShortScoreSignal {
   kind: ShortScoreSignalKind;
@@ -237,6 +259,11 @@ export interface ShortScoreSignal {
   reason: string;
   /** 买入信号按哪套口径成立：rise=自低点抬升 / jump=单日跳升（观察、卖出时为空） */
   via?: 'rise' | 'jump';
+}
+
+/** 信号是否为买入（抬升买入 / 跳升买入） */
+export function isBuySignalKind(kind?: string): boolean {
+  return kind === '抬升买入' || kind === '跳升买入';
 }
 
 /** 保留一位小数（-0 归零，避免显示 -0.0） */
@@ -305,11 +332,12 @@ function signalContext(
  *   2. 没有冷却期与跳空过滤（那两项依赖卖出成交日与次日开盘价）。
  * 买入与卖出同时成立时按买入输出（reason 里仍会写明回撤值，便于自己判断）。
  *
- * **启动有两种形态，rise 口径两者都认**：
- *   - 自低点抬升：近 riseRefDays 日最低分 → 当日评分抬升 ≥ minRise（分几天完成的低位启动）；
- *   - 单日跳升：当日 Δ ≥ buyDelta（一根大阳柱就是启动日本身）。
+ * **启动有两种形态，rise 口径两者都认，且分两类信号标记**：
+ *   - 跳升买入（前置判断）：当日 Δ ≥ buyDelta 且 评分 ≥ minScore（一根大跳升柱就是启动日本身）；
+ *   - 抬升买入：近 riseRefDays 日最低分 → 当日评分抬升 ≥ minRise（分几天磨出来的低位启动）。
  * 只认累计抬升会把「单日跳升 +26 但累计还没到 20 分」的启动日漏掉、延后一天才出信号，
  * 所以 rise 口径按「或」处理；两套口径各自带自己的评分地板与低位条件。
+ * 两者同时成立时归一为「跳升买入」（当日确实是跳升柱），reason 里会注明累计抬升也达标。
  */
 export function evaluateShortScoreSignal(args: {
   scores: Record<string, number>;
@@ -373,17 +401,20 @@ export function evaluateShortScoreSignal(args: {
 
   if (p.buyMode === 'jump') {
     if (jumpOk) {
-      return { kind: '买入', reason: withSell(jumpReason), via: 'jump' };
+      return { kind: '跳升买入', reason: withSell(jumpReason), via: 'jump' };
     }
-  } else if (riseOk) {
-    return { kind: '买入', reason: withSell(riseReason), via: 'rise' };
   } else if (jumpOk) {
-    // 累计抬升还没到阈值，但当日已经是一根明显的跳升柱：同样算启动，别等到第二天补齐累计抬升
+    // 当日就是一根明显的跳升柱：优先标成「跳升买入」（单日怼上去的启动日），
+    // 累计抬升同时达标时在 reason 里注明，方便回看是哪一种启动
     return {
-      kind: '买入',
-      reason: withSell(`${jumpReason}（累计抬升 ${f1(riseAmt)} 未到 ${p.minRise}，按单日跳升口径）`),
+      kind: '跳升买入',
+      reason: withSell(
+        `${jumpReason}（累计抬升 ${f1(riseAmt)} ${riseOk ? `也达标 ≥${p.minRise}` : `未到 ${p.minRise}`}）`
+      ),
       via: 'jump',
     };
+  } else if (riseOk) {
+    return { kind: '抬升买入', reason: withSell(riseReason), via: 'rise' };
   }
 
   if (sellOk) {
