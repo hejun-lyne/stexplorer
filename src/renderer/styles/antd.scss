@@ -186,6 +186,45 @@
   }
 }
 
+// 下拉占位文字：默认是近乎透明的灰，深色背景上几乎看不见
+.ant-select-selection-placeholder {
+  color: var(--secondary-text-color) !important;
+}
+
+// 多选下拉的已选项标签：antd 默认浅灰底，配上主题浅色文字会「白底浅字」看不清
+.ant-select-multiple {
+  .ant-select-selection-item {
+    background-color: var(--top-background-color);
+    border-color: var(--main-border-color);
+    color: var(--main-text-color);
+  }
+
+  .ant-select-selection-item-remove {
+    color: var(--secondary-text-color);
+
+    &:hover {
+      color: var(--main-text-color);
+    }
+  }
+}
+
+// 下拉面板：跟随主题底色与文字色（默认白底，深色主题下会白底灰字）
+.ant-select-dropdown {
+  background-color: var(--inner-color);
+  border: 1px solid var(--main-border-color);
+}
+
+.ant-select-item {
+  color: var(--main-text-color) !important;
+}
+
+.ant-select-item-option-active:not(.ant-select-item-option-disabled),
+.ant-select-item-option-selected:not(.ant-select-item-option-disabled) {
+  background-color: var(--top-background-color) !important;
+  color: var(--main-text-color) !important;
+  font-weight: normal;
+}
+
 .ant-tree {
   background-color: var(--nav-background-color);
 }

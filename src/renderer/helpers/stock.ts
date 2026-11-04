@@ -2278,13 +2278,32 @@ export async function AnalyzeKline(secid: string, type: Enums.KSortType, klimit:
 }
 
 /// 找到最近几天有涨停的
-export async function FilterMultiKlines(secids: string[], types: Enums.KFilterType[], days: number) {
-  const collectors = secids.map((s) => () => FilterKline(s, types, days));
+/**
+ * 批量 K 线过滤
+ *
+ * maPeriods 为均线过滤的周期列表（空数组=不过滤）：要求最新收盘价站上所选的全部均线。
+ * K 线条数按最大均线周期自动加长，避免自定义长周期（如 MA120）因取数不足被误判为不通过。
+ */
+export async function FilterMultiKlines(
+  secids: string[],
+  types: Enums.KFilterType[],
+  days: number,
+  maPeriods: number[] = []
+) {
+  const maxPeriod = maPeriods.length ? Math.max(...maPeriods) : 0;
+  const klimit = Math.max(100, maxPeriod + 5);
+  const collectors = secids.map((s) => () => FilterKline(s, types, days, klimit, maPeriods));
   return Adapter.ConCurrencyAllAdapter(collectors);
 }
 
-export async function FilterKline(secid: string, types: Enums.KFilterType[], days: number, klimit = 100) {
-  if (types.length == 1 && types[0] == Enums.KFilterType.NKCB) {
+export async function FilterKline(
+  secid: string,
+  types: Enums.KFilterType[],
+  days: number,
+  klimit = 100,
+  maPeriods: number[] = []
+) {
+  if (types.length == 1 && types[0] == Enums.KFilterType.NKCB && !maPeriods.length) {
     if (secid.indexOf('1.688') == -1 ) {
       return secid;
     } else {
@@ -2293,6 +2312,10 @@ export async function FilterKline(secid: string, types: Enums.KFilterType[], day
   }
   const { ks } = await Services.Stock.GetKFromSetting(secid, Enums.KLineType.Day, klimit);
   if (!ks.length) {
+    return null;
+  }
+  // 均线过滤：最新收盘价站上所选的全部均线（多条时取交集）
+  if (maPeriods.length && !AboveMAs(ks, maPeriods)) {
     return null;
   }
   let passed = true;
@@ -2324,6 +2347,28 @@ export async function FilterKline(secid: string, types: Enums.KFilterType[], day
     passed = false;
   }
   return passed ? secid : null;
+}
+
+/**
+ * 均线过滤：最新收盘价是否站上所选的全部均线
+ *
+ * periods 里任意一条周期取不到足够 K 线（未上市/停牌太久）都判为不通过，
+ * 避免「拿前 N 天不足的数据硬算出一条均线」造成误判。
+ */
+function AboveMAs(ks: Stock.KLineItem[], periods: number[]) {
+  const closes = ks.map((k) => k.sp);
+  const last = closes[closes.length - 1];
+  return periods.every((period) => {
+    const p = Math.floor(Number(period));
+    if (!p || p < 1 || closes.length < p) {
+      return false;
+    }
+    let sum = 0;
+    for (let i = closes.length - p; i < closes.length; i++) {
+      sum += closes[i];
+    }
+    return last >= sum / p;
+  });
 }
 
 function ZJZT(ks: Stock.KLineItem[], days: number) {

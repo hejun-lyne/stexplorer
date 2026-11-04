@@ -101,6 +101,9 @@ const SHORT_SCORE_HISTORY_DAYS = 15;
  */
 const SHORT_SCORE_BACKFILL_DAYS = 20;
 
+/** 均线过滤可选的均线周期（下拉多选；勾选多条时要求收盘价站上每一条） */
+const MA_FILTER_OPTIONS = [5, 10, 20, 40, 60, 120];
+
 /**
  * 训练模式「时间推进」的时间轴：09:25 ~ 11:30、13:00 ~ 15:00
  *
@@ -313,6 +316,10 @@ const STList: React.FC<STListProps> = ({
   const [filtering, setFiltering] = useState(false);
   const [ftypes, setFtypes] = useState<number[]>([]);
   const [filterSecids, setFilterSecids] = useState<string[]>([]);
+  /** 均线过滤勾选的周期（空数组=不过滤）：要求收盘价站上勾选的每一条均线 */
+  const [maPeriods, setMaPeriods] = useState<number[]>([]);
+  /** 是否启用了 K 线过滤（K线类型 or 均线）：两者任一勾选时，列表才按过滤结果裁剪 */
+  const klineFilterActive = ftypes.length > 0 || maPeriods.length > 0;
   const [nameFilter, setNameFilter] = useState('');
   /** 排除科创板 + 北交所（默认勾选）：同时作用于列表展示与评分池（短线评分 / 训练周期预计算） */
   const [excludeStarBse, setExcludeStarBse] = useState(true);
@@ -966,7 +973,7 @@ const STList: React.FC<STListProps> = ({
       }
       rebuildStocksFromBoards();
       // K线过滤防抖：多板块逐个返回时只跑最后一次（见 scheduleKlineFilter）
-      if (ftypes.length > 0) {
+      if (klineFilterActive) {
         scheduleKlineFilter();
       }
     },
@@ -1013,7 +1020,7 @@ const STList: React.FC<STListProps> = ({
         return;
       }
       rebuildStocksFromBoards();
-      if (ftypes.length > 0) {
+      if (klineFilterActive) {
         scheduleKlineFilter();
       }
     },
@@ -1170,10 +1177,20 @@ const STList: React.FC<STListProps> = ({
       runFilterStocks(
         base.map((s) => s.secid),
         ftypes,
-        fdays
+        fdays,
+        maPeriods
       );
     }, 400);
-  }, [rebuildStocksFromBoards, excludeStarBse, marketCapFilterEnabled, marketCapRange, ftypes, fdays, runFilterStocks]);
+  }, [
+    rebuildStocksFromBoards,
+    excludeStarBse,
+    marketCapFilterEnabled,
+    marketCapRange,
+    ftypes,
+    fdays,
+    maPeriods,
+    runFilterStocks,
+  ]);
 
   useEffect(
     () => () => {
@@ -2472,24 +2489,45 @@ const STList: React.FC<STListProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ontrain, trainDate, pendingBuyKey, dispatch]);
 
+  /** 立刻按「K线类型 + 均线」跑一次过滤（两个勾选组共用，任一变化都要重算） */
+  const runKlineFilter = useCallback(
+    (types: number[], periods: number[]) => {
+      if ((!types.length && !periods.length) || !poolStocks.length) {
+        return;
+      }
+      setFiltering(true);
+      runFilterStocks(
+        poolStocks.map((s) => s.secid),
+        types,
+        fdays,
+        periods
+      );
+    },
+    [poolStocks, fdays, runFilterStocks]
+  );
+
   const updateFtypes = useCallback(
     (ts: any[]) => {
       setFtypes(ts);
       setCurrentPage(1);
-      if (ts.length && poolStocks.length) {
-        setFiltering(true);
-        runFilterStocks(
-          poolStocks.map((s) => s.secid),
-          ts,
-          fdays
-        );
-      }
+      runKlineFilter(ts, maPeriods);
     },
-    [poolStocks, fdays, runFilterStocks]
+    [maPeriods, runKlineFilter]
   );
+
+  /** 均线勾选变化：立刻重算过滤（取消全部条件时 filterStocks 会自动退回完整池子） */
+  const updateMaPeriods = useCallback(
+    (periods: number[]) => {
+      setMaPeriods(periods);
+      setCurrentPage(1);
+      runKlineFilter(ftypes, periods);
+    },
+    [ftypes, runKlineFilter]
+  );
+
   const filterStocks = React.useMemo(
-    () => (ftypes.length ? poolStocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : poolStocks),
-    [ftypes, poolStocks, filterSecids]
+    () => (klineFilterActive ? poolStocks.filter((s) => filterSecids.indexOf(s.secid) != -1) : poolStocks),
+    [klineFilterActive, poolStocks, filterSecids]
   );
 
   // 格式化资金流向金额（元 -> 亿/万）
@@ -3400,6 +3438,23 @@ const STList: React.FC<STListProps> = ({
             value={ftypes}
             onChange={updateFtypes}
           />
+          <span
+            style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            title="均线过滤：只保留收盘价站上所选全部均线的股票（多选取交集）"
+          >
+            <span style={{ fontSize: 12 }}>均线</span>
+            <Select
+              mode="multiple"
+              allowClear
+              size="small"
+              placeholder="选择均线"
+              value={maPeriods}
+              onChange={(v) => updateMaPeriods((v as number[]).map((x) => Number(x)))}
+              style={{ minWidth: 160, maxWidth: 260 }}
+              options={MA_FILTER_OPTIONS.map((p) => ({ label: `MA${p}`, value: p }))}
+              maxTagCount="responsive"
+            />
+          </span>
           <Checkbox
             checked={excludeStarBse}
             onChange={(e) => {
