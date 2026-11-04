@@ -7,24 +7,28 @@
  *
  * 规则（与图表上的红绿柱同口径，与离线脚本 backtest_short_score_jump.py 保持一致）：
  *   Δ = 评分(D) - 评分(D-1)，仅相邻交易日才算一次突变；
- *   买入（buyMode=jump）：Δ ≥ buyDelta 且 评分 ≥ minScore 且「低位启动」→ 次日开盘买入；
- *   买入（buyMode=rise）：评分自近 riseRefDays 日最低点抬升 ≥ minRise 且 ≥ riseMinScore，
- *     当日不回落（Δ ≥ 0）→ 次日开盘买入。低位启动常分几天完成，单日 Δ 都不到 buyDelta，
- *     改成看「自低点抬升了多少」才不会把这类启动全部漏掉；
- *     rise 口径同时认「单日跳升」（Δ ≥ buyDelta 且 评分 ≥ minScore，低位按突变前 N 日判）：
- *     单日大幅跳升的启动日当天就该出信号，否则要等累计抬升补齐、晚一天才买；
+ *   买入（两种口径都只有「单日跳升」）：Δ ≥ buyDelta 且 评分 ≥ 地板 且「低位启动」→ 次日开盘买入；
+ *     地板：buyMode=jump 取 minScore，buyMode=rise 取 riseMinScore（两者默认都是 60）；
+ *   抬升（评分自近 riseRefDays 日最低点抬升 ≥ minRise 且 ≥ riseMinScore、当日不回落）
+ *     只在 buyMode=rise 时标成「抬升观察」，不建仓——实测该形态期望≈0、盈利因子<1；
  *   Δ ≤ sellDelta                                → 次日开盘卖出；
  *   评分自持仓期最高点回撤 ≥ trailDrop 且 Δ ≤ 0   → 次日开盘卖出（回撤止盈，反弹当天不卖）。
  *
- * 三个入场过滤（均为 0 时关闭）：
+ * 四个入场过滤（均为 0 时关闭）：
  *   低位启动 lowBaseDays/lowBaseMax：jump 口径要求突变前 N 个评分日都 ≤ lowBaseMax；
  *     rise 口径要求近 N 日最低分（抬升起点）≤ lowBaseMax。
  *     只看单日跳升会把「高位跌两天再反抽 +20」当成买点（下跌趋势里的伪信号）；
  *   冷却期 cooldownDays：卖出成交日起 N 个交易日内不开新仓，避免"绿柱卖出后反抽又追回"；
+ *     默认关闭（0）：全市场离线回测（925 只 / 203 个交易日）里开启 3 日冷却后，
+ *     笔数 -22%、期望 +1.45%→+1.00%、盈利因子 1.65→1.47，收益贡献反而下降；
  *   跳空过滤 maxGapPct：信号日收盘 → 次日开盘的跳空超过 ±该百分比则放弃本次信号，
- *     防止在追高（高开）或破位（低开）时按次日开盘价接盘。
+ *     防止在追高（高开）或破位（低开）时按次日开盘价接盘；默认同样关闭（0），
+ *     原因同上——被它挡掉的信号在样本里平均是赚的；
+ *   均线区间 maBandLow/maBandHigh：信号日收盘价要在短均线之上、长均线之下
+ *     （5/10/20/40/60 的组合，与离线脚本 --ma-band / 列表「区间」过滤同口径）。
  */
 import { Stock } from '@/types/stock';
+import { MaBand, maBandOkAt } from './maBand';
 
 export interface ShortScoreBacktestParams {
   /** 买入：单日评分跳升阈值（分） */
@@ -50,8 +54,8 @@ export interface ShortScoreBacktestParams {
   /**
    * 买入口径：
    *   jump = 只看单日跳升：Δ ≥ buyDelta 且 评分 ≥ minScore
-   *   rise = 主看累计抬升：评分自近 riseRefDays 日最低点抬升 ≥ minRise 且 ≥ riseMinScore；
-   *          同时认「单日跳升」（Δ ≥ buyDelta 且 评分 ≥ minScore）作为另一种启动形态，取并集
+   *   rise = 买点同样是单日跳升（地板取 riseMinScore），额外把「累计抬升达标」标成
+   *          「抬升观察」——只有标记，不下单（历史验证见 ShortScoreSignalKind 注释）
    */
   buyMode: 'jump' | 'rise';
   /** rise 模式：自低点抬升幅度下限（分） */
@@ -60,6 +64,14 @@ export interface ShortScoreBacktestParams {
   riseRefDays: number;
   /** rise 模式：评分绝对地板（低于该值不算启动） */
   riseMinScore: number;
+  /**
+   * 均线区间过滤：信号日收盘价必须 > MA(maBandLow) 且 < MA(maBandHigh)
+   *
+   * 0/0 表示关闭。区间取 5/10/20/40/60 的组合（与离线脚本 --ma-band 同口径），
+   * 对应「中期趋势没坏、短期回踩到中继位置」的低吸形态。
+   */
+  maBandLow: number;
+  maBandHigh: number;
 }
 
 export const DEFAULT_SHORT_SCORE_BACKTEST: ShortScoreBacktestParams = {
@@ -68,8 +80,10 @@ export const DEFAULT_SHORT_SCORE_BACKTEST: ShortScoreBacktestParams = {
   minScore: 60,
   fee: 0.0012,
   limitDays: 240,
-  cooldownDays: 3,
-  maxGapPct: 2,
+  // 冷却期 / 跳空过滤默认关闭：离线回测（与 --cooldown 3 --max-gap 2 对照组比较）显示
+  // 两者都会减少交易并降低每笔期望，收益贡献 0.7%→0.4%/股票年，因此不作为默认开关。
+  cooldownDays: 0,
+  maxGapPct: 0,
   // 低位启动：突变前 3 个评分日都 ≤45（= 启动地板 riseMinScore，起点高于地板就不算低位启动）
   lowBaseDays: 3,
   lowBaseMax: 45,
@@ -79,7 +93,14 @@ export const DEFAULT_SHORT_SCORE_BACKTEST: ShortScoreBacktestParams = {
   buyMode: 'jump',
   minRise: 20,
   riseRefDays: 10,
-  riseMinScore: 45,
+  // 抬升观察的评分地板，同时是 rise 口径下「跳升买入」的评分下限。
+  // 历史上是 45，但跳升买点实测在 45 分时信号后 3 日 -0.33%/44%，60 分时 +0.25%/48%，
+  // 收益贡献从 0.8% 提到 2.8%/股票年（55 分约 3.2%，与 60 分在噪声范围内），
+  // 所以默认抬到 60，与经典跳升策略的 minScore 对齐。
+  riseMinScore: 60,
+  // 均线区间默认关闭（0/0）：打开后只买「短均线之上、长均线之下」的回调位
+  maBandLow: 0,
+  maBandHigh: 0,
 };
 
 /**
@@ -93,7 +114,7 @@ export const DEFAULT_SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = {
   buyMode: 'rise',
 };
 
-/** 「抬升买入」标记色：橙色 */
+/** 「抬升观察」标记色：橙色（只观察，不再作为买点） */
 export const SHORT_SCORE_RISE_BUY_MARK_COLOR = '#fa8c16';
 /** 「跳升买入」标记色：粉色 */
 export const SHORT_SCORE_JUMP_BUY_MARK_COLOR = '#eb2f96';
@@ -102,7 +123,7 @@ export const SHORT_SCORE_SELL_MARK_COLOR = '#00e676';
 
 /** 信号种类 -> 标记色（观察 / 空返回空串，表示不标记） */
 export function shortScoreSignalColor(kind?: string): string {
-  if (kind === '抬升买入') {
+  if (kind === '抬升观察') {
     return SHORT_SCORE_RISE_BUY_MARK_COLOR;
   }
   if (kind === '跳升买入') {
@@ -194,7 +215,7 @@ export interface ShortScoreBacktestSkip {
   date: string;
   score: number;
   delta: number;
-  reason: '非低位启动' | '评分历史不足' | '冷却期' | '跳空高开' | '跳空低开';
+  reason: '非低位启动' | '评分历史不足' | '冷却期' | '跳空高开' | '跳空低开' | '均线区间';
   /** 次日开盘相对信号日收盘的跳空幅度（%），正=高开；未成交时为 0 */
   gap: number;
   /** 非低位启动时：突变前 N 日里的最高评分（便于核对） */
@@ -247,11 +268,14 @@ const num = (v: any) => (typeof v === 'number' && Number.isFinite(v) ? v : Numbe
 /**
  * 列表「信号」列的取值
  *
- * 买入分两种启动形态，图/表上都分开标记，方便区分「分几天磨出来的」和「一天怼上去的」：
- * - 抬升买入：自近 N 日低点累计抬升达标（rise）
- * - 跳升买入：单日跳升达阈值（jump）
+ * 只有「跳升买入」是买点。抬升买入已降级为「抬升观察」：
+ * 实测（2026-02~11，小盘成长 / 300 只抽样）抬升信号 18 次/股票年、是跳升的 17~21 倍，
+ * 单笔期望 -0.07%~-0.19%、盈利因子 0.94~0.98（扣成本后为负），27% 还是连续重复触发，
+ * 当买点会把跳升的 +1.5~+2.7%/笔优势稀释到 0 附近。所以只保留标记、不建仓：
+ * - 抬升观察：自近 N 日低点累计抬升达标（rise），仅提示，不产生买点
+ * - 跳升买入：单日跳升达阈值（jump），唯一的买点
  */
-export type ShortScoreSignalKind = '抬升买入' | '跳升买入' | '卖出' | '观察';
+export type ShortScoreSignalKind = '抬升观察' | '跳升买入' | '卖出' | '观察';
 
 export interface ShortScoreSignal {
   kind: ShortScoreSignalKind;
@@ -261,9 +285,9 @@ export interface ShortScoreSignal {
   via?: 'rise' | 'jump';
 }
 
-/** 信号是否为买入（抬升买入 / 跳升买入） */
+/** 信号是否为买点（只有「跳升买入」；抬升观察不算） */
 export function isBuySignalKind(kind?: string): boolean {
-  return kind === '抬升买入' || kind === '跳升买入';
+  return kind === '跳升买入';
 }
 
 /** 保留一位小数（-0 归零，避免显示 -0.0） */
@@ -332,13 +356,13 @@ function signalContext(
  *   2. 没有冷却期与跳空过滤（那两项依赖卖出成交日与次日开盘价）。
  * 买入与卖出同时成立时按买入输出（reason 里仍会写明回撤值，便于自己判断）。
  *
- * **启动有两种形态，rise 口径两者都认，且分两类信号标记**：
- *   - 跳升买入（前置判断）：当日 Δ ≥ buyDelta 且 评分 ≥（rise 口径取 riseMinScore，jump 口径取 minScore），
+ * **只有「跳升买入」是买点**：
+ *   - 跳升买入：当日 Δ ≥ buyDelta 且 评分 ≥（rise 口径取 riseMinScore，jump 口径取 minScore），
  *     一根大跳升柱就是启动日本身；
- *   - 抬升买入：近 riseRefDays 日最低分 → 当日评分抬升 ≥ minRise（分几天磨出来的低位启动）。
- * 只认累计抬升会把「单日跳升 +26 但累计还没到 20 分」的启动日漏掉、延后一天才出信号，
- * 所以 rise 口径按「或」处理；两套口径各自带自己的评分地板与低位条件。
- * 两者同时成立时归一为「跳升买入」（当日确实是跳升柱），reason 里会注明累计抬升也达标。
+ *   - 抬升观察：近 riseRefDays 日最低分 → 当日评分抬升 ≥ minRise（分几天磨出来的低位启动）。
+ *     这一类只做标记、不建仓——实测 18 次/股票年（跳升的十几倍）、单笔期望≈0、
+ *     盈利因子 <1，混进买点会把跳升的优势稀释掉，理由见 ShortScoreSignalKind 的注释。
+ * 两者同时成立时仍标「跳升买入」（当日确实是跳升柱），reason 里会注明累计抬升也达标。
  */
 export function evaluateShortScoreSignal(args: {
   scores: Record<string, number>;
@@ -426,7 +450,8 @@ export function evaluateShortScoreSignal(args: {
       via: 'jump',
     };
   } else if (riseOk) {
-    return { kind: '抬升买入', reason: withSell(riseReason), via: 'rise' };
+    // 抬升只作观察：历史回测里这类信号单笔期望≈0、盈利因子<1，当买点只会摊薄收益
+    return { kind: '抬升观察', reason: withSell(`仅观察不建仓：${riseReason}`), via: 'rise' };
   }
 
   if (sellOk) {
@@ -577,7 +602,10 @@ export function runShortScoreBacktest(args: {
     buyMode: raw.buyMode === 'rise' ? 'rise' : 'jump',
     minRise: Math.max(0, Number(raw.minRise) || 0),
     riseRefDays: Math.max(1, Math.min(60, Math.floor(Number(raw.riseRefDays) || 10))),
-    riseMinScore: Number.isFinite(Number(raw.riseMinScore)) ? Number(raw.riseMinScore) : 45,
+    riseMinScore: Number.isFinite(Number(raw.riseMinScore)) ? Number(raw.riseMinScore) : 60,
+    // 均线区间：旧调用方没有这两个字段 → 0/0（关闭），保持行为不变
+    maBandLow: Math.max(0, Math.floor(Number(raw.maBandLow) || 0)),
+    maBandHigh: Math.max(0, Math.floor(Number(raw.maBandHigh) || 0)),
   };
   // rise 模式必须有抬升阈值，否则退化成「评分 ≥ 地板就买」，信号会爆量
   if (params.buyMode === 'rise' && params.minRise <= 0) {
@@ -600,6 +628,21 @@ export function runShortScoreBacktest(args: {
   const lastScoreKey = scoreKeys[scoreKeys.length - 1] || '';
   const inWindow = all.filter((b) => (!lastScoreKey || b.key <= lastScoreKey) && b.open > 0);
   const window = inWindow.slice(-limitDays);
+  // 均线区间要在「窗口之前的历史」上算：只用窗口内K线算，最早几十根会因不足 N 日被判成不通过
+  const allCloses = all.map((b) => b.close);
+  const allIdxByKey = new Map(all.map((b, i) => [b.key, i]));
+  const maBand: MaBand | null =
+    params.maBandLow > 0 && params.maBandHigh > params.maBandLow
+      ? { low: params.maBandLow, high: params.maBandHigh }
+      : null;
+  /** 第 i 根窗口K线是否落在均线区间内（数据不足 / 找不到对应K线按不通过） */
+  const maBandOk = (i: number) => {
+    if (!maBand) {
+      return true;
+    }
+    const idx = allIdxByKey.get(window[i].key);
+    return idx === undefined ? false : maBandOkAt(allCloses, idx, maBand) === true;
+  };
 
   const emptyStats: ShortScoreBacktestStats = {
     trades: 0, winRate: 0, avgRet: 0, medianRet: 0, avgWin: 0, avgLoss: 0, payoff: 0,
@@ -721,24 +764,36 @@ export function runShortScoreBacktest(args: {
       }
       continue;
     }
-    // rise：低位启动常分几天完成（22.9 → 31.2 → 47.8 → 52.3，单日都不到 20），
-    // 看「评分自近 N 日低点抬升了多少」比看单日 Δ 更贴近启动本身；
-    // 但「单日就大幅跳升」的那种启动日也必须当天认（累计抬升可能还没到阈值），
-    // 所以 rise 口径按「累计抬升达标 或 单日跳升达标」取并集，与列表「信号」列同一套判定。
+    // 买点只有单日跳升一种。历史上 rise 口径按「累计抬升达标 或 单日跳升达标」取并集，
+    // 但抬升那一路信号太密（18 次/股票年，是跳升的十几倍）且扣成本后期望≈0，
+    // 已降级为列表里的「抬升观察」标记，不再产生交易。
     const lowRef = params.buyMode === 'rise' ? recentLowOf(i, params.riseRefDays) : null;
-    const riseAmt = lowRef === null ? 0 : cur - lowRef;
-    // 跳升的评分下限：rise 口径与抬升共用绝对地板（否则「Δ 跳了 20 分但评分 58 < 60」会被判成抬升）
+    // 跳升的评分下限：rise 口径沿用 riseMinScore（与列表「信号」列同一套阈值）
     const jumpMinScore = params.buyMode === 'rise' ? params.riseMinScore : params.minScore;
     const jumpHit = delta >= params.buyDelta && cur >= jumpMinScore;
-    const riseHit = lowRef !== null && delta >= 0 && riseAmt >= params.minRise && cur >= params.riseMinScore;
-    const hitBuy = params.buyMode === 'rise' ? riseHit || jumpHit : jumpHit;
-    /** 这一根是靠「单日跳升」成立的（低位过滤要按 jump 口径看突变前 N 日） */
-    const viaJump = params.buyMode === 'rise' ? !riseHit : true;
+    // 抬升命中只用于「信号列/图上标记」，不再开仓：实测该形态单笔期望≈0、盈利因子<1，
+    // 频率还是跳升的十几倍，并进买点会把跳升的优势完全稀释
+    const hitBuy = jumpHit;
+    /** 唯一买点就是单日跳升，低位过滤按 jump 口径看突变前 N 日 */
+    const viaJump = true;
     if (hitBuy) {
       const signalBar = window[i];
       // 信号日收盘 → 次日开盘的跳空（次日开盘就是成交价）
       const gap = signalBar.close > 0 ? window[i + 1].open / signalBar.close - 1 : 0;
       const gapPct = gap * 100;
+
+      // 均线区间过滤：收盘价要夹在短均线之上、长均线之下（上升中继回调），
+      // 站上长均线（追高）或跌破短均线（走坏）都不买
+      if (!maBandOk(i)) {
+        skips.push({
+          date: signalBar.date,
+          score: Number(cur.toFixed(2)),
+          delta: Number(delta.toFixed(2)),
+          reason: '均线区间',
+          gap: Number(gapPct.toFixed(2)),
+        });
+        continue;
+      }
 
       // 低位启动过滤：
       //   rise：抬升的起点（近 N 日最低分）本身要在低位

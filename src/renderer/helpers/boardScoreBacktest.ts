@@ -5,12 +5,18 @@
  * 并把每只股票窗口最后一根 K 线的突变判定为「今日信号」（次日开盘买入），
  * 再按信号质量评分排序 —— 多只股票同时触发买入信号时按分数从高到低选。
  *
+ * 历史区间回测：传 startDate/endDate 时只统计「买入日」落在区间内的交易，
+ * 并把跨股票的交易明细（trades）与汇总（summary）一起返回，用于发现策略缺陷；
+ * 不传区间 = 用整段窗口（limit 根 K 线）。
+ *
  * 口径与个股回测面板（shortTermScoreBacktest）完全一致：
  *   评分来自 computeShortTermScoreCurve（逐日现算，不读评分缓存）；
  *   买入 Δ ≥ buyDelta 且 评分 ≥ minScore，次日开盘买；
  *   卖出 Δ ≤ sellDelta，次日开盘卖；
  *   低位启动过滤 / 回撤止盈 / 冷却期 / 跳空过滤同样生效（被过滤的信号不会出现在今日信号里）：
  *   今日信号要求突变前 N 个评分日都 ≤ lowBaseMax，持仓提示同时覆盖「单日跳降」与「自峰值回撤」。
+ *   均线区间（maBandLow/maBandHigh）同样作用于历史回测与今日信号：收盘价要在短均线之上、
+ *   长均线之下，与列表「区间」过滤、离线脚本 --ma-band 同一口径。
  *
  * 信号质量评分（满分 100）只评估「当前这个信号」，维度全部来自已有数据，不含未来数据：
  *   突变强度 15 + 评分水平 10 + 历史胜率 12 + 历史期望 8 + 盈亏比 5
@@ -19,11 +25,13 @@
 import { Stock } from '@/types/stock';
 import { FundApiType } from '@/utils/enums';
 import { computeShortTermScoreCurve, createScoreContext, SHORT_SCORE_SOURCE } from './shortTermScoreList';
+import { maBandOkAt } from './maBand';
 import {
   DEFAULT_SHORT_SCORE_BACKTEST,
   runShortScoreBacktest,
   ShortScoreBacktestParams,
   ShortScoreBacktestStats,
+  ShortScoreBacktestTrade,
 } from './shortTermScoreBacktest';
 
 const dayKey = (d?: string) => String(d || '').replace(/-/g, '').substring(0, 8);
@@ -80,12 +88,24 @@ export interface BoardBacktestStock {
   quality?: SignalQuality;
 }
 
+/** 板块历史回测的单笔交易（在个股 Trade 上补上股票信息，便于跨股票汇总/排序） */
+export interface BoardBacktestTrade extends ShortScoreBacktestTrade {
+  key: string;
+  code: string;
+  name: string;
+  /** 是否为窗口末仍未平仓（不参与汇总统计，避免未来函数） */
+  open: boolean;
+}
+
 export interface BoardScoreBacktestResult {
   board: { secid: string; name: string; type: number };
   params: ShortScoreBacktestParams;
   generatedAt: string;
   /** 评分曲线窗口（交易日） */
   limit: number;
+  /** 实际回测区间（取所有股票成交区间的并集） */
+  rangeStart: string;
+  rangeEnd: string;
   total: number;
   succeeded: number;
   failed: number;
@@ -95,6 +115,68 @@ export interface BoardScoreBacktestResult {
   signals: BoardBacktestStock[];
   /** 全部股票，按「有信号 → 质量分 → 胜率」倒序 */
   stocks: BoardBacktestStock[];
+  /** 区间内全部交易（按买入日倒序），用于「交易明细」 */
+  trades: BoardBacktestTrade[];
+  /** 区间内全部交易的汇总（只统计已平仓交易） */
+  summary: ShortScoreBacktestStats;
+}
+
+/** 把多只股票的交易汇总成一份统计（与个股回测同口径，只统计已平仓交易） */
+function aggregateTrades(
+  trades: BoardBacktestTrade[],
+  days: number
+): ShortScoreBacktestStats {
+  const closed = trades.filter((t) => !t.open);
+  const rets = closed.map((t) => t.ret);
+  const mean = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+  const median = (arr: number[]) => {
+    if (!arr.length) {
+      return 0;
+    }
+    const s = arr.slice().sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  };
+  const wins = rets.filter((r) => r > 0);
+  const losses = rets.filter((r) => r <= 0);
+  const avgWin = mean(wins);
+  const avgLoss = mean(losses);
+  const grossWin = wins.reduce((a, b) => a + b, 0);
+  const grossLoss = Math.abs(losses.reduce((a, b) => a + b, 0));
+  const avg = mean(rets);
+  const sd = rets.length > 1 ? Math.sqrt(mean(rets.map((r) => (r - avg) ** 2))) : 0;
+  const years = Math.max(days, 1) / 252;
+  const tradesPerYear = years > 0 ? closed.length / years : 0;
+  // 按买入日排序后复利，只用于组间比较
+  let equity = 1;
+  let peak = 1;
+  let maxDD = 0;
+  closed
+    .slice()
+    .sort((a, b) => dayKey(a.entryDate).localeCompare(dayKey(b.entryDate)))
+    .forEach((t) => {
+      equity *= 1 + t.ret;
+      peak = Math.max(peak, equity);
+      maxDD = Math.max(maxDD, 1 - equity / peak);
+    });
+  return {
+    trades: closed.length,
+    winRate: closed.length ? wins.length / closed.length : 0,
+    avgRet: avg,
+    medianRet: median(rets),
+    avgWin,
+    avgLoss,
+    payoff: losses.length && avgLoss !== 0 ? avgWin / Math.abs(avgLoss) : wins.length ? Infinity : 0,
+    profitFactor: grossLoss > 0 ? grossWin / grossLoss : grossWin > 0 ? Infinity : 0,
+    sharpe: sd > 0 && tradesPerYear > 0 ? (avg / sd) * Math.sqrt(tradesPerYear) : 0,
+    avgBars: closed.length ? mean(closed.map((t) => t.bars)) : 0,
+    cumulative: equity - 1,
+    maxDrawdown: maxDD,
+    exposure: 0,
+    tradesPerYear,
+    best: rets.length ? Math.max(...rets) : 0,
+    worst: rets.length ? Math.min(...rets) : 0,
+  };
 }
 
 /**
@@ -233,11 +315,12 @@ async function runPool<T, R>(
   return out;
 }
 
-/** 取信号日那根 K 线之前的量能 / 高点位置 */
+/** 取信号日那根 K 线之前的量能 / 高点位置（同时带出收盘价序列，供均线区间判定） */
 function liveMetrics(klines: Stock.KLineItem[], signalKey: string) {
   const idx = klines.findIndex((k) => dayKey(k.date) === signalKey);
+  const closes = klines.map((k) => num(k.sp));
   if (idx < 0) {
-    return { volumeRatio: 1, drawdownFromHigh: 0.15, found: false };
+    return { volumeRatio: 1, drawdownFromHigh: 0.15, found: false, idx: -1, closes };
   }
   const close = num(klines[idx].sp);
   // 前 5 日均量（不含信号日）
@@ -248,7 +331,7 @@ function liveMetrics(klines: Stock.KLineItem[], signalKey: string) {
   const window60 = klines.slice(Math.max(0, idx - 59), idx + 1).map((k) => num(k.sp));
   const high = window60.length ? Math.max(...window60) : close;
   const drawdownFromHigh = high > 0 ? Math.max(0, 1 - close / high) : 0.15;
-  return { volumeRatio, drawdownFromHigh, found: true };
+  return { volumeRatio, drawdownFromHigh, found: true, idx, closes };
 }
 
 /**
@@ -263,8 +346,14 @@ export async function runBoardScoreBacktest(args: {
   params: ShortScoreBacktestParams;
   /** K线数据源（与设置里的 K线API 一致） */
   source?: FundApiType;
-  /** 评分曲线窗口（交易日，20~120） */
+  /** 评分曲线窗口（交易日，20~600） */
   limit?: number;
+  /**
+   * 历史区间（含端点，YYYY-MM-DD / YYYYMMDD 均可）。
+   * 只保留「买入日」落在区间内的交易；不传 = 用整段窗口。
+   */
+  startDate?: string;
+  endDate?: string;
   /** 只回测前 N 只（0 = 全部） */
   maxStocks?: number;
   concurrency?: number;
@@ -272,8 +361,10 @@ export async function runBoardScoreBacktest(args: {
   onProgress?: (info: { done: number; total: number; code: string; name: string }) => void;
 }): Promise<BoardScoreBacktestResult> {
   const params: ShortScoreBacktestParams = { ...DEFAULT_SHORT_SCORE_BACKTEST, ...args.params };
-  // 窗口上限 240：与个股回测面板一致（详情页曲线已按 K 线长度算，最长 240 根日K）
-  const limit = Math.max(20, Math.min(240, Math.floor(Number(args.limit) || 120)));
+  // 窗口上限 600：历史区间回测要覆盖 1~2 年，个股回测面板仍按自己的 limit 传值
+  const limit = Math.max(20, Math.min(600, Math.floor(Number(args.limit) || 120)));
+  const startKey = dayKey(args.startDate);
+  const endKey = dayKey(args.endDate);
   const maxStocks = Math.max(0, Math.floor(Number(args.maxStocks) || 0));
   const concurrency = Math.max(1, Math.min(4, Math.floor(Number(args.concurrency) || 2)));
 
@@ -288,6 +379,8 @@ export async function runBoardScoreBacktest(args: {
   const list = maxStocks > 0 ? items.slice(0, maxStocks) : items;
   const total = list.length;
   let done = 0;
+  /** 跨股票汇总的交易明细（并发写，JS 单线程 push 是安全的） */
+  const allTrades: BoardBacktestTrade[] = [];
 
   const results = await runPool(
     list,
@@ -313,6 +406,23 @@ export async function runBoardScoreBacktest(args: {
           scores: curve.scores,
           klines: curve.klines,
           params,
+        });
+        // 收集区间内的交易（买入日落在 [startKey, endKey] 内；不传区间则全收）
+        bt.trades.forEach((t, i) => {
+          const entryKey = dayKey(t.entryDate);
+          if (startKey && entryKey < startKey) {
+            return;
+          }
+          if (endKey && entryKey > endKey) {
+            return;
+          }
+          allTrades.push({
+            ...t,
+            key: `${item.code}-${entryKey}-${i}`,
+            code: item.code,
+            name: item.name,
+            open: t.exitReason === '窗口结束',
+          });
         });
         const bars = bt.bars;
         const lastIdx = bars.length - 1;
@@ -353,7 +463,9 @@ export async function runBoardScoreBacktest(args: {
           out.exitSignal = delta <= params.sellDelta || (params.trailDrop > 0 && drop >= params.trailDrop);
           return out;
         }
-        if (delta < params.buyDelta || cur < params.minScore) {
+        // 买点只有「跳升」一种（抬升已降级为观察）；评分地板与回测循环保持一致
+        const jumpMinScore = params.buyMode === 'rise' ? params.riseMinScore : params.minScore;
+        if (delta < params.buyDelta || cur < jumpMinScore) {
           return out;
         }
         // 低位启动：突变前 N 个评分日都要在低位（与回测循环 / 离线脚本同口径）
@@ -363,12 +475,29 @@ export async function runBoardScoreBacktest(args: {
           if (idx < params.lowBaseDays) {
             return out;
           }
-          const prevHigh = Math.max(...keys.slice(idx - params.lowBaseDays, idx).map((k) => curve.scores[k]));
-          if (prevHigh > params.lowBaseMax) {
-            return out;
+          // rise 口径下「抬升起点在低位」也算低位启动（历史回测里就是这么放行的）
+          const refKeys = keys.slice(Math.max(0, idx - params.riseRefDays), idx);
+          const lowRef = refKeys.length ? Math.min(...refKeys.map((k) => curve.scores[k])) : null;
+          const riseLowOk = params.buyMode === 'rise' && lowRef !== null && lowRef <= params.lowBaseMax;
+          if (!riseLowOk) {
+            const prevHigh = Math.max(...keys.slice(idx - params.lowBaseDays, idx).map((k) => curve.scores[k]));
+            if (prevHigh > params.lowBaseMax) {
+              return out;
+            }
           }
         }
         const metrics = liveMetrics(curve.klines, lastKey);
+        // 均线区间：与历史回测同一口径（收盘价在短均线之上、长均线之下），
+        // 数据不足（K线不够算均线）视为不通过，避免把算不出均线的票当成信号
+        if (params.maBandLow > 0 && params.maBandHigh > params.maBandLow) {
+          const ok = maBandOkAt(metrics.closes, metrics.idx, {
+            low: params.maBandLow,
+            high: params.maBandHigh,
+          });
+          if (ok !== true) {
+            return out;
+          }
+        }
         out.live = {
           date: bars[lastIdx].date,
           score: Number(cur.toFixed(2)),
@@ -387,6 +516,47 @@ export async function runBoardScoreBacktest(args: {
     },
     args.shouldStop
   );
+
+  // 交易明细按买入日倒序（最新的在最前），同一天按代码排，便于核对
+  const trades = allTrades
+    .slice()
+    .sort(
+      (a, b) =>
+        dayKey(b.entryDate).localeCompare(dayKey(a.entryDate)) || a.code.localeCompare(b.code)
+    );
+  const entryKeys = trades.map((t) => dayKey(t.entryDate)).sort();
+  const rangeStart = entryKeys[0] || startKey;
+  const rangeEnd = entryKeys[entryKeys.length - 1] || endKey;
+  // 区间交易日数：能从首尾买入日推出来就用真实跨度，否则退回窗口根数
+  const spanDays =
+    rangeStart && rangeEnd
+      ? Math.max(
+          1,
+          Math.round(
+            (new Date(
+              `${rangeEnd.slice(0, 4)}-${rangeEnd.slice(4, 6)}-${rangeEnd.slice(6, 8)}`
+            ).getTime() -
+              new Date(
+                `${rangeStart.slice(0, 4)}-${rangeStart.slice(4, 6)}-${rangeStart.slice(6, 8)}`
+              ).getTime()) /
+              86400000
+          ) * 0.69
+        )
+      : limit;
+
+  // 选了区间：用区间内的交易重算每只股票的统计，否则「全部成分股」页仍是整段窗口的胜率，
+  // 和「交易明细」对不上
+  if (startKey || endKey) {
+    const byCode = new Map<string, BoardBacktestTrade[]>();
+    trades.forEach((t) => {
+      const arr = byCode.get(t.code) || [];
+      arr.push(t);
+      byCode.set(t.code, arr);
+    });
+    results.forEach((r) => {
+      r.stats = aggregateTrades(byCode.get(r.code) || [], spanDays);
+    });
+  }
 
   // 板块共振要等全部股票算完才知道，所以质量分在第二阶段统一计算
   const liveCount = results.filter((r) => r.live).length;
@@ -421,6 +591,8 @@ export async function runBoardScoreBacktest(args: {
     params,
     generatedAt: new Date().toISOString(),
     limit,
+    rangeStart,
+    rangeEnd,
     total,
     succeeded: results.filter((r) => r.status === 'ok').length,
     failed: results.filter((r) => r.status === 'error').length,
@@ -433,5 +605,7 @@ export async function runBoardScoreBacktest(args: {
       }
       return byQuality(a, b);
     }),
+    trades,
+    summary: aggregateTrades(trades, spanDays),
   };
 }

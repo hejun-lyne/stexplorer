@@ -79,6 +79,7 @@ import {
   normalizeKlineShape,
 } from '@/helpers/klineShape';
 import { RSI_SHAPE_FILTER_OPTIONS, normalizeRsiShape } from '@/helpers/rsiShape';
+import { MA_BAND_OPTIONS, MaBand, parseMaBand } from '@/helpers/maBand';
 import { filterThemeBoards } from '@/helpers/boardFilter';
 import { saveTrainDayAction } from '@/actions/train';
 import { toggleStockFavoriteAction } from '@/actions/setting';
@@ -227,12 +228,20 @@ const BOARD_COLUMN_LIMIT = 3;
  * （评分历史不足、该行还没算过评分，与单元格里的 -- 同义）。
  */
 const SIGNAL_FILTER_OPTIONS = [
-  { label: '抬升买入', value: '抬升买入' },
+  { label: '抬升观察', value: '抬升观察' },
   { label: '跳升买入', value: '跳升买入' },
   { label: '卖出', value: '卖出' },
   { label: '观察', value: '观察' },
   { label: '（未判定）', value: '' },
 ];
+
+/**
+ * 「信号 / 质量」列的排序键：按信号质量评分（0~100）排序
+ *
+ * 质量分只对「有信号」的行有意义（观察/未判定为 null），这些行无论升降序都排在最后。
+ * 第一次点击直接降序（质量高的在前），再点升序，第三次取消，与 K线形态列一致。
+ */
+const SIGNAL_QUALITY_SORT_KEY = 'signalQuality';
 
 /**
  * 列表「信号」列使用的策略参数
@@ -318,8 +327,16 @@ const STList: React.FC<STListProps> = ({
   const [filterSecids, setFilterSecids] = useState<string[]>([]);
   /** 均线过滤勾选的周期（空数组=不过滤）：要求收盘价站上勾选的每一条均线 */
   const [maPeriods, setMaPeriods] = useState<number[]>([]);
-  /** 是否启用了 K 线过滤（K线类型 or 均线）：两者任一勾选时，列表才按过滤结果裁剪 */
-  const klineFilterActive = ftypes.length > 0 || maPeriods.length > 0;
+  /**
+   * 均线区间（'5:20'，空串=不过滤）：要求收盘价在短均线之上、长均线之下
+   *
+   * 与「均线」多选是两条独立条件（同时设置时取交集）：均线多选是「站上全部」，
+   * 区间是「夹在两条之间」，对应离线脚本的 --below-ma / --ma-band。
+   */
+  const [maBandSel, setMaBandSel] = useState('');
+  const maBand = React.useMemo(() => parseMaBand(maBandSel), [maBandSel]);
+  /** 是否启用了 K 线过滤（K线类型 / 均线 / 均线区间）：任一勾选时，列表才按过滤结果裁剪 */
+  const klineFilterActive = ftypes.length > 0 || maPeriods.length > 0 || !!maBand;
   const [nameFilter, setNameFilter] = useState('');
   /** 排除科创板 + 北交所（默认勾选）：同时作用于列表展示与评分池（短线评分 / 训练周期预计算） */
   const [excludeStarBse, setExcludeStarBse] = useState(true);
@@ -456,7 +473,7 @@ const STList: React.FC<STListProps> = ({
   const [shortScoreKlineShapes, setShortScoreKlineShapes] = useState<string[]>([]);
   // RSI形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；按归一化后的形态 key 过滤）
   const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
-  // 信号筛选：仅显示所选信号的股票（多选，空数组=不过滤；值为 抬升买入/跳升买入/卖出/观察/''（未判定））
+  // 信号筛选：仅显示所选信号的股票（多选，空数组=不过滤；值为 跳升买入/抬升观察/卖出/观察/''（未判定））
   const [shortScoreSignals, setShortScoreSignals] = useState<string[]>([]);
   // 信号筛选项的计数：打开漏斗时才统计（信号要逐行按评分序列判定，不能在评分过程中反复全表重算）
   const [signalFilterCounts, setSignalFilterCounts] = useState<Record<string, number>>({});
@@ -1178,7 +1195,8 @@ const STList: React.FC<STListProps> = ({
         base.map((s) => s.secid),
         ftypes,
         fdays,
-        maPeriods
+        maPeriods,
+        maBand
       );
     }, 400);
   }, [
@@ -1189,6 +1207,7 @@ const STList: React.FC<STListProps> = ({
     ftypes,
     fdays,
     maPeriods,
+    maBand,
     runFilterStocks,
   ]);
 
@@ -2489,10 +2508,10 @@ const STList: React.FC<STListProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ontrain, trainDate, pendingBuyKey, dispatch]);
 
-  /** 立刻按「K线类型 + 均线」跑一次过滤（两个勾选组共用，任一变化都要重算） */
+  /** 立刻按「K线类型 + 均线 + 均线区间」跑一次过滤（三组勾选共用，任一变化都要重算） */
   const runKlineFilter = useCallback(
-    (types: number[], periods: number[]) => {
-      if ((!types.length && !periods.length) || !poolStocks.length) {
+    (types: number[], periods: number[], band: MaBand | null) => {
+      if ((!types.length && !periods.length && !band) || !poolStocks.length) {
         return;
       }
       setFiltering(true);
@@ -2500,7 +2519,8 @@ const STList: React.FC<STListProps> = ({
         poolStocks.map((s) => s.secid),
         types,
         fdays,
-        periods
+        periods,
+        band
       );
     },
     [poolStocks, fdays, runFilterStocks]
@@ -2510,9 +2530,9 @@ const STList: React.FC<STListProps> = ({
     (ts: any[]) => {
       setFtypes(ts);
       setCurrentPage(1);
-      runKlineFilter(ts, maPeriods);
+      runKlineFilter(ts, maPeriods, maBand);
     },
-    [maPeriods, runKlineFilter]
+    [maPeriods, maBand, runKlineFilter]
   );
 
   /** 均线勾选变化：立刻重算过滤（取消全部条件时 filterStocks 会自动退回完整池子） */
@@ -2520,9 +2540,19 @@ const STList: React.FC<STListProps> = ({
     (periods: number[]) => {
       setMaPeriods(periods);
       setCurrentPage(1);
-      runKlineFilter(ftypes, periods);
+      runKlineFilter(ftypes, periods, maBand);
     },
-    [ftypes, runKlineFilter]
+    [ftypes, maBand, runKlineFilter]
+  );
+
+  /** 均线区间变化：立刻重算过滤（空串=关闭该条件） */
+  const updateMaBand = useCallback(
+    (value: string) => {
+      setMaBandSel(value);
+      setCurrentPage(1);
+      runKlineFilter(ftypes, maPeriods, parseMaBand(value));
+    },
+    [ftypes, maPeriods, runKlineFilter]
   );
 
   const filterStocks = React.useMemo(
@@ -2569,20 +2599,20 @@ const STList: React.FC<STListProps> = ({
   const updateSortType = useCallback((key: string) => {
     setSortTypes((prev) => {
       const currentType = prev[key] || 0;
-      // K线形态列：常用顺序是「阳线在前、形态优先级高的在前」，所以第一次点击直接给降序（2），
+      // K线形态 / 信号质量列：常用顺序是「形态优先级高的在前、质量高的在前」，所以第一次点击直接给降序（2），
       // 再点一次给升序（1），第三次取消；其余列沿用「升序 → 降序 → 取消」
-      const nextType =
-        key === KLINE_SHAPE_SORT_KEY
-          ? currentType === 0
-            ? 2
-            : currentType === 2
-            ? 1
-            : 0
-          : currentType === 0
-          ? 1
-          : currentType === 1
+      const preferDescFirst = key === KLINE_SHAPE_SORT_KEY || key === SIGNAL_QUALITY_SORT_KEY;
+      const nextType = preferDescFirst
+        ? currentType === 0
           ? 2
-          : 0;
+          : currentType === 2
+          ? 1
+          : 0
+        : currentType === 0
+        ? 1
+        : currentType === 1
+        ? 2
+        : 0;
       // 只保留当前点击列的排序状态，其他列重置
       if (nextType === 0) {
         return {};
@@ -2835,6 +2865,26 @@ const STList: React.FC<STListProps> = ({
           // 与板块评分列表共用同一套比较逻辑（helpers/klineShape）。降序=阳线在前、形态优先级高的在前。
           const t = sortTypes[KLINE_SHAPE_SORT_KEY];
           list.sort((a: any, b: any) => compareKlineShape(a, b, t));
+        } else if (keys[0] === SIGNAL_QUALITY_SORT_KEY) {
+          // 信号质量排序：逐行判定信号并算质量分（0~100）。
+          // 观察 / 未判定没有质量分（null），无论升降序都排在最后。
+          // 只在用户点了该列排序时才计算：评分过程中列表会不断追加行，避免每行都白算一遍。
+          const t = sortTypes[SIGNAL_QUALITY_SORT_KEY];
+          const qualityCache = new Map<any, number | null>();
+          list.forEach((row: any) => {
+            const sig = signalOfShortScoreRow(row);
+            const total = sig?.quality?.total;
+            qualityCache.set(row, typeof total === 'number' && Number.isFinite(total) ? total : null);
+          });
+          list.sort((a: any, b: any) => {
+            const left = qualityCache.get(a);
+            const right = qualityCache.get(b);
+            if (left == null && right == null) return 0;
+            if (left == null) return 1;
+            if (right == null) return -1;
+            if (left === right) return 0;
+            return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+          });
         } else {
           list.sort((a: any, b: any) => {
             const left = Number(a[keys[0]]) || 0;
@@ -2857,7 +2907,7 @@ const STList: React.FC<STListProps> = ({
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, scoreStale, isFavorited]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, scoreStale, isFavorited, signalOfShortScoreRow]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」「市值区间」和「名字过滤」过滤（对所有展示模式生效）
@@ -3035,7 +3085,9 @@ const STList: React.FC<STListProps> = ({
         ` K线形态过滤=${shortScoreKlineShapes.length ? shortScoreKlineShapes.join('/') : '无'}` +
         ` RSI形态过滤=${shortScoreRsiShapes.length ? shortScoreRsiShapes.join('/') : '无'}` +
         ` 信号过滤=${shortScoreSignals.length ? shortScoreSignals.map((s) => s || '未判定').join('/') : '无'}` +
-        ` 板块过滤=${shortScoreBoards.length ? shortScoreBoards.join('/') : '无'} 名字过滤="${nameFilter}"`
+        ` 板块过滤=${shortScoreBoards.length ? shortScoreBoards.join('/') : '无'}` +
+        ` 均线=${maPeriods.length ? maPeriods.map((p) => `MA${p}`).join('/') : '无'}` +
+        ` 区间=${maBandSel || '无'} 名字过滤="${nameFilter}"`
     );
   }, [
     displayMode,
@@ -3052,6 +3104,8 @@ const STList: React.FC<STListProps> = ({
     shortScoreShowNotListed,
     shortScoreFilterEnabled,
     shortScoreRsiFilterEnabled,
+    maPeriods,
+    maBandSel,
     nameFilter,
   ]);
 
@@ -3285,6 +3339,26 @@ const STList: React.FC<STListProps> = ({
   const panelStockCode = panelRow ? codeOfListItem(panelRow) : '';
   const panelStockSecid = panelStockCode ? `${panelStockCode.startsWith('6') ? '1' : '0'}.${panelStockCode}` : '';
 
+  /**
+   * 面板「列表模式」要展示的已收藏股票（按收藏顺序）
+   *
+   * 收藏只存 6 位代码，名称优先用名称缓存，其次当前板块列表/评分结果/自选股配置兜底，
+   * 都取不到时先显示代码（面板内部仍能按代码取数）。
+   */
+  const panelFavoriteStocks = React.useMemo(() => {
+    const nameOf = (code: string) =>
+      stockNameCacheRef.current[code] ||
+      String((stocks as any[]).find((s) => String(s?.code || '') === code)?.name || '') ||
+      String((displayList as any[]).find((r) => codeOfListItem(r) === code)?.name || '') ||
+      (stockConfigsMapping as any)[`${code.startsWith('6') ? '1' : '0'}.${code}`]?.name ||
+      '';
+    return (favoriteCodes || [])
+      // 收藏理论上只存 6 位代码，这里再兜底一次 ts_code 形态（000001.SZ -> 000001）
+      .map((c) => String(c || '').split('.')[0].trim())
+      .filter(Boolean)
+      .map((code) => ({ code, name: nameOf(code) || code }));
+  }, [favoriteCodes, stocks, displayList, stockConfigsMapping]);
+
   // ========== 时间推进：联动刷新列表 K线形态 ==========
   /** 当页股票在训练日的全部分时缓存（secid -> 分时），整轮训练内复用，推进不重复取数 */
   const intradayTrendsRef = React.useRef<Record<string, Stock.TrendItem[]>>({});
@@ -3453,6 +3527,21 @@ const STList: React.FC<STListProps> = ({
               style={{ minWidth: 160, maxWidth: 260 }}
               options={MA_FILTER_OPTIONS.map((p) => ({ label: `MA${p}`, value: p }))}
               maxTagCount="responsive"
+            />
+          </span>
+          <span
+            style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            title="均线区间过滤：只保留收盘价在短均线之上、长均线之下的股票（价在两条均线之间，对应上升中继回调）。与左边的「均线」多选同时设置时取交集"
+          >
+            <span style={{ fontSize: 12 }}>区间</span>
+            <Select
+              size="small"
+              allowClear
+              placeholder="均线区间"
+              value={maBandSel || undefined}
+              onChange={(v) => updateMaBand((v as string) || '')}
+              style={{ minWidth: 130 }}
+              options={MA_BAND_OPTIONS.filter((o) => o.value)}
             />
           </span>
           <Checkbox
@@ -3879,7 +3968,7 @@ const STList: React.FC<STListProps> = ({
           <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="信号（按评分序列逐日判定，与回测同一套阈值）：买入分两种形态——「跳升买入」（粉色，优先级更高）=单日跳升≥20分且评分≥45、突变前3日≤45，当日就是一根跳升柱；「抬升买入」（橙色）=自近10日低点累计抬升≥20分且评分≥45、抬升起点≤45（分几天磨出来的启动；当日若也跳升≥20则归为跳升买入）。卖出=单日Δ≤-15 或 自近10日最高分回撤≥10（且当日评分未继续走高）；观察=其余情况。悬停单元格可看判定依据。信号后的数字是该信号的质量分（0~100）与等级 A/B/C/D：抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20，按满分归一到 100。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）"
+              title={`信号（按评分序列逐日判定，与回测同一套阈值）：唯一买点是「跳升买入」（粉色）=单日跳升≥${SHORT_SCORE_SIGNAL_PARAMS.buyDelta}分且评分≥${SHORT_SCORE_SIGNAL_PARAMS.riseMinScore}、突变前${SHORT_SCORE_SIGNAL_PARAMS.lowBaseDays}日≤${SHORT_SCORE_SIGNAL_PARAMS.lowBaseMax}，当日就是一根跳升柱。「抬升观察」（橙色）=自近${SHORT_SCORE_SIGNAL_PARAMS.riseRefDays}日低点累计抬升≥${SHORT_SCORE_SIGNAL_PARAMS.minRise}分且评分≥${SHORT_SCORE_SIGNAL_PARAMS.riseMinScore}、抬升起点≤${SHORT_SCORE_SIGNAL_PARAMS.lowBaseMax}（分几天磨出来的启动；当日若也跳升≥${SHORT_SCORE_SIGNAL_PARAMS.buyDelta}则归为跳升买入），只做标记不建仓——该形态实测 18 次/股票年（跳升的十几倍）、单笔期望≈0、盈利因子<1，混进买点会把跳升的优势稀释掉。卖出=单日Δ≤${SHORT_SCORE_SIGNAL_PARAMS.sellDelta} 或 自近${SHORT_SCORE_SIGNAL_PARAMS.riseRefDays}日最高分回撤≥${SHORT_SCORE_SIGNAL_PARAMS.trailDrop}（且当日评分未继续走高）；观察=其余情况。悬停单元格可看判定依据。信号后的数字是该信号的质量分（0~100）与等级 A/B/C/D：抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20，按满分归一到 100。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）`}
             >
               <span className={styles.klineShapeHeaderText}>信号 / 质量</span>
               <Dropdown
@@ -3945,6 +4034,22 @@ const STList: React.FC<STListProps> = ({
                   }
                 />
               </Dropdown>
+              <Button
+                size="small"
+                type="text"
+                icon={
+                  sortTypes[SIGNAL_QUALITY_SORT_KEY] == 1 ? (
+                    <CaretUpOutlined />
+                  ) : sortTypes[SIGNAL_QUALITY_SORT_KEY] == 2 ? (
+                    <CaretDownOutlined />
+                  ) : (
+                    <CaretRightOutlined />
+                  )
+                }
+                className={styles.sortbtn}
+                onClick={() => updateSortType(SIGNAL_QUALITY_SORT_KEY)}
+                title="按信号质量评分排序（首次点击降序：质量高的在前）；观察 / 未判定没有质量分，始终排在最后"
+              />
             </span>
           </Col>
           <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
@@ -4459,9 +4564,9 @@ const STList: React.FC<STListProps> = ({
                       >
                         <span
                           style={{
-                            // 抬升买入=橙、跳升买入=粉、卖出=主题绿、观察=次要文字色，与图上柱子标记色一致
+                            // 抬升观察=橙、跳升买入=粉、卖出=主题绿、观察=次要文字色，与图上柱子标记色一致
                             color:
-                              sig.signal.kind === '抬升买入'
+                              sig.signal.kind === '抬升观察'
                                 ? SHORT_SCORE_RISE_BUY_MARK_COLOR
                                 : sig.signal.kind === '跳升买入'
                                   ? SHORT_SCORE_JUMP_BUY_MARK_COLOR
@@ -4696,6 +4801,7 @@ const STList: React.FC<STListProps> = ({
             trainDate={ontrain ? trainDate : ''}
             trainTime={ontrain ? trainTime : ''}
             onOpenStock={onOpenStock}
+            favoriteStocks={panelFavoriteStocks}
           />
         ) : null}
         </div>

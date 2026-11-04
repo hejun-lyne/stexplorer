@@ -22,6 +22,7 @@ import {
 } from '@/actions/stock';
 import { Stock } from '@/types/stock';
 import { ChanGSpotState, ChanTrendState, ChanType, MAType, PriceMAState } from '@/utils/enums';
+import { MaBand, maBandOkAt } from '@/helpers/maBand';
 import moment from 'moment';
 import { EastmoneySingleStockPush, EastmoneySingleTrendsPush, EastmoneyStockDetailsPush, EastmoneyStockKlinesPush } from '@/services/push';
 const { saveString } = window.contextModules.electron;
@@ -2282,17 +2283,19 @@ export async function AnalyzeKline(secid: string, type: Enums.KSortType, klimit:
  * 批量 K 线过滤
  *
  * maPeriods 为均线过滤的周期列表（空数组=不过滤）：要求最新收盘价站上所选的全部均线。
+ * maBand 为均线区间（null=不过滤）：要求收盘价在短均线上方、长均线下方。
  * K 线条数按最大均线周期自动加长，避免自定义长周期（如 MA120）因取数不足被误判为不通过。
  */
 export async function FilterMultiKlines(
   secids: string[],
   types: Enums.KFilterType[],
   days: number,
-  maPeriods: number[] = []
+  maPeriods: number[] = [],
+  maBand: MaBand | null = null
 ) {
-  const maxPeriod = maPeriods.length ? Math.max(...maPeriods) : 0;
+  const maxPeriod = Math.max(maPeriods.length ? Math.max(...maPeriods) : 0, maBand ? maBand.high : 0);
   const klimit = Math.max(100, maxPeriod + 5);
-  const collectors = secids.map((s) => () => FilterKline(s, types, days, klimit, maPeriods));
+  const collectors = secids.map((s) => () => FilterKline(s, types, days, klimit, maPeriods, maBand));
   return Adapter.ConCurrencyAllAdapter(collectors);
 }
 
@@ -2301,9 +2304,10 @@ export async function FilterKline(
   types: Enums.KFilterType[],
   days: number,
   klimit = 100,
-  maPeriods: number[] = []
+  maPeriods: number[] = [],
+  maBand: MaBand | null = null
 ) {
-  if (types.length == 1 && types[0] == Enums.KFilterType.NKCB && !maPeriods.length) {
+  if (types.length == 1 && types[0] == Enums.KFilterType.NKCB && !maPeriods.length && !maBand) {
     if (secid.indexOf('1.688') == -1 ) {
       return secid;
     } else {
@@ -2316,6 +2320,10 @@ export async function FilterKline(
   }
   // 均线过滤：最新收盘价站上所选的全部均线（多条时取交集）
   if (maPeriods.length && !AboveMAs(ks, maPeriods)) {
+    return null;
+  }
+  // 均线区间：收盘价夹在短均线之上、长均线之下（与板块回测的「均线区间」同一口径）
+  if (maBand && !InMaBand(ks, maBand)) {
     return null;
   }
   let passed = true;
@@ -2369,6 +2377,17 @@ function AboveMAs(ks: Stock.KLineItem[], periods: number[]) {
     }
     return last >= sum / p;
   });
+}
+
+/**
+ * 均线区间过滤：最新收盘价是否在短均线之上、长均线之下
+ *
+ * 两条均线任一算不出来（K 线不足）都判为不通过，口径与 AboveMAs 一致；
+ * 边界判定复用 helpers/maBand，保证与板块回测 / 离线脚本看到的是同一个形态。
+ */
+function InMaBand(ks: Stock.KLineItem[], band: MaBand) {
+  const closes = ks.map((k) => Number(k.sp));
+  return maBandOkAt(closes, closes.length - 1, band) === true;
 }
 
 function ZJZT(ks: Stock.KLineItem[], days: number) {

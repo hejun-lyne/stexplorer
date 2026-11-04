@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Radio, Select, Slider, Spin, Switch, Tag, Tooltip } from 'antd';
-import { ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
+import { UnorderedListOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import { useSelector } from 'react-redux';
+import { StoreState } from '@/reducers/types';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import * as CONST from '@/constants';
@@ -42,7 +44,8 @@ import {
   Early30Features,
 } from '@/helpers/intradayPattern';
 import { GetCompanyFromTushare } from '@/services/tushare';
-import ScoreStockTrade from './ScoreStockTrade';
+import { ComputeTrainAccount } from '@/helpers/trainAccount';
+import ScoreStockTrade, { POSITION_RATIOS } from './ScoreStockTrade';
 
 /** 面板日K线取数条数（约半年） */
 const PANEL_KLINE_LIMIT = 120;
@@ -80,6 +83,8 @@ interface TrendOptionParams {
   zs: number;
   /** 昨日的日K（用于标出昨日最低价、昨日开盘价），为空表示取不到 */
   prevBar?: Stock.KLineItem | null;
+  /** 图表总高度（列表模式会压缩，便于同时观察多只股票） */
+  height?: number;
 }
 
 interface KlineOptionParams {
@@ -90,7 +95,13 @@ interface KlineOptionParams {
   techType: number;
   /** 短线评分曲线（YYYYMMDD -> 综合评分），仅 techType = SHORT_SCORE 时使用 */
   shortScoreScores?: Record<string, number>;
+  /** 图表总高度（列表模式会压缩，便于同时观察多只股票） */
+  height?: number;
 }
+
+/** 列表模式的图表高度：压缩后一屏能同时看多只股票的分时 */
+const LIST_TREND_HEIGHT = 230;
+const LIST_KLINE_HEIGHT = 300;
 
 /** 短线评分曲线的线色（与评分等级色区分，保持中性金色） */
 const SHORT_SCORE_LINE_COLOR = '#faad14';
@@ -403,7 +414,7 @@ function buildTechSeries(
  * 布局（价格 / 成交量 / 技术指标）按开关动态排布，高度用像素计算，
  * 保证在较矮的面板里各 grid 也能等分得比较均匀。
  */
-function buildKlineOption({ klines, range, showVolume, techType, shortScoreScores }: KlineOptionParams) {
+function buildKlineOption({ klines, range, showVolume, techType, shortScoreScores, height }: KlineOptionParams) {
   const colors = Utils.getVariablesColor(CONST.VARIABLES);
   const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
   const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
@@ -427,12 +438,13 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
   const closes = klines.map((k) => k.sp);
   const vols = klines.map((k, i) => [i, k.cjl, i > 0 && k.sp < klines[i - 1].sp ? -1 : 1]);
 
-  const chartHeight = showTech ? 480 : 400;
+  const chartHeight = Number(height) > 0 ? Number(height) : showTech ? 480 : 400;
+  const compact = chartHeight < 360;
   const TOP = 6;
   const BOTTOM = 20;
   const GAP = 6;
-  const VOL_H = 54;
-  const TECH_H = 96;
+  const VOL_H = compact ? 40 : 54;
+  const TECH_H = compact ? 64 : 96;
   const priceH =
     chartHeight - TOP - BOTTOM - (showVolume ? VOL_H + GAP : 0) - (showTech ? TECH_H + GAP : 0);
   const gridWidth = { left: 6, right: 46 };
@@ -753,7 +765,7 @@ function early30FeatureText(f: Early30Features) {
  *
  * 参考线：昨收（虚横线）+ 昨日K线的最低价 / 开盘价，方便对照今天有没有跌破昨低、高开还是低开。
  */
-function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar }: TrendOptionParams) {
+function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar, height }: TrendOptionParams) {
   const colors = Utils.getVariablesColor(CONST.VARIABLES);
   const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
   const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
@@ -773,11 +785,11 @@ function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar }: Tre
     i < visible ? [i, t.vol, t.current >= t.last ? 1 : -1] : null
   );
 
-  const chartHeight = 400;
+  const chartHeight = Number(height) > 0 ? Number(height) : 400;
   const TOP = 6;
   const BOTTOM = 20;
   const GAP = 6;
-  const VOL_H = 54;
+  const VOL_H = chartHeight < 300 ? 40 : 54;
   const priceH = chartHeight - TOP - BOTTOM - (showVolume ? VOL_H + GAP : 0);
   const gridWidth = { left: 6, right: 46 };
 
@@ -998,15 +1010,139 @@ export interface ScoreStockPanelProps {
   trainTime?: string;
   /** 点击名字/代码打开股票详情 */
   onOpenStock: (secid: string, name: string) => void;
+  /**
+   * 列表模式要展示的已收藏股票（按收藏顺序）
+   *
+   * 名称由外部解析好传进来：收藏只存 6 位代码，面板内部拿不到板块列表里的名字缓存。
+   */
+  favoriteStocks?: Array<{ code: string; name: string }>;
+}
+
+/** 面板展示模式：单股详情 / 列表模式（同时看多只收藏股） */
+type PanelMode = 'single' | 'list';
+
+/** 模式与仓位的本地存储键（记住上次的选择） */
+const PANEL_MODE_KEY = 'scoreStockPanelMode';
+const PANEL_RATIO_KEY = 'scoreStockPanelPositionRatio';
+
+/** 6 位代码 -> secid（与列表里的面板股票口径一致） */
+const secidOfCode = (code: string) => `${String(code || '').startsWith('6') ? '1' : '0'}.${String(code || '')}`;
+
+/** 金额展示（元 -> 带千分位） */
+function formatMoney(v: number) {
+  const n = Math.abs(Math.round(Number(v) || 0));
+  return `¥${n.toLocaleString('zh-CN')}`;
 }
 
 /**
- * 评分结果列表右侧的个股信息面板
+ * 顶部固定的「资金情况」：训练模式取共享训练账户，非训练模式按手工交易记录估算。
  *
- * 从上往下：名字+代码（点击打开详情）→ 公司简介 → 日K线（可缩放/成交量/技术指标）→ 买入卖出操作。
+ * 不取行情：列表模式会同时展示多只股票，再给每只持仓拉收盘价请求量太大；
+ * 这里展示可用资金 / 持仓成本 / 已实现盈亏，口径与个股详情页训练工具栏一致。
+ */
+const PanelFundsSummary: React.FC = () => {
+  const { ontrain, trainDate, trainStartDate, initialCapital, commissionRate } = useSelector(
+    (state: StoreState) => state.setting.systemSetting
+  );
+  const { stockConfigsMapping, nowHolds } = useSelector((state: StoreState) => state.stock);
+
+  const summary = useMemo(() => {
+    if (ontrain) {
+      const account = ComputeTrainAccount({
+        configs: Object.values(stockConfigsMapping || {}),
+        startDate: trainStartDate || '',
+        currentDay: trainDate || '',
+        initialCapital: Number(initialCapital) || 0,
+        commissionRate,
+      });
+      return {
+        cash: account.cash,
+        cost: account.positions.reduce((s, p) => s + p.costAmount, 0),
+        count: account.positions.length,
+        realized: account.realized,
+      };
+    }
+    const holds = nowHolds || [];
+    const cost = holds.reduce((s, h) => s + Number(h.price) * Number(h.count), 0);
+    return {
+      cash: Math.max(0, (Number(initialCapital) || 100000) - cost),
+      cost,
+      count: holds.length,
+      realized: 0,
+    };
+  }, [ontrain, stockConfigsMapping, trainStartDate, trainDate, initialCapital, commissionRate, nowHolds]);
+
+  const realizedCls = summary.realized >= 0 ? 'text-up' : 'text-down';
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'baseline',
+        flexWrap: 'wrap',
+        gap: '2px 12px',
+        flex: '1 1 auto',
+        minWidth: 0,
+        fontSize: 12,
+        color: 'var(--hint-color)',
+      }}
+    >
+      <span style={{ fontWeight: 600, color: 'var(--main-text-color)' }}>
+        {ontrain ? '训练账户' : '手工交易'}
+      </span>
+      <span>
+        可用资金 <b style={{ color: 'var(--main-text-color)' }}>{formatMoney(summary.cash)}</b>
+      </span>
+      <span>
+        持仓成本 <b style={{ color: 'var(--main-text-color)' }}>{formatMoney(summary.cost)}</b>
+      </span>
+      <span>
+        持仓 <b style={{ color: 'var(--main-text-color)' }}>{summary.count}</b> 只
+      </span>
+      {ontrain ? (
+        <span>
+          已实现 <b className={realizedCls}>{`${summary.realized >= 0 ? '+' : ''}${summary.realized.toFixed(2)}`}</b>
+        </span>
+      ) : null}
+    </div>
+  );
+};
+
+export interface ScoreStockDetailProps extends ScoreStockPanelProps {
+  /** 列表模式：不显示公司简介、不自己滚动，作为可滚容器里的一段 */
+  layout?: 'single' | 'list';
+  /** 是否展示公司简介（列表模式下省略） */
+  showIntro?: boolean;
+  /** 默认图表类型（列表模式默认看分时） */
+  defaultChartMode?: PanelChartMode;
+  /** 受控仓位（列表模式顶部统一选择） */
+  ratio?: number;
+  onRatioChange?: (ratio: number) => void;
+  /** 单股模式下的「切换到列表模式」入口 */
+  onSwitchToList?: () => void;
+}
+
+/**
+ * 个股信息区域（单股详情 / 列表模式共用）
+ *
+ * 从上往下：名字+代码（点击打开详情）→ 公司简介 → 分时形态 → 图表（分时/日K）→ 买入卖出操作。
  * 日K线与短线评分同源（Tushare），训练模式下由取数层自动截断到训练日。
  */
-const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, trainDate, trainTime, onOpenStock }) => {
+const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
+  code,
+  secid,
+  name,
+  trainDate,
+  trainTime,
+  onOpenStock,
+  layout = 'single',
+  showIntro = true,
+  defaultChartMode,
+  ratio,
+  onRatioChange,
+  onSwitchToList,
+}) => {
+  const isList = layout === 'list';
   const [intro, setIntro] = useState('');
   const [introLoading, setIntroLoading] = useState(false);
   const [klines, setKlines] = useState<Stock.KLineItem[]>([]);
@@ -1019,8 +1155,9 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
   const [trends, setTrends] = useState<Stock.TrendItem[]>([]);
   const [trendLoading, setTrendLoading] = useState(false);
   const [trendError, setTrendError] = useState('');
-  // 图表默认看日K线（分时需要时手动切换；训练模式下日K的当日那根仍按「训练时间」用分时重建）
-  const [chartMode, setChartMode] = useState<PanelChartMode>('kline');
+  // 图表默认看日K线（分时需要时手动切换；训练模式下日K的当日那根仍按「训练时间」用分时重建）；
+  // 列表模式默认看分时：多只股票对照时，分时走势比日K更直观
+  const [chartMode, setChartMode] = useState<PanelChartMode>(defaultChartMode || 'kline');
 
   // ===== 图表控制（与详情页 PriceTrend 对齐）=====
   const [range, setRange] = useState<RangeArea>(DEFAULT_RANGE);
@@ -1029,7 +1166,11 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
   const [techType, setTechType] = useState<number>(TechIndicatorType.RSI);
 
   // 公司简介：Tushare 优先，取不到时回退东财（内容更全）
+  // 列表模式不展示简介，也就不取：收藏多了会白白多出一串请求
   useEffect(() => {
+    if (!showIntro) {
+      return () => {};
+    }
     let canceled = false;
     const cached = introCache.get(secid);
     if (cached != null) {
@@ -1070,7 +1211,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     return () => {
       canceled = true;
     };
-  }, [secid]);
+  }, [secid, showIntro]);
 
   // 日K线（与评分同源）
   useEffect(() => {
@@ -1149,14 +1290,14 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     };
   }, [techType, code, name, shortScoreCurveDays, klines.length]);
 
-  // 默认看日K线：只在「进入/退出训练」时回到日K，训练日推进不打断用户当前选择
+  // 默认看日K线：只在「进入/退出训练」时回到默认图表，训练日推进不打断用户当前选择
   const wasTrainingRef = useRef(inTraining);
   useEffect(() => {
     if (wasTrainingRef.current !== inTraining) {
       wasTrainingRef.current = inTraining;
-      setChartMode('kline');
+      setChartMode(defaultChartMode || 'kline');
     }
-  }, [inTraining]);
+  }, [inTraining, defaultChartMode]);
 
   // 分时取数：训练模式取训练日的历史分时（Tushare 1 分钟线），非训练模式取实时分时。
   // 训练模式下即使当前看的是日K也要取：当日那根K线要按分时重建（见 displayKlines）；
@@ -1383,14 +1524,24 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
   // 图表配色取自 CSS 变量：切主题（深/浅、低饱和度）后必须重算 option，否则 tooltip 底色会停在旧主题
   const { darkMode, lowKey } = useNativeThemeColor([]);
   const { option, chartHeight } = useMemo(() => {
+    // 列表模式压缩图表高度：一屏能同时看到多只股票的分时走势
+    const trendHeight = isList ? LIST_TREND_HEIGHT : 400;
+    const klineHeight = isList ? LIST_KLINE_HEIGHT : techType === TECH_NONE ? 400 : 480;
     if (chartMode === 'trend') {
       return trends.length
-        ? buildTrendOption({ trends, visibleCount, showVolume, zs: trendZs, prevBar: prevDayBar })
-        : { option: null, chartHeight: 400 };
+        ? buildTrendOption({ trends, visibleCount, showVolume, zs: trendZs, prevBar: prevDayBar, height: trendHeight })
+        : { option: null, chartHeight: trendHeight };
     }
     return displayKlines.length
-      ? buildKlineOption({ klines: displayKlines, range, showVolume, techType, shortScoreScores })
-      : { option: null, chartHeight: techType === TECH_NONE ? 400 : 480 };
+      ? buildKlineOption({
+          klines: displayKlines,
+          range,
+          showVolume,
+          techType,
+          shortScoreScores,
+          height: klineHeight,
+        })
+      : { option: null, chartHeight: klineHeight };
   }, [
     chartMode,
     trends,
@@ -1404,6 +1555,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
     shortScoreScores,
     darkMode,
     lowKey,
+    isList,
   ]);
   const { ref: chartRef, chartInstance } = useResizeEchart(-1);
   useRenderEcharts(
@@ -1423,47 +1575,75 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
 
   return (
     <aside
-      style={{
-        // 与左侧结果列表平分宽度
-        flex: '1 1 50%',
-        minWidth: 0,
-        height: '100%',
-        overflowY: 'auto',
-        boxSizing: 'border-box',
-        padding: '4px 12px 12px',
-        borderLeft: '1px solid var(--border-color)',
-      }}
+      style={
+        isList
+          ? {
+              // 列表模式：本身是一段内容，滚动交给外层容器（顶部头部用 sticky 固定）
+              flex: '0 0 auto',
+              minWidth: 0,
+              boxSizing: 'border-box',
+              padding: '8px 12px 14px',
+              borderBottom: '1px dashed var(--border-color)',
+            }
+          : {
+              // 与左侧结果列表平分宽度
+              flex: '1 1 50%',
+              minWidth: 0,
+              height: '100%',
+              overflowY: 'auto',
+              boxSizing: 'border-box',
+              padding: '4px 12px 12px',
+              borderLeft: '1px solid var(--border-color)',
+            }
+      }
     >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'baseline',
-          gap: 8,
-          lineHeight: 2,
-          cursor: 'pointer',
-        }}
-        title="点击打开股票详情"
-        onClick={() => onOpenStock(secid, name)}
-      >
-        <span style={{ fontSize: 16, fontWeight: 'bold', color: '#1890ff' }}>{name || code}</span>
-        <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{code}</span>
-      </div>
-
-      <div style={{ marginTop: 8 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>公司简介</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, lineHeight: 2 }}>
         <div
           style={{
-            fontSize: 12,
-            lineHeight: 1.7,
-            color: 'var(--secondary-text-color)',
-            whiteSpace: 'pre-wrap',
-            maxHeight: 120,
-            overflowY: 'auto',
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 8,
+            minWidth: 0,
+            cursor: 'pointer',
           }}
+          title="点击打开股票详情"
+          onClick={() => onOpenStock(secid, name)}
         >
-          {introLoading ? <Spin size="small" /> : intro || '暂无公司简介'}
+          <span style={{ fontSize: isList ? 14 : 16, fontWeight: 'bold', color: '#1890ff' }}>{name || code}</span>
+          <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{code}</span>
         </div>
+        {!isList && onSwitchToList ? (
+          <Tooltip title="列表模式：同时查看多只已收藏股票的分时走势">
+            <Button
+              size="small"
+              type="text"
+              icon={<UnorderedListOutlined />}
+              style={{ marginLeft: 'auto' }}
+              onClick={onSwitchToList}
+            >
+              列表模式
+            </Button>
+          </Tooltip>
+        ) : null}
       </div>
+
+      {showIntro ? (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>公司简介</div>
+          <div
+            style={{
+              fontSize: 12,
+              lineHeight: 1.7,
+              color: 'var(--secondary-text-color)',
+              whiteSpace: 'pre-wrap',
+              maxHeight: 120,
+              overflowY: 'auto',
+            }}
+          >
+            {introLoading ? <Spin size="small" /> : intro || '暂无公司简介'}
+          </div>
+        </div>
+      ) : null}
 
       {/* C5a 全天分时形态 + C5b 开盘 30 分钟预测（规格 M7a / M7b），图表上方一行展示 */}
       <div
@@ -1586,11 +1766,11 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
               {techType === TechIndicatorType.SHORT_SCORE && !shortScoreCurveLoading ? (
                 <span
                   style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}
-                  title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。橙柱=抬升买入、粉柱=跳升买入、亮绿柱=卖出（与列表「信号」列同一套规则，悬停曲线上可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
+                  title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。橙柱=抬升观察、粉柱=跳升买入、亮绿柱=卖出（与列表「信号」列同一套规则，悬停曲线上可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
                 >
                   红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
                   <span style={{ marginLeft: 4 }}>
-                    <span style={{ color: SHORT_SCORE_RISE_BUY_MARK_COLOR, fontWeight: 600 }}>橙柱=抬升买入</span>
+                    <span style={{ color: SHORT_SCORE_RISE_BUY_MARK_COLOR, fontWeight: 600 }}>橙柱=抬升观察</span>
                     {'、'}
                     <span style={{ color: SHORT_SCORE_JUMP_BUY_MARK_COLOR, fontWeight: 600 }}>粉柱=跳升买入</span>
                     {'、'}
@@ -1663,10 +1843,12 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
       </div>
 
       {/* 买入卖出区域：训练模式与详情页共用同一个训练账户 */}
-      <div style={{ marginTop: 12 }}>
-        <p>
-          <span>人不渡我，唯有自渡</span>
-        </p>
+      <div style={{ marginTop: isList ? 8 : 12 }}>
+        {!isList ? (
+          <p>
+            <span>人不渡我，唯有自渡</span>
+          </p>
+        ) : null}
         <ScoreStockTrade
           secid={secid}
           code={code}
@@ -1674,8 +1856,154 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({ code, secid, name, tr
           klines={klines}
           currentPrice={trendPrice}
           intradayReady={!trendLoading}
+          ratio={ratio}
+          onRatioChange={onRatioChange}
+          compact={isList}
         />
       </div>
+    </aside>
+  );
+};
+
+/**
+ * 评分结果列表右侧面板
+ *
+ * 两种模式互相切换：
+ * - 单股详情：原来的一只股票完整信息（简介 / 图表 / 买卖）；
+ * - 列表模式：顶部固定（sticky）资金情况 + 仓位选择 + 切换按钮，下方按收藏顺序
+ *   依次展示每只收藏股的分时形态 → 图表 → 买入卖出操作。
+ *
+ * 模式与仓位选择存在本地，重启后保持上次的选择。
+ */
+const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
+  code,
+  secid,
+  name,
+  trainDate,
+  trainTime,
+  onOpenStock,
+  favoriteStocks,
+}) => {
+  const [mode, setMode] = useState<PanelMode>(() =>
+    Utils.GetStorage<string>(PANEL_MODE_KEY, 'single') === 'list' ? 'list' : 'single'
+  );
+  const [ratio, setRatio] = useState<number>(() => {
+    const saved = Number(Utils.GetStorage(PANEL_RATIO_KEY, POSITION_RATIOS[0].value));
+    return POSITION_RATIOS.some((r) => r.value === saved) ? saved : POSITION_RATIOS[0].value;
+  });
+
+  const switchMode = useCallback((next: PanelMode) => {
+    setMode(next);
+    Utils.SetStorage(PANEL_MODE_KEY, next);
+  }, []);
+
+  const changeRatio = useCallback((v: number) => {
+    setRatio(v);
+    Utils.SetStorage(PANEL_RATIO_KEY, v);
+  }, []);
+
+  /** 收藏列表：按 6 位代码去重（名称由外部解析） */
+  const favorites = useMemo(() => {
+    const seen = new Set<string>();
+    return (favoriteStocks || [])
+      .map((s) => ({ code: String(s?.code || '').trim(), name: String(s?.name || '') }))
+      .filter((s) => {
+        if (!s.code || seen.has(s.code)) {
+          return false;
+        }
+        seen.add(s.code);
+        return true;
+      });
+  }, [favoriteStocks]);
+
+  if (mode === 'single') {
+    return (
+      <ScoreStockDetail
+        code={code}
+        secid={secid}
+        name={name}
+        trainDate={trainDate}
+        trainTime={trainTime}
+        onOpenStock={onOpenStock}
+        layout="single"
+        showIntro
+        ratio={ratio}
+        onRatioChange={changeRatio}
+        onSwitchToList={() => switchMode('list')}
+      />
+    );
+  }
+
+  return (
+    <aside
+      style={{
+        // 与左侧结果列表平分宽度
+        flex: '1 1 50%',
+        minWidth: 0,
+        height: '100%',
+        overflowY: 'auto',
+        boxSizing: 'border-box',
+        padding: '0 12px 12px',
+        borderLeft: '1px solid var(--border-color)',
+      }}
+    >
+      {/* 顶部固定：资金情况 + 仓位选择 + 模式切换（不跟随下方图表滚动） */}
+      <div
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 10,
+          background: 'var(--background-color)',
+          padding: '6px 0',
+          marginBottom: 4,
+          borderBottom: '1px solid var(--border-color)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <PanelFundsSummary />
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Tooltip title="买入仓位：对所有收藏股票的买入区生效">
+              <span style={{ fontSize: 11, color: 'var(--hint-color)' }}>仓位</span>
+            </Tooltip>
+            <Select size="small" style={{ width: 82 }} value={ratio} onChange={(v) => changeRatio(Number(v))}>
+              {POSITION_RATIOS.map((r) => (
+                <Select.Option key={r.value} value={r.value}>
+                  {r.label}
+                </Select.Option>
+              ))}
+            </Select>
+            <Button size="small" onClick={() => switchMode('single')}>
+              单股详情
+            </Button>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--hint-color)', marginTop: 2 }}>
+          列表模式 · 已收藏 {favorites.length} 只（按收藏顺序，点击名称看个股详情）
+        </div>
+      </div>
+
+      {favorites.length ? (
+        favorites.map((s) => (
+          <ScoreStockDetail
+            key={s.code}
+            code={s.code}
+            secid={secidOfCode(s.code)}
+            name={s.name || s.code}
+            trainDate={trainDate}
+            trainTime={trainTime}
+            onOpenStock={onOpenStock}
+            layout="list"
+            showIntro={false}
+            defaultChartMode="trend"
+            ratio={ratio}
+            onRatioChange={changeRatio}
+          />
+        ))
+      ) : (
+        <div style={{ fontSize: 12, color: 'var(--hint-color)', padding: '12px 0' }}>
+          暂无收藏股票：在列表里点击星标收藏后，这里会按顺序显示它们的分时走势与买卖操作。
+        </div>
+      )}
     </aside>
   );
 };

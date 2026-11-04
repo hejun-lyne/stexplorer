@@ -25,7 +25,7 @@ const DEFAULT_COMMISSION = 0.0003;
 /** 训练买卖点标记（与详情页 TrainBar 的 TRAIN_TYPE 一致） */
 const TRAIN_MARK = 'train';
 /** 仓位：全仓 / 可用资金（或持仓）的 1/2、1/3、1/4，与详情页买卖区一致 */
-const POSITION_RATIOS = [
+export const POSITION_RATIOS = [
   { value: 1, label: '全仓' },
   { value: 2, label: '1/2仓' },
   { value: 3, label: '1/3仓' },
@@ -137,6 +137,19 @@ export interface ScoreStockTradeProps {
   currentPrice?: number;
   /** 分时是否已取回（false = 还在加载）：加载中不允许下单，避免用收盘价成交 */
   intradayReady?: boolean;
+  /**
+   * 受控仓位（列表模式顶部统一选择）：传值时不由本组件维护，切换股票也不会重置
+   */
+  ratio?: number;
+  /** 受控仓位的变更回调（由顶部统一选择维护时必传） */
+  onRatioChange?: (ratio: number) => void;
+  /**
+   * 紧凑模式（右侧面板列表模式）
+   *
+   * 只保留「买入（按顶部选择的仓位金额）」与「清仓（有持仓时）」两个按钮，
+   * 不渲染理由输入、金额输入、仓位下拉与操作记录，避免多只股票时占满屏幕。
+   */
+  compact?: boolean;
 }
 
 /**
@@ -159,7 +172,17 @@ export interface ScoreStockTradeProps {
  * 与买卖记录一起列在操作记录里。
  * 面板最后按标的列出操作记录（训练买卖点 / 手工交易记录 / 复盘），逐条显示理由。
  */
-const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, klines, currentPrice, intradayReady }) => {
+const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
+  secid,
+  code,
+  name,
+  klines,
+  currentPrice,
+  intradayReady,
+  ratio: ratioProp,
+  onRatioChange,
+  compact = false,
+}) => {
   const dispatch = useDispatch();
   const { ontrain, trainDate, trainStartDate, initialCapital, commissionRate, kLineApiSourceSetting } = useSelector(
     (state: StoreState) => state.setting.systemSetting
@@ -168,7 +191,18 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
   const config = stockConfigsMapping?.[secid];
 
   const [tradeType, setTradeType] = useState<'buy' | 'sell'>('buy');
-  const [ratio, setRatio] = useState<number>(POSITION_RATIOS[0].value);
+  const [innerRatio, setInnerRatio] = useState<number>(POSITION_RATIOS[0].value);
+  /** 受控仓位（列表模式顶部统一选择）：外部传值时以外部为准，切股不重置 */
+  const ratioControlled = typeof ratioProp === 'number' && ratioProp > 0;
+  const ratio = ratioControlled ? Number(ratioProp) : innerRatio;
+  const setRatio = (v: number) => {
+    if (!ratioControlled) {
+      setInnerRatio(v);
+    }
+    if (onRatioChange) {
+      onRatioChange(v);
+    }
+  };
   const [amount, setAmount] = useState<number | null>(null);
   const [reason, setReason] = useState('');
   // ===== 复盘记录（按标的存本地，不参与训练账户 / 交易记录计算）=====
@@ -345,10 +379,13 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
   }, [secid, klines, dispatch, trainDate]);
 
   // 换股：重置表单（成交价随分时/日K自动更新；理由由上面的草稿逻辑回填，这里不动）
+  // 受控仓位（列表模式顶部统一选择）不在这里重置，否则每只股票都会回到「全仓」
   useEffect(() => {
     setTradeType('buy');
-    setRatio(POSITION_RATIOS[0].value);
-  }, [secid]);
+    if (!ratioControlled) {
+      setInnerRatio(POSITION_RATIOS[0].value);
+    }
+  }, [secid, ratioControlled]);
 
   const canSubmit = (() => {
     if (intradayReady === false) {
@@ -417,19 +454,29 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
     }
   };
 
-  const doSubmit = async () => {
+  /**
+   * 提交买卖
+   *
+   * @param override 列表模式（紧凑交易区）直接指定方向 / 股数 / 金额，
+   *                 不依赖界面上没有渲染的「买卖方向 / 金额输入框」状态
+   */
+  const doSubmit = async (override?: { type?: 'buy' | 'sell'; shares?: number; amount?: number; reason?: string }) => {
+    const submitType = override?.type || tradeType;
+    const submitShares = override?.shares != null ? override.shares : shares;
+    const submitAmount = override?.amount != null ? override.amount : tradeAmount;
+    const submitOrderAmount = submitShares * tradePrice;
     // 训练模式下买入未收藏的标的：先自动加入自选股（标签：训练），再写入买卖点
-    if (tradeType === 'buy' && !(await ensureTrainConfig())) {
+    if (submitType === 'buy' && !(await ensureTrainConfig())) {
       return;
     }
-    const reasonText = reason.trim();
+    const reasonText = (override?.reason != null ? override.reason : reason).trim();
     const tradeDate = ontrain
       ? String(trainBar?.date).substring(0, 10)
       : String(lastBar?.date).substring(0, 10) || moment().format('YYYY-MM-DD');
-    const pendingBuy = tradeType === 'buy' && limitUpToday;
+    const pendingBuy = submitType === 'buy' && limitUpToday;
 
     if (ontrain) {
-      if (tradeType === 'buy') {
+      if (submitType === 'buy') {
         if (pendingBuy) {
           dispatch(
             appendTrade({
@@ -438,51 +485,57 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
               secid,
               name: name || code,
               price: tradePrice,
-              count: shares,
+              count: submitShares,
               time: `${tradeDate} 15:00:00`,
               stoplossAt: 0,
               latestNewsAs: 'positive',
               explain: '',
               reason: reasonText,
               pending: true,
-              pendingAmount: tradeAmount,
+              pendingAmount: submitAmount,
               profits: [0, 0, 0, 0, 0],
             })
           );
-          message.success(`当日涨停买不进，已挂下一交易日开盘价买入：${name}（${formatMoney(tradeAmount)}）`);
+          message.success(`当日涨停买不进，已挂下一交易日开盘价买入：${name}（${formatMoney(submitAmount)}）`);
         } else {
-          dispatch(addStockTradePointAction(secid, tradeDate, tradePrice, true, TRAIN_MARK, tradeAmount, reasonText));
-          message.success(`已买入 ${name}：${tradePrice.toFixed(2)} × ${shares} 股（${formatMoney(orderAmount)}）`);
+          dispatch(
+            addStockTradePointAction(secid, tradeDate, tradePrice, true, TRAIN_MARK, submitAmount, reasonText)
+          );
+          message.success(
+            `已买入 ${name}：${tradePrice.toFixed(2)} × ${submitShares} 股（${formatMoney(submitOrderAmount)}）`
+          );
         }
       } else {
         dispatch(addStockTradePointAction(secid, tradeDate, tradePrice, false, TRAIN_MARK, undefined, reasonText));
-        message.success(`已清仓 ${name}：${tradePrice.toFixed(2)} × ${shares} 股（${formatMoney(orderAmount)}）`);
+        message.success(
+          `已清仓 ${name}：${tradePrice.toFixed(2)} × ${submitShares} 股（${formatMoney(submitOrderAmount)}）`
+        );
       }
     } else {
       dispatch(
         appendTrade({
           id: 0,
-          type: tradeType,
+          type: submitType,
           secid,
           name: name || code,
           price: pendingBuy ? Number(lastBar?.sp) || tradePrice : tradePrice,
-          count: shares,
+          count: submitShares,
           time: pendingBuy ? `${tradeDate} 15:00:00` : moment(new Date()).format('YYYY-MM-DD HH:mm:ss'),
           stoplossAt: 0,
           latestNewsAs: 'positive',
           explain: '',
           reason: reasonText,
           pending: pendingBuy || undefined,
-          pendingAmount: pendingBuy ? orderAmount : undefined,
+          pendingAmount: pendingBuy ? submitOrderAmount : undefined,
           profits: [0, 0, 0, 0, 0],
         })
       );
       message.success(
         pendingBuy
-          ? `当日涨停买不进，已挂下一交易日开盘价买入：${name}（${formatMoney(orderAmount)}）`
-          : `${tradeType === 'buy' ? '买入' : '卖出'}已记录：${name} ${tradePrice.toFixed(2)} × ${shares} 股（${formatMoney(
-              orderAmount
-            )}）`
+          ? `当日涨停买不进，已挂下一交易日开盘价买入：${name}（${formatMoney(submitOrderAmount)}）`
+          : `${submitType === 'buy' ? '买入' : '卖出'}已记录：${name} ${tradePrice.toFixed(
+              2
+            )} × ${submitShares} 股（${formatMoney(submitOrderAmount)}）`
       );
     }
     // 理由已经写进操作记录，草稿清空（输入框里不再留着上一笔的理由）
@@ -655,6 +708,114 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({ secid, code, name, kl
     }
     return '';
   })();
+
+  // ===== 紧凑模式（列表模式）：只保留「按顶部仓位买入」与「清仓」 =====
+  /** 买入金额：可用资金 ÷ 顶部选择的仓位比例 */
+  const compactBuyBudget = Math.floor(cashBase / ratio);
+  const compactBuyShares = (() => {
+    if (tradePrice <= 0 || compactBuyBudget <= 0) {
+      return 0;
+    }
+    // 训练模式金额含佣金（与 ComputeTrainAccount 口径一致）
+    const budget = ontrain ? compactBuyBudget / (1 + commission) : compactBuyBudget;
+    return Math.floor(budget / tradePrice / MIN_LOT) * MIN_LOT;
+  })();
+  const compactBuyAmount = compactBuyShares * tradePrice;
+  const canCompactBuy =
+    intradayReady !== false &&
+    tradePrice > 0 &&
+    (!ontrain || !!trainBar) &&
+    compactBuyShares >= MIN_LOT &&
+    compactBuyBudget <= cashBase + 1e-6;
+  const canCompactSell =
+    intradayReady !== false && tradePrice > 0 && sellSharesBase > 0 && (!ontrain || (!!trainBar && !boughtToday));
+  const ratioLabel = POSITION_RATIOS.find((r) => r.value === ratio)?.label || `${ratio}`;
+  /** 买入按钮不可点的原因（列表模式没有输入框，需要一句话说明） */
+  const compactBuyHint =
+    intradayReady === false
+      ? '分时价加载中'
+      : ontrain && !trainBar
+        ? suspended
+          ? '当日停牌'
+          : '当日无行情'
+        : tradePrice <= 0
+          ? '暂无行情'
+          : compactBuyShares < MIN_LOT
+            ? '可用资金不足一手'
+            : '';
+
+  /** 列表模式直接下单：买入按顶部仓位金额，卖出一次清仓 */
+  const handleCompactSubmit = async (type: 'buy' | 'sell') => {
+    if (submittingRef.current) {
+      return;
+    }
+    if (type === 'buy' ? !canCompactBuy : !canCompactSell) {
+      return;
+    }
+    submittingRef.current = true;
+    try {
+      if (type === 'buy') {
+        await doSubmit({ type: 'buy', shares: compactBuyShares, amount: compactBuyBudget });
+      } else {
+        await doSubmit({ type: 'sell', shares: sellSharesBase, amount: sellSharesBase * tradePrice });
+      }
+    } finally {
+      submittingRef.current = false;
+    }
+  };
+
+  if (compact) {
+    return (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 6,
+          fontSize: 11,
+          color: 'var(--secondary-text-color)',
+        }}
+      >
+        <span>
+          {trendPrice > 0 ? '现价' : '收盘'} <b>{tradePrice > 0 ? tradePrice.toFixed(2) : '--'}</b>
+        </span>
+        {sellSharesBase > 0 ? (
+          <span>
+            持仓 <b>{sellSharesBase}</b> 股
+          </span>
+        ) : null}
+        <Button
+          size="small"
+          type="primary"
+          disabled={!canCompactBuy}
+          onClick={() => handleCompactSubmit('buy')}
+          title={compactBuyHint || `按顶部仓位（${ratioLabel}）买入，金额随可用资金自动换算`}
+        >
+          {limitUpToday ? '买入(次日开盘)' : '买入'} · {formatMoney(compactBuyAmount)}
+        </Button>
+        {sellSharesBase > 0 ? (
+          <Button
+            size="small"
+            danger
+            disabled={!canCompactSell}
+            onClick={() => handleCompactSubmit('sell')}
+            title={boughtToday ? 'T+1：当日买入，下一交易日才能卖出' : `按现价清仓 ${sellSharesBase} 股`}
+          >
+            清仓
+          </Button>
+        ) : null}
+        {compactBuyHint ? <span style={{ color: '#faad14' }}>{compactBuyHint}</span> : null}
+        {pendingBuys.length ? (
+          <span style={{ color: 'var(--hint-color)' }}>
+            待成交 {formatMoney(Number(pendingBuys[0].pendingAmount) || 0)}
+            <a style={{ marginLeft: 4 }} onClick={() => dispatch(removeTrade(pendingBuys[0].id))}>
+              取消
+            </a>
+          </span>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div style={{ marginTop: 12 }}>

@@ -4703,7 +4703,9 @@ class TushareAPI:
             # 数据库缓存（meta.db/api_cache）：按「个股/板块 + 代码 + 周期 + 截止交易日」缓存。
             # 历史交易日的数据不会变化 → 长期复用；真实当天（盘中）资金流仍可能更新 → 1 小时时效。
             # 训练模式下 _now() 为训练日期，属于历史日期，因此训练日结果可长期复用。
-            cache_key = f"moneyflow_{'ind' if is_board else 'stock'}_{code}_{days or 0}_{today}"
+            # v2：dc 覆盖不足时用经典 moneyflow 补早段（旧键里的结果可能只有近一年），
+            # 换 key 让旧缓存自然失效，避免继续命中「早段没有资金流」的老结果
+            cache_key = f"moneyflow_v2_{'ind' if is_board else 'stock'}_{code}_{days or 0}_{today}"
             cached = read_cache(cache_key, max_age_hours=8760)
             if isinstance(cached, dict) and not cached.get("error"):
                 if today != _real_today_str():
@@ -4715,41 +4717,88 @@ class TushareAPI:
                     return cached
 
             if days:
-                start_date = (datetime.strptime(today, '%Y%m%d') - timedelta(days=days + 45)).strftime('%Y%m%d')
+                # days 是「交易日」口径，换算成请求的自然日区间要 ×1.5（250 交易日 ≈ 365 自然日），
+                # 再多留 45 天缓冲。原写法直接按自然日回退 days+45 天，请求两年多的窗口时
+                # 实际只拿到最近一年多，更早的交易日没有资金流 → 评分行 moneyScore = null。
+                start_date = (
+                    datetime.strptime(today, '%Y%m%d')
+                    - timedelta(days=int(days * 1.5) + 45)
+                ).strftime('%Y%m%d')
 
+                rows_src: List[Tuple[Any, str]] = []
                 if is_board:
                     ts_code = f"{code}.DC" if not code.endswith(".DC") else code
                     df = safe_api_call(pro.moneyflow_ind_dc, ts_code=ts_code, start_date=start_date, end_date=today)
+                    if isinstance(df, dict) and df.get("error"):
+                        return df
+                    if df is None or df.empty:
+                        return {"error": "No data"}
+                    rows_src = [(row, "dc") for _, row in df.sort_values('trade_date').iterrows()]
                 else:
                     ts_code = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
                     df = safe_api_call(pro.moneyflow_dc, ts_code=ts_code, start_date=start_date, end_date=today)
+                    if isinstance(df, dict) and df.get("error"):
+                        return df
+                    dc_rows: List[Tuple[Any, str]] = []
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        dc_rows = [(row, "dc") for _, row in df.sort_values('trade_date').iterrows()]
 
-                if isinstance(df, dict) and df.get("error"):
-                    return df
-                # 东财资金流（moneyflow_dc）只覆盖近期数据；训练模式回看历史日期时改用经典 moneyflow（有历史数据）
-                if (df is None or (isinstance(df, pd.DataFrame) and df.empty)) and not is_board:
-                    mf = safe_api_call(pro.moneyflow, ts_code=ts_code, start_date=start_date, end_date=today)
-                    if isinstance(mf, pd.DataFrame) and not mf.empty:
-                        print(f"[资金流] moneyflow_dc 无数据，改用 moneyflow: {ts_code} {start_date}~{today}")
-                        df = mf
-                        source = "ts"
-                if df is None or df.empty:
+                    # 东财资金流（moneyflow_dc）只覆盖近期（约 360 个交易日），而回测/训练要回看一两年：
+                    # 此时 dc 返回的是「非空但更短」的一段，旧逻辑只在返回空表时才回退，
+                    # 导致更早的交易日整段没有资金流（评分行的 moneyScore = null，被 --complete-only 丢弃）。
+                    # 这里改为：dc 的起点晚于请求起点时，用经典 moneyflow（历史完整）补齐早段。
+                    earliest = ""
+                    if dc_rows:
+                        earliest = _standardize_date(dc_rows[0][0].get('trade_date', '')).replace('-', '')
+                    gap_end = ""
+                    if not earliest:
+                        gap_end = today
+                    elif earliest > start_date:
+                        gap_end = (datetime.strptime(earliest, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
+                    # 缺口不足 10 个自然日（周末/长假）不值得多请求一次
+                    if gap_end and (
+                        not earliest
+                        or (
+                            datetime.strptime(gap_end, '%Y%m%d')
+                            - datetime.strptime(start_date, '%Y%m%d')
+                        ).days >= 10
+                    ):
+                        mf = safe_api_call(
+                            pro.moneyflow, ts_code=ts_code, start_date=start_date, end_date=gap_end
+                        )
+                        if isinstance(mf, pd.DataFrame) and not mf.empty:
+                            print(
+                                f"[资金流] moneyflow_dc 起步 {earliest or '空'} 晚于请求 {start_date}，"
+                                f"用 moneyflow 补齐 {start_date}~{gap_end}: {ts_code}"
+                            )
+                            rows_src = [(row, "ts") for _, row in mf.sort_values('trade_date').iterrows()]
+                    rows_src += dc_rows
+                    if not rows_src:
+                        return {"error": "No data"}
+
+                # 按交易日去重（同一天以先到的 ts 早段 / 后到的 dc 为准）、升序，取最近 days 条
+                merged: Dict[str, Tuple[Any, str]] = {}
+                for row, src in rows_src:
+                    date_str = _standardize_date(row.get('trade_date', ''))
+                    if date_str:
+                        merged[date_str] = (row, src)
+                if not merged:
                     return {"error": "No data"}
+                dates_sorted = sorted(merged)[-days:]
+                if len({src for _, src in merged.values()}) > 1:
+                    source = "dc+ts"
+                elif all(src == "ts" for _, src in merged.values()):
+                    source = "ts"
 
-                # 按日期排序，取最近 days 条
-                df = df.sort_values('trade_date', ascending=True).reset_index(drop=True)
-                if len(df) > days:
-                    df = df.iloc[-days:]
-
-                # 计算每日数据：个股用 _calc_money_flow_from_row_dc（历史日期回退到 moneyflow 时用 _calc_money_flow_from_row_ts），板块用 _calc_money_flow_from_row_dc_ind
+                # 计算每日数据：早段（ts）用 _calc_money_flow_from_row_ts，近期（dc）用 dc 口径，
+                # 板块用 _calc_money_flow_from_row_dc_ind
                 daily_data = []
-                for _, row in df.iterrows():
-                    date_val = row.get('trade_date', '')
-                    date_str = _standardize_date(date_val)
-                    if is_board:
-                        day_data = TushareAPI._calc_money_flow_from_row_dc_ind(row)
-                    elif source == "ts":
+                for date_str in dates_sorted:
+                    row, src = merged[date_str]
+                    if src == "ts":
                         day_data = TushareAPI._calc_money_flow_from_row_ts(row)
+                    elif is_board:
+                        day_data = TushareAPI._calc_money_flow_from_row_dc_ind(row)
                     else:
                         day_data = TushareAPI._calc_money_flow_from_row_dc(row)
                     day_data["trade_date"] = date_str

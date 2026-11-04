@@ -245,7 +245,7 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
       }
     >
       <Space wrap size={12} style={{ marginBottom: 12 }}>
-        <span title="自低点抬升：评分自近 N 个评分日最低点抬了多少（适合分几天完成的低位启动）；另认可「单日跳升」达标作为另一种启动形态，避免单日大幅跳升的启动日要等累计抬升补齐、晚一天才买">
+        <span title="买点只有「单日跳升」一种。「自低点抬升」口径下额外把抬升达标的票标成「抬升观察」，但不下单（实测该形态单笔期望≈0、盈利因子<1，混进买点会把跳升的优势稀释掉）">
           买入口径
           <Radio.Group
             size="small"
@@ -254,8 +254,8 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
             onChange={(e) => setParams((prev) => ({ ...prev, buyMode: e.target.value }))}
             optionType="button"
             options={[
-              { label: '自低点抬升', value: 'rise' },
-              { label: '单日跳升', value: 'jump' },
+              { label: '自低点抬升（仅观察）', value: 'rise' },
+              { label: '单日跳升（买点）', value: 'jump' },
             ]}
           />
         </span>
@@ -278,7 +278,7 @@ const BacktestModal: React.FC<BacktestModalProps> = ({ open, onClose, code, name
               />
               个评分日
             </span>
-            <span title="评分绝对地板：当日评分低于该值不算启动">
+            <span title="评分绝对地板：当日评分低于该值不算启动；该口径下它同时是「单日跳升」买点的评分下限">
               启动地板 ≥
               <InputNumber size="small" value={params.riseMinScore} step={5} onChange={setParam('riseMinScore')} style={{ width: 70 }} />
             </span>

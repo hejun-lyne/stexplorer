@@ -3523,10 +3523,10 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
                     ) : (
                       <span
                         style={{ fontSize: 11, color: 'var(--secondary-text-color)', marginLeft: 4 }}
-                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。橙柱=抬升买入、粉柱=跳升买入、亮绿柱=卖出（与列表「信号」列/回测同一套规则，悬停曲线可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
+                        title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。橙柱=抬升观察、粉柱=跳升买入、亮绿柱=卖出（与列表「信号」列/回测同一套规则，悬停曲线可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
                       >
                         红绿柱=评分突变（红升绿降，≥{SCORE_JUMP_CONFIG.minDelta}分加重）
-                        <span style={{ marginLeft: 4, color: SHORT_SCORE_RISE_BUY_MARK_COLOR, fontWeight: 600 }}>橙柱=抬升买入</span>
+                        <span style={{ marginLeft: 4, color: SHORT_SCORE_RISE_BUY_MARK_COLOR, fontWeight: 600 }}>橙柱=抬升观察</span>
                         <span style={{ marginLeft: 4, color: SHORT_SCORE_JUMP_BUY_MARK_COLOR, fontWeight: 600 }}>粉柱=跳升买入</span>
                         <span style={{ marginLeft: 4, color: SHORT_SCORE_SELL_MARK_COLOR, fontWeight: 600 }}>亮绿柱=卖出</span>
                         <span style={{ color: 'var(--secondary-text-color)' }}>
