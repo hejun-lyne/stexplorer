@@ -1,13 +1,13 @@
 import dayjs from 'dayjs';
 import * as Services from '@/services';
 import { FundApiType, KLineType } from '@/utils/enums';
+import { Stock } from '@/types/stock';
 import * as Score from './shortTermScore';
 import {
   buildStockScoreInputs,
   computeShortTermScoreForDate,
   createScoreContext,
   isListedOnDay,
-  loadScoreSeries,
   notListedShortTermScoreRow,
   primeBoards,
   saveScoreSeries,
@@ -60,6 +60,25 @@ const FLUSH_EVERY_DAYS = 20;
 
 /** 每个交易日内并发计算的股票数（取数都已批量预取，只有纯计算与少量兜底） */
 const CONCURRENCY_PER_DAY = 4;
+
+/**
+ * 单只股票评分的超时上限。
+ *
+ * 逐日计算里数据都已批量预取，单只评分正常是毫秒级内存切片；超过这个时限说明
+ * 某次兜底取数的 IPC 挂住了（python 常驻进程对个别请求无响应且无超时）。
+ * 与其让 4 个并发 worker 全部卡死、整个预计算停在某个交易日，不如把这按
+ * 「超时跳过」处理让循环继续——挂起的 IPC 即便最终返回，其结果也不写入缓存。
+ */
+const STOCK_SCORE_TIMEOUT_MS = 60_000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} 超时（${Math.round(ms / 1000)}s）`)), ms)
+    ),
+  ]);
+}
 
 export interface PrecomputeOptions {
   items: ShortTermScoreItem[];
@@ -127,7 +146,9 @@ const toDay = (v: any): string => {
 };
 
 export async function precomputeShortTermScores(options: PrecomputeOptions): Promise<PrecomputeResult> {
-  const { items, source, shouldStop, onProgress, ignoreCache } = options;
+  const { source, shouldStop, onProgress, ignoreCache } = options;
+  // items 会在「剔除无日K标的」后重新赋值，故用 let
+  let items = options.items;
   const result: PrecomputeResult = {
     dates: 0,
     reused: 0,
@@ -149,8 +170,8 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   const startDate = toDay(options.startDate);
 
   const secidOf = (code: string) => (code.startsWith('6') ? `1.${code}` : `0.${code}`);
-  const codes = items.map((i) => i.code);
-  const secids = codes.map(secidOf);
+  let codes = items.map((i) => i.code);
+  let secids = codes.map(secidOf);
   const indexSecids = ['1.000001', '0.399001', '0.399006'];
 
   // ---- 1. 交易日历：三大指数日K的日期并集，限制在 [startDate 再往前 historyDays 个交易日, endDate] 内 ----
@@ -164,6 +185,9 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   const indexKlinesMap = await Services.Tushare.BatchGetKFromTushare(indexSecids, endDate, indexLimit, KLineType.Day, {
     ignoreTrain: true,
   });
+  if (shouldStop?.()) {
+    return result;
+  }
   const dateSet = new Set<string>();
   indexSecids.forEach((s) => {
     (indexKlinesMap[s] || []).forEach((k) => {
@@ -190,8 +214,6 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   // ignoreCache（点「预计算训练评分」从头重算）时：先清掉窗口内已存的评分行，再整段重算，
   // 避免旧行残留导致「明明重算了却还是旧分数 / 显示未覆盖」。
   let pendingDays: string[];
-  /** 每个交易日「还缺几只股票」（增量模式下只补这些股票，不整天重算） */
-  let missingByDay: Record<string, number> = {};
   if (ignoreCache) {
     // 忽略缓存 = 不做增量判断、窗口内所有交易日全部重算。
     // 这里刻意「不」预先清空旧评分行：写入是按 (股票, 交易日) 覆盖合并的，重算到的交易日会被新结果覆盖。
@@ -202,11 +224,14 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   } else {
     // 必须带上行结构版本：只统计当前版本的行，否则版本升级后会把旧行当成「已覆盖」而跳过重算，
     // 列表侧按当前版本读取却全部未命中 → 表现为「预计算秒完成，点短线评分依然很慢」。
+    onProgress?.(0, days.length, '统计缓存覆盖...');
     const summary = await Services.Tushare.GetShortTermScoreSeriesSummaryFromTushare(codes, days, source, {
       ignoreTrain: true,
       rowVersion: SCORE_ROW_VERSION,
     });
-    missingByDay = summary || {};
+    if (shouldStop?.()) {
+      return result;
+    }
     pendingDays = days.filter((d) => (summary[d.replace(/-/g, '')] ?? Infinity) > 0);
     result.reused = days.length - pendingDays.length;
     if (!pendingDays.length) {
@@ -215,23 +240,75 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     }
   }
 
-  // ---- 3. 个股日K（一次批量取全：窗口交易日数 + 每个交易日所需历史根数）----
-  onProgress?.(0, pendingDays.length, '拉取个股日K...');
-  const stockKlinesMap = await Services.Tushare.BatchGetKFromTushare(
-    secids,
-    endDate,
-    days.length + STOCK_KLINES_PER_DAY + 10,
-    KLineType.Day,
-    { ignoreTrain: true }
-  );
+  // ---- 3. 个股日K（窗口交易日数 + 每个交易日所需历史根数）----
+  // 常驻 python 进程同一时刻只处理一个请求，一次塞进几百上千只股票会长期占用该 worker
+  // 且期间没有任何输出（界面就一直停在「拉取个股日K...」）。按 40 只分块顺序取，
+  // 每块回报一次进度，也能避免单次 IPC 的命令行参数过长。
+  const STOCK_K_BATCH = 40;
+  const klineLimit = days.length + STOCK_KLINES_PER_DAY + 10;
+  const stockKlinesMap: Record<string, Stock.KLineItem[]> = {};
+  for (let i = 0; i < secids.length; i += STOCK_K_BATCH) {
+    if (shouldStop?.()) {
+      return result;
+    }
+    const part = secids.slice(i, i + STOCK_K_BATCH);
+    onProgress?.(
+      0,
+      pendingDays.length,
+      `拉取个股日K ${Math.min(i + part.length, secids.length)}/${secids.length}...`
+    );
+    // 分块顺序请求：并发发过去也只会在常驻进程里排队
+    // eslint-disable-next-line no-await-in-loop
+    const partMap = await Services.Tushare.BatchGetKFromTushare(
+      part,
+      endDate,
+      klineLimit,
+      KLineType.Day,
+      { ignoreTrain: true }
+    );
+    Object.assign(stockKlinesMap, partMap);
+  }
 
-  // ---- 4. 个股资金流（一次批量取全，截止到训练窗口末日）----
-  onProgress?.(0, pendingDays.length, '拉取资金流向...');
-  const moneyFlowMap = await Services.Tushare.BatchGetMoneyFlowFromTushare(
-    codes,
-    days.length + MONEY_DAYS_PER_DAY + 10,
-    { ignoreTrain: true, tradeDate: endDate }
-  );
+  // ---- 3.5 剔除 Tushare 完全没有日K的标的（B股 200/900、退市、暂停上市等）----
+  // 它们在窗口内每一个交易日都会走「取数失败 → 重试 → skipped」的路径：
+  // 既刷大量 [K线] 未返回 daily 的 warn，又把逐日循环拖慢。剔除后不再进入评分。
+  const noDataSecids = secids.filter((s) => !(stockKlinesMap[s] || []).length);
+  if (noDataSecids.length) {
+    console.warn(
+      `[预计算] 跳过 ${noDataSecids.length} 只无日K数据的标的（B股/退市等）：` +
+        `${noDataSecids.slice(0, 30).join(', ')}${noDataSecids.length > 30 ? ' …' : ''}`
+    );
+    items = items.filter((it) => (stockKlinesMap[secidOf(it.code)] || []).length > 0);
+    codes = items.map((i) => i.code);
+    secids = codes.map(secidOf);
+    onProgress?.(0, pendingDays.length, `已剔除 ${noDataSecids.length} 只无日K标的，实际计算 ${items.length} 只`);
+  }
+  if (!items.length) {
+    onProgress?.(pendingDays.length, pendingDays.length, '股票池内没有可用日K的标的');
+    return result;
+  }
+
+  // ---- 4. 个股资金流（截止到训练窗口末日，同样分块回报进度）----
+  const MONEY_FLOW_BATCH = 40;
+  const moneyFlowDays = days.length + MONEY_DAYS_PER_DAY + 10;
+  const moneyFlowMap: Record<string, any> = {};
+  for (let i = 0; i < codes.length; i += MONEY_FLOW_BATCH) {
+    if (shouldStop?.()) {
+      return result;
+    }
+    const part = codes.slice(i, i + MONEY_FLOW_BATCH);
+    onProgress?.(
+      0,
+      pendingDays.length,
+      `拉取资金流向 ${Math.min(i + part.length, codes.length)}/${codes.length}...`
+    );
+    // eslint-disable-next-line no-await-in-loop
+    const partMap = await Services.Tushare.BatchGetMoneyFlowFromTushare(part, moneyFlowDays, {
+      ignoreTrain: true,
+      tradeDate: endDate,
+    });
+    Object.assign(moneyFlowMap, partMap);
+  }
 
   // ---- 5. 大盘维度公共数据：涨跌比（按日，覆盖每个交易日所需的近10日窗口）----
   const allIndexDays = [
@@ -241,16 +318,23 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   const from = firstPos > 0 ? Math.max(0, firstPos - Score.SHORT_TERM_SCORE_CONFIG.marketDays + 1) : 0;
   onProgress?.(0, pendingDays.length, '拉取涨跌比...');
   const upRatioMap = await Services.Tushare.GetUpRatioFromTushare(allIndexDays.slice(from), { ignoreTrain: true });
+  if (shouldStop?.()) {
+    return result;
+  }
 
   // ---- 6. 市值档成交统计（按日，一次批量取回）----
   onProgress?.(0, pendingDays.length, '拉取市值档成交统计...');
   const marketStatsMap = await Services.Tushare.GetMarketActivityStatsBatchFromTushare(pendingDays, {
     ignoreTrain: true,
   });
+  if (shouldStop?.()) {
+    return result;
+  }
 
   // ---- 7. 评分共享上下文：批量数据一次性塞进 ctx，逐日只在内存切片 ----
   // 与列表 / 详情页共用同一套取数与评分逻辑（buildStockScoreInputs + computeShortTermScoreForDate），
   // 保证「预计算第 D 天」=「训练日推进到 D 现算」=「个股详情页看到的结果」。
+  onProgress?.(0, pendingDays.length, '构建评分上下文...');
   const ctx = createScoreContext(source, {
     indexKlinesMap,
     stockKlinesMap,
@@ -270,6 +354,7 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   }
   if (boardCodes.size) {
     const boardList = [...boardCodes];
+    onProgress?.(0, pendingDays.length, '拉取板块K线...');
     const fetched = await Services.Tushare.BatchGetKFromTushare(
       boardList.map((c) => `90.${c}`),
       endDate,
@@ -277,6 +362,9 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
       KLineType.Day,
       { ignoreTrain: true }
     );
+    if (shouldStop?.()) {
+      return result;
+    }
     boardList.forEach((c) => {
       // 取数失败时接口会返回 {error}，这里必须归一成数组，否则后续切片会抛异常把该股打成 0 分
       const ks = fetched[`90.${c}`];
@@ -289,6 +377,9 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   // 结论是确定的（上市日期不会再变），所以按日写一条「跳过」行入库，之后不再尝试取数。
   onProgress?.(0, pendingDays.length, '读取上市日期...');
   const listDateByCode = await Services.Tushare.GetStockListDatesFromTushare(codes);
+  if (shouldStop?.()) {
+    return result;
+  }
 
   // ---- 10. 逐日计算（内存切片 + 纯函数评分），按「股票」写回评分序列 ----
   let buffer: ShortTermScoreSeries = {};
@@ -298,20 +389,10 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
     }
     const day = pendingDays[di];
     const dayKey = day.replace(/-/g, '');
-    // 只补当天真正缺行的股票：缺行多半是停牌 / 数据未到，为一两只股票整天全量重算不划算
-    let dayItems = items;
-    const missingCount = ignoreCache ? items.length : Number(missingByDay[dayKey]) || 0;
-    if (!ignoreCache && missingCount > 0 && missingCount < items.length) {
-      try {
-        const series = await loadScoreSeries(codes, source, { dates: [dayKey] });
-        const lacking = items.filter((i) => !series[i.code]?.[dayKey]);
-        if (lacking.length) {
-          dayItems = lacking;
-        }
-      } catch {
-        // 序列读不到就退回整池计算，保证结果完整
-      }
-    }
+    // 增量模式下「只补缺行」需要一次全池评分序列读取来定位缺口（单次 IPC 传全池代码，
+    // python 侧逐个读整段序列缓存，实测 > 60s），代价远高于直接整池重算（纯内存切片、秒级）。
+    // 写入按 (股票, 交易日) 覆盖合并，重复计算已缓存股票只是浪费少量算力，不影响结果。
+    const dayItems = items;
     let count = 0;
     // 同一天内按股票并发（数据都已批量预取，这里是纯计算）：原来 天数 × 股票数 全部串行
     let cursor = 0;
@@ -335,7 +416,11 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
           continue;
         }
         try {
-          const inputs = await buildStockScoreInputs(ctx, item, day);
+          const inputs = await withTimeout(
+            buildStockScoreInputs(ctx, item, day),
+            STOCK_SCORE_TIMEOUT_MS,
+            `${item.code} 评分输入`
+          );
           const { row } = computeShortTermScoreForDate({ code: item.code, name: item.name, scoreDay: day, ...inputs });
           // 数据未就绪（日K不足 / 未覆盖到基准日）：不写缓存，留给后续运行重新取数计算
           if (row.pending) {
@@ -345,7 +430,10 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
           buffer[item.code] = { ...(buffer[item.code] || {}), [dayKey]: row };
           count += 1;
           result.rows += 1;
-        } catch {
+        } catch (e: any) {
+          if (String(e?.message || '').includes('超时')) {
+            console.warn(`[预计算] ${day} ${item.code}（${item.name}）评分输入超时，跳过（某次取数 IPC 疑似挂起）`);
+          }
           result.skipped += 1;
         }
       }
@@ -375,6 +463,9 @@ export async function precomputeShortTermScores(options: PrecomputeOptions): Pro
   // （停牌无数据 / 日K不足 / 上市前等），该天就会被算作有缺口；
   // 因此这里统计的是缺口条数与涉及天数，而不是把「有天缺口」直接当成失败。
   onProgress?.(days.length, days.length, '校验缓存覆盖...');
+  if (shouldStop?.()) {
+    return result;
+  }
   try {
     const verify = await Services.Tushare.GetShortTermScoreSeriesSummaryFromTushare(codes, days, source, {
       ignoreTrain: true,

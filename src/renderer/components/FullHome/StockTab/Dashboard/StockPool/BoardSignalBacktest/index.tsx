@@ -55,6 +55,13 @@ const PSEUDO_BOARD_NAMES: Record<string, string> = {
 const isPseudoBoardSecid = (sid: string): boolean =>
   sid === THEME_ONLY_SECID || sid === STYLE_ONLY_SECID;
 
+/**
+ * 科创板 / 北交所股票代码过滤（与离线脚本 --exclude-boards 同口径）
+ *
+ * 科创板 68x（688/689）；北交所 4/8/920（含历史 43/83/87 及 920 新代码）。
+ */
+const isStarOrBseCode = (code: string): boolean => /^(68|4|8|920)/.test(String(code || ''));
+
 const pct = (v?: number, digits = 2) => {
   const n = Number(v);
   if (!Number.isFinite(n)) {
@@ -100,6 +107,8 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
   const [range, setRange] = useState<any>(null);
   const [maxStocks, setMaxStocks] = useState(60);
   const [concurrency, setConcurrency] = useState(2);
+  /** 排除科创板(68x)与北交所(4/8/920)股票，只对成分股股票池过滤 */
+  const [excludeStarBse, setExcludeStarBse] = useState(false);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; name: string } | null>(null);
   const [result, setResult] = useState<BoardScoreBacktestResult | null>(null);
@@ -167,18 +176,26 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     : boards.find((b) => b.secid === secid)?.name || '';
 
   /**
-   * 批量取板块成分股并去重合并
+   * 批量取板块成分股并去重合并（不截断，全量参与回测/缓存预计算）
    *
-   * 「只看题材」会展开成一两百个板块，串行请求太慢，这里按 6 个一批并发；
-   * 同一只股票可能属于多个板块，按代码去重。
+   * 「只看题材」会展开成上百个板块，串行请求太慢，这里按 6 个一批并发；
+   * 同一只股票可能属于多个板块，按代码去重。Tushare 的板块成分股接口不接受数量上限，
+   * 传进去的 200 只是给其它数据源用的，Tushare 分支会返回全量。
    */
   const loadStocksOfBoards = useCallback(
-    async (list: Stock.BanKuaiItem[], onTick?: (done: number, total: number) => void) => {
+    async (
+      list: Stock.BanKuaiItem[],
+      onTick?: (done: number, total: number, stockCount: number) => void,
+      shouldStop?: () => boolean,
+      excludeStarBse = false
+    ): Promise<Stock.DetailItem[] | null> => {
       const map = new Map<string, Stock.DetailItem>();
       const batch = 6;
       for (let i = 0; i < list.length; i += batch) {
+        if (shouldStop?.()) {
+          return null;
+        }
         const part = list.slice(i, i + batch);
-        onTick?.(Math.min(i + part.length, list.length), list.length);
         // 分批并发，避免一次打满板块成分股接口
         // eslint-disable-next-line no-await-in-loop
         const results = await Promise.all(
@@ -193,8 +210,14 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
             }
           });
         });
+        onTick?.(Math.min(i + part.length, list.length), list.length, map.size);
       }
-      return [...map.values()];
+      let out = [...map.values()];
+      if (excludeStarBse) {
+        out = out.filter((s) => !isStarOrBseCode(s.code));
+      }
+      onTick?.(list.length, list.length, out.length);
+      return out;
     },
     []
   );
@@ -234,9 +257,16 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     setProgress({ done: 0, total: 0, name: '' });
     stopRef.current = false;
     try {
-      const stocks = await loadStocksOfBoards(targets, (done, total) =>
-        setProgress({ done: 0, total: 0, name: `读取板块成分股 ${done}/${total}` })
+      const stocks = await loadStocksOfBoards(
+        targets,
+        (done, total, count) =>
+          setProgress({ done: 0, total: 0, name: `读取板块成分股 ${done}/${total}（已合并 ${count} 只）` }),
+        () => stopRef.current,
+        excludeStarBse
       );
+      if (!stocks) {
+        return;
+      }
       if (!stocks.length) {
         setError('该板块没有取到成分股');
         return;
@@ -271,6 +301,7 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     range,
     maxStocks,
     concurrency,
+    excludeStarBse,
   ]);
 
   const openStock = useCallback(
@@ -342,9 +373,17 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     setCacheTotal(0);
     setCacheMsg('准备中：读取板块成分股...');
     try {
-      const stocks = await loadStocksOfBoards(targets, (done, total) =>
-        setCacheMsg(`准备中：读取板块成分股 ${done}/${total}`)
+      const stocks = await loadStocksOfBoards(
+        targets,
+        (done, total, count) =>
+          setCacheMsg(`准备中：读取板块成分股 ${done}/${total}（已合并 ${count} 只）`),
+        () => cachePauseRef.current,
+        excludeStarBse
       );
+      if (stocks === null) {
+        setCacheMsg('已停止');
+        return;
+      }
       if (!stocks.length) {
         setCacheMsg('该板块没有取到成分股');
         return;
@@ -380,7 +419,7 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     } finally {
       setCacheRunning(false);
     }
-  }, [cacheRunning, expandBoards, loadStocksOfBoards, secid, cacheRange, cacheForce]);
+  }, [cacheRunning, expandBoards, loadStocksOfBoards, secid, cacheRange, cacheForce, excludeStarBse]);
 
   const signalColumns = [
     {
@@ -832,6 +871,14 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
             style={{ width: 55 }}
           />
         </span>
+        <Checkbox
+          checked={excludeStarBse}
+          onChange={(e) => setExcludeStarBse(e.target.checked)}
+          disabled={running}
+          style={{ marginLeft: 4 }}
+        >
+          排除科创/北交
+        </Checkbox>
         <Button type="primary" size="small" loading={running} disabled={!secid} onClick={() => void handleRun()}>
           开始回测
         </Button>

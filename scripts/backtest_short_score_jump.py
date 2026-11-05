@@ -88,6 +88,7 @@ import json
 import math
 import os
 import random
+import re
 import sqlite3
 import ssl
 import statistics
@@ -318,6 +319,243 @@ def fetch_board_members(board_code: str, refresh: bool = False) -> List[Tuple[st
         with open(cache_file, "w", encoding="utf-8") as fp:
             json.dump(members, fp, ensure_ascii=False)
     return [(m["code"], m["name"]) for m in members]
+
+
+def _stock_board_map(refresh: bool = False) -> Dict[str, List[str]]:
+    """6 位代码 -> 所属东财板块代码列表（概念 + 行业），整表缓存 1 天
+
+    板块效应验证用：把「信号股票」反查到它属于哪些板块。东财没有「股票 -> 板块」的
+    反查接口，只能枚举全部板块取成分股再倒排。首次运行需联网逐个板块取数（几百个
+    板块，视网速可能几分钟），之后 1 天内读整表缓存、秒出。
+    """
+    os.makedirs(BOARD_CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(BOARD_CACHE_DIR, "stock_boards.json")
+    if not refresh and os.path.exists(cache_file) and time.time() - os.path.getmtime(cache_file) < 86400:
+        try:
+            with open(cache_file, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        except Exception:
+            pass
+    boards = _board_index(refresh)
+    stock_boards: Dict[str, List[str]] = {}
+    failed = 0
+    for i, code in enumerate(boards, 1):
+        try:
+            members = fetch_board_members(code, refresh)
+        except Exception:
+            failed += 1
+            continue
+        for mcode, _ in members:
+            stock_boards.setdefault(mcode, []).append(code)
+        progress(i, len(boards), f"构建板块反查 {boards[code]}")
+    if failed:
+        print(f"[警告] {failed} 个板块取成分股失败已跳过（对应股票的板块覆盖会偏低）")
+    try:
+        with open(cache_file, "w", encoding="utf-8") as fp:
+            json.dump(stock_boards, fp, ensure_ascii=False)
+    except Exception:
+        pass
+    return stock_boards
+
+
+def _board_kline(board_code: str, refresh: bool = False) -> Dict[str, float]:
+    """东财板块指数日K的涨跌幅 {date: zdf%}，缓存 1 天
+
+    板块效应「强度」维度用：板块指数当日涨跌幅代表板块整体强弱（动量延续假设——
+    板块当天越强，其内个股信号的后续表现越好）。
+    """
+    os.makedirs(BOARD_CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(BOARD_CACHE_DIR, f"{board_code}_kline.json")
+    if not refresh and os.path.exists(cache_file) and time.time() - os.path.getmtime(cache_file) < 86400:
+        try:
+            with open(cache_file, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        except Exception:
+            pass
+    url = (
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=90.%s"
+        "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+        "&klt=101&fqt=1&beg=19900101&end=20500101&lmt=1000000" % board_code
+    )
+    out: Dict[str, float] = {}
+    try:
+        payload = _http_json(url).get("data") or {}
+        for k in payload.get("klines") or []:
+            parts = str(k).split(",")
+            if len(parts) >= 9:
+                try:
+                    out[parts[0]] = float(parts[8])  # f59 = 涨跌幅(%)
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    if out:
+        try:
+            with open(cache_file, "w", encoding="utf-8") as fp:
+                json.dump(out, fp, ensure_ascii=False)
+        except Exception:
+            pass
+    return out
+
+
+# ---------------------------------------------------------------- 概念板块「题材 / 风格」过滤
+# 与前端 helpers/boardFilter.ts 同口径：伪概念黑名单优先，再按行业/产业关键词白名单判定题材。
+
+_NON_THEME_PATTERNS = [
+    # 1. 规模/估值/风格类
+    '盘股|价股',
+    '股$',
+    '价值股|成长股|周期股|题材股|绩优|微利|亏损|破净|破发|高送转|送转预期',
+    '高股息|高分红|低估值|高估值|高成长|低市盈|高市盈|中特估',
+    # 2. 交易特征/情绪榜单类
+    '高换手|低换手|高振幅|活跃股|超跌|强势股|弱势股|龙头股|妖股|人气股|热门股|热搜',
+    '赚钱效应|昨日|涨停|跌停|连板|首板|炸板|打板|触板',
+    # 3. 指数成分/榜单类
+    r'沪深300|上证50|上证180|上证380|深证100|深成500|中证\d+|国证\d+|央视50',
+    '富时|标普|MSCI|罗素|道琼斯|漂亮100|茅指数|宁组合|超级品牌|成份股|权重股',
+    r'创业板\d*|科创\d*|北证\d*|三板',
+    # 4. 上市/股本/交易属性类
+    '次新|B股|AH股|AB股|GDR|ST|摘帽|退市|两融|融资融券|转融券',
+    '可转债|转债标的|解禁|大宗交易',
+    # 5. 机构持仓/股东类
+    '(机构|基金|社保|保险|券商|信托|QFII|公募|私募|北向|外资).{0,2}重仓',
+    '重仓|险资|国家队|证金|汇金|参股|持股|股权',
+    # 6. 事件/资本运作类
+    '举牌|增持|减持|回购|员工持股|股权激励|定向增发|再融资|并购|资产重组|重组上市',
+    '重组松绑|重组概念|借壳|壳资源|分拆|整体上市|IPO',
+    # 7. 业绩/财务类
+    '预盈|预增|预亏|预减|业绩预告|扭亏|高净利',
+    # 8. 政策/口号抽象类
+    '中字头|国企改革|央企改革|混改|国资|专精特新|独角兽|瞪羚|隐形冠军',
+    '乡村振兴|共同富裕|统一大市场|内循环|双循环|新型城镇化|新质生产力',
+    # 9. 地域类
+    '北京|上海|天津|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东',
+    '河南|湖北|湖南|广东|广西|海南|四川|贵州|云南|陕西|甘肃|青海|宁夏|新疆|西藏|内蒙',
+    '深圳|广州|杭州|南京|成都|武汉|西安|苏州|厦门|青岛|大连|宁波|珠海|汕头',
+    '雄安|粤港澳|长三角|长江三角|珠三角|珠江三角|京津冀|成渝|自贸|特区|一带一路',
+    '西部开发|东北振兴|振兴|区域经济|县域经济|湾区经济|都市圈|城市群',
+    # 10. 其他杂项
+    '百元股',
+]
+
+_INDUSTRY_THEME_KEYWORDS = [
+    # 医药医疗
+    '医药|医疗|生物|疫苗|中药|中成药|化学制药|原料药|创新药|仿制药|特效药|减肥药|药',
+    '医疗器械|医疗服务|医院|药店|医美|基因|细胞|免疫|血制品|体外诊断|IVD|CRO|CXO|CDMO',
+    '脑机|抗生素|维生素|眼科|口腔|体检|诊断|检测|蛋白|肝素',
+    # 机器人/智能制造
+    '机器人|人形|减速器|谐波|伺服|丝杠|灵巧手|传感器|工业母机|机床|数控|刀具|注塑机',
+    '激光|3D打印|增材|精密|自动化|工业软件|工业互联|智能制造|电机|轴承|液压|气动',
+    '模具|铸造|锻压|焊接|工程机械|挖掘机|叉车|重卡',
+    # 军工/航天/航空
+    '军工|国防|导弹|航天|航空|大飞机|商业航天|卫星|北斗|无人机|低空|通用航空',
+    '船舶|航母|雷达|兵装|军贸|eVTOL|飞行汽车|火箭|空间站',
+    # 电池/新能源
+    '电池|锂|钠离子|固态|液流|燃料电池|氢能|氢|储能|光伏|风电|核电|水电|充电桩|换电',
+    '超级电容|电解液|隔膜|正极|负极|铜箔|铝箔|逆变器|硅料|硅片|组件|光伏设备|光热',
+    '新能源|碳中和|碳交易|绿电|虚拟电厂|特高压|智能电网|电网|电力|变压器|生物质能',
+    # 半导体/电子
+    '半导体|芯片|集成电路|光刻|存储|封测|封装|晶圆|碳化硅|氮化镓|第三代半导体|EDA|MLCC',
+    'PCB|消费电子|面板|LED|OLED|被动元件|连接器|光学|镜头|摄像头|声学|无线充电|折叠屏',
+    # 计算机/通信/传媒
+    '服务器|液冷|CPO|光模块|算力|IDC|数据中心|云计算|边缘计算|网络安全|信创|鸿蒙|操作系统',
+    '数据库|数据要素|数字经济|区块链|数字货币|稳定币|支付|人工智能|AI|大模型|AIGC',
+    '智能体|机器视觉|语音|无人驾驶|自动驾驶|智能驾驶|车联网|元宇宙|虚拟现实|VR|AR|MR',
+    '智能穿戴|通信|5G|6G|光通信|光纤|光缆|卫星互联网|量子|专网',
+    '游戏|传媒|影视|院线|短剧|网红|直播|电商|跨境电商|出版|版权|IP|教育|培训|体育|彩票',
+    # 汽车
+    '汽车|汽车零部件|一体化压铸|轮胎|座椅|商用车|乘用车|摩托车|两轮车|汽车拆解|二手车',
+    # 产业链龙头/终端品牌
+    '华为|苹果|特斯拉|小米|英伟达|台积电|字节|腾讯|阿里巴巴|百度|美团|拼多多|京东',
+    '宁德时代|比亚迪|大疆|三星|高通|英特尔|微软|ChatGPT|DeepSeek',
+    # 化工/材料/资源
+    '化工|化肥|农药|磷|氟|钛白|MDI|聚氨酯|纯碱|氯碱|有机硅|塑料|橡胶|可降解|化纤',
+    '涤纶|氨纶|染料|涂料|添加剂|石墨烯|碳纤维|新材料|稀土|永磁|磁材|石墨',
+    '黄金|铜|铝|锌|镍|钴|钨|锑|锡|铅|有色|小金属|盐湖提锂|锂矿|矿',
+    '石油|油气|页岩气|天然气|煤炭|焦炭|煤化工',
+    # 建筑/地产/基建
+    '建筑|建材|水泥|玻璃|玻纤|防水|管材|钢结构|装配式|地产|房地产|物业|城中村|保障房',
+    '基建|水利|铁路|公路|高速|桥梁|隧道|装修|家装',
+    # 金融
+    '银行|券商|证券|保险|信托|期货|金融科技|互联网金融|跨境支付|REITs|创投',
+    # 消费
+    '白酒|啤酒|酒|食品|饮料|乳业|调味品|预制菜|餐饮|旅游|酒店|免税|零售|超市|百货',
+    '家电|白电|黑电|小家电|厨电|家居|家具|造纸|包装|纺织|服装|鞋|化妆品|个护|珠宝',
+    '宠物|潮玩|玩具|婴童|母婴|演艺|会展',
+    # 农业
+    '农业|种业|种植|养殖|饲料|农机|转基因|粮食|棉花|糖|猪|鸡|水产',
+    # 公用/环保/交运
+    '环保|水务|固废|污水|垃圾|再生|循环|燃气|供热|园林',
+    '航运|港口|物流|快递|供应链|机场|航空运输|交通',
+    # 钢铁/金属/其他制造
+    '钢铁|钢|煤|石化|炼化|陶瓷|印刷|仪器|仪表|安防|金属',
+    # 泛行业词
+    '软件|物联网|消费|工业',
+    # 新兴/细分题材
+    '东数西算|电子烟|培育钻石|钻石|供销社|蓄能|地热|数字人|人脑|辅助生殖|三胎|生育',
+    '养老|托育|代糖|人造肉|云|芯|屏|智驾|星闪|UWB|WiFi|IPv6|毫米波|智慧城市|智慧政务',
+    '材料|超导|核聚变|磁悬浮|抗病毒|数字',
+    # 通用兜底
+    '经济|数据|概念',
+]
+
+_NON_THEME_RE = [re.compile(p) for p in _NON_THEME_PATTERNS]
+_INDUSTRY_THEME_RE = re.compile("|".join(_INDUSTRY_THEME_KEYWORDS))
+
+
+def is_style_board(name: str) -> bool:
+    """名称以「风格」结尾的板块（与 STList「只看风格」同口径）"""
+    return str(name or "").strip().endswith("风格")
+
+
+def is_theme_board(name: str) -> bool:
+    """true=产业/技术题材板块；false=风格/指数/持仓/地域等伪概念（与前端 boardFilter 同口径）"""
+    text = str(name or "").strip()
+    if not text:
+        return False
+    if any(rx.search(text) for rx in _NON_THEME_RE):
+        return False
+    return bool(_INDUSTRY_THEME_RE.search(text))
+
+
+def _concept_boards(refresh: bool = False) -> Dict[str, str]:
+    """东财概念板块（仅 t:3，含风格/题材等，与前端「概念」口径一致），缓存 7 天"""
+    os.makedirs(BOARD_CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(BOARD_CACHE_DIR, "concept_boards.json")
+    if not refresh and os.path.exists(cache_file) and time.time() - os.path.getmtime(cache_file) < 7 * 86400:
+        try:
+            with open(cache_file, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        except Exception:
+            pass
+    items = _em_list("m:90 t:3 f:!50")
+    boards = {str(x.get("f12")): str(x.get("f14")) for x in items if x.get("f12")}
+    if boards:
+        with open(cache_file, "w", encoding="utf-8") as fp:
+            json.dump(boards, fp, ensure_ascii=False)
+    return boards
+
+
+def _industry_boards(refresh: bool = False) -> Dict[str, str]:
+    """东财行业板块（仅 t:2），缓存 7 天
+
+    板块效应验证的「行业」口径用：每只股票只属于一个行业板块，天然无多重归属，
+    是检验「板块轮动/共振」最干净的定义。
+    """
+    os.makedirs(BOARD_CACHE_DIR, exist_ok=True)
+    cache_file = os.path.join(BOARD_CACHE_DIR, "industry_boards.json")
+    if not refresh and os.path.exists(cache_file) and time.time() - os.path.getmtime(cache_file) < 7 * 86400:
+        try:
+            with open(cache_file, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        except Exception:
+            pass
+    items = _em_list("m:90 t:2 f:!50")
+    boards = {str(x.get("f12")): str(x.get("f14")) for x in items if x.get("f12")}
+    if boards:
+        with open(cache_file, "w", encoding="utf-8") as fp:
+            json.dump(boards, fp, ensure_ascii=False)
+    return boards
 
 
 _WIDE_CHARS = ("F", "W")
@@ -1949,6 +2187,427 @@ def signal_census(data, args, horizons=(1, 3, 5, 10)) -> None:
     )
 
 
+def board_effect_study(data, args, horizons=(1, 3, 5, 10)) -> None:
+    """验证「板块效应」猜想：把每日买入信号按所属板块统计，考察信号更集中的板块
+    其后续胜率与收益是否更高。
+
+    信号口径与 signal_census 的「跳升买入」完全一致（evaluateShortScoreSignal 的
+    jump 分支）：Δ≥buy 且评分≥riseMinScore 且低位运行。每个信号按「当日所属板块里
+    最多触发几只」分成 独苗(1)/双信号(2)/共振(≥3) 三档，并做「当日最热板块 vs 其余
+    信号」的同日对照（消除大盘整体涨跌的干扰），最后给一个「逐日差额」汇总。
+    """
+    buy_delta = float(args.buy)
+    rise_floor = float(args.rise_min_score)
+    ref_days = max(1, int(args.rise_ref_days))
+    low_days = max(0, int(args.low_base_days))
+    low_max = float(args.low_base_max)
+
+    stock_map = _stock_board_map(args.refresh_board)
+    # 板块范围过滤：all=全部概念+行业 / industry=仅东财行业（单归属，最干净）/ theme=仅产业题材
+    scope = args.board_effect_scope
+    board_names = _board_index(args.refresh_board)
+    scope_codes: set = set()
+    if scope == "concept":
+        scope_codes = set(_concept_boards(args.refresh_board))
+        scope_txt = "概念板块（东财 t:3 全量）"
+    elif scope == "industry":
+        scope_codes = set(_industry_boards(args.refresh_board))
+        scope_txt = "行业板块"
+    elif scope == "theme":
+        scope_txt = "产业/技术题材板块"
+    else:
+        scope_txt = "全部概念+行业板块"
+
+    def keep(b: str) -> bool:
+        if scope in ("concept", "industry"):
+            return b in scope_codes
+        if scope == "theme":
+            return is_theme_board(board_names.get(b, ""))
+        return True
+
+    covered = sum(1 for s, _ in data if any(keep(b) for b in stock_map.get(s.code, [])))
+    print(
+        f"\n板块反查（口径：{scope_txt}）：样本 {covered}/{len(data)} 只有板块归属"
+        f"（全市场共 {len(stock_map)} 只股票被板块索引覆盖）"
+    )
+
+    def fwd(bars: Bars, date: str, h: int) -> Optional[float]:
+        i0 = bars.next_index(date)
+        if i0 < 0 or i0 + h - 1 >= len(bars.dates):
+            return None
+        return bars.closes[i0 + h - 1] / bars.opens[i0] - 1
+
+    # 第一遍：收集所有「跳升买入」信号，并统计每个 (板块, 交易日) 的信号数
+    signals: List[dict] = []
+    board_day_count: Dict[Tuple[str, str], int] = {}
+    total_jump = 0
+    for s, bars in data:
+        boards = [b for b in stock_map.get(s.code, []) if keep(b)]
+        for i in range(1, len(s.dates)):
+            d = s.dates[i]
+            bi, pb = bars.index_of(d), bars.index_of(s.dates[i - 1])
+            if bi < 0 or pb < 0 or bi - pb != 1:
+                continue
+            delta = s.scores[i] - s.scores[i - 1]
+            cur = s.scores[i]
+            ref = s.scores[max(0, i - ref_days):i]
+            if not ref:
+                continue
+            low_ref = min(ref)
+            low_base_high = max(s.scores[i - low_days:i]) if low_days and i >= low_days else None
+            in_low = lambda v: low_days <= 0 or v is None or v <= low_max
+            if not (delta >= buy_delta and cur >= rise_floor and (in_low(low_base_high) or in_low(low_ref))):
+                continue
+            total_jump += 1
+            if not boards:
+                continue
+            sig = {
+                "date": d, "boards": boards,
+                "rets": {h: fwd(bars, d, h) for h in horizons},
+                "mv": bars.mv_at(bi),  # 信号日流通市值（元），用于判断是否小盘效应
+            }
+            signals.append(sig)
+            for b in boards:
+                board_day_count[(b, d)] = board_day_count.get((b, d), 0) + 1
+
+    if not signals:
+        print("没有跳升买入信号，无法验证板块效应。可放宽 --buy / --rise-min-score 或加大 --sample。")
+        return
+
+    # 当日每个板块的信号数 -> 当日最热板块
+    day_board_counts: Dict[str, Dict[str, int]] = {}
+    for (b, d), c in board_day_count.items():
+        day_board_counts.setdefault(d, {})[b] = c
+    day_top: Dict[str, str] = {}
+    for d, bcs in day_board_counts.items():
+        day_top[d] = max(bcs, key=lambda b: (bcs[b], b))
+
+    # 共振度分档：一个信号若属于多个板块，取「当日所属板块中信号最多的那个」定档
+    bucket_keys = ("独苗(1)", "双信号(2)", "共振(≥3)")
+    bucket_counts = {k: 0 for k in bucket_keys}
+    buckets = {k: {h: [] for h in horizons} for k in bucket_keys}
+
+    top_rets = {h: [] for h in horizons}
+    other_rets = {h: [] for h in horizons}
+    all_rets = {h: [] for h in horizons}
+    top_count = other_count = 0
+    # 逐日差额：当日最热板块信号均值 - 其余信号均值（只取最热板块 ≥2 信号、且两组都有值的天）
+    day_ret: Dict[str, Dict[str, Dict[int, List[float]]]] = {}
+    for sig in signals:
+        d = sig["date"]
+        heat = max((board_day_count[(b, d)] for b in sig["boards"]), default=0)
+        bkey = "共振(≥3)" if heat >= 3 else "双信号(2)" if heat == 2 else "独苗(1)"
+        sig["bkey"] = bkey
+        bucket_counts[bkey] += 1
+        in_top = day_top[d] in sig["boards"]
+        top_count += in_top
+        other_count += (not in_top)
+        day_ret.setdefault(d, {}).setdefault("top" if in_top else "other", {h: [] for h in horizons})
+        for h in horizons:
+            v = sig["rets"][h]
+            if v is None:
+                continue
+            buckets[bkey][h].append(v)
+            (top_rets if in_top else other_rets)[h].append(v)
+            all_rets[h].append(v)
+            day_ret[d]["top" if in_top else "other"][h].append(v)
+    spread_by_day = {h: [] for h in horizons}
+    spread_days = 0
+    for d, grp in day_ret.items():
+        if "top" not in grp or "other" not in grp:
+            continue
+        if day_board_counts[d][day_top[d]] < 2:
+            continue
+        spread_days += 1
+        for h in horizons:
+            if grp["top"][h] and grp["other"][h]:
+                spread_by_day[h].append(statistics.fmean(grp["top"][h]) - statistics.fmean(grp["other"][h]))
+
+    def cell(v: List[float]) -> str:
+        if not v:
+            return "--"
+        win = sum(1 for x in v if x > 0) / len(v) * 100
+        return f"{statistics.fmean(v) * 100:+.2f}/{win:.0f}%"
+
+    def row_of(name: str, n: int, groups: Dict[int, List[float]]) -> List[str]:
+        return [name, n] + [cell(groups[h]) for h in horizons]
+
+    print("\n=== 板块效应验证：信号更集中的板块，后续胜率/收益是否更高 ===")
+    print(
+        f"信号口径：跳升买入（Δ≥{buy_delta:g} 且评分≥{rise_floor:g} 且低位≤{low_max:g}持续{low_days}日）"
+        f"；未来收益=次日开盘买入持 h 日收盘卖出（未扣成本）"
+    )
+    print(
+        f"跳升买入共 {total_jump} 个，其中 {total_jump - len(signals)} 个无板块归属"
+        f"（未计入下方板块统计）"
+    )
+
+    headers = ["板块共振度（当日所属板块信号数）", "信号数"] + [f"{h}日(均/胜)" for h in horizons]
+    rows = [row_of(k, bucket_counts[k], buckets[k]) for k in bucket_keys]
+    print(render_table(headers, rows, "lr" + "r" * len(horizons)))
+
+    headers2 = ["同日对照", "信号数"] + [f"{h}日(均/胜)" for h in horizons]
+    rows2 = [
+        row_of("当日最热板块", top_count, top_rets),
+        row_of("当日其余信号", other_count, other_rets),
+        row_of("全部跳升", len(signals), all_rets),
+    ]
+    print(render_table(headers2, rows2, "lr" + "r" * len(horizons)))
+
+    if spread_days:
+        print(f"\n逐日差额（最热板块均值 - 其余信号均值，仅统计最热板块≥2信号且有对照的 {spread_days} 天）：")
+        spread_parts = []
+        for h in horizons:
+            v = spread_by_day[h]
+            if not v:
+                spread_parts.append(f"{h}日: --")
+                continue
+            pos = sum(1 for x in v if x > 0) / len(v) * 100
+            spread_parts.append(f"{h}日: {statistics.fmean(v)*100:+.2f}%（{pos:.0f}%的交易日为正）")
+        print("  " + "  ".join(spread_parts))
+    else:
+        print("\n（逐日差额样本不足：没有同时存在「最热板块≥2信号」与「其余信号」的交易日）")
+
+    # ---- 反向检验：信号「更少」的板块（独苗）是否反而更强，以及是否只是小盘效应 ----
+    def median_mv(group: List[dict]) -> Optional[float]:
+        vs = [s["mv"] for s in group if s["mv"]]
+        return statistics.median(vs) / 1e8 if vs else None  # 亿元
+
+    solo = [s for s in signals if s["bkey"] == "独苗(1)"]
+    pair = [s for s in signals if s["bkey"] == "双信号(2)"]
+    reso = [s for s in signals if s["bkey"] == "共振(≥3)"]
+    mv_solo, mv_pair, mv_reso = median_mv(solo), median_mv(pair), median_mv(reso)
+    def fmt_mv(v: Optional[float]) -> str:
+        return f"{v:.0f}亿" if v is not None else "--"
+    print("\n=== 反向检验：信号少的「独苗」板块是否反而更强（及是否小盘效应）===")
+    print(
+        f"信号日流通市值中位数：独苗 {fmt_mv(mv_solo)}  /  双信号 {fmt_mv(mv_pair)}  /  "
+        f"共振 {fmt_mv(mv_reso)}"
+    )
+    if solo and reso:
+        # 逐日配对：同一天的「独苗均值 - 共振均值」，天然消除大盘涨跌
+        solo_by_day: Dict[str, Dict[int, List[float]]] = {}
+        reso_by_day: Dict[str, Dict[int, List[float]]] = {}
+        for s in solo:
+            solo_by_day.setdefault(s["date"], {h: [] for h in horizons})
+        for s in reso:
+            reso_by_day.setdefault(s["date"], {h: [] for h in horizons})
+        for s in solo:
+            for h in horizons:
+                if s["rets"][h] is not None:
+                    solo_by_day[s["date"]][h].append(s["rets"][h])
+        for s in reso:
+            for h in horizons:
+                if s["rets"][h] is not None:
+                    reso_by_day[s["date"]][h].append(s["rets"][h])
+        print(f"\n逐日配对差额（独苗均值 - 共振均值，同一天两组都有信号的交易日）：")
+        parts = []
+        for h in horizons:
+            diffs = []
+            for d in solo_by_day:
+                if d in reso_by_day and solo_by_day[d][h] and reso_by_day[d][h]:
+                    diffs.append(statistics.fmean(solo_by_day[d][h]) - statistics.fmean(reso_by_day[d][h]))
+            if len(diffs) < 2:
+                parts.append(f"{h}日: 样本不足({len(diffs)}天)")
+                continue
+            m = statistics.fmean(diffs)
+            sd = statistics.stdev(diffs)
+            t = m / (sd / math.sqrt(len(diffs)))
+            p = 2 * (1 - 0.5 * (1 + math.erf(abs(t) / math.sqrt(2))))  # 双侧正态近似
+            pos = sum(1 for x in diffs if x > 0) / len(diffs) * 100
+            parts.append(f"{h}日: {m*100:+.2f}%（正{pos:.0f}%,t={t:+.2f},p={p:.2f},n={len(diffs)}）")
+        print("  " + "  ".join(parts))
+        print(
+            "  （p<0.05 才算稳健；若独苗优势来自小盘股，则市值中位数会明显更低，"
+            "说明是「小盘效应」而非「板块信号少」本身）"
+        )
+
+
+def board_momentum_study(data, args, horizons=(1, 3, 5, 10)) -> None:
+    """验证「板块强度」维度：信号所属板块当日整体涨幅越高，信号后续胜率/收益是否越高。
+
+    与 board_effect_study 同信号口径（跳升买入），但把「板块信号数」换成「板块指数
+    当日涨跌幅」作为板块强度——动量延续假设：板块当天越强，其内个股信号后续表现越好。
+    同一信号若属多个板块，强度取这些板块当日涨幅的均值。
+    """
+    buy_delta = float(args.buy)
+    rise_floor = float(args.rise_min_score)
+    ref_days = max(1, int(args.rise_ref_days))
+    low_days = max(0, int(args.low_base_days))
+    low_max = float(args.low_base_max)
+
+    stock_map = _stock_board_map(args.refresh_board)
+    scope = args.board_effect_scope
+    board_names = _board_index(args.refresh_board)
+    scope_codes: set = set()
+    if scope == "concept":
+        scope_codes = set(_concept_boards(args.refresh_board))
+        scope_txt = "概念板块"
+    elif scope == "industry":
+        scope_codes = set(_industry_boards(args.refresh_board))
+        scope_txt = "行业板块"
+    elif scope == "theme":
+        scope_txt = "产业/技术题材板块"
+    else:
+        scope_txt = "全部概念+行业板块"
+
+    def keep(b: str) -> bool:
+        if scope in ("concept", "industry"):
+            return b in scope_codes
+        if scope == "theme":
+            return is_theme_board(board_names.get(b, ""))
+        return True
+
+    def fwd(bars: Bars, date: str, h: int) -> Optional[float]:
+        i0 = bars.next_index(date)
+        if i0 < 0 or i0 + h - 1 >= len(bars.dates):
+            return None
+        return bars.closes[i0 + h - 1] / bars.opens[i0] - 1
+
+    # 第一遍：收集跳升买入信号 + 涉及的板块 + 无条件基准（控制大盘涨跌）
+    signals: List[dict] = []
+    used_boards: set = set()
+    total_jump = 0
+    base: Dict[int, List[float]] = {h: [] for h in horizons}
+    for s, bars in data:
+        boards = [b for b in stock_map.get(s.code, []) if keep(b)]
+        for i in range(1, len(s.dates)):
+            d = s.dates[i]
+            bi, pb = bars.index_of(d), bars.index_of(s.dates[i - 1])
+            if bi < 0 or pb < 0 or bi - pb != 1:
+                continue
+            delta = s.scores[i] - s.scores[i - 1]
+            cur = s.scores[i]
+            ref = s.scores[max(0, i - ref_days):i]
+            if not ref:
+                continue
+            # 无条件基准：每个相邻交易日都算一次未来收益，作为「这批行情本身」的参照
+            base_row = {h: fwd(bars, d, h) for h in horizons}
+            for h in horizons:
+                if base_row[h] is not None:
+                    base[h].append(base_row[h])
+            low_ref = min(ref)
+            low_base_high = max(s.scores[i - low_days:i]) if low_days and i >= low_days else None
+            in_low = lambda v: low_days <= 0 or v is None or v <= low_max
+            if not (delta >= buy_delta and cur >= rise_floor and (in_low(low_base_high) or in_low(low_ref))):
+                continue
+            total_jump += 1
+            if not boards:
+                continue
+            sig = {
+                "date": d, "boards": boards,
+                "rets": {h: fwd(bars, d, h) for h in horizons},
+                "mv": bars.mv_at(bi),
+            }
+            signals.append(sig)
+            used_boards.update(boards)
+
+    if not signals:
+        print("没有跳升买入信号，无法验证板块强度。可放宽 --buy / --rise-min-score 或加大 --sample。")
+        return
+
+    # 拉取涉及的板块指数日K（涨跌幅），只取信号涉及到的板块
+    board_zdf: Dict[str, Dict[str, float]] = {}
+    print(f"\n板块强度口径：{scope_txt}；拉取 {len(used_boards)} 个板块指数日K（缓存 1 天）…")
+    for j, b in enumerate(sorted(used_boards), 1):
+        board_zdf[b] = _board_kline(b, args.refresh_board)
+        progress(j, len(used_boards), f"板块指数 {board_names.get(b, b)}")
+
+    # 每个信号的板块强度 = 所属板块当日涨幅均值（%）
+    for sig in signals:
+        zs = [board_zdf[b].get(sig["date"]) for b in sig["boards"]]
+        zs = [z for z in zs if z is not None]
+        sig["strength"] = statistics.fmean(zs) if zs else None
+
+    has_strength = [s for s in signals if s["strength"] is not None]
+
+    def bucket(key_of) -> Dict[str, Dict[int, List[float]]]:
+        keys = ("弱(<0%)", "中(0~2%)", "强(≥2%)")
+        b = {k: {h: [] for h in horizons} for k in keys}
+        c = {k: 0 for k in keys}
+        for s in has_strength:
+            c[key_of(s)] += 1
+            for h in horizons:
+                v = s["rets"][h]
+                if v is not None:
+                    b[key_of(s)][h].append(v)
+        return b, c
+
+    def key_of(s: dict) -> str:
+        v = s["strength"]
+        return "强(≥2%)" if v >= 2 else "中(0~2%)" if v >= 0 else "弱(<0%)"
+
+    buckets, counts = bucket(key_of)
+
+    def cell(v: List[float]) -> str:
+        if not v:
+            return "--"
+        win = sum(1 for x in v if x > 0) / len(v) * 100
+        return f"{statistics.fmean(v) * 100:+.2f}/{win:.0f}%"
+
+    print("\n=== 板块强度验证：板块当日涨幅越高，信号后续胜率/收益是否越高 ===")
+    print(
+        f"信号口径：跳升买入（Δ≥{buy_delta:g} 且评分≥{rise_floor:g} 且低位≤{low_max:g}持续{low_days}日）"
+        f"；板块强度=所属板块指数当日涨幅均值；未来收益=次日开盘买持 h 日收盘卖（未扣成本）"
+    )
+    print(f"跳升买入共 {total_jump} 个，其中有板块强度数据的 {len(has_strength)} 个")
+
+    headers = ["板块当日涨幅", "信号数"] + [f"{h}日(均/胜)" for h in horizons]
+    rows = [[k, counts[k]] + [cell(buckets[k][h]) for h in horizons] for k in ("弱(<0%)", "中(0~2%)", "强(≥2%)")]
+    # 全部跳升信号 + 无条件基准作为对照（后者用于剥离「大盘当天涨了」的延续效应）
+    rows.append(["全部跳升", len(has_strength)] + [cell([s["rets"][h] for s in has_strength if s["rets"][h] is not None]) for h in horizons])
+    rows.append(["无条件基准", "--"] + [cell(base[h]) for h in horizons])
+    print(render_table(headers, rows, "lr" + "r" * len(horizons)))
+
+    # 逐日配对：强(≥2%) vs 弱(<0%)，控制日期（消除大盘涨跌）
+    strong = [s for s in has_strength if s["strength"] >= 2]
+    weak = [s for s in has_strength if s["strength"] < 0]
+    if strong and weak:
+        strong_by_day: Dict[str, Dict[int, List[float]]] = {}
+        weak_by_day: Dict[str, Dict[int, List[float]]] = {}
+        for s in strong:
+            strong_by_day.setdefault(s["date"], {h: [] for h in horizons})
+        for s in weak:
+            weak_by_day.setdefault(s["date"], {h: [] for h in horizons})
+        for s in strong:
+            for h in horizons:
+                if s["rets"][h] is not None:
+                    strong_by_day[s["date"]][h].append(s["rets"][h])
+        for s in weak:
+            for h in horizons:
+                if s["rets"][h] is not None:
+                    weak_by_day[s["date"]][h].append(s["rets"][h])
+        print(f"\n逐日配对差额（强板块均值 - 弱板块均值，同一天两组都有信号的交易日）：")
+        parts = []
+        for h in horizons:
+            diffs = []
+            for d in strong_by_day:
+                if d in weak_by_day and strong_by_day[d][h] and weak_by_day[d][h]:
+                    diffs.append(statistics.fmean(strong_by_day[d][h]) - statistics.fmean(weak_by_day[d][h]))
+            if len(diffs) < 2:
+                parts.append(f"{h}日: 样本不足({len(diffs)}天)")
+                continue
+            m = statistics.fmean(diffs)
+            sd = statistics.stdev(diffs)
+            t = m / (sd / math.sqrt(len(diffs)))
+            p = 2 * (1 - 0.5 * (1 + math.erf(abs(t) / math.sqrt(2))))
+            pos = sum(1 for x in diffs if x > 0) / len(diffs) * 100
+            parts.append(f"{h}日: {m*100:+.2f}%（正{pos:.0f}%,t={t:+.2f},p={p:.2f},n={len(diffs)}）")
+        print("  " + "  ".join(parts))
+        # 市值对照：强/弱两组是否只是小盘差异
+        def mv_med(grp: List[dict]) -> Optional[float]:
+            vs = [s["mv"] for s in grp if s["mv"]]
+            return statistics.median(vs) / 1e8 if vs else None
+        ms, mw = mv_med(strong), mv_med(weak)
+        print(
+            f"信号日流通市值中位数：强板块 {(f'{ms:.0f}亿' if ms else '--')}  /  "
+            f"弱板块 {(f'{mw:.0f}亿' if mw else '--')}"
+        )
+        print("  （p<0.05 才算稳健；正差额说明「板块当天强→后续强」的动量延续成立）")
+    else:
+        print("\n（强弱两组样本不足，无法做逐日配对）")
+
+
 QUALITY_DIM_MAX = 75  # 抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20
 
 
@@ -2824,6 +3483,11 @@ def main() -> None:
         "--board", action="append", default=[], metavar="名称|BK代码",
         help="只回测该板块成分股（可重复传，如 --board 小盘成长；支持 BK1667）",
     )
+    ap.add_argument(
+        "--board-scope", choices=["theme", "style"], default=None,
+        help="按概念板块范围回测：theme=只看题材（产业/技术题材，与面板「只看题材」同口径）；"
+        "style=只看风格（名称以「风格」结尾）",
+    )
     ap.add_argument("--list-boards", action="store_true", help="列出可用的东财板块（联网，缓存 7 天）")
     ap.add_argument("--refresh-board", action="store_true", help="强制刷新板块列表与成分股缓存")
     ap.add_argument("--min-days", type=int, default=120, help="只取评分天数 >= 该值的股票（数据少时可调小）")
@@ -2994,6 +3658,20 @@ def main() -> None:
     ap.add_argument(
         "--census", action="store_true",
         help="按 STList「信号」列口径统计「跳升买入 / 抬升买入」的触发量、连续重复比例与信号后收益",
+    )
+    ap.add_argument(
+        "--board-effect", action="store_true",
+        help="验证「板块效应」：把每日跳升买入信号按所属板块统计，比较信号更集中的板块其后续胜率/收益是否更高",
+    )
+    ap.add_argument(
+        "--board-effect-scope", choices=["concept", "all", "industry", "theme"], default="concept",
+        help="板块口径（配合 --board-effect / --board-momentum）：concept=仅东财概念板块 t:3 全量（默认）/ "
+        "theme=仅产业/技术题材（滤掉风格/指数/持仓等伪概念）/ "
+        "industry=仅东财行业 t:2（单归属）/ all=全部概念+行业",
+    )
+    ap.add_argument(
+        "--board-momentum", action="store_true",
+        help="验证「板块强度」维度：信号所属板块指数当日涨幅越高，信号后续胜率/收益是否越高（动量延续）",
     )
     ap.add_argument(
         "--quality", action="store_true",
@@ -3209,18 +3887,29 @@ def main() -> None:
             "--version dominant（或先打开应用让评分缓存写入数据）"
         )
 
-    sample_n = args.sample if args.sample is not None else (0 if args.board else 300)
+    sample_n = args.sample if args.sample is not None else (0 if (args.board or args.board_scope) else 300)
 
-    if args.board:
+    board_pool: List[str] = list(args.board or [])
+    if args.board_scope:
+        scope = args.board_scope
+        for code, name in _concept_boards(args.refresh_board).items():
+            if (scope == "style" and is_style_board(name)) or (scope == "theme" and is_theme_board(name)):
+                board_pool.append(name)
+
+    if board_pool:
         members: Dict[str, str] = {}
         parts: List[str] = []
-        for b in args.board:
+        for b in board_pool:
             board_code, board_name = resolve_board(b, args.refresh_board)
             rows = fetch_board_members(board_code, args.refresh_board)
             for c, n in rows:
                 members.setdefault(c, n)
             parts.append(f"{board_name}({board_code}) {len(rows)}只")
-        print("板块成分: " + "；".join(parts))
+        if args.board_scope:
+            head = "、".join(parts[:6])
+            print(f"板块范围「{args.board_scope}」展开 {len(board_pool)} 个板块：{head}" + (" …" if len(parts) > 6 else ""))
+        else:
+            print("板块成分: " + "；".join(parts))
         covered = {c: n for c, n in members.items() if c in series}
         print(f"成分股合计 {len(members)} 只，可回测（评分序列达标）{len(covered)} 只")
         if not covered:
@@ -3262,6 +3951,10 @@ def main() -> None:
         event_study(data)
     if args.census:
         signal_census(data, args)
+    if args.board_effect:
+        board_effect_study(data, args)
+    if args.board_momentum:
+        board_momentum_study(data, args)
     if args.quality:
         quality_study(data, args, lag, args.min_mv * 1e8)
     if args.positions:
