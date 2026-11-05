@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './index.scss';
-import { Button, Input, InputNumber, Modal, Select, Switch, Tag, Tooltip, message } from 'antd';
+import { Button, Input, InputNumber, Select, Switch, Tag, Tooltip, message } from 'antd';
 import { ColumnWidthOutlined, HeartFilled, HeartOutlined, PlusOutlined } from '@ant-design/icons';
 import { batch, useDispatch, useSelector } from 'react-redux';
-import moment from 'moment';
 import { StoreState } from '@/reducers/types';
 import * as Helpers from '@/helpers';
 import {
@@ -11,24 +10,16 @@ import {
   addStockMarkLineAction,
   addStockTagAction,
   addStockTradePointAction,
-  clearAllStockTradePointAction,
   clearKNoteAction,
   clearStockTradePointAction,
   deleteStockMarkLineAction,
   deleteStockTagAction,
   syncStockMarktypeAction,
 } from '@/actions/stock';
-import {
-  addTrainArchiveAction,
-  clearTrainProgressAction,
-  saveTrainDayAction,
-  setTrainDaysAction,
-  stopTrainAction,
-  TRAIN_TYPE,
-} from '@/actions/train';
+import { addTrainTradeRecordAction, saveTrainDayAction, setTrainDaysAction, TRAIN_TYPE } from '@/actions/train';
+import { BuildStockTradeRecord } from '@/helpers/trainAccount';
 import { MarkType } from '@/utils/enums';
 import * as Utils from '@/utils';
-import TrainSettlement from '../TrainSettlement';
 
 /**
  * 工具栏高度的兼容常量：
@@ -86,9 +77,6 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     kLineApiSourceSetting,
   } = useSelector((state: StoreState) => state.setting.systemSetting);
   const [marktype, setMarktype] = useState(config?.marktype || 0);
-  /** 结算结果（弹窗展示） */
-  const [settlement, setSettlement] = useState<Train.ArchiveRecord | null>(null);
-  const [settling, setSettling] = useState(false);
   /** 买入金额（元）：留空表示使用全部可用资金 */
   const [buyAmount, setBuyAmount] = useState<number | undefined>(undefined);
   /** 买入资金比例：1=全仓，2/3/4=可用资金的 1/2、1/3、1/4 */
@@ -374,7 +362,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     // 按交易日推进（days 已跳过非交易日），同时落盘训练日与进度
     saveProgress(nextDay);
     if (days[days.length - 1] === nextDay) {
-      message.info('已推进到训练结束日期，请进行结算归档');
+      message.info('已推进到训练窗口最后一天');
     }
   }, [nextDay, days, saveProgress]);
 
@@ -456,7 +444,24 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         message.warning('T+1：买入成交当日不可卖出，请推进到下一个交易日');
         return;
       }
+      // 清仓即归档：把本轮（上一次清仓 → 本次清仓）的完整交易写入「训练记录」
+      const tradeRecord = BuildStockTradeRecord({
+        secid,
+        name: stockName,
+        sellDate: currentDay,
+        sellPrice: todayClose,
+        shares: account.shares,
+        costAmount: account.costPrice * account.shares,
+        commissionRate: commission,
+        trainStartDate: startDate,
+        buyPoints: config?.buyPoints,
+        sellPoints: config?.sellPoints,
+        tradingDays: days,
+      });
       dispatch(addStockTradePointAction(secid, currentDay, todayClose, false, TRAIN_TYPE));
+      if (tradeRecord) {
+        dispatch(addTrainTradeRecordAction(tradeRecord));
+      }
     },
     [
       currentDay,
@@ -464,7 +469,11 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       suspended,
       secid,
       buyAmount,
-      account.cash,
+      account,
+      stockName,
+      config,
+      startDate,
+      days,
       commission,
       boughtToday,
       ensureStockConfig,
@@ -492,99 +501,6 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       dispatch(clearKNoteAction(secid, true));
     });
   }, [secid]);
-
-  // 结算并归档
-  const settle = useCallback(async () => {
-    if (!currentDay || !days.length) {
-      return;
-    }
-    setSettling(true);
-    try {
-      // 结算口径＝训练过程中的「共享组合账户」：把所有标的的训练买卖点按日期合并后统一回放。
-      // 只回放当前标的会让归档里只剩当前标的的几笔成交，与训练时界面显示的可用资金/持仓完全不符。
-      const combined: { secid: string; name: string; date: string; price: number; isBuy: boolean; amount?: number }[] = [];
-      const collect = (c: any) => {
-        if (!c || !c.secid) {
-          return;
-        }
-        const name = c.name || c.secid;
-        ((c.buyPoints || []) as any[])
-          .filter((t) => isTrainMark(t.t))
-          .forEach((t) =>
-            combined.push({ secid: c.secid, name, date: String(t.x).substring(0, 10), price: t.y, isBuy: true, amount: t.a })
-          );
-        ((c.sellPoints || []) as any[])
-          .filter((t) => isTrainMark(t.t))
-          .forEach((t) =>
-            combined.push({ secid: c.secid, name, date: String(t.x).substring(0, 10), price: t.y, isBuy: false })
-          );
-      };
-      Object.values(stockConfigsMapping || {}).forEach(collect);
-      // 兜底：当前标的配置若尚未进入 stockConfigsMapping，补一次
-      if (config && !combined.some((t) => t.secid === config.secid)) {
-        collect(config);
-      }
-      const settleTrades = combined
-        .filter((t) => (!startDate || t.date >= startDate) && t.date <= currentDay)
-        .filter((t) => Number(t.price) > 0);
-
-      // 各标的的逐日收盘价（数据层已按当前训练日期过滤，不含未来数据；当前标的直接用已加载的行情）
-      const dayClosesBySecid: Record<string, Record<string, number>> = {};
-      const secidsToValue = [...new Set(settleTrades.map((t) => t.secid))];
-      const CLOSE_FETCH_CONCURRENCY = 5;
-      for (let i = 0; i < secidsToValue.length; i += CLOSE_FETCH_CONCURRENCY) {
-        const chunk = secidsToValue.slice(i, i + CLOSE_FETCH_CONCURRENCY);
-        // eslint-disable-next-line no-await-in-loop
-        await Promise.all(
-          chunk.map(async (sid) => {
-            try {
-              dayClosesBySecid[sid] =
-                sid === secid && Object.keys(dayClosesMap).length
-                  ? { ...dayClosesMap }
-                  : await Helpers.Stock.GetTrainDayCloses(sid);
-            } catch {
-              dayClosesBySecid[sid] = {};
-            }
-          })
-        );
-      }
-
-      const result = Helpers.TrainSettle.SettleTrain({
-        startDate: startDate || days[0],
-        endDate: currentDay,
-        initialCapital: capital,
-        commissionRate: commission,
-        days,
-        dayClosesBySecid,
-        trades: settleTrades,
-      });
-      const tradedSecids = [...new Set(result.trades.map((t) => t.secid).filter(Boolean))];
-      const record: Train.ArchiveRecord = {
-        ...result,
-        id: `${secid}_${moment().format('YYYYMMDDHHmmss')}`,
-        // 组合结算：一次训练可能跨多只标的。单标的时保留原标的，便于左侧归档一眼看出是哪只
-        secid: tradedSecids.length > 1 ? 'ALL' : settleTrades[0]?.secid || secid,
-        name:
-          tradedSecids.length > 1
-            ? `训练组合（${tradedSecids.length} 只标的）`
-            : settleTrades[0]?.name || stock?.detail?.name || secid,
-        createdAt: moment().format('YYYY-MM-DD HH:mm:ss'),
-      };
-      dispatch(addTrainArchiveAction(record));
-      // 组合已整体结算归档：清掉所有标的的训练买卖标记，避免影响下一次训练
-      dispatch(clearAllStockTradePointAction(true, TRAIN_TYPE));
-      // 训练已结算归档，清除未完成进度
-      dispatch(clearTrainProgressAction());
-      setSettlement(record);
-      dispatch(stopTrainAction());
-      message.success('训练已结束，结算结果已归档到左侧“训练归档”');
-    } catch (error) {
-      console.log('训练结算失败', error);
-      message.error('训练结算失败');
-    } finally {
-      setSettling(false);
-    }
-  }, [currentDay, days, secid, startDate, capital, commission, stockConfigsMapping, config, dayClosesMap, stock]);
 
   const removeTag = useCallback((t) => {
     dispatch(deleteStockTagAction(t, secid));
@@ -643,22 +559,11 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
           </div>
           <div className={styles.item}>
             {finished ? (
-              <>
-                <Tag color="gold">训练结束</Tag>
-                <Button type="primary" size="small" loading={settling} onClick={settle}>
-                  结算并归档
-                </Button>
-              </>
+              <Tag color="gold">已到训练窗口最后一天</Tag>
             ) : (
-              <>
-                <Button type="primary" size="small" disabled={!nextDay} onClick={nextDayAction}>
-                  下一天
-                </Button>
-                &nbsp;
-                <Button size="small" disabled={settling || !currentDay} loading={settling} onClick={settle}>
-                  结算归档
-                </Button>
-              </>
+              <Button type="primary" size="small" disabled={!nextDay} onClick={nextDayAction}>
+                下一天
+              </Button>
             )}
           </div>
           {showTrade && (
@@ -732,7 +637,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
               {config && (
                 <span className={styles.hint}>
                   {finished
-                    ? '已到训练最后一天：不再进行买卖，可直接结算归档'
+                    ? '已到训练最后一天：不再进行买卖（每次清仓都会自动记入「训练记录」）'
                     : suspended
                       ? `${currentDay || '--'} 停牌：当日不能买卖，持仓按最近收盘价${
                           currentClose > 0 ? ` ${currentClose.toFixed(2)}` : ''
@@ -820,16 +725,6 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
           )}
         </div>
       </div>
-      <Modal
-        title="训练结算"
-        visible={!!settlement}
-        footer={null}
-        width={1000}
-        onCancel={() => setSettlement(null)}
-        destroyOnClose
-      >
-        {settlement && <TrainSettlement record={settlement} />}
-      </Modal>
     </div>
   );
 });

@@ -1,0 +1,58 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background-color: var(--background-color);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--main-text-color);
+  border-bottom: 1px solid var(--main-border-color);
+}
+
+.sub {
+  margin-left: 2px;
+  color: var(--secondary-text-color);
+}
+
+.tableWrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 6px 10px 10px;
+}
+
+.table {
+  :global(.ant-table) {
+    background-color: transparent;
+  }
+}
+
+.del {
+  color: var(--reverse-text-color);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--danger-color, #f5222d);
+  }
+}
+
+.buys {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--main-text-color);
+}
+
+.buysLabel {
+  color: var(--secondary-text-color);
+}

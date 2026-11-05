@@ -15,6 +15,7 @@ const TABLE_MAP: Record<string, string> = {
   'store/tradings.json': 'tradings',
   'store/trainings.json': 'trainings',
   'store/ktrainings.json': 'ktrainings',
+  'store/train_trade_records.json': 'train_trade_records',
   'store/strategy_groups.json': 'strategy_groups',
 };
 

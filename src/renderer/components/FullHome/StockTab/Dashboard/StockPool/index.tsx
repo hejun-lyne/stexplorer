@@ -12,6 +12,7 @@ import CXList from './CXList';
 import ZBList from './ZBList';
 import DTList from './DTList';
 import STList from './STList';
+import TrainRecord from './TrainRecord';
 import HoldView from './HoldView';
 import { Stock } from '@/types/stock';
 import { StoreState } from '@/reducers/types';
@@ -204,6 +205,11 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
             // 持仓弹窗里的「打开股票」是明确动作：直接切到该标的详情页
             onOpenStockFocus={(s, n) => onOpenStock(s, n, undefined, undefined, undefined, undefined, true)}
             active={activeKey === 'stocks'}
+          />
+        </Tabs.TabPane>
+        <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>训练记录</span>} key={'trainrecords'}>
+          <TrainRecord
+            onOpenStock={(s, n) => onOpenStock(s, n, undefined, undefined, undefined, undefined, true)}
           />
         </Tabs.TabPane>
         <Tabs.TabPane tab={<span style={{ padding: '0 20px' }}>涨停股票</span>} key={'ztlist'}>

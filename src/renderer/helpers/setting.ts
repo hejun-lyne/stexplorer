@@ -23,6 +23,7 @@ export const defaultSystemSetting: System.Setting = {
   trainDate: '',
   trainStartDate: '',
   trainEndDate: '',
+  trainTime: '',
   commissionRate: 0.0003,
   favorites: [],
 };

@@ -226,7 +226,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
             }}
           >
             <div className={styles.left}>
-              <RealTime stock={nDetails} ignoreTrain={ignoreTrain} />
+              <RealTime stock={nDetails} ignoreTrain={ignoreTrain} klines={klines || undefined} />
               <BanKuai secid={nDetails.secid} active={active} openBankuai={onOpenStock} />
               <TradeRecord showSeats={true} stock={nDetails} active={active} />
             </div>

@@ -13,6 +13,13 @@ export interface RealTimeProps {
   stock: Stock.DetailItem;
   /** 忽略训练：展示真实最新行情，不用训练日K推导 */
   ignoreTrain?: boolean;
+  /**
+   * 详情页当前展示的日K（训练模式下已按共享训练时刻重建训练日当日K）
+   *
+   * 传入时优先用它推导训练行情，保证「价格 / 分时 / 当日K」都停在同一时刻；
+   * 未传入时退回按训练日取数（首帧 PriceTrend 还没算出重建K的情况）。
+   */
+  klines?: Stock.KLineItem[];
 }
 
 /**
@@ -52,7 +59,7 @@ function buildTrainDetail(stock: Stock.DetailItem, klines: Stock.KLineItem[], tr
   };
 }
 
-const RealTime: React.FC<RealTimeProps> = React.memo(({ stock, ignoreTrain = false }) => {
+const RealTime: React.FC<RealTimeProps> = React.memo(({ stock, ignoreTrain = false, klines }) => {
   const stocks = useSelector((store: StoreState) => store.stock.stocksMapping[stock.secid]);
   const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
   /** 训练日的日K（优先取 redux，缺失时自行取一次，走磁盘缓存代价很低） */
@@ -87,10 +94,12 @@ const RealTime: React.FC<RealTimeProps> = React.memo(({ stock, ignoreTrain = fal
 
   const data = useMemo(() => {
     if (!ignoreTrain && ontrain && trainDate) {
-      return buildTrainDetail(stock, trainKlines, trainDate);
+      // 详情页日K优先：PriceTrend 已按共享训练时钟重建训练日当日K，行情卡跟着它走
+      const source = klines && klines.length ? klines : trainKlines;
+      return buildTrainDetail(stock, source, trainDate);
     }
     return stock || stocks?.detail || {};
-  }, [ignoreTrain, ontrain, trainDate, stock, trainKlines, stocks]);
+  }, [ignoreTrain, ontrain, trainDate, stock, trainKlines, stocks, klines]);
 
   return (
     <PureCard>

@@ -9,7 +9,7 @@ export const TRAIN_TYPE = 'train';
 
 export const SYNC_TRAIN_DAYS = 'SYNC_TRAIN_DAYS';
 export const SYNC_TRAIN_PROGRESS = 'SYNC_TRAIN_PROGRESS';
-export const SYNC_TRAIN_ARCHIVES = 'SYNC_TRAIN_ARCHIVES';
+export const SYNC_TRAIN_TRADE_RECORDS = 'SYNC_TRAIN_TRADE_RECORDS';
 export const SET_TRAIN_SYNING = 'SET_TRAIN_SYNING';
 
 /** 记录当前训练会话的交易日列表（训练工具栏与设置页共用） */
@@ -31,6 +31,29 @@ export function setTrainCurrentDateAction(date: string): ThunkAction {
     dispatch({
       type: SYNC_SYSTEM_SETTING,
       payload: [{ ...systemSetting, trainDate: date }, settingModified],
+    });
+  };
+}
+
+/**
+ * 仅更新系统设置中的当前训练时刻（HH:mm，不触发远端同步）
+ *
+ * 训练时钟由 STList 的时间推进写入，详情页的分时/当日K、评分面板共用同一个时刻，
+ * 保证列表与详情页展示到的都是同一分钟。时间推进每分钟都会调用，因此不能走会写盘/同步的 action。
+ */
+export function setTrainTimeAction(time: string): ThunkAction {
+  return (dispatch, getState) => {
+    const {
+      setting: { systemSetting, settingModified },
+    } = getState();
+    const next = String(time || '');
+    if ((systemSetting.trainTime || '') === next) {
+      return;
+    }
+    // 保持 settingModified 不变，避免影响与远端设置的同步比较
+    dispatch({
+      type: SYNC_SYSTEM_SETTING,
+      payload: [{ ...systemSetting, trainTime: next }, settingModified],
     });
   };
 }
@@ -288,86 +311,92 @@ export function restartTrainAction(): ThunkAction {
   };
 }
 
-// ==================== 训练归档 ====================
+// ==================== 训练记录（逐股清仓归档） ====================
 
-export function syncRemoteTrainArchivesAction(): ThunkAction {
+/** 读取远端训练记录（启动时；本地为空时以远端为准） */
+export function syncRemoteTrainTradeRecordsAction(): ThunkAction {
   return (dispatch, getState) => {
     try {
       const {
-        train: { archives, archivesModified },
+        train: { tradeRecords, tradeRecordsModified },
         storage: { storage },
       } = getState();
       if (!storage) {
         throw new Error('storage未初始化');
       }
-      dispatch({ type: SET_TRAIN_SYNING, payload: { v: true, t: '读取训练归档中' } });
-      storage
-        .ReadRemoteTrainArchives()
+      dispatch({ type: SET_TRAIN_SYNING, payload: { v: true, t: '读取训练记录中' } });
+      return storage
+        .ReadRemoteTrainTradeRecords()
         .then((content) => {
-          if (!content) {
-            dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '读取训练归档失败' } });
-          }
-          return content;
-        })
-        .then((content) => {
-          if (content && content.data && content.lastModified >= archivesModified) {
-            const data = content.data as Train.ArchiveRecord[];
-            if (Array.isArray(data) && data.length > 0) {
-              batch(() => {
-                dispatch({ type: SYNC_TRAIN_ARCHIVES, payload: [data, content.lastModified] });
-                dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '读取训练归档完成' } });
-              });
-              return false;
-            }
-          }
-          return true;
-        })
-        .then((content) => {
-          if (content && archives.length) {
+          const data = content?.data as Train.StockTradeRecord[] | undefined;
+          if (Array.isArray(data) && data.length && content.lastModified >= tradeRecordsModified) {
+            dispatch({ type: SYNC_TRAIN_TRADE_RECORDS, payload: [data, content.lastModified] });
+          } else if (tradeRecords.length) {
+            // 远端没有记录（或比本地旧）：把本地记录补写回去
             // eslint-disable-next-line promise/no-nesting
-            storage
-              .WriteRemoteTrainArchives(archives, archivesModified)
-              .then((success) => {
-                if (!success) {
-                  dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '写入训练归档失败' } });
-                }
-                return success;
-              })
-              .catch(() => {
-                dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '写入训练归档失败' } });
-              });
+            storage.WriteRemoteTrainTradeRecords(tradeRecords, tradeRecordsModified).catch(() => {});
           }
-          return content;
+          dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '' } });
+        })
+        .catch(() => {
+          dispatch({ type: SET_TRAIN_SYNING, payload: { v: false, t: '' } });
         });
     } catch (error) {
-      console.log('同步训练归档出错', error);
+      console.log('同步训练记录出错', error);
+      return Promise.resolve();
     }
   };
 }
 
-export function setTrainArchivesAction(archives: Train.ArchiveRecord[]): ThunkAction {
+/** 覆盖写入训练记录（不同步读取，避免高频清仓时的读写循环） */
+export function setTrainTradeRecordsAction(records: Train.StockTradeRecord[]): ThunkAction {
+  return (dispatch, getState) => {
+    const modified = moment(new Date()).format('YYYY-MM-DD HH:mm:ss');
+    const next = [...records];
+    dispatch({ type: SYNC_TRAIN_TRADE_RECORDS, payload: [next, modified] });
+    try {
+      const {
+        storage: { storage },
+      } = getState();
+      if (storage) {
+        // eslint-disable-next-line promise/no-nesting
+        storage.WriteRemoteTrainTradeRecords(next, modified).catch(() => {});
+      }
+    } catch (error) {
+      console.log('写入训练记录出错', error);
+    }
+  };
+}
+
+/**
+ * 清仓后归档一条训练记录
+ *
+ * 同一只股票、同一清仓日只保留最新一条：卖出点在同日会被覆盖（一天只清仓一次），
+ * 这里同步去重，避免重复提交或同日反复操作产生多条。
+ */
+export function addTrainTradeRecordAction(record: Train.StockTradeRecord): ThunkAction {
+  return (dispatch, getState) => {
+    const {
+      train: { tradeRecords },
+    } = getState();
+    const rest = tradeRecords.filter((_) => !(_.secid === record.secid && _.sellDate === record.sellDate));
+    dispatch(setTrainTradeRecordsAction([record].concat(rest)));
+  };
+}
+
+/** 删除一条训练记录 */
+export function removeTrainTradeRecordAction(id: string): ThunkAction {
+  return (dispatch, getState) => {
+    const {
+      train: { tradeRecords },
+    } = getState();
+    dispatch(setTrainTradeRecordsAction(tradeRecords.filter((_) => _.id !== id)));
+  };
+}
+
+/** 清空全部训练记录（重新开始训练时使用） */
+export function clearTrainTradeRecordsAction(): ThunkAction {
   return (dispatch) => {
-    dispatch({ type: SYNC_TRAIN_ARCHIVES, payload: [[...archives], moment(new Date()).format('YYYY-MM-DD HH:mm:ss')] });
-    dispatch(syncRemoteTrainArchivesAction());
-  };
-}
-
-/** 归档一次训练 */
-export function addTrainArchiveAction(record: Train.ArchiveRecord): ThunkAction {
-  return (dispatch, getState) => {
-    const {
-      train: { archives },
-    } = getState();
-    dispatch(setTrainArchivesAction([record].concat(archives)));
-  };
-}
-
-/** 删除归档 */
-export function removeTrainArchiveAction(id: string): ThunkAction {
-  return (dispatch, getState) => {
-    const {
-      train: { archives },
-    } = getState();
-    dispatch(setTrainArchivesAction(archives.filter((_) => _.id !== id)));
+    dispatch(setTrainTradeRecordsAction([]));
   };
 }

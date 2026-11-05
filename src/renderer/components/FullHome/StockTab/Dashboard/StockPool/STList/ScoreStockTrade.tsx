@@ -12,7 +12,8 @@ import {
   fillPendingBuyTradesAction,
   removeTrade,
 } from '@/actions/stock';
-import { ComputeTrainAccount, IsTrainMark } from '@/helpers/trainAccount';
+import { BuildStockTradeRecord, ComputeTrainAccount, IsTrainMark } from '@/helpers/trainAccount';
+import { addTrainTradeRecordAction } from '@/actions/train';
 import { GetLimitUpPct, GetStockDetail, GetStockType } from '@/helpers/stock';
 import { GetStorage, SetStorage } from '@/utils';
 
@@ -188,6 +189,8 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
     (state: StoreState) => state.setting.systemSetting
   );
   const { stockConfigsMapping, nowHolds, tradings } = useSelector((state: StoreState) => state.stock);
+  /** 训练窗口交易日：用于把「持有天数」换算成交易日数 */
+  const trainDays = useSelector((state: StoreState) => state.train.days);
   const config = stockConfigsMapping?.[secid];
 
   const [tradeType, setTradeType] = useState<'buy' | 'sell'>('buy');
@@ -506,7 +509,25 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           );
         }
       } else {
+        // 清仓即归档：把本轮（上一次清仓 → 本次清仓）的完整交易写入「训练记录」
+        const tradeRecord = BuildStockTradeRecord({
+          secid,
+          name: name || code,
+          sellDate: tradeDate,
+          sellPrice: tradePrice,
+          shares: Number(trainPosition?.shares) || 0,
+          costAmount: Number(trainPosition?.costAmount) || 0,
+          commissionRate: commission,
+          reason: reasonText,
+          trainStartDate,
+          buyPoints: config?.buyPoints,
+          sellPoints: config?.sellPoints,
+          tradingDays: trainDays,
+        });
         dispatch(addStockTradePointAction(secid, tradeDate, tradePrice, false, TRAIN_MARK, undefined, reasonText));
+        if (tradeRecord) {
+          dispatch(addTrainTradeRecordAction(tradeRecord));
+        }
         message.success(
           `已清仓 ${name}：${tradePrice.toFixed(2)} × ${submitShares} 股（${formatMoney(submitOrderAmount)}）`
         );

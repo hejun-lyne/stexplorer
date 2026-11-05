@@ -28,6 +28,7 @@ export const defaultSystemSetting: System.Setting = {
   trainDate: '',
   trainStartDate: '',
   trainEndDate: '',
+  trainTime: '',
   kLineApiSourceSetting: Enums.FundApiType.Eastmoney,
   useZizaiDayK: false,
   kimiApiKeySetting: '',

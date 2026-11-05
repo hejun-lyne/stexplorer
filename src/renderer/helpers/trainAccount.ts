@@ -177,6 +177,99 @@ export function ComputeTrainAccount(params: {
 }
 
 /**
+ * 构建「一轮交易」的归档记录（清仓时调用）
+ *
+ * 与整体结算不同：这里只归档单只股票本轮（上次清仓之后 → 本次清仓）的完整交易，
+ * 包含本轮全部买入明细，卖出即一次清仓。
+ *
+ * @param params.shares 本轮清仓股数（训练账户回放的持仓）
+ * @param params.costAmount 本轮持仓成本（含买入佣金）
+ * @param params.buyPoints / sellPoints 该股全部训练买卖点，用于还原本轮起点与买入明细
+ * @param params.tradingDays 可选：训练窗口交易日列表，用于把持有天数换算成交易日数
+ */
+export function BuildStockTradeRecord(params: {
+  secid: string;
+  name?: string;
+  sellDate: string;
+  sellPrice: number;
+  shares: number;
+  costAmount: number;
+  commissionRate?: number;
+  reason?: string;
+  trainStartDate?: string;
+  buyPoints?: any[];
+  sellPoints?: any[];
+  tradingDays?: string[];
+}): Train.StockTradeRecord | null {
+  const secid = params.secid;
+  const sellPrice = Number(params.sellPrice) || 0;
+  const shares = Number(params.shares) || 0;
+  const costAmount = Number(params.costAmount) || 0;
+  if (!secid || sellPrice <= 0 || shares <= 0 || costAmount <= 0) {
+    return null;
+  }
+  const sellDate = String(params.sellDate || '').substring(0, 10);
+  if (!sellDate) {
+    return null;
+  }
+  const trainStartDate = String(params.trainStartDate || '').substring(0, 10);
+  const dayOf = (p: any) => String(p?.x ?? p?.date ?? '').substring(0, 10);
+
+  // 本轮起点：上一次清仓日之后（同一天重复清仓时，卖出点会被覆盖，这里按「早于本次清仓日」找上一轮）
+  const prevSellDate = (params.sellPoints || [])
+    .filter((p) => IsTrainMark(p?.t))
+    .map(dayOf)
+    .filter((d) => d && d < sellDate)
+    .sort()
+    .pop();
+
+  const buys = (params.buyPoints || [])
+    .filter((p) => IsTrainMark(p?.t) && Number(p?.y) > 0)
+    .map((p) => ({ date: dayOf(p), price: Number(p.y), amount: p.a != null ? Number(p.a) : undefined }))
+    .filter((b) => !!b.date && b.date <= sellDate)
+    .filter((b) => (!trainStartDate || b.date >= trainStartDate) && (!prevSellDate || b.date > prevSellDate))
+    .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0));
+
+  const buyDate = buys[0]?.date || sellDate;
+  const rawRate = Number(params.commissionRate);
+  const rate = Number.isFinite(rawRate) && rawRate >= 0 ? rawRate : TRAIN_DEFAULT_COMMISSION;
+  const amount = sellPrice * shares;
+  const fee = amount * rate;
+  const profit = amount - fee - costAmount;
+  const profitRatio = (profit / costAmount) * 100;
+
+  let holdDays = 0;
+  const tradingDays = params.tradingDays || [];
+  if (tradingDays.length) {
+    holdDays = tradingDays.filter((d) => d > buyDate && d <= sellDate).length;
+  } else {
+    const from = Date.parse(buyDate);
+    const to = Date.parse(sellDate);
+    holdDays = Number.isFinite(from) && Number.isFinite(to) ? Math.max(0, Math.round((to - from) / 86400000)) : 0;
+  }
+
+  return {
+    id: `${secid}_${sellDate}_${Date.now()}`,
+    secid,
+    name: params.name || secid,
+    buyDate,
+    buyPrice: costAmount / shares,
+    sellDate,
+    sellPrice,
+    count: shares,
+    amount,
+    commission: fee,
+    profit,
+    profitRatio,
+    holdDays,
+    reason: (params.reason || '').trim(),
+    buys,
+    trainStartDate,
+    createdAt: new Date().toISOString().replace('T', ' ').substring(0, 19),
+  };
+}
+
+/**
  * 某训练日的收盘价：当天有行情就用当天，否则退回最近一个不晚于该日的收盘价
  * @param closes 交易日 -> 收盘价
  * @param day 训练日（YYYY-MM-DD）

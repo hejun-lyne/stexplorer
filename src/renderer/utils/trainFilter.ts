@@ -134,3 +134,38 @@ export function CutFlowTrends(trends?: Stock.FlowTrendItem[]) {
 export function CutFlowDlines(lines?: Stock.FlowDLineItem[]) {
   return CutTimeSeries(lines, (l) => l && l.date);
 }
+
+// ==================== 训练时钟（训练日内的「时刻」） ====================
+
+/** 训练时钟起点：09:30 才视为「已开始推进」（09:25 集合竞价可手动回退查看） */
+export const TRAIN_CLOCK_START = '09:30';
+/** 训练时钟终点：收盘 */
+export const TRAIN_CLOCK_CLOSE = '15:00';
+
+/** 取时间里的「时刻」部分（HH:mm），兼容 "YYYY-MM-DD HH:mm" 与 "HH:mm:ss" */
+export function ClockOf(datetime?: string) {
+  const matched = String(datetime || '').match(/(\d{2}):(\d{2})/);
+  return matched ? `${matched[1]}:${matched[2]}` : '';
+}
+
+/** 归一化训练时钟（空值退回 09:30，与 STList 时间轴默认位置一致） */
+export function NormalizeTrainClock(time?: string) {
+  return ClockOf(time) || TRAIN_CLOCK_START;
+}
+
+/**
+ * 按训练时钟截断分时（只保留 <= clock 的分钟）
+ *
+ * 与按天截断（CutTrends）配合使用：数据层只保证不越过训练日，
+ * 训练日当天的分时还要按共享时钟切到当前时刻，避免出现「当天收盘后」的数据。
+ */
+export function CutTrendsByClock(trends: Stock.TrendItem[] | undefined, clock?: string) {
+  if (!trends || !trends.length || !clock) {
+    return trends || [];
+  }
+  const cuted = trends.filter((t) => {
+    const c = ClockOf(t && t.datetime);
+    return !c || c <= clock;
+  });
+  return cuted.length === trends.length ? trends : cuted;
+}

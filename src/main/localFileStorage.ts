@@ -24,6 +24,7 @@ const FILE_MAP: Record<string, string> = {
   tradings: 'tradings.json',
   trainings: 'trainings.json',
   ktrainings: 'ktrainings.json',
+  train_trade_records: 'train_trade_records.json',
   books: 'books.json',
   strategy_groups: 'strategy_groups.json',
 };

@@ -116,6 +116,45 @@ declare namespace Train {
   }
 
   /**
+   * 一次「建仓 → 清仓」的完整交易记录（训练模式，清仓时逐股归档）
+   *
+   * 与 ArchiveRecord（整段训练的组合结算）不同：这里只记录单只股票的一轮交易，
+   * 包含本轮全部买入明细（交易全过程），用于「训练记录」列表展示与复盘。
+   */
+  export interface StockTradeRecord {
+    id: string;
+    secid: string;
+    name: string;
+    /** 本轮首次买入日 */
+    buyDate: string;
+    /** 平均持仓成本价（含买入佣金） */
+    buyPrice: number;
+    /** 清仓日 */
+    sellDate: string;
+    /** 清仓成交价 */
+    sellPrice: number;
+    /** 清仓股数 */
+    count: number;
+    /** 卖出成交额 */
+    amount: number;
+    /** 卖出佣金 */
+    commission: number;
+    /** 已实现盈亏 */
+    profit: number;
+    /** 已实现收益率%（相对持仓成本） */
+    profitRatio: number;
+    /** 持仓天数（有训练交易日列表时按交易日数，否则按自然日） */
+    holdDays: number;
+    /** 清仓理由 */
+    reason: string;
+    /** 本轮全部买入明细（交易全过程） */
+    buys: { date: string; price: number; amount?: number }[];
+    /** 训练开始日（用于按训练会话筛选） */
+    trainStartDate: string;
+    createdAt: string;
+  }
+
+  /**
    * 未完成训练的进度（关闭训练模式时保存，下次开启训练时可选择继续）
    */
   export interface Progress {

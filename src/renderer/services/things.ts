@@ -9,6 +9,7 @@ const TRADINGS_FILE_PATH = 'store/tradings.json';
 const TRAININGS_FILE_PATH = 'store/trainings.json';
 const KTRAININGS_FILE_PATH = 'store/ktrainings.json';
 const TRAIN_ARCHIVES_FILE_PATH = 'store/train_archives.json';
+const TRAIN_TRADE_RECORDS_FILE_PATH = 'store/train_trade_records.json';
 const TRAIN_PROGRESS_FILE_PATH = 'store/train_progress.json';
 const STRATEGY_GROUPS_FILE_PATH = 'store/strategy_groups.json';
 class ThingsStorage {
@@ -82,6 +83,14 @@ class ThingsStorage {
 
   async WriteRemoteTrainArchives(data: Train.ArchiveRecord[], lastModified: string) {
     return this.Write(TRAIN_ARCHIVES_FILE_PATH, data, lastModified);
+  }
+
+  async ReadRemoteTrainTradeRecords() {
+    return this.Read(TRAIN_TRADE_RECORDS_FILE_PATH);
+  }
+
+  async WriteRemoteTrainTradeRecords(data: Train.StockTradeRecord[], lastModified: string) {
+    return this.Write(TRAIN_TRADE_RECORDS_FILE_PATH, data, lastModified);
   }
 
   async ReadRemoteTrainProgress() {

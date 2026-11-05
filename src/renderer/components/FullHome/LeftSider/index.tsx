@@ -1,6 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { Layout, Input, Collapse, Button, Popconfirm } from 'antd';
-import { useDispatch, useSelector } from 'react-redux';
+import { Layout, Input, Collapse, Button } from 'antd';
 import LoadingScreen from '@/components/LoadingScreen';
 import StockList from '@/components/FullHome/StockList';
 import CustomDrawer from '@/components/CustomDrawer';
@@ -9,14 +8,10 @@ import SettingContent from '@/components/SettingContent';
 import ReferSites from '@/components/FullHome/ReferSites';
 import SiteTagDetail from '../ReferSites/SiteTagDetail';
 import StockTagDetail from '../StockList/StockTagDetail';
-import { removeTrainArchiveAction } from '@/actions/train';
-import { StoreState } from '@/reducers/types';
 import styles from '../index.scss';
 import { useContextMenu } from '@/utils/hooks';
-import * as Utils from '@/utils';
 import * as Enums from '@/utils/enums';
-import classnames from 'classnames';
-import { DeleteOutlined, DownOutlined, MenuFoldOutlined, MenuUnfoldOutlined, RightOutlined } from '@ant-design/icons';
+import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 
 export const stockTypesConfig = [
   { name: '指数', code: Enums.StockMarketType.Zindex },
@@ -34,18 +29,11 @@ export interface LeftSiderProps {
   openStock: (secid: string, name: string, firstQSAppear?: string, change?: number, type?: Enums.StockMarketType) => void;
   openTag:(name: string, markettype: Enums.StockMarketType) => void;
   openSite: (site: Site.FavorItem) => void;
-  /** 打开训练归档详情（在 StockTab 中新增一个 tab 页） */
-  openTrainArchive: (archive: Train.ArchiveRecord) => void;
   barHidden: boolean;
   toggleBarHidden: () => void;
 }
 
-const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, openStock, openSite, openTrainArchive, barHidden, toggleBarHidden, openTag }) => {
-  const dispatch = useDispatch();
-  /** 训练归档 */
-  const archives = useSelector((state: StoreState) => state.train.archives);
-  /** 训练归档列表收起/展开 */
-  const [archivesCollapsed, setArchivesCollapsed] = useState(false);
+const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, openStock, openSite, barHidden, toggleBarHidden, openTag }) => {
   const [searchText, setSearchText] = useState('');
   const [showSearchDrawer, setShowSearchDrawer] = useState(false);
   const [showSettingDrawer, setShowSettingDrawer] = useState(false);
@@ -107,57 +95,6 @@ const LeftSider: React.FC<LeftSiderProps> = React.memo(({ activeTabid, width, op
             <Button type="text" icon={!barHidden ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />} onClick={toggleBarHidden} />
           </div>
           <ReferSites filterText={filterText} onOpenSite={openSite} onAddSiteTag={openSiteTagDrawer} />
-        </div>
-        <div className={styles.category}>
-          <div
-            className={classnames(styles.categoryHeader, styles.archiveHeader)}
-            onClick={() => setArchivesCollapsed((v) => !v)}
-            title={archivesCollapsed ? '展开训练归档' : '收起训练归档'}
-          >
-            <span>训练归档</span>
-            <span className={styles.archiveCount}>
-              {archives.length}
-              {archivesCollapsed ? <RightOutlined /> : <DownOutlined />}
-            </span>
-          </div>
-          {!archivesCollapsed && (
-            <>
-              {archives.length === 0 && <div className={styles.archiveEmpty}>暂无训练归档</div>}
-              {archives.map((archive) => (
-                <div
-                  key={archive.id}
-                  className={styles.archiveItem}
-                  title={`${archive.startDate} ~ ${archive.endDate}`}
-                  onClick={() => openTrainArchive(archive)}
-                >
-                  <div className={styles.archiveTitle}>
-                    {archive.name || archive.secid}
-                    <span className={Utils.GetValueColor(Number(archive.totalReturn) || 0).textClass}>
-                      {' '}
-                      {(Number(archive.totalReturn) || 0) >= 0 ? '+' : ''}
-                      {((Number(archive.totalReturn) || 0) * 100).toFixed(2)}%
-                    </span>
-                  </div>
-                  <div className={styles.archiveSub}>
-                    {archive.startDate} ~ {archive.endDate} ｜ 夏普 {(Number(archive.sharpeRatio) || 0).toFixed(2)} ｜ 回撤{' '}
-                    {((Number(archive.maxDrawdown) || 0) * 100).toFixed(2)}%
-                  </div>
-                  <Popconfirm
-                    title="删除该训练归档？"
-                    okText="删除"
-                    cancelText="取消"
-                    onConfirm={() => dispatch(removeTrainArchiveAction(archive.id))}
-                  >
-                    <DeleteOutlined
-                      className={styles.archiveDel}
-                      title="删除归档"
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  </Popconfirm>
-                </div>
-              ))}
-            </>
-          )}
         </div>
         <Collapse defaultActiveKey={stockTypesConfig.map((type) => type.code)} bordered={false}>
           {stockTypesConfig.map((type) => (

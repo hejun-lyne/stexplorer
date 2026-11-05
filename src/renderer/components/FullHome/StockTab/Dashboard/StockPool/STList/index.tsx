@@ -79,7 +79,7 @@ import {
 import { RSI_SHAPE_FILTER_OPTIONS, normalizeRsiShape } from '@/helpers/rsiShape';
 import { MA_BAND_OPTIONS, MaBand, parseMaBand } from '@/helpers/maBand';
 import { filterThemeBoards } from '@/helpers/boardFilter';
-import { saveTrainDayAction } from '@/actions/train';
+import { saveTrainDayAction, setTrainTimeAction } from '@/actions/train';
 import { toggleStockFavoriteAction } from '@/actions/setting';
 import { fillPendingBuyTradesAction } from '@/actions/stock';
 import ScoreStockPanel from './ScoreStockPanel';
@@ -665,8 +665,16 @@ const STList: React.FC<STListProps> = ({
   const [precomputeMsg, setPrecomputeMsg] = useState('');
   const isPrecomputePausedRef = React.useRef(false);
 
-  const { kLineApiSourceSetting, ontrain, trainDate, trainStartDate, trainEndDate, initialCapital, commissionRate } =
-    useSelector((state: StoreState) => state.setting.systemSetting);
+  const {
+    kLineApiSourceSetting,
+    ontrain,
+    trainDate,
+    trainStartDate,
+    trainEndDate,
+    trainTime: settingTrainTime,
+    initialCapital,
+    commissionRate,
+  } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { stockConfigsMapping, tradings } = useSelector((state: StoreState) => state.stock);
   // 收藏的股票代码：收藏后忽略评分/RSI/市值/形态等过滤条件，始终留在评分结果列表里
   const favoriteCodes = useSelector((state: StoreState) => state.setting.systemSetting.favorites);
@@ -718,10 +726,18 @@ const STList: React.FC<STListProps> = ({
   const trainDay = ontrain && trainDate ? String(trainDate).replace(/-/g, '') : '';
 
   // ========== 训练时间推进（09:25 ~ 15:00，跳过非交易时间） ==========
-  // 时间轴按训练日内的「时刻」推进：列表的 K线形态、右侧面板的分时与日K都只展示到这个时刻为止。
-  const [timeIdx, setTimeIdx] = useState(TRAIN_TIME_DEFAULT_IDX);
+  // 时间轴按训练日内的「时刻」推进：列表的 K线形态、详情页的分时与日K都只展示到这个时刻为止。
+  // 时刻本身存在系统设置里（trainTime），STList / 详情页 / 评分面板共用同一个训练时钟。
   const [timePlaying, setTimePlaying] = useState(false);
   const [timeSpeed, setTimeSpeed] = useState(TRAIN_TIME_SPEEDS[0]);
+  /** 共享训练时钟 → 时间轴下标（时钟为空或非法时回到开盘默认位置） */
+  const timeIdx = React.useMemo(() => {
+    const idx = TRAIN_TIME_LIST.indexOf(settingTrainTime || '');
+    return idx >= 0 ? idx : TRAIN_TIME_DEFAULT_IDX;
+  }, [settingTrainTime]);
+  /** 推进定时器里读最新下标用 ref，避免每次时钟变化都重建定时器 */
+  const timeIdxRef = React.useRef(timeIdx);
+  timeIdxRef.current = timeIdx;
   const trainTime = TRAIN_TIME_LIST[Math.min(Math.max(timeIdx, 0), TRAIN_TIME_LIST.length - 1)];
   /**
    * 分时推进是否已经开始（点过播放 / 倍速 / 完成）
@@ -735,7 +751,7 @@ const STList: React.FC<STListProps> = ({
   // 训练日推进 / 退出训练：时间轴回到开盘，避免停在上一日的 15:00
   useEffect(() => {
     setTimePlaying(false);
-    setTimeIdx(TRAIN_TIME_DEFAULT_IDX);
+    dispatch(setTrainTimeAction(TRAIN_TIME_LIST[TRAIN_TIME_DEFAULT_IDX]));
   }, [trainDate, ontrain]);
 
   // 定时推进：1 倍速 = 1 个交易分钟对应 1 分钟真实时间
@@ -743,10 +759,10 @@ const STList: React.FC<STListProps> = ({
     if (!timePlaying || !ontrain) {
       return () => {};
     }
-    const timer = window.setInterval(
-      () => setTimeIdx((idx) => Math.min(idx + 1, TRAIN_TIME_LIST.length - 1)),
-      Math.max(120, TRAIN_MINUTE_MS / timeSpeed)
-    );
+    const timer = window.setInterval(() => {
+      const next = Math.min(timeIdxRef.current + 1, TRAIN_TIME_LIST.length - 1);
+      dispatch(setTrainTimeAction(TRAIN_TIME_LIST[next]));
+    }, Math.max(120, TRAIN_MINUTE_MS / timeSpeed));
     return () => window.clearInterval(timer);
   }, [timePlaying, timeSpeed, ontrain]);
 
@@ -759,21 +775,25 @@ const STList: React.FC<STListProps> = ({
 
   /** 开始 / 暂停时间推进（已到收盘再点一次则回到开盘重新推进） */
   const toggleTimePlay = useCallback(() => {
-    setTimeIdx((idx) => (idx >= TRAIN_TIME_LIST.length - 1 ? TRAIN_TIME_DEFAULT_IDX : idx));
+    if (timeIdxRef.current >= TRAIN_TIME_LIST.length - 1) {
+      dispatch(setTrainTimeAction(TRAIN_TIME_LIST[TRAIN_TIME_DEFAULT_IDX]));
+    }
     setTimePlaying((p) => !p);
   }, []);
 
   /** 按指定倍速推进（点倍速即按该倍速开始播放） */
   const playTimeAtSpeed = useCallback((s: number) => {
     setTimeSpeed(s);
-    setTimeIdx((idx) => (idx >= TRAIN_TIME_LIST.length - 1 ? TRAIN_TIME_DEFAULT_IDX : idx));
+    if (timeIdxRef.current >= TRAIN_TIME_LIST.length - 1) {
+      dispatch(setTrainTimeAction(TRAIN_TIME_LIST[TRAIN_TIME_DEFAULT_IDX]));
+    }
     setTimePlaying(true);
   }, []);
 
   /** 完成：直接到收盘 15:00 */
   const finishTimePlay = useCallback(() => {
     setTimePlaying(false);
-    setTimeIdx(TRAIN_TIME_LIST.length - 1);
+    dispatch(setTrainTimeAction(TRAIN_TIME_LIST[TRAIN_TIME_LIST.length - 1]));
   }, []);
 
   /**
@@ -834,6 +854,20 @@ const STList: React.FC<STListProps> = ({
   const handlePrevTrainDay = useCallback(() => {
     handleGotoTrainDay(prevTrainDay);
   }, [handleGotoTrainDay, prevTrainDay]);
+
+  /**
+   * 随机跳到训练窗口内的某个交易日（训练期内随机抽样）
+   *
+   * 与「上一天 / 下一天」同源：走 handleGotoTrainDay 落盘训练日与进度，
+   * 列表随后按新训练日自动重算。窗口内只有当前一天时保持不动。
+   */
+  const handleRandomTrainDay = useCallback(() => {
+    const candidates = trainCalendarDays.filter((d) => d !== trainDate);
+    if (!candidates.length) {
+      return;
+    }
+    handleGotoTrainDay(candidates[Math.floor(Math.random() * candidates.length)]);
+  }, [trainCalendarDays, trainDate, handleGotoTrainDay]);
 
   // ========== 当前持仓（训练共享账户，仅训练模式） ==========
   // 持仓来自各标的的模拟买卖点（t='train'），与详情页训练工具栏用同一套回放口径，
@@ -3780,6 +3814,14 @@ const STList: React.FC<STListProps> = ({
                 title="推进到下一个交易日，并把训练日与训练进度落盘（下次启动从此日继续）"
               >
                 下一天
+              </Button>
+              <Button
+                size="small"
+                disabled={trainCalendarDays.length <= 1 || shortScoreLoading || todayScoreLoading}
+                onClick={handleRandomTrainDay}
+                title="在训练周期内随机选择一个交易日（同样会落盘训练日与进度，并按该日重新计算列表）"
+              >
+                随机一天
               </Button>
               {trainFinished && (
                 <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>（已到窗口最后一天）</span>

@@ -19,6 +19,7 @@ declare namespace System {
     trainDate: string; // 当前训练日期（训练进行中每天推进）
     trainStartDate: string; // 训练开始日期
     trainEndDate: string; // 训练结束日期
+    trainTime: string; // 训练时钟：训练日内当前时刻 HH:mm（列表与详情页共享）
 
     kLineApiSourceSetting: number; // K线加载的数据源
 
