@@ -23,7 +23,7 @@ import {
 import dayjs from 'dayjs';
 import { useSelector } from 'react-redux';
 import * as Services from '@/services';
-import { BKType } from '@/utils/enums';
+import { BKType, FundApiType } from '@/utils/enums';
 import { Stock } from '@/types/stock';
 import { StoreState } from '@/reducers/types';
 import { BoardBacktestStock, BoardScoreBacktestResult, runBoardScoreBacktest } from '@/helpers/boardScoreBacktest';
@@ -31,11 +31,29 @@ import { DEFAULT_SHORT_SCORE_BACKTEST, ShortScoreBacktestParams } from '@/helper
 import { MA_BAND_OPTIONS, maBandKey, parseMaBand } from '@/helpers/maBand';
 import { precomputeShortTermScores, PrecomputeResult } from '@/helpers/shortTermScorePrecompute';
 import { SHORT_SCORE_SOURCE, ShortTermScoreItem } from '@/helpers/shortTermScoreList';
+import { filterThemeBoards } from '@/helpers/boardFilter';
 
 export interface BoardSignalBacktestProps {
   active?: boolean;
   onOpenStock?: (secid: string, name: string) => void;
 }
+
+/**
+ * 板块下拉里的伪选项（与 STList 同口径）
+ *
+ * 不是真实板块：选中后展开成「当前概念板块列表里满足条件的一批板块」，
+ * 回测/缓存用这些板块成分股去重合并后的股票池。
+ *  - 只看题材：helpers/boardFilter 的题材过滤（剔除风格/指数/持仓/事件/地域等伪概念）
+ *  - 只看风格：名称以「风格」结尾的板块（科技风格 / 消费风格 / 医药医疗风格…）
+ */
+const THEME_ONLY_SECID = '__THEME_ONLY__';
+const STYLE_ONLY_SECID = '__STYLE_ONLY__';
+const PSEUDO_BOARD_NAMES: Record<string, string> = {
+  [THEME_ONLY_SECID]: '只看题材',
+  [STYLE_ONLY_SECID]: '只看风格',
+};
+const isPseudoBoardSecid = (sid: string): boolean =>
+  sid === THEME_ONLY_SECID || sid === STYLE_ONLY_SECID;
 
 const pct = (v?: number, digits = 2) => {
   const n = Number(v);
@@ -106,7 +124,8 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     async (t: BKType) => {
       setBoardLoading(true);
       try {
-        const d = await Services.Stock.GetBanKuaisFromDataSource(kLineApiSourceSetting, t, 300, 'dc');
+        // 板块列表固定走 Tushare（dc_index 全量快照），不走东财 REST
+        const d = await Services.Stock.GetBanKuaisFromDataSourceAll(t, 'dc');
         setBoards(d?.arr || []);
       } catch {
         setBoards([]);
@@ -126,6 +145,59 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     void loadBoards(boardType);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, boardType, kLineApiSourceSetting]);
+
+  /** 选中项展开成真实板块：伪选项「只看题材 / 只看风格」与 STList 同口径 */
+  const expandBoards = useCallback(
+    (sid: string): Stock.BanKuaiItem[] => {
+      if (sid === STYLE_ONLY_SECID) {
+        return boards.filter((b) => String(b?.name || '').trim().endsWith('风格'));
+      }
+      if (sid === THEME_ONLY_SECID) {
+        return filterThemeBoards(boards);
+      }
+      const one = boards.find((b) => b.secid === sid);
+      return one ? [one] : [];
+    },
+    [boards]
+  );
+
+  /** 下拉当前显示名（伪选项不是真实板块，但回测结果里要能显示它） */
+  const selectedBoardName = isPseudoBoardSecid(secid)
+    ? PSEUDO_BOARD_NAMES[secid]
+    : boards.find((b) => b.secid === secid)?.name || '';
+
+  /**
+   * 批量取板块成分股并去重合并
+   *
+   * 「只看题材」会展开成一两百个板块，串行请求太慢，这里按 6 个一批并发；
+   * 同一只股票可能属于多个板块，按代码去重。
+   */
+  const loadStocksOfBoards = useCallback(
+    async (list: Stock.BanKuaiItem[], onTick?: (done: number, total: number) => void) => {
+      const map = new Map<string, Stock.DetailItem>();
+      const batch = 6;
+      for (let i = 0; i < list.length; i += batch) {
+        const part = list.slice(i, i + batch);
+        onTick?.(Math.min(i + part.length, list.length), list.length);
+        // 分批并发，避免一次打满板块成分股接口
+        // eslint-disable-next-line no-await-in-loop
+        const results = await Promise.all(
+          part.map((b) =>
+            Services.Stock.GetBankuaiStocksFromDataSource(FundApiType.Tushare, b.secid, 200)
+          )
+        );
+        results.forEach((r) => {
+          (r?.stocks || []).forEach((s) => {
+            if (!map.has(s.code)) {
+              map.set(s.code, s as Stock.DetailItem);
+            }
+          });
+        });
+      }
+      return [...map.values()];
+    },
+    []
+  );
 
   const setParam = (key: keyof ShortScoreBacktestParams) => (v: number | null) =>
     setParams((prev) => ({ ...prev, [key]: typeof v === 'number' ? v : prev[key] }));
@@ -150,9 +222,10 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
   }, [range, limit]);
 
   const handleRun = useCallback(async () => {
-    const board = boards.find((b) => b.secid === secid);
-    if (!board) {
-      setError('请先选择板块');
+    // 伪选项（只看题材/只看风格）先展开成一批真实板块，再合并成分股
+    const targets = expandBoards(secid);
+    if (!targets.length) {
+      setError(isPseudoBoardSecid(secid) ? '当前概念板块里没有匹配的板块' : '请先选择板块');
       return;
     }
     setRunning(true);
@@ -161,14 +234,15 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     setProgress({ done: 0, total: 0, name: '' });
     stopRef.current = false;
     try {
-      const res = await Services.Stock.GetBankuaiStocksFromDataSource(kLineApiSourceSetting, board.secid, 200);
-      const stocks = (res?.stocks || []) as Stock.DetailItem[];
+      const stocks = await loadStocksOfBoards(targets, (done, total) =>
+        setProgress({ done: 0, total: 0, name: `读取板块成分股 ${done}/${total}` })
+      );
       if (!stocks.length) {
         setError('该板块没有取到成分股');
         return;
       }
       const r = await runBoardScoreBacktest({
-        board: { secid: board.secid, name: board.name, type: boardType },
+        board: { secid, name: selectedBoardName || `${targets.length} 个板块`, type: boardType },
         stocks: stocks.map((s) => ({ code: s.code, name: s.name })),
         params,
         source: kLineApiSourceSetting,
@@ -186,7 +260,18 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     } finally {
       setRunning(false);
     }
-  }, [boards, secid, kLineApiSourceSetting, boardType, params, effLimit, range, maxStocks, concurrency]);
+  }, [
+    expandBoards,
+    loadStocksOfBoards,
+    selectedBoardName,
+    secid,
+    boardType,
+    params,
+    effLimit,
+    range,
+    maxStocks,
+    concurrency,
+  ]);
 
   const openStock = useCallback(
     (r: BoardBacktestStock) => {
@@ -234,9 +319,9 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
       setCacheMsg('正在停止（当前交易日算完后结束，已算完的已落盘）...');
       return;
     }
-    const board = boards.find((b) => b.secid === secid);
-    if (!board) {
-      message.warning('请先选择板块');
+    const targets = expandBoards(secid);
+    if (!targets.length) {
+      message.warning(isPseudoBoardSecid(secid) ? '当前概念板块里没有匹配的板块' : '请先选择板块');
       return;
     }
     const [start, end] = cacheRange || [];
@@ -257,12 +342,9 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     setCacheTotal(0);
     setCacheMsg('准备中：读取板块成分股...');
     try {
-      const res = await Services.Stock.GetBankuaiStocksFromDataSource(
-        kLineApiSourceSetting,
-        board.secid,
-        200
+      const stocks = await loadStocksOfBoards(targets, (done, total) =>
+        setCacheMsg(`准备中：读取板块成分股 ${done}/${total}`)
       );
-      const stocks = (res?.stocks || []) as Stock.DetailItem[];
       if (!stocks.length) {
         setCacheMsg('该板块没有取到成分股');
         return;
@@ -298,7 +380,7 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
     } finally {
       setCacheRunning(false);
     }
-  }, [cacheRunning, boards, secid, cacheRange, cacheForce, kLineApiSourceSetting]);
+  }, [cacheRunning, expandBoards, loadStocksOfBoards, secid, cacheRange, cacheForce]);
 
   const signalColumns = [
     {
@@ -599,11 +681,21 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
             showSearch
             value={secid || undefined}
             loading={boardLoading}
-            placeholder="选择东财行业/概念板块"
-            style={{ width: 220, marginLeft: 6 }}
+            placeholder={boardType === BKType.Industry ? '选择行业板块' : '选择概念板块（含只看题材/风格）'}
+            style={{ width: 240, marginLeft: 6 }}
             optionFilterProp="children"
             onChange={(v) => setSecid(String(v))}
           >
+            {boardType === BKType.Gainian && (
+              <Select.Option value={THEME_ONLY_SECID} key={THEME_ONLY_SECID}>
+                只看题材
+              </Select.Option>
+            )}
+            {boardType === BKType.Gainian && (
+              <Select.Option value={STYLE_ONLY_SECID} key={STYLE_ONLY_SECID}>
+                只看风格
+              </Select.Option>
+            )}
             {boards.map((b) => (
               <Select.Option key={b.secid} value={b.secid}>
                 {b.name}
@@ -882,9 +974,7 @@ const BoardSignalBacktest: React.FC<BoardSignalBacktestProps> = ({ active = true
       ) : null}
 
       <Modal
-        title={`生成评分缓存 · ${
-          boards.find((b) => b.secid === secid)?.name || '未选板块'
-        }`}
+        title={`生成评分缓存 · ${selectedBoardName || '未选板块'}`}
         open={cacheOpen}
         width={640}
         footer={null}

@@ -4879,6 +4879,34 @@ export async function GetBanKuaisFromDataSource(
   return result;
 }
 
+/**
+ * 板块列表（全量，含风格板块）——只走 Tushare 接口
+ *
+ * 与 GetBanKuaisFromDataSource 的区别：不按系统设置的数据源分派，固定读 Tushare 的
+ * dc_index 板块快照（一次返回全量，没有东财 clist 的单页上限），
+ * 这样「只看风格 / 只看题材」才能筛到完整板块列表，也不会直连东财 REST。
+ */
+export async function GetBanKuaisFromDataSourceAll(
+  type: BKType,
+  dataSource = 'dc',
+  forceRefresh = false
+) {
+  const cacheKey = `tushare_all_${type}_${dataSource}`;
+
+  if (!forceRefresh) {
+    const cached = boardListMemCache.get(cacheKey);
+    if (cached?.result?.arr?.length && Date.now() - cached.at < BOARD_LIST_CACHE_TTL) {
+      return cached.result;
+    }
+  }
+
+  const result = await TushareAPI.GetBanKuaisFromTushare(type, dataSource);
+  if (result?.arr?.length) {
+    boardListMemCache.set(cacheKey, { at: Date.now(), result });
+  }
+  return result;
+}
+
 export async function GetCompanyFromDataSource(source: Enums.FundApiType, secid: string) {
   if (source === Enums.FundApiType.Akshare) {
     return AkshareAPI.GetCompanyFromAkshare(secid);
