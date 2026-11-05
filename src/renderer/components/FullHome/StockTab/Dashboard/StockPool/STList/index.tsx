@@ -1904,8 +1904,9 @@ const STList: React.FC<STListProps> = ({
       const computed = await computeShortTermScoreRows(shortScoreRemainingRef.current, {
         source: SHORT_SCORE_SOURCE,
         concurrency: 3,
-        // 不使用评分缓存：每次点「短线评分」都重新取数计算（算完仍回写序列供历史列使用）
-        ignoreCache: true,
+        // 训练模式读评分序列缓存：预计算（或上一轮评分回写）已覆盖的基准日直接命中、无需逐只取数，
+        // 未命中的缺口仍会现算并回写；非训练模式仍每次重算，保证「今天最新」的盘中口径。
+        ignoreCache: !ontrain,
         scoreDayMode,
         shouldStop: () => isShortScorePausedRef.current,
         // 近 N 个交易日的历史列有缺口时顺带补算（列表缺哪天补哪天）
@@ -2459,9 +2460,30 @@ const STList: React.FC<STListProps> = ({
     handleShortScoreRef.current = handleShortScore;
   }, [handleShortScore]);
 
-  // 训练日推进后**不再自动重算评分**（避免每推进一天就把整池股票重跑一遍）：
-  // 结果列表只保留「已收藏」的股票（见 showList 里的 scoreStale），
-  // 需要按新训练日更新时点「短线评分」——那会重新拉取板块成分股并按新日重算。
+  // 训练日推进后自动重算短线评分：评分已改为训练模式读缓存（handleShortScore 里 ignoreCache=!ontrain），
+  // 命中预计算缓存秒出，无需再手动点「短线评分」等待。只在「短线评分结果」模式下自动重算；
+  // 且等时间轴重置回开盘（timeIdx 回到默认值）后再触发，确保用 prevDay 口径（新训练日还没走到 15:00）。
+  const lastAutoScoreDayRef = React.useRef('');
+  useEffect(() => {
+    if (!ontrain || !trainDate) {
+      lastAutoScoreDayRef.current = '';
+      return;
+    }
+    const day = String(trainDate).replace(/-/g, '');
+    if (!day || day === lastAutoScoreDayRef.current) {
+      return;
+    }
+    // 推进训练日瞬间 timeIdx 仍是上一日的收盘时刻，等上面「时间轴重置」effect 落地后再触发
+    if (timeIdx > TRAIN_TIME_DEFAULT_IDX) {
+      return;
+    }
+    lastAutoScoreDayRef.current = day;
+    if (displayModeRef.current === 'shortScore') {
+      handleShortScoreRef.current();
+    }
+    // timeIdx 参与依赖是为「等时间轴重置」；lastAutoScoreDayRef 保证每个训练日只触发一次（播放时不会重复）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trainDate, ontrain, timeIdx]);
 
   // 训练日推进后回填「涨停挂单」的待成交买入（按新训练日的开盘价成交）。
   // 不能只依赖右侧面板：面板可能没打开 / 结果列表正在重算 / 面板日K还没刷新，

@@ -5,7 +5,8 @@
  * 复盘整个训练过程，计算总收益率 / 年化收益率 / 最大回撤 / 夏普比率 / 胜率 / 盈亏比，
  * 并输出收益率曲线（dailyValues）与持仓变化明细（trades）。
  *
- * 成交价由买卖记录自带：买入与卖出均为「当日收盘价」（TrainBar 记录）；
+ * 成交价由买卖记录自带：买入与卖出均为 ScoreStockTrade 下单那一刻的盘中分时价（trendPrice，
+ * 集合竞价 / 无分时退回训练日收盘价），**不是**当日收盘价；
  * 各标的每日收盘价同时用于逐日估值（dailyValues）。
  *
  * 训练账户是「所有标的共享」的一个组合账户（见 TrainBar 的 sharedAccount），
@@ -57,7 +58,9 @@ export function SettleTrain({
   const rate = commissionRate > 0 ? commissionRate : 0;
   // 结算交易日固定按升序回放（收益率曲线/回撤依赖时间顺序）
   const sessionDays = (days || []).filter((d) => d >= startDate && d <= endDate).sort();
-  // 按日期排序；同日先卖后买（A股卖出回款当日即可用于买入）
+  // 按日期排序；同日先卖后买（A股卖出回款当日即可用于买入），同时隐式实现 T+1：
+  // 当日买入排在同日卖出之后，卖出时点只有前一日及更早的可卖持仓，「当日买、当日卖」天然不成立，
+  // 与 ScoreStockTrade 界面上的 boughtToday 约束同构。
   const sortedTrades = (trades || [])
     .slice()
     .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : a.isBuy === b.isBuy ? 0 : a.isBuy ? 1 : -1));
