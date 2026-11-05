@@ -30,7 +30,7 @@ export function setTrainCurrentDateAction(date: string): ThunkAction {
     // 保持 settingModified 不变，避免影响与远端设置的同步比较
     dispatch({
       type: SYNC_SYSTEM_SETTING,
-      payload: [{ ...systemSetting, trainDate: date }, settingModified],
+      payload: [{ ...systemSetting, trainDate: date, trainTime: '' }, settingModified],
     });
   };
 }
@@ -71,6 +71,8 @@ export function startTrainAction(): ThunkAction {
         ...systemSetting,
         ontrain: true,
         trainDate: systemSetting.trainStartDate || systemSetting.trainDate,
+        // 训练日切换后训练时钟回到开盘
+        trainTime: '',
       })
     );
   };
@@ -203,7 +205,7 @@ export function saveTrainDayAction(params: {
     const prev = (progress || {}) as Train.Progress;
     const days = params.days && params.days.length ? params.days : prev.days || [];
     // 1) 训练日 + 训练开关落盘
-    dispatch(setSystemSettingAction({ ...systemSetting, ontrain: true, trainDate: date }));
+    dispatch(setSystemSettingAction({ ...systemSetting, ontrain: true, trainDate: date, trainTime: '' }));
     // 2) 训练进度落盘
     dispatch(
       writeTrainProgressAction({
@@ -256,6 +258,7 @@ export function resumeTrainAction(): ThunkAction {
         initialCapital: progress.initialCapital || systemSetting.initialCapital,
         commissionRate: progress.commissionRate >= 0 ? progress.commissionRate : systemSetting.commissionRate,
         trainDate: progress.currentDate,
+        trainTime: '',
       })
     );
   };
@@ -283,7 +286,7 @@ export function restoreTrainCursorAction(): ThunkAction {
     if (fromProgress === current) return;
     // 只往前恢复：设置里的训练日更靠后时说明它比进度文件新，直接用会倒退训练进度
     if (current && fromProgress <= current) return;
-    dispatch(setSystemSettingAction({ ...systemSetting, trainDate: fromProgress }));
+    dispatch(setSystemSettingAction({ ...systemSetting, trainDate: fromProgress, trainTime: '' }));
   };
 }
 
@@ -304,6 +307,7 @@ export function restartTrainAction(): ThunkAction {
           ...systemSetting,
           ontrain: true,
           trainDate: systemSetting.trainStartDate || (progress ? progress.startDate : systemSetting.trainDate),
+          trainTime: '',
         })
       );
     });

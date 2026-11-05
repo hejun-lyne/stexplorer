@@ -1822,7 +1822,8 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
         }
 
         // 同步更新日线K线：交易日的任意非交易时段（午休、收盘后）也用分时补/更新当日K线
-        if (canBuildTodayKFromTrends()) {
+        // 训练模式下不能拿训练日的分时去合成「真实今天」的K线（训练日当日K由训练时钟重建）
+        if (!trainActive && canBuildTodayKFromTrends()) {
           const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
           const currentDayKlines = klineDataRef.current.klines[dayIndex];
           if (currentDayKlines && currentDayKlines.length > 0) {
@@ -2081,21 +2082,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             }
           }
         }
-        // if (ontrain && trainDate.length > 0) {
-        //   // 截断数据
-        //   let stopIndex = -1;
-        //   for (let i = ks.length - 1; i >= 0; i--) {
-        //     if (ks[i].date == trainDate) {
-        //       stopIndex = i;
-        //       break;
-        //     }
-        //   }
-        //   if (stopIndex > 0) {
-        //     ks = ks.slice(0, stopIndex + 1);
-        //   }
-        // }
         // 交易日的任意非交易时段（午休、收盘后）也可用分时补当日K；非交易日则不用分时填K
-        if (canBuildTodayKFromTrends()) {
+        // 训练模式下训练日的分时只用于重建训练日当日K，不能拼出「真实今天」的K线
+        if (!trainActive && canBuildTodayKFromTrends()) {
           const latestTrends = trendDataRef.current.trends;
           if (kt == KLineType.Day) {
             const today = new Date();
@@ -2183,8 +2172,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
             setKLineData(newKlineData);
             if (kt == KLineType.Day) {
               setTrendDates(ks.map((_: { date: any; }) => _.date));
+              // 只有日K回写到详情页：训练时钟重建的当日K必须带上，其它周期不能覆盖它
+              updateKLineData?.(ks);
             }
-            updateKLineData?.(ks);
             updateKLineOption(kIndex, newKlineData);
             // 立即执行被节流窗口挂起的图表更新：多周期同时返回时，
             // 否则只有最后一次会落到图表上（训练模式下表现为「推进一天后日K不刷新」）
@@ -2399,10 +2389,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       }
     }, [trainTrendsCut]);
 
-    // 训练日切换 / 退出训练 / 忽略训练：清空上一训练日的分时与「真实日K」快照
+    // 训练日切换 / 退出训练 / 忽略训练：清空上一训练日的分时（真实日K的还原见下一个 effect）
     useEffect(() => {
       setTrainTrendsRaw([]);
-      trainDayBarRef.current = null;
     }, [trainDate, ontrain, ignoreTrain]);
 
     /**
@@ -2423,11 +2412,14 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       const closed = !trainClock || trainClock >= TrainFilter.TRAIN_CLOCK_CLOSE;
       if (closed || lastDay !== trainDayStr) {
         const origin = trainDayBarRef.current;
-        if (origin && lastDay === String(origin.date).substring(0, 10) && last.sp !== origin.sp) {
-          trainDayBarRef.current = null;
+        if (!origin) {
+          return;
+        }
+        if (lastDay === String(origin.date).substring(0, 10) && last.sp !== origin.sp) {
           handeKline({ ks: [...ks.slice(0, -1), origin], kt: KLineType.Day });
           flushHandeKline();
         }
+        trainDayBarRef.current = null;
         return;
       }
       if (!trainTrendsCut.length) {

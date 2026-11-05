@@ -104,6 +104,8 @@ const SettingContent: React.FC<SettingContentProps> = ({ onClose, onOpenUrl }) =
         trainDate: istrain ? keptTrainDate || trainStart : '',
         trainStartDate: trainStart,
         trainEndDate: trainEnd,
+        // 训练时钟（当前训练日内的时刻）由列表/详情页共用，保存其它设置时原样带回
+        trainTime: systemSetting.trainTime || '',
         kLineApiSourceSetting: kLineApiSource,
         tushareTokenSetting: tushareToken,
         kimiApiKeySetting: kimiApiKey,

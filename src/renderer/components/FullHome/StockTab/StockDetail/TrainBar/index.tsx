@@ -20,6 +20,7 @@ import { addTrainTradeRecordAction, saveTrainDayAction, setTrainDaysAction, TRAI
 import { BuildStockTradeRecord } from '@/helpers/trainAccount';
 import { MarkType } from '@/utils/enums';
 import * as Utils from '@/utils';
+import * as TrainFilter from '@/utils/trainFilter';
 
 /**
  * 工具栏高度的兼容常量：
@@ -72,6 +73,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
     trainDate,
     trainStartDate,
     trainEndDate,
+    trainTime,
     initialCapital,
     commissionRate,
     kLineApiSourceSetting,
@@ -556,6 +558,11 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
                 ({currentIdx + 1}/{days.length})
               </span>
             )}
+          </div>
+          {/* 训练时钟与 STList 的时间推进共用：分时/日K只展示到这个时刻 */}
+          <div className={styles.item}>
+            <span className={styles.label}>训练时间</span>
+            <span className={`${styles.value} ${styles.strong}`}>{TrainFilter.NormalizeTrainClock(trainTime)}</span>
           </div>
           <div className={styles.item}>
             {finished ? (
