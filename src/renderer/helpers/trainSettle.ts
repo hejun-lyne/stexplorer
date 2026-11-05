@@ -66,13 +66,18 @@ export function SettleTrain({
     .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : a.isBuy === b.isBuy ? 0 : a.isBuy ? 1 : -1));
 
   let cash = capital;
-  /** 各标的持仓：标的 -> 股数 / 成本（含买入佣金） */
-  const positions: Record<string, { shares: number; costAmount: number }> = {};
+  /** 各标的持仓：标的 -> 股数 / 成本（含买入佣金）/ 首次买入日 */
+  const positions: Record<string, { shares: number; costAmount: number; firstBuyDate: string }> = {};
   /** 各标的最近一次有效收盘价：当日无行情（停牌 / 数据缺失）时按它估值 */
   const lastCloses: Record<string, number> = {};
   let cursor = 0;
   const logs: Train.TradeLog[] = [];
   const dailyValues: Train.DailyValue[] = [];
+  /** 完整往返（建仓 → 清仓）明细，用于归因分析 */
+  const roundTrips: Train.RoundTrip[] = [];
+  /** 交易日 -> 索引（用于计算持仓交易日数） */
+  const dayIndex = new Map<string, number>();
+  sessionDays.forEach((d, i) => dayIndex.set(d, i));
 
   /** 某标的在某交易日的收盘价：取不到时退回该标的最近一次有效收盘价，再退回持仓成本价 */
   const closeOf = (sid: string, day: string, costPrice: number): number => {
@@ -94,7 +99,7 @@ export function SettleTrain({
         continue;
       }
       const sid = trade.secid || '';
-      const pos = positions[sid] || { shares: 0, costAmount: 0 };
+      const pos = positions[sid] || { shares: 0, costAmount: 0, firstBuyDate: '' };
       if (trade.isBuy) {
         // 指定金额买入：预算取「指定金额」与「共享可用资金」的较小值
         const budget = trade.amount && trade.amount > 0 ? Math.min(cash, trade.amount) : cash;
@@ -106,7 +111,11 @@ export function SettleTrain({
         const amount = price * count;
         const commission = amount * rate;
         cash = cash - amount - commission;
-        const next = { shares: pos.shares + count, costAmount: pos.costAmount + amount + commission };
+        const next = {
+          shares: pos.shares + count,
+          costAmount: pos.costAmount + amount + commission,
+          firstBuyDate: pos.shares > 0 ? pos.firstBuyDate : day,
+        };
         positions[sid] = next;
         logs.push({
           date: day,
@@ -130,8 +139,24 @@ export function SettleTrain({
         const proceeds = amount - commission;
         const cost = pos.costAmount;
         const profit = proceeds - cost;
+        const profitRatio = cost > 0 ? Number(((profit / cost) * 100).toFixed(4)) : 0;
         cash += proceeds;
-        positions[sid] = { shares: 0, costAmount: 0 };
+        // 记录一笔完整往返（建仓 → 清仓），归因分析用
+        const buyIdx = dayIndex.get(pos.firstBuyDate);
+        const sellIdx = dayIndex.get(day);
+        roundTrips.push({
+          secid: trade.secid || '',
+          name: trade.name,
+          buyDate: pos.firstBuyDate || day,
+          sellDate: day,
+          buyPrice: count > 0 ? pos.costAmount / count : price,
+          sellPrice: price,
+          count,
+          profit,
+          profitRatio,
+          holdDays: buyIdx !== undefined && sellIdx !== undefined ? Math.max(0, sellIdx - buyIdx) : 0,
+        });
+        positions[sid] = { shares: 0, costAmount: 0, firstBuyDate: '' };
         logs.push({
           date: day,
           type: 'sell',
@@ -143,7 +168,7 @@ export function SettleTrain({
           shares: 0,
           costPrice: 0,
           profit,
-          profitRatio: cost > 0 ? Number(((profit / cost) * 100).toFixed(4)) : 0,
+          profitRatio,
           secid: trade.secid,
           name: trade.name,
         });
@@ -230,5 +255,101 @@ export function SettleTrain({
     loseCount,
     dailyValues,
     trades: logs,
+    attribution: BuildAttribution(roundTrips),
   };
+}
+
+/** 持仓周期分桶（交易日数；T+1 下最短为 1 日） */
+const HOLDING_BUCKETS: { label: string; minDays: number; maxDays: number }[] = [
+  { label: '1日（T+1）', minDays: 1, maxDays: 1 },
+  { label: '2~3日', minDays: 2, maxDays: 3 },
+  { label: '4~5日', minDays: 4, maxDays: 5 },
+  { label: '6~10日', minDays: 6, maxDays: 10 },
+  { label: '11~20日', minDays: 11, maxDays: 20 },
+  { label: '20日以上', minDays: 21, maxDays: Number.POSITIVE_INFINITY },
+];
+
+/**
+ * 由往返明细汇总出归因分析（个股 / 持仓周期 / 月度）
+ *
+ * - 个股归因：按标的聚合往返，盈亏占比 = 个股已实现盈亏 / 全部已实现盈亏（带符号）；
+ * - 持仓周期归因：按持仓交易日数分桶，胜率与平均收益率用于识别「拿太短 / 拿太久」；
+ * - 月度归因：按卖出月份聚合，看盈亏在时间上的分布。
+ */
+export function BuildAttribution(roundTrips: Train.RoundTrip[]): Train.Attribution {
+  const byStockMap: Record<string, Train.StockAttribution> = {};
+  const byMonthMap: Record<string, Train.MonthAttribution> = {};
+  const byHolding: Train.HoldingAttribution[] = HOLDING_BUCKETS.map((b) => ({
+    label: b.label,
+    minDays: b.minDays,
+    maxDays: b.maxDays,
+    count: 0,
+    wins: 0,
+    losses: 0,
+    winRate: 0,
+    profit: 0,
+    avgReturn: 0,
+  }));
+
+  (roundTrips || []).forEach((rt) => {
+    const secid = rt.secid || '';
+    const stock = byStockMap[secid] || {
+      secid,
+      name: rt.name,
+      roundTrips: 0,
+      wins: 0,
+      losses: 0,
+      winRate: 0,
+      profit: 0,
+      contribution: 0,
+    };
+    stock.roundTrips += 1;
+    stock.profit += rt.profit;
+    if (rt.profit > 0) {
+      stock.wins += 1;
+    } else {
+      stock.losses += 1;
+    }
+    byStockMap[secid] = stock;
+
+    const month = (rt.sellDate || '').substring(0, 7);
+    const m = byMonthMap[month] || { month, count: 0, wins: 0, losses: 0, winRate: 0, profit: 0 };
+    m.count += 1;
+    m.profit += rt.profit;
+    if (rt.profit > 0) {
+      m.wins += 1;
+    } else {
+      m.losses += 1;
+    }
+    byMonthMap[month] = m;
+
+    const bucket = byHolding.find((b) => rt.holdDays >= b.minDays && rt.holdDays <= b.maxDays);
+    if (bucket) {
+      bucket.count += 1;
+      bucket.profit += rt.profit;
+      bucket.avgReturn += rt.profitRatio;
+      if (rt.profit > 0) {
+        bucket.wins += 1;
+      } else {
+        bucket.losses += 1;
+      }
+    }
+  });
+
+  const byStock = Object.values(byStockMap);
+  const totalRealized = byStock.reduce((s, x) => s + x.profit, 0);
+  byStock.forEach((s) => {
+    s.winRate = s.roundTrips ? s.wins / s.roundTrips : 0;
+    s.contribution = totalRealized !== 0 ? s.profit / totalRealized : 0;
+  });
+  byStock.sort((a, b) => b.profit - a.profit);
+
+  byHolding.forEach((b) => {
+    b.winRate = b.count ? b.wins / b.count : 0;
+    b.avgReturn = b.count ? b.avgReturn / b.count : 0;
+  });
+
+  const byMonth = Object.values(byMonthMap).sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
+
+  return { roundTrips: roundTrips || [], byStock, byHolding, byMonth };
 }

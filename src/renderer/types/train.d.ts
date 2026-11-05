@@ -47,6 +47,64 @@ declare namespace Train {
     loseCount: number; // 亏损次数
     dailyValues: DailyValue[]; // 收益率变化
     trades: TradeLog[]; // 持仓变化
+    attribution?: Attribution; // 归因分析（个股 / 持仓周期 / 月度）
+  }
+
+  /** 一笔完整往返（建仓 → 清仓）的归因明细 */
+  export interface RoundTrip {
+    secid: string; // 标的代码（单标的结算时可能为空）
+    name?: string; // 标的名称
+    buyDate: string; // 首次买入日（YYYY-MM-DD）
+    sellDate: string; // 卖出日（YYYY-MM-DD）
+    buyPrice: number; // 平均持仓成本价（含买入佣金）
+    sellPrice: number; // 卖出价
+    count: number; // 卖出股数
+    profit: number; // 已实现盈亏
+    profitRatio: number; // 已实现收益率%
+    holdDays: number; // 持仓交易日数（买入日 → 卖出日）
+  }
+
+  /** 个股归因：某只标的的往返汇总 */
+  export interface StockAttribution {
+    secid: string;
+    name?: string;
+    roundTrips: number; // 完成的往返次数
+    wins: number; // 盈利次数
+    losses: number; // 亏损次数
+    winRate: number; // 胜率
+    profit: number; // 累计已实现盈亏
+    contribution: number; // 占总已实现盈亏的比例（带符号）
+  }
+
+  /** 持仓周期归因桶 */
+  export interface HoldingAttribution {
+    label: string; // 如「1日（T+1）」
+    minDays: number;
+    maxDays: number;
+    count: number; // 该周期完成的往返次数
+    wins: number;
+    losses: number;
+    winRate: number;
+    profit: number; // 累计已实现盈亏
+    avgReturn: number; // 平均收益率%
+  }
+
+  /** 月度归因 */
+  export interface MonthAttribution {
+    month: string; // YYYY-MM
+    count: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    profit: number; // 累计已实现盈亏
+  }
+
+  /** 归因分析结果 */
+  export interface Attribution {
+    roundTrips: RoundTrip[]; // 往返明细
+    byStock: StockAttribution[]; // 按个股
+    byHolding: HoldingAttribution[]; // 按持仓周期
+    byMonth: MonthAttribution[]; // 按卖出月份
   }
 
   /** 归档记录 */

@@ -3,6 +3,7 @@ import classnames from 'classnames';
 import { Table, Empty } from 'antd';
 import { useRenderEcharts, useResizeEchart } from '@/utils/hooks';
 import * as Utils from '@/utils';
+import { BuildAttribution } from '@/helpers/trainSettle';
 import styles from './index.scss';
 
 export interface TrainSettlementProps {
@@ -34,6 +35,32 @@ const TrainSettlement: React.FC<TrainSettlementProps> = React.memo(({ record }) 
       { label: '期末总资产', value: formatNumber(record.finalValue, 2), className: Utils.GetValueColor(record.finalValue - record.initialCapital).textClass },
     ];
   }, [record]);
+
+  // 归因分析：新归档直接用结算时算好的结果；旧归档（无归因字段）用卖出明细兜底算「个股 / 月度」两维，
+  // 持仓周期需要往返的买入日，旧数据还原不出来，此时该维度为空、界面自动隐藏。
+  const attribution = useMemo<Train.Attribution>(() => {
+    if (record.attribution && record.attribution.roundTrips) {
+      return record.attribution;
+    }
+    const sells = (record.trades || []).filter((t) => t.type === 'sell');
+    return BuildAttribution(
+      sells.map((t) => ({
+        secid: t.secid || '',
+        name: t.name,
+        buyDate: t.date,
+        sellDate: t.date,
+        buyPrice: 0,
+        sellPrice: t.price,
+        count: t.count,
+        profit: t.profit,
+        profitRatio: t.profitRatio,
+        holdDays: 0,
+      }))
+    );
+  }, [record]);
+
+  /** 有往返时展示持仓周期归因；个股 / 月度只要有卖出就展示 */
+  const hasHoldingAttr = attribution.byHolding.some((b) => b.count > 0);
 
   useRenderEcharts(
     () => {
@@ -177,6 +204,164 @@ const TrainSettlement: React.FC<TrainSettlementProps> = React.memo(({ record }) 
         />
       ) : (
         <Empty description="本次训练没有交易记录" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+      )}
+
+      {attribution.byStock.length > 0 && (
+        <>
+          <div className={styles.chartTitle}>归因分析 · 个股盈亏</div>
+          <Table
+            className={styles.table}
+            size="small"
+            rowKey={(r: Train.StockAttribution) => r.secid || r.name || 'all'}
+            dataSource={attribution.byStock}
+            pagination={false}
+            scroll={{ y: 200, x: 620 }}
+            columns={[
+              {
+                title: '标的',
+                dataIndex: 'name',
+                width: 110,
+                render: (v: string, r: Train.StockAttribution) => v || r.secid || '--',
+              },
+              { title: '往返', dataIndex: 'roundTrips', width: 60, align: 'right' as const },
+              {
+                title: '胜/负',
+                width: 70,
+                align: 'right' as const,
+                render: (_: unknown, r: Train.StockAttribution) => `${r.wins}/${r.losses}`,
+              },
+              {
+                title: '胜率',
+                dataIndex: 'winRate',
+                width: 70,
+                align: 'right' as const,
+                render: (v: number) => `${(v * 100).toFixed(1)}%`,
+              },
+              {
+                title: '累计盈亏',
+                dataIndex: 'profit',
+                width: 110,
+                align: 'right' as const,
+                render: (v: number) => (
+                  <span className={Utils.GetValueColor(v).textClass}>
+                    {v >= 0 ? '+' : ''}
+                    {formatNumber(v, 0)}
+                  </span>
+                ),
+              },
+              {
+                title: '盈亏占比',
+                dataIndex: 'contribution',
+                width: 90,
+                align: 'right' as const,
+                render: (v: number) => (
+                  <span className={Utils.GetValueColor(v).textClass}>
+                    {v >= 0 ? '+' : ''}
+                    {(v * 100).toFixed(1)}%
+                  </span>
+                ),
+              },
+            ]}
+          />
+        </>
+      )}
+
+      {hasHoldingAttr && (
+        <>
+          <div className={styles.chartTitle}>归因分析 · 持仓周期</div>
+          <Table
+            className={styles.table}
+            size="small"
+            rowKey="label"
+            dataSource={attribution.byHolding.filter((b) => b.count > 0)}
+            pagination={false}
+            scroll={{ y: 200, x: 560 }}
+            columns={[
+              { title: '持仓周期', dataIndex: 'label', width: 110 },
+              { title: '次数', dataIndex: 'count', width: 60, align: 'right' as const },
+              {
+                title: '胜/负',
+                width: 70,
+                align: 'right' as const,
+                render: (_: unknown, r: Train.HoldingAttribution) => `${r.wins}/${r.losses}`,
+              },
+              {
+                title: '胜率',
+                dataIndex: 'winRate',
+                width: 70,
+                align: 'right' as const,
+                render: (v: number) => `${(v * 100).toFixed(1)}%`,
+              },
+              {
+                title: '平均收益',
+                dataIndex: 'avgReturn',
+                width: 90,
+                align: 'right' as const,
+                render: (v: number) => (
+                  <span className={Utils.GetValueColor(v).textClass}>
+                    {v >= 0 ? '+' : ''}
+                    {v.toFixed(2)}%
+                  </span>
+                ),
+              },
+              {
+                title: '累计盈亏',
+                dataIndex: 'profit',
+                width: 110,
+                align: 'right' as const,
+                render: (v: number) => (
+                  <span className={Utils.GetValueColor(v).textClass}>
+                    {v >= 0 ? '+' : ''}
+                    {formatNumber(v, 0)}
+                  </span>
+                ),
+              },
+            ]}
+          />
+        </>
+      )}
+
+      {attribution.byMonth.length > 0 && (
+        <>
+          <div className={styles.chartTitle}>归因分析 · 月度盈亏</div>
+          <Table
+            className={styles.table}
+            size="small"
+            rowKey="month"
+            dataSource={attribution.byMonth}
+            pagination={false}
+            scroll={{ y: 200, x: 460 }}
+            columns={[
+              { title: '月份', dataIndex: 'month', width: 90 },
+              { title: '次数', dataIndex: 'count', width: 60, align: 'right' as const },
+              {
+                title: '胜/负',
+                width: 70,
+                align: 'right' as const,
+                render: (_: unknown, r: Train.MonthAttribution) => `${r.wins}/${r.losses}`,
+              },
+              {
+                title: '胜率',
+                dataIndex: 'winRate',
+                width: 70,
+                align: 'right' as const,
+                render: (v: number) => `${(v * 100).toFixed(1)}%`,
+              },
+              {
+                title: '累计盈亏',
+                dataIndex: 'profit',
+                width: 110,
+                align: 'right' as const,
+                render: (v: number) => (
+                  <span className={Utils.GetValueColor(v).textClass}>
+                    {v >= 0 ? '+' : ''}
+                    {formatNumber(v, 0)}
+                  </span>
+                ),
+              },
+            ]}
+          />
+        </>
       )}
     </div>
   );
