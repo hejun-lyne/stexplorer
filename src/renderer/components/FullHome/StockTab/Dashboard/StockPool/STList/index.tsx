@@ -65,12 +65,10 @@ import {
   DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
   evaluateShortScoreSignal,
   isBuySignalKind,
-  scoreShortScoreSignalQuality,
   SHORT_SCORE_JUMP_BUY_MARK_COLOR,
   SHORT_SCORE_RISE_BUY_MARK_COLOR,
   ShortScoreBacktestParams,
   ShortScoreSignal,
-  ShortScoreSignalQuality,
 } from '@/helpers/shortTermScoreBacktest';
 import {
   compareKlineShape,
@@ -236,22 +234,19 @@ const SIGNAL_FILTER_OPTIONS = [
 ];
 
 /**
- * 「信号 / 质量」列的排序键：按信号质量评分（0~100）排序
- *
- * 质量分只对「有信号」的行有意义（观察/未判定为 null），这些行无论升降序都排在最后。
- * 第一次点击直接降序（质量高的在前），再点升序，第三次取消，与 K线形态列一致。
- */
-const SIGNAL_QUALITY_SORT_KEY = 'signalQuality';
-
-/**
  * 列表「信号」列使用的策略参数
  *
- * 与详情页回测面板 / 离线脚本的默认口径保持一致：自低点抬升（近 10 日低点抬升 ≥20 分、
- * 地板 45 分、抬升起点 ≤45 分）、卖出 Δ≤-15、自高点回撤 ≥10 分止盈。
- * 买入同时认「单日跳升」（Δ≥20 分、评分≥启动地板 45、突变前 3 日 ≤45）：单日就大幅跳升的启动日
+ * 与离线脚本 backtest_short_score_jump.py 的默认口径保持一致：自低点抬升（近 10 日低点抬升 ≥20 分、
+ * 地板 45 分、抬升起点 ≤40 分）、卖出 Δ≤-15、自高点回撤 ≥10 分止盈。
+ * 买入同时认「单日跳升」（Δ≥20 分、评分≥启动地板 45、突变前 3 日 ≤40）：单日就大幅跳升的启动日
  * 累计抬升可能还没到 20，只认累计抬升会晚一天才出信号（见 evaluateShortScoreSignal）。
  */
-const SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = DEFAULT_SHORT_SCORE_SIGNAL_PARAMS;
+const SHORT_SCORE_SIGNAL_PARAMS: ShortScoreBacktestParams = {
+  ...DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
+  // 与离线脚本默认参数对齐：riseMinScore 45 / lowBaseMax 40（脚本 --rise-min-score 45 / --low-base-max 40）
+  riseMinScore: 45,
+  lowBaseMax: 40,
+};
 /** 「所属板块」批量取数并发数（东财 slist 是逐只接口，控制并发避免被限流） */
 const BANKUAI_FETCH_CONCURRENCY = 4;
 /** 所属板块取数为空（多为并发被限流）时的重试次数 */
@@ -2599,9 +2594,9 @@ const STList: React.FC<STListProps> = ({
   const updateSortType = useCallback((key: string) => {
     setSortTypes((prev) => {
       const currentType = prev[key] || 0;
-      // K线形态 / 信号质量列：常用顺序是「形态优先级高的在前、质量高的在前」，所以第一次点击直接给降序（2），
+      // K线形态列：常用顺序是「形态优先级高的在前」，所以第一次点击直接给降序（2），
       // 再点一次给升序（1），第三次取消；其余列沿用「升序 → 降序 → 取消」
-      const preferDescFirst = key === KLINE_SHAPE_SORT_KEY || key === SIGNAL_QUALITY_SORT_KEY;
+      const preferDescFirst = key === KLINE_SHAPE_SORT_KEY;
       const nextType = preferDescFirst
         ? currentType === 0
           ? 2
@@ -2706,7 +2701,7 @@ const STList: React.FC<STListProps> = ({
    * 若预先对整表建 Map，追加一行就要重算全表，几千行时会明显卡顿。
    */
   const signalOfShortScoreRow = React.useCallback(
-    (row: any): { signal: ShortScoreSignal; quality: ShortScoreSignalQuality | null } | null => {
+    (row: any): ShortScoreSignal | null => {
       const code = codeOfListItem(row);
       const days = shortScoreFilterDays;
       if (!code || !days.length) {
@@ -2730,19 +2725,7 @@ const STList: React.FC<STListProps> = ({
       if (typeof row.total === 'number' && Number.isFinite(row.total)) {
         scores[baseDay] = row.total;
       }
-      const signal = evaluateShortScoreSignal({ scores, params: SHORT_SCORE_SIGNAL_PARAMS });
-      // 质量分只对「有信号」的行有意义（观察行算出来的分数没有指导意义）
-      const quality =
-        signal.kind === '观察'
-          ? null
-          : scoreShortScoreSignalQuality({
-              scores,
-              params: SHORT_SCORE_SIGNAL_PARAMS,
-              volumeScore: row.volumeScore,
-              // 按实际成立的口径算「抬升强度 / 低位起点」（单日跳升成立的信号按跳升算）
-              via: signal.via,
-            });
-      return { signal, quality };
+      return evaluateShortScoreSignal({ scores, params: SHORT_SCORE_SIGNAL_PARAMS });
     },
     [shortScoreFilterDays, shortScoreSeries, shortScoreBaseDay]
   );
@@ -2865,26 +2848,6 @@ const STList: React.FC<STListProps> = ({
           // 与板块评分列表共用同一套比较逻辑（helpers/klineShape）。降序=阳线在前、形态优先级高的在前。
           const t = sortTypes[KLINE_SHAPE_SORT_KEY];
           list.sort((a: any, b: any) => compareKlineShape(a, b, t));
-        } else if (keys[0] === SIGNAL_QUALITY_SORT_KEY) {
-          // 信号质量排序：逐行判定信号并算质量分（0~100）。
-          // 观察 / 未判定没有质量分（null），无论升降序都排在最后。
-          // 只在用户点了该列排序时才计算：评分过程中列表会不断追加行，避免每行都白算一遍。
-          const t = sortTypes[SIGNAL_QUALITY_SORT_KEY];
-          const qualityCache = new Map<any, number | null>();
-          list.forEach((row: any) => {
-            const sig = signalOfShortScoreRow(row);
-            const total = sig?.quality?.total;
-            qualityCache.set(row, typeof total === 'number' && Number.isFinite(total) ? total : null);
-          });
-          list.sort((a: any, b: any) => {
-            const left = qualityCache.get(a);
-            const right = qualityCache.get(b);
-            if (left == null && right == null) return 0;
-            if (left == null) return 1;
-            if (right == null) return -1;
-            if (left === right) return 0;
-            return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
-          });
         } else {
           list.sort((a: any, b: any) => {
             const left = Number(a[keys[0]]) || 0;
@@ -2941,7 +2904,7 @@ const STList: React.FC<STListProps> = ({
   const signalKindOfRow = React.useCallback(
     (row: any): string => {
       const sig = signalOfShortScoreRow(row);
-      return sig ? sig.signal.kind : '';
+      return sig ? sig.kind : '';
     },
     [signalOfShortScoreRow]
   );
@@ -3968,9 +3931,9 @@ const STList: React.FC<STListProps> = ({
           <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title={`信号（按评分序列逐日判定，与回测同一套阈值）：唯一买点是「跳升买入」（粉色）=单日跳升≥${SHORT_SCORE_SIGNAL_PARAMS.buyDelta}分且评分≥${SHORT_SCORE_SIGNAL_PARAMS.riseMinScore}、突变前${SHORT_SCORE_SIGNAL_PARAMS.lowBaseDays}日≤${SHORT_SCORE_SIGNAL_PARAMS.lowBaseMax}，当日就是一根跳升柱。「抬升观察」（橙色）=自近${SHORT_SCORE_SIGNAL_PARAMS.riseRefDays}日低点累计抬升≥${SHORT_SCORE_SIGNAL_PARAMS.minRise}分且评分≥${SHORT_SCORE_SIGNAL_PARAMS.riseMinScore}、抬升起点≤${SHORT_SCORE_SIGNAL_PARAMS.lowBaseMax}（分几天磨出来的启动；当日若也跳升≥${SHORT_SCORE_SIGNAL_PARAMS.buyDelta}则归为跳升买入），只做标记不建仓——该形态实测 18 次/股票年（跳升的十几倍）、单笔期望≈0、盈利因子<1，混进买点会把跳升的优势稀释掉。卖出=单日Δ≤${SHORT_SCORE_SIGNAL_PARAMS.sellDelta} 或 自近${SHORT_SCORE_SIGNAL_PARAMS.riseRefDays}日最高分回撤≥${SHORT_SCORE_SIGNAL_PARAMS.trailDrop}（且当日评分未继续走高）；观察=其余情况。悬停单元格可看判定依据。信号后的数字是该信号的质量分（0~100）与等级 A/B/C/D：抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20，按满分归一到 100。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）`}
+              title={`信号（按评分序列逐日判定，与回测同一套阈值）：唯一买点是「跳升买入」（粉色）=单日跳升≥${SHORT_SCORE_SIGNAL_PARAMS.buyDelta}分且评分≥${SHORT_SCORE_SIGNAL_PARAMS.riseMinScore}、突变前${SHORT_SCORE_SIGNAL_PARAMS.lowBaseDays}日≤${SHORT_SCORE_SIGNAL_PARAMS.lowBaseMax}，当日就是一根跳升柱。「抬升观察」（橙色）=自近${SHORT_SCORE_SIGNAL_PARAMS.riseRefDays}日低点累计抬升≥${SHORT_SCORE_SIGNAL_PARAMS.minRise}分且评分≥${SHORT_SCORE_SIGNAL_PARAMS.riseMinScore}、抬升起点≤${SHORT_SCORE_SIGNAL_PARAMS.lowBaseMax}（分几天磨出来的启动；当日若也跳升≥${SHORT_SCORE_SIGNAL_PARAMS.buyDelta}则归为跳升买入），只做标记不建仓——该形态实测 18 次/股票年（跳升的十几倍）、单笔期望≈0、盈利因子<1，混进买点会把跳升的优势稀释掉。卖出=单日Δ≤${SHORT_SCORE_SIGNAL_PARAMS.sellDelta} 或 自近${SHORT_SCORE_SIGNAL_PARAMS.riseRefDays}日最高分回撤≥${SHORT_SCORE_SIGNAL_PARAMS.trailDrop}（且当日评分未继续走高）；观察=其余情况。悬停单元格可看判定依据。训练模式下只用到训练日为止的评分。点漏斗可勾选信号过滤（Excel 式，仅影响列表显示，不影响「当日评分」的候选股票）`}
             >
-              <span className={styles.klineShapeHeaderText}>信号 / 质量</span>
+              <span className={styles.klineShapeHeaderText}>信号</span>
               <Dropdown
                 trigger={['click']}
                 placement="bottomLeft"
@@ -4034,22 +3997,6 @@ const STList: React.FC<STListProps> = ({
                   }
                 />
               </Dropdown>
-              <Button
-                size="small"
-                type="text"
-                icon={
-                  sortTypes[SIGNAL_QUALITY_SORT_KEY] == 1 ? (
-                    <CaretUpOutlined />
-                  ) : sortTypes[SIGNAL_QUALITY_SORT_KEY] == 2 ? (
-                    <CaretDownOutlined />
-                  ) : (
-                    <CaretRightOutlined />
-                  )
-                }
-                className={styles.sortbtn}
-                onClick={() => updateSortType(SIGNAL_QUALITY_SORT_KEY)}
-                title="按信号质量评分排序（首次点击降序：质量高的在前）；观察 / 未判定没有质量分，始终排在最后"
-              />
             </span>
           </Col>
           <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
@@ -4537,66 +4484,38 @@ const STList: React.FC<STListProps> = ({
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12 }}
                 >
                   {sig ? (
-                    // 买入 / 卖出：悬停展示该信号的具体产生原因（以及信号质量的各维度依据）
+                    // 买入 / 卖出：悬停展示该信号的具体产生原因
                     // 观察：原因较短，沿用原生 title，避免整列都弹浮层
                     <Tooltip
                       title={
-                        sig.signal.kind === '观察' ? undefined : (
+                        sig.kind === '观察' ? undefined : (
                           <div style={{ fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-line' }}>
-                            {[
-                              `${sig.signal.kind}：${sig.signal.reason}`,
-                              sig.quality
-                                ? `信号质量 ${sig.quality.total} 分（${sig.quality.grade}）：${sig.quality.dims
-                                    .map((d) => `${d.label} ${d.score}/${d.max}`)
-                                    .join('、')}`
-                                : '',
-                            ]
-                              .filter(Boolean)
-                              .join('\n')}
+                            {`${sig.kind}：${sig.reason}`}
                           </div>
                         )
                       }
                       placement="topLeft"
                     >
                       <span
-                        title={sig.signal.kind === '观察' ? sig.signal.reason : undefined}
-                        style={{ cursor: sig.signal.kind === '观察' ? 'default' : 'help' }}
+                        title={sig.kind === '观察' ? sig.reason : undefined}
+                        style={{ cursor: sig.kind === '观察' ? 'default' : 'help' }}
                       >
                         <span
                           style={{
                             // 抬升观察=橙、跳升买入=粉、卖出=主题绿、观察=次要文字色，与图上柱子标记色一致
                             color:
-                              sig.signal.kind === '抬升观察'
+                              sig.kind === '抬升观察'
                                 ? SHORT_SCORE_RISE_BUY_MARK_COLOR
-                                : sig.signal.kind === '跳升买入'
+                                : sig.kind === '跳升买入'
                                   ? SHORT_SCORE_JUMP_BUY_MARK_COLOR
-                                  : sig.signal.kind === '卖出'
+                                  : sig.kind === '卖出'
                                     ? 'var(--reduce-color)'
                                     : 'var(--reverse-text-color)',
-                            fontWeight: isBuySignalKind(sig.signal.kind) ? 'bold' : 'normal',
+                            fontWeight: isBuySignalKind(sig.kind) ? 'bold' : 'normal',
                           }}
                         >
-                          {sig.signal.kind}
+                          {sig.kind}
                         </span>
-                        {sig.quality ? (
-                          <span
-                            style={{
-                              marginLeft: 4,
-                              fontSize: 11,
-                              color:
-                                sig.quality.grade === 'A'
-                                  ? '#52c41a'
-                                  : sig.quality.grade === 'B'
-                                    ? '#1890ff'
-                                    : sig.quality.grade === 'C'
-                                      ? '#faad14'
-                                      : '#ff4d4f',
-                            }}
-                          >
-                            {sig.quality.total}
-                            {sig.quality.grade}
-                          </span>
-                        ) : null}
                       </span>
                     </Tooltip>
                   ) : (

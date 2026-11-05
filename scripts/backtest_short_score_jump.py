@@ -656,11 +656,13 @@ def fmt_date(key: str) -> str:
 
 
 class Series:
-    __slots__ = ("code", "name", "dates", "scores", "volume")
+    __slots__ = ("code", "name", "dates", "scores", "volume", "rsi", "rsi_pattern")
 
     def __init__(
         self, code: str, name: str, dates: List[str], scores: List[float],
         volume: Optional[List[Optional[float]]] = None,
+        rsi: Optional[List[Optional[float]]] = None,
+        rsi_pattern: Optional[List[str]] = None,
     ):
         self.code = code
         self.name = name
@@ -668,6 +670,10 @@ class Series:
         self.scores = scores
         # 评分里的「量能」维度（0~30），与 dates 对齐；None = 该行取不到（质量分按中性计）
         self.volume = volume if volume is not None else [None] * len(dates)
+        # 评分里的「RSI」形态分（0~40，权重为 0 仅展示），与 dates 对齐；None = 取不到
+        self.rsi = rsi if rsi is not None else [None] * len(dates)
+        # RSI 命中情形文案（如「金叉｜RSI6=78 偏高，下调15分」），与 dates 对齐
+        self.rsi_pattern = rsi_pattern if rsi_pattern is not None else [""] * len(dates)
 
 
 def load_scores(
@@ -703,7 +709,7 @@ def load_scores(
         code = str(data.get("code") or key.rsplit("_", 2)[-2])
         name = ""
         day_rows = data.get("rows") or {}
-        by_version: Dict[object, List[Tuple[str, float]]] = {}
+        by_version: Dict[object, List[Tuple[str, float, Optional[float], Optional[float], str]]] = {}
         for d in sorted(day_rows):
             row = day_rows[d]
             if not isinstance(row, dict):
@@ -720,7 +726,10 @@ def load_scores(
             name = name or str(row.get("name") or "")
             vol = row.get("volumeScore")
             vol = float(vol) if isinstance(vol, (int, float)) else None
-            by_version.setdefault(row.get("v"), []).append((fmt_date(d), float(total), vol))
+            rsi = row.get("rsiScore")
+            rsi = float(rsi) if isinstance(rsi, (int, float)) else None
+            pat = str(row.get("rsiPattern") or "")
+            by_version.setdefault(row.get("v"), []).append((fmt_date(d), float(total), vol, rsi, pat))
         if not by_version:
             continue
         # 版本体检（所有版本都统计，与 version_policy 无关）
@@ -744,7 +753,9 @@ def load_scores(
         if len(items) < min_days:
             continue
         out[code] = Series(
-            code, name, [i[0] for i in items], [i[1] for i in items], [i[2] for i in items]
+            code, name,
+            [i[0] for i in items], [i[1] for i in items], [i[2] for i in items],
+            [i[3] for i in items], [i[4] for i in items],
         )
     return out, stats
 
@@ -812,10 +823,43 @@ def pick_sample(series: Dict[str, Series], n: int, seed: int) -> List[str]:
 # ---------------------------------------------------------------- 载入日K
 
 
+def faster_rsi(closes: Sequence[float], interval: int = 6) -> List[Optional[float]]:
+    """Wilder 平滑 RSI，与前端 trading-signals 的 FasterRSI(interval) 同口径
+
+    前 interval 个涨跌用简单平均起算，之后按 avg = avg + (cur - avg) / interval 平滑；
+    平均跌幅为 0 时 RSI=100。返回与 closes 等长的序列，前 interval 个位置为 None。
+    """
+    n = len(closes)
+    out: List[Optional[float]] = [None] * n
+    if n < interval + 1:
+        return out
+    gain_sum = 0.0
+    loss_sum = 0.0
+    avg_gain = 0.0
+    avg_loss = 0.0
+    for i in range(1, n):
+        ch = closes[i] - closes[i - 1]
+        g = ch if ch > 0 else 0.0
+        l = -ch if ch < 0 else 0.0
+        if i <= interval:
+            gain_sum += g
+            loss_sum += l
+            if i == interval:
+                avg_gain = gain_sum / interval
+                avg_loss = loss_sum / interval
+        else:
+            avg_gain += (g - avg_gain) / interval
+            avg_loss += (l - avg_loss) / interval
+        if i < interval:
+            continue
+        out[i] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (avg_gain / avg_loss + 1.0)
+    return out
+
+
 class Bars:
     __slots__ = (
         "dates", "opens", "closes", "highs", "lows", "zdf", "circ_mv",
-        "ma5", "ma10", "ma20", "ma40", "ma60", "vols", "atr14",
+        "ma5", "ma10", "ma20", "ma40", "ma60", "vols", "atr14", "rsi6",
     )
 
     def __init__(self, dates, opens, closes, highs, lows, zdf, circ_mv, vols=None):
@@ -827,6 +871,8 @@ class Bars:
         self.zdf = zdf            # 当日涨跌幅（%）
         self.circ_mv = circ_mv    # 推算流通市值（元）：成交额 /(换手率/100)
         self.vols = vols or [0.0] * len(dates)  # 成交量（手），用于「启动日放量」确认
+        # RSI6（Wilder 平滑），用于「RSI 冲高提前止盈」这类超买卖出
+        self.rsi6 = faster_rsi(closes, 6)
 
         # ATR(14)：真实波幅的 14 日简单均值，用于「最高价 - K×ATR」这类趋势跟踪止损
         trs: List[float] = []
@@ -1040,6 +1086,7 @@ def run_stock(
     atr_trail: float = 0.0,
     swing_break: int = 0,
     ma_cross_exit: bool = False,
+    rsi_exit: float = 0.0,
 ) -> Tuple[List[Trade], Dict[str, float], int]:
     """单只股票回测。
 
@@ -1114,6 +1161,7 @@ def run_stock(
         曾出现过「3 天持有上限」实际持了 23 天。所以持仓规则一律按日K交易日推进：
 
           止损   ：收盘价较买入价 <= -stop_loss
+          RSI止盈：RSI6 冲到 rsi_exit 以上（超买）提前止盈，rsi_exit=0 关闭
           不再新高：当日最高价(或收盘)没有超过买入以来的高点 → 动能中断
           趋势转跌：连续 trend_exit 日「收盘 < MA5 且 MA5 下行」
           吊灯止损：收盘跌破「持仓期最高价 - atr_trail × ATR(14)」
@@ -1132,6 +1180,12 @@ def run_stock(
             close = bars.closes[j]
             if stop_loss > 0 and close / p["price"] - 1 <= -stop_loss:
                 return j, "止损"
+            # RSI6 冲高到超买区提前止盈（rsi_exit>0 开启）：与评分绿柱/回撤止盈互不冲突，
+            # 谁先触发按触发日先后取早的那个（同一天则评分卖出优先，见下方 candidates 排序）
+            if rsi_exit > 0:
+                r = bars.rsi6[j]
+                if r is not None and r >= rsi_exit:
+                    return j, f"RSI6超买{rsi_exit:g}"
             if no_new_high:
                 cur = bars.highs[j] if newhigh_basis == "high" else close
                 if cur > peak:
@@ -1709,7 +1763,7 @@ def evaluate(
     price_trail: float = 0.0, take_profit: float = 0.0, ma_exit: int = 0,
     vol_stall: float = 0.0, score_price_both: bool = False,
     trend_exit: int = 0, atr_trail: float = 0.0, swing_break: int = 0,
-    ma_cross_exit: bool = False,
+    ma_cross_exit: bool = False, rsi_exit: float = 0.0,
 ) -> dict:
     all_trades: List[Trade] = []
     daily_by_stock, active_days = [], []
@@ -1727,7 +1781,7 @@ def evaluate(
             price_trail=price_trail, take_profit=take_profit, ma_exit=ma_exit,
             vol_stall=vol_stall, score_price_both=score_price_both,
             trend_exit=trend_exit, atr_trail=atr_trail, swing_break=swing_break,
-            ma_cross_exit=ma_cross_exit,
+            ma_cross_exit=ma_cross_exit, rsi_exit=rsi_exit,
         )
         all_trades.extend(trades)
         daily_by_stock.append(daily)
@@ -2606,6 +2660,183 @@ def board_momentum_study(data, args, horizons=(1, 3, 5, 10)) -> None:
         print("  （p<0.05 才算稳健；正差额说明「板块当天强→后续强」的动量延续成立）")
     else:
         print("\n（强弱两组样本不足，无法做逐日配对）")
+
+
+def rsi_study(data, args, horizons=(1, 3, 5, 10)) -> None:
+    """验证「RSI 评分机制」能否提高信号胜率：把跳升买入信号按信号日的 RSI 形态 / 形态分分组，
+    看偏多形态、高 RSI 分的信号后续胜率/收益是否更高，并对比「只买偏多形态」与「全部信号」。
+
+    RSI 口径与 STList 的 RSI 列一致（renderer/helpers/shortTermScore.ts 的 scoreStockRsi）：
+    rsiScore 0~40 为形态分（权重 0、仅展示），rsiPattern 为命中情形文案（如「金叉」，
+    可能带「｜RSI6=78 偏高，下调15分」的追高衰减后缀，这里按「｜」切掉后缀归一化）。
+    """
+    buy_delta = float(args.buy)
+    rise_floor = float(args.rise_min_score)
+    ref_days = max(1, int(args.rise_ref_days))
+    low_days = max(0, int(args.low_base_days))
+    low_max = float(args.low_base_max)
+
+    # 与 rsiShape.ts 的 RSI_SHAPE_LABELS 顺序一致：前 7 个偏多、后 3 个偏空
+    shapes = ("超买回踩企稳", "超买回踩中", "超卖反转", "金叉", "多头排列", "金叉在即", "修复中",
+              "死叉", "空头排列", "超买钝化")
+    bullish = set(shapes[:7])
+
+    def norm_shape(pat: str) -> str:
+        name = (pat or "").split("｜")[0].strip()
+        return name if name in shapes else ""
+
+    def fwd(bars: Bars, date: str, h: int) -> Optional[float]:
+        i0 = bars.next_index(date)
+        if i0 < 0 or i0 + h - 1 >= len(bars.dates):
+            return None
+        return bars.closes[i0 + h - 1] / bars.opens[i0] - 1
+
+    # 收集跳升买入信号 + 无条件基准
+    signals: List[dict] = []
+    base: Dict[int, List[float]] = {h: [] for h in horizons}
+    total_jump = 0
+    for s, bars in data:
+        for i in range(1, len(s.dates)):
+            d = s.dates[i]
+            bi, pb = bars.index_of(d), bars.index_of(s.dates[i - 1])
+            if bi < 0 or pb < 0 or bi - pb != 1:
+                continue
+            delta = s.scores[i] - s.scores[i - 1]
+            cur = s.scores[i]
+            ref = s.scores[max(0, i - ref_days):i]
+            if not ref:
+                continue
+            base_row = {h: fwd(bars, d, h) for h in horizons}
+            for h in horizons:
+                if base_row[h] is not None:
+                    base[h].append(base_row[h])
+            low_ref = min(ref)
+            low_base_high = max(s.scores[i - low_days:i]) if low_days and i >= low_days else None
+            in_low = lambda v: low_days <= 0 or v is None or v <= low_max
+            if not (delta >= buy_delta and cur >= rise_floor and (in_low(low_base_high) or in_low(low_ref))):
+                continue
+            total_jump += 1
+            signals.append({
+                "date": d,
+                "rets": {h: fwd(bars, d, h) for h in horizons},
+                "shape": norm_shape(s.rsi_pattern[i]),
+                "rsi": s.rsi[i],
+            })
+
+    if not signals:
+        print("没有跳升买入信号，无法验证 RSI。可放宽 --buy / --rise-min-score 或加大 --sample。")
+        return
+
+    def cell(v: List[float]) -> str:
+        if not v:
+            return "--"
+        win = sum(1 for x in v if x > 0) / len(v) * 100
+        return f"{statistics.fmean(v) * 100:+.2f}/{win:.0f}%"
+
+    def header() -> List[str]:
+        return ["分组", "信号数"] + [f"{h}日(均/胜)" for h in horizons]
+
+    print("\n=== RSI 验证：结合 RSI 形态/评分能否提高信号胜率 ===")
+    print(
+        f"信号口径：跳升买入（Δ≥{buy_delta:g} 且评分≥{rise_floor:g} 且低位≤{low_max:g}持续{low_days}日）"
+        f"；RSI 口径=STList RSI 列（scoreStockRsi）；未来收益=次日开盘买持 h 日收盘卖（未扣成本）"
+    )
+    print(f"跳升买入共 {total_jump} 个")
+
+    # 表1：按 RSI 形态分组
+    shape_groups: Dict[str, Dict[int, List[float]]] = {}
+    shape_count: Dict[str, int] = {}
+    for sig in signals:
+        key = sig["shape"] or "未识别"
+        shape_count[key] = shape_count.get(key, 0) + 1
+        g = shape_groups.setdefault(key, {h: [] for h in horizons})
+        for h in horizons:
+            if sig["rets"][h] is not None:
+                g[h].append(sig["rets"][h])
+    rows = []
+    for sh in shapes:
+        if shape_count.get(sh):
+            rows.append([sh, shape_count[sh]] + [cell(shape_groups[sh][h]) for h in horizons])
+    if shape_count.get("未识别"):
+        rows.append(["未识别", shape_count["未识别"]] + [cell(shape_groups["未识别"][h]) for h in horizons])
+    print(render_table(header(), rows, "lr" + "r" * len(horizons)))
+
+    # 表2：偏多 / 偏空 / 未识别 / 全部 / 无条件基准
+    groups = {"RSI偏多": {h: [] for h in horizons}, "RSI偏空": {h: [] for h in horizons},
+              "未识别": {h: [] for h in horizons}}
+    cnt = {"RSI偏多": 0, "RSI偏空": 0, "未识别": 0}
+    for sig in signals:
+        key = "RSI偏多" if sig["shape"] in bullish else ("RSI偏空" if sig["shape"] else "未识别")
+        cnt[key] += 1
+        for h in horizons:
+            if sig["rets"][h] is not None:
+                groups[key][h].append(sig["rets"][h])
+    rows2 = []
+    for key in ("RSI偏多", "RSI偏空", "未识别"):
+        rows2.append([key, cnt[key]] + [cell(groups[key][h]) for h in horizons])
+    rows2.append(["全部跳升", len(signals)] + [cell([s["rets"][h] for s in signals if s["rets"][h] is not None]) for h in horizons])
+    rows2.append(["无条件基准", "--"] + [cell(base[h]) for h in horizons])
+    print(render_table(header(), rows2, "lr" + "r" * len(horizons)))
+
+    # 表3：按 RSI 形态分（0~40）分档
+    bins = (("0~10", 0, 10), ("10~20", 10, 20), ("20~30", 20, 30), ("30~40", 30, 40))
+    bin_groups = {k: {h: [] for h in horizons} for k, _, _ in bins}
+    bin_cnt = {k: 0 for k, _, _ in bins}
+    no_rsi = {h: [] for h in horizons}
+    no_rsi_cnt = 0
+    for sig in signals:
+        v = sig["rsi"]
+        if v is None:
+            no_rsi_cnt += 1
+            for h in horizons:
+                if sig["rets"][h] is not None:
+                    no_rsi[h].append(sig["rets"][h])
+            continue
+        # 按形态分落档（0~40）
+        k = "0~10" if v < 10 else "10~20" if v < 20 else "20~30" if v < 30 else "30~40"
+        bin_cnt[k] += 1
+        for h in horizons:
+            if sig["rets"][h] is not None:
+                bin_groups[k][h].append(sig["rets"][h])
+    rows3 = []
+    for k, _, _ in bins:
+        rows3.append([f"RSI分{k}", bin_cnt[k]] + [cell(bin_groups[k][h]) for h in horizons])
+    rows3.append(["无RSI数据", no_rsi_cnt] + [cell(no_rsi[h]) for h in horizons])
+    print(render_table(header(), rows3, "lr" + "r" * len(horizons)))
+
+    # 结论性对比：只买偏多形态 vs 全部信号（按逐日配对控制日期，避免大盘涨跌混淆）
+    bull_by_day: Dict[str, Dict[int, List[float]]] = {}
+    all_by_day: Dict[str, Dict[int, List[float]]] = {}
+    for sig in signals:
+        d = sig["date"]
+        bull = sig["shape"] in bullish
+        if bull:
+            bull_by_day.setdefault(d, {h: [] for h in horizons})
+        all_by_day.setdefault(d, {h: [] for h in horizons})
+        for h in horizons:
+            if sig["rets"][h] is None:
+                continue
+            all_by_day[d][h].append(sig["rets"][h])
+            if bull:
+                bull_by_day[d][h].append(sig["rets"][h])
+    print(f"\n逐日配对差额（RSI偏多信号均值 - 全部信号均值，同一天两组都有信号的交易日）：")
+    parts = []
+    for h in horizons:
+        diffs = []
+        for d in bull_by_day:
+            if all_by_day.get(d) and bull_by_day[d][h] and all_by_day[d][h]:
+                diffs.append(statistics.fmean(bull_by_day[d][h]) - statistics.fmean(all_by_day[d][h]))
+        if len(diffs) < 2:
+            parts.append(f"{h}日: 样本不足({len(diffs)}天)")
+            continue
+        m = statistics.fmean(diffs)
+        sd = statistics.stdev(diffs)
+        t = m / (sd / math.sqrt(len(diffs)))
+        p = 2 * (1 - 0.5 * (1 + math.erf(abs(t) / math.sqrt(2))))
+        pos = sum(1 for x in diffs if x > 0) / len(diffs) * 100
+        parts.append(f"{h}日: {m*100:+.2f}%（正{pos:.0f}%,t={t:+.2f},p={p:.2f},n={len(diffs)}）")
+    print("  " + "  ".join(parts))
+    print("  （正差额且 p<0.05 才算「偏多形态能提高胜率」的稳健证据）")
 
 
 QUALITY_DIM_MAX = 75  # 抬升强度15 + 评分水平10 + 低位起点15 + 量能确认15 + 位置20
@@ -3568,6 +3799,10 @@ def main() -> None:
         "--ma-cross-exit", action="store_true",
         help="MA5 下穿 MA10（死叉）当日卖出",
     )
+    ap.add_argument(
+        "--rsi-exit", type=float, default=0.0, metavar="RSI",
+        help="持仓期 RSI6 冲到该值以上提前止盈（默认 0=关闭；常用 80，与评分绿柱/回撤止盈并行、谁先触发谁生效）",
+    )
     ap.add_argument("--min-score", type=float, default=60.0, help="买入时评分下限")
     ap.add_argument(
         "--low-base-days", type=int, default=3,
@@ -3674,6 +3909,10 @@ def main() -> None:
         help="验证「板块强度」维度：信号所属板块指数当日涨幅越高，信号后续胜率/收益是否越高（动量延续）",
     )
     ap.add_argument(
+        "--rsi", action="store_true",
+        help="验证「RSI 评分机制」：把跳升买入信号按信号日 RSI 形态/形态分分组，看偏多形态/高 RSI 分能否提高胜率",
+    )
+    ap.add_argument(
         "--quality", action="store_true",
         help="验证「信号质量分」（STList 那套 0~100 / A-B-C-D）对胜率有无区分度",
     )
@@ -3768,6 +4007,7 @@ def main() -> None:
         "atr_trail": args.atr_trail,
         "swing_break": args.swing_break,
         "ma_cross_exit": args.ma_cross_exit,
+        "rsi_exit": args.rsi_exit,
     }
 
     if args.list_data_dirs:
@@ -3955,6 +4195,8 @@ def main() -> None:
         board_effect_study(data, args)
     if args.board_momentum:
         board_momentum_study(data, args)
+    if args.rsi:
+        rsi_study(data, args)
     if args.quality:
         quality_study(data, args, lag, args.min_mv * 1e8)
     if args.positions:
