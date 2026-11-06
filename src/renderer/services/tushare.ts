@@ -1965,10 +1965,12 @@ export async function GetStrongStocksFromTushare(date: string): Promise<any> {
  * 60日新高 ∪ 近 T 日涨停次数 ≥ minLimitTimes：
  * 涨停次数取自 limit_list_d 的 up_stat（"N/T"），需要 5000 积分；ST 不在涨跌停榜单里。
  * 结果由 python 侧写入 api_cache（key = strong_pool_{date}_{n}，历史数据 10 年 TTL）。
+ *
+ * @param options.ignoreTrain 忽略训练模式的日期截断（「重建历史」写库时用，与训练无关）
  */
 export async function GetStrongPoolFromTushare(
   date: string,
-  options?: { minLimitTimes?: number; force?: boolean }
+  options?: { minLimitTimes?: number; force?: boolean; ignoreTrain?: boolean }
 ): Promise<{
   stocks: any[];
   date: string;
@@ -1982,11 +1984,15 @@ export async function GetStrongPoolFromTushare(
 }> {
   const d = String(date || '').replace(/-/g, '');
   try {
-    const result = await callTushare('get_strong_pool', {
-      date: d,
-      min_limit_times: options?.minLimitTimes ?? 2,
-      force: !!options?.force,
-    });
+    const result = await callTushare(
+      'get_strong_pool',
+      {
+        date: d,
+        min_limit_times: options?.minLimitTimes ?? 2,
+        force: !!options?.force,
+      },
+      { ignoreTrain: !!options?.ignoreTrain }
+    );
     if (result?.error) {
       console.error('[强势股池] Tushare 重建失败:', result.error);
       return { stocks: [], date: d, count: 0, error: String(result.error) };

@@ -154,6 +154,43 @@ export function NormalizeTrainClock(time?: string) {
 }
 
 /**
+ * 训练时钟是否已经「开始推进」
+ *
+ * 09:30（含集合竞价 09:25）视为还没开始：当天分时、当天日K都当作未来数据不展示，
+ * 只有推进到 09:31 之后才按当前时刻逐步显示。
+ */
+export function IsTrainClockStarted(time?: string) {
+  return NormalizeTrainClock(time) > TRAIN_CLOCK_START;
+}
+
+/**
+ * 训练时间轴（1 分钟粒度）：09:25 集合竞价 ～ 11:30，13:00 ～ 15:00
+ *
+ * STList 的时间轴、详情页 TrainBar 的分时推进共用同一份，避免两边步长/边界不一致。
+ */
+export const TRAIN_TIME_LIST: string[] = (() => {
+  const list: string[] = [];
+  const pushRange = (fromH: number, fromM: number, toH: number, toM: number) => {
+    let h = fromH;
+    let m = fromM;
+    while (h < toH || (h === toH && m <= toM)) {
+      list.push(`${`${h}`.padStart(2, '0')}:${`${m}`.padStart(2, '0')}`);
+      m += 1;
+      if (m >= 60) {
+        m = 0;
+        h += 1;
+      }
+    }
+  };
+  pushRange(9, 25, 11, 30);
+  pushRange(13, 0, 15, 0);
+  return list;
+})();
+
+/** 时间轴默认位置：开盘第一分钟（09:30；09:25 集合竞价可手动回退查看） */
+export const TRAIN_TIME_DEFAULT_INDEX = Math.max(0, TRAIN_TIME_LIST.indexOf('09:30'));
+
+/**
  * 按训练时钟截断分时（只保留 <= clock 的分钟）
  *
  * 与按天截断（CutTrends）配合使用：数据层只保证不越过训练日，

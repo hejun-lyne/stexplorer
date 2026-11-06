@@ -22,6 +22,7 @@ import * as Services from '@/services';
 import * as CONST from '@/constants';
 import * as Utils from '@/utils';
 import * as Helpers from '@/helpers';
+import * as TrainFilter from '@/utils/trainFilter';
 import { useState } from 'react';
 import { Stock } from '@/types/stock';
 import { useRequest } from 'ahooks';
@@ -102,31 +103,14 @@ const SHORT_SCORE_BACKFILL_DAYS = 20;
 const MA_FILTER_OPTIONS = [5, 10, 20, 40, 60, 120];
 
 /**
- * 训练模式「时间推进」的时间轴：09:25 ~ 11:30、13:00 ~ 15:00
+ * 训练模式「时间推进」的时间轴（09:25 ~ 11:30、13:00 ~ 15:00，每格一分钟）
  *
- * 跳过午休与非交易时间，每格一分钟（09:25 含集合竞价）。
+ * 与详情页 TrainBar 的分时推进共用同一份（见 utils/trainFilter），避免两边边界/步长不一致；
  * 「时间推进」按训练日内的时间走动，而不是按分时根数：倍速只影响真实耗时。
  */
-const TRAIN_TIME_LIST: string[] = (() => {
-  const list: string[] = [];
-  const pushRange = (fromH: number, fromM: number, toH: number, toM: number) => {
-    let h = fromH;
-    let m = fromM;
-    while (h < toH || (h === toH && m <= toM)) {
-      list.push(`${`${h}`.padStart(2, '0')}:${`${m}`.padStart(2, '0')}`);
-      m += 1;
-      if (m >= 60) {
-        m = 0;
-        h += 1;
-      }
-    }
-  };
-  pushRange(9, 25, 11, 30);
-  pushRange(13, 0, 15, 0);
-  return list;
-})();
+const TRAIN_TIME_LIST = TrainFilter.TRAIN_TIME_LIST;
 /** 时间轴默认位置：开盘第一分钟（09:25 集合竞价可手动回退查看） */
-const TRAIN_TIME_DEFAULT_IDX = Math.max(0, TRAIN_TIME_LIST.indexOf('09:30'));
+const TRAIN_TIME_DEFAULT_IDX = TrainFilter.TRAIN_TIME_DEFAULT_INDEX;
 /** 时间推进倍速（1 = 按真实时间推进：1 个交易分钟 = 1 分钟真实时间） */
 const TRAIN_TIME_SPEEDS = [1, 2, 5, 10, 20, 40, 60];
 /** 一个交易分钟对应的真实毫秒 */
@@ -451,8 +435,8 @@ const STList: React.FC<STListProps> = ({
   /**
    * 最近一次评分结果的「评分基准日」（YYYY-MM-DD）
    *
-   * 训练日推进时若正在展示结果列表会自动按新训练日重算，用它在工具栏提示
-   * 「当前看到的是哪一天算出来的分」（重算进行中为空）。
+   * 用它在工具栏提示「当前看到的是哪一天算出来的分」（重算进行中为空）。
+   * 训练日推进不会自动重算，所以推进后这里仍是上一次的基准日，直到用户手动点评分。
    */
   const [shortScoreDate, setShortScoreDate] = useState('');
   /**
@@ -2500,7 +2484,8 @@ const STList: React.FC<STListProps> = ({
   }, [secid]);
 
   // 仅「数据源」变化时在这里清空旧结果：评分口径与缓存 key 都变了，继续展示旧数据源算的分会误导。
-  // 训练日推进不在这里清空：由下方「训练日推进 → 自动重算」的 effect 重新计算（清空/写入由评分流程自己做）。
+  // 训练日推进不在这里清空：训练日不等价于评分口径变化（当日是否收盘才决定用哪天日K），
+  // 是否重算交给用户点「短线评分 / 当日评分」，避免推进一天就把整份结果列表重建。
   useEffect(() => {
     if (isShortScoreRunningRef.current || todayScoreRunningRef.current) {
       return;
@@ -2630,30 +2615,10 @@ const STList: React.FC<STListProps> = ({
     handleShortScoreRef.current = handleShortScore;
   }, [handleShortScore]);
 
-  // 训练日推进后自动重算短线评分：评分已改为训练模式读缓存（handleShortScore 里 ignoreCache=!ontrain），
-  // 命中预计算缓存秒出，无需再手动点「短线评分」等待。只在「短线评分结果」模式下自动重算；
-  // 且等时间轴重置回开盘（timeIdx 回到默认值）后再触发，确保用 prevDay 口径（新训练日还没走到 15:00）。
-  const lastAutoScoreDayRef = React.useRef('');
-  useEffect(() => {
-    if (!ontrain || !trainDate) {
-      lastAutoScoreDayRef.current = '';
-      return;
-    }
-    const day = String(trainDate).replace(/-/g, '');
-    if (!day || day === lastAutoScoreDayRef.current) {
-      return;
-    }
-    // 推进训练日瞬间 timeIdx 仍是上一日的收盘时刻，等上面「时间轴重置」effect 落地后再触发
-    if (timeIdx > TRAIN_TIME_DEFAULT_IDX) {
-      return;
-    }
-    lastAutoScoreDayRef.current = day;
-    if (displayModeRef.current === 'shortScore') {
-      handleShortScoreRef.current();
-    }
-    // timeIdx 参与依赖是为「等时间轴重置」；lastAutoScoreDayRef 保证每个训练日只触发一次（播放时不会重复）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trainDate, ontrain, timeIdx]);
+  // 训练日推进后**不再**自动重算短线评分：
+  // 评分口径依赖「当日是否已收盘」，由用户自己决定何时点「短线评分 / 当日评分」；
+  // 自动重算会把整份结果列表按新训练日重建，容易在推进过程中被误触发（也浪费时间）。
+  // 切板块后的自动重算仍保留（见上面的 boardsKey effect）。
 
   // 训练日推进后回填「涨停挂单」的待成交买入（按新训练日的开盘价成交）。
   // 不能只依赖右侧面板：面板可能没打开 / 结果列表正在重算 / 面板日K还没刷新，

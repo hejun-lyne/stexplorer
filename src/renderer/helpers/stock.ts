@@ -1085,6 +1085,32 @@ export async function GetTrainDayPrices(
   }
 }
 
+/**
+ * 训练日历史分时（1 分钟）的并发合并
+ *
+ * 同一只股票同一天，详情页分时图与训练条取价会各请求一次；这里用同一份 Promise 合并，
+ * 数据层（python/db）本身有缓存，30 秒后再允许重新取一次（拿兜底源更新的数据）。
+ */
+const trainDayTrendsInFlight = new Map<string, Promise<Stock.TrendItem[]>>();
+export function GetTrainDayTrends(secid: string, date: string): Promise<Stock.TrendItem[]> {
+  const day = String(date || '').replace(/-/g, '');
+  const key = `${secid}_${day}`;
+  const hit = trainDayTrendsInFlight.get(key);
+  if (hit) {
+    return hit;
+  }
+  const task = Services.Stock.requestHistTrends(secid, day)
+    .then((arr) => (arr || []) as Stock.TrendItem[])
+    .catch((error) => {
+      trainDayTrendsInFlight.delete(key);
+      console.error('[训练分时] 取数失败:', key, error);
+      return [] as Stock.TrendItem[];
+    });
+  trainDayTrendsInFlight.set(key, task);
+  setTimeout(() => trainDayTrendsInFlight.delete(key), 30000);
+  return task;
+}
+
 export function UpdateStockData(
   prev: Stock.AllData | undefined,
   secid: string,
@@ -4386,18 +4412,20 @@ export async function RebuildStrongPoolDay(
   options?: { minLimitTimes?: number; force?: boolean }
 ): Promise<StrongPoolRebuildResult> {
   const d = String(date || '').replace(/-/g, '');
-  const res = await TushareAPI.GetStrongPoolFromTushare(d, options);
+  // 重建是历史数据的离线回填，与训练模式无关：显式忽略训练日期截断，
+  // 否则训练中重建晚于训练日的日期会被截断成训练日，写错库
+  const res = await TushareAPI.GetStrongPoolFromTushare(d, { ...options, ignoreTrain: true });
   if (res?.error) {
     return { date: d, count: 0, multiLimitCount: 0, newHighCount: 0, error: String(res.error) };
   }
-  // 训练模式下请求日期会被截断到训练日：日期对不上就不要写库，避免把训练日数据写成未来某天
+  // 兜底：日期对不上就不要写库，避免把别的交易日数据写成请求的那天
   if (String(res?.date || '') !== d) {
     return {
       date: d,
       count: 0,
       multiLimitCount: 0,
       newHighCount: 0,
-      error: `返回日期 ${res?.date} 与请求日期 ${d} 不一致（训练模式下不能重建晚于训练日的日期）`,
+      error: `返回日期 ${res?.date} 与请求日期 ${d} 不一致，已跳过写库`,
     };
   }
   const stocks = (res?.stocks || []) as any[];

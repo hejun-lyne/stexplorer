@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Row, Col, DatePicker, Select, Button, InputNumber, Checkbox, message } from 'antd';
+import { Row, Col, DatePicker, Select, Button, InputNumber, Checkbox, Modal, message } from 'antd';
 import styles from '../index.scss';
 import * as Utils from '@/utils';
 import * as Helpers from '@/helpers';
@@ -178,6 +178,19 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [minLimitTimes, setMinLimitTimes] = useState(2);
   const isRebuildPausedRef = useRef(false);
   const rebuildRunningRef = useRef(false);
+  /** 重建历史使用的区间：与「查询区间」解耦，默认近 30 天，并记住上次选择 */
+  const [rebuildRange, setRebuildRange] = useState<[moment.Moment, moment.Moment]>(() => {
+    const saved = Utils.GetStorage<string[]>('QSList_REBUILD_RANGE', []);
+    const start = saved?.[0] ? moment(saved[0], 'YYYYMMDD') : moment().subtract(30, 'day');
+    const end = saved?.[1] ? moment(saved[1], 'YYYYMMDD') : moment();
+    return [start, end];
+  });
+  /** 弹窗里的草稿区间：点「开始重建」才生效 */
+  const [rebuildDraftRange, setRebuildDraftRange] = useState<[moment.Moment | null, moment.Moment | null]>([
+    null,
+    null,
+  ]);
+  const [rebuildModalOpen, setRebuildModalOpen] = useState(false);
 
   /** 把所选日历区间换成交易日列表（交易日历取不到时退回「去掉周末」） */
   const buildRebuildDates = useCallback(async (start: string, end: string) => {
@@ -208,74 +221,85 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   }, []);
 
   /**
-   * 重建所选区间的历史强势股池
+   * 重建「指定区间」的历史强势股池（区间由弹窗单独指定，与查询日期无关）
    *
    * 逐日调用 Tushare 精确重建（60日新高 ∪ up_stat≥N 次涨停）并写入数据库缓存，
    * 之后 QSList 查询、STList 的「强势股」板块、回测都直接命中，不再实时计算。
-   * 再次点击视为暂停（当前这一天算完后停止，已完成的天已落库）。
    */
-  const onRebuildHistory = useCallback(async () => {
+  const runRebuild = useCallback(
+    async (start: string, end: string) => {
+      if (!start || !end) {
+        message.warning('请选择重建区间');
+        return;
+      }
+      if (start > end) {
+        message.warning('重建开始日期不能晚于结束日期');
+        return;
+      }
+      rebuildRunningRef.current = true;
+      setRebuildLoading(true);
+      const days = await buildRebuildDates(start, end);
+      if (!days.length) {
+        rebuildRunningRef.current = false;
+        setRebuildLoading(false);
+        message.warning('所选区间没有交易日');
+        return;
+      }
+      isRebuildPausedRef.current = false;
+      setRebuildDone(0);
+      setRebuildTotal(days.length);
+      setRebuildLast('');
+      const failed: string[] = [];
+      let fallbackDays = 0;
+      try {
+        for (let i = 0; i < days.length; i += 1) {
+          if (isRebuildPausedRef.current) {
+            break;
+          }
+          const day = days[i];
+          // 串行：每日都要拉 60 个交易日的日线（走 daily_all 缓存），并发容易被限流
+          // eslint-disable-next-line no-await-in-loop
+          const res = await Helpers.Stock.RebuildStrongPoolDay(day, { minLimitTimes });
+          if (res.error) {
+            failed.push(day);
+            console.warn(`[强势股池] ${day} 重建失败：${res.error}`);
+          } else if (res.limitSource && res.limitSource !== 'limit_list_d') {
+            // 积分不足时退化成了「当日涨停」，口径会偏窄
+            fallbackDays += 1;
+          }
+          setRebuildDone(i + 1);
+          setRebuildLast(
+            `${day}：${res.count} 只（多次涨停 ${res.multiLimitCount} / 60日新高 ${res.newHighCount}）`
+          );
+        }
+      } finally {
+        rebuildRunningRef.current = false;
+        setRebuildLoading(false);
+      }
+      if (failed.length) {
+        message.warning(
+          `重建结束，失败 ${failed.length} 天（${failed.slice(0, 5).join('、')}${failed.length > 5 ? '…' : ''}）`
+        );
+      } else if (fallbackDays > 0) {
+        message.warning(
+          `重建完成，但有 ${fallbackDays} 天取不到 limit_list_d（已退化为「当日涨停」口径），请检查 Tushare 积分是否 ≥5000`
+        );
+      } else {
+        message.success(`已重建 ${start} ~ ${end} 的强势股池，已写入数据库缓存`);
+      }
+    },
+    [minLimitTimes, buildRebuildDates]
+  );
+
+  /** 点「重建历史」：运行中则暂停；否则打开弹窗指定区间 */
+  const onRebuildHistory = useCallback(() => {
     if (rebuildRunningRef.current) {
       isRebuildPausedRef.current = true;
       return;
     }
-    if (!dates.length) {
-      return;
-    }
-    const start = dates[0];
-    const end = dates[dates.length - 1];
-    rebuildRunningRef.current = true;
-    setRebuildLoading(true);
-    const days = await buildRebuildDates(start, end);
-    if (!days.length) {
-      rebuildRunningRef.current = false;
-      setRebuildLoading(false);
-      message.warning('所选区间没有交易日');
-      return;
-    }
-    isRebuildPausedRef.current = false;
-    setRebuildDone(0);
-    setRebuildTotal(days.length);
-    setRebuildLast('');
-    const failed: string[] = [];
-    let fallbackDays = 0;
-    try {
-      for (let i = 0; i < days.length; i += 1) {
-        if (isRebuildPausedRef.current) {
-          break;
-        }
-        const day = days[i];
-        // 串行：每日都要拉 60 个交易日的日线（走 daily_all 缓存），并发容易被限流
-        // eslint-disable-next-line no-await-in-loop
-        const res = await Helpers.Stock.RebuildStrongPoolDay(day, { minLimitTimes });
-        if (res.error) {
-          failed.push(day);
-          console.warn(`[强势股池] ${day} 重建失败：${res.error}`);
-        } else if (res.limitSource && res.limitSource !== 'limit_list_d') {
-          // 积分不足时退化成了「当日涨停」，口径会偏窄
-          fallbackDays += 1;
-        }
-        setRebuildDone(i + 1);
-        setRebuildLast(
-          `${day}：${res.count} 只（多次涨停 ${res.multiLimitCount} / 60日新高 ${res.newHighCount}）`
-        );
-      }
-    } finally {
-      rebuildRunningRef.current = false;
-      setRebuildLoading(false);
-    }
-    if (failed.length) {
-      message.warning(
-        `重建结束，失败 ${failed.length} 天（${failed.slice(0, 5).join('、')}${failed.length > 5 ? '…' : ''}）`
-      );
-    } else if (fallbackDays > 0) {
-      message.warning(
-        `重建完成，但有 ${fallbackDays} 天取不到 limit_list_d（已退化为「当日涨停」口径），请检查 Tushare 积分是否 ≥5000`
-      );
-    } else {
-      message.success('历史强势股池已重建完成，已写入数据库缓存');
-    }
-  }, [dates, minLimitTimes, buildRebuildDates]);
+    setRebuildDraftRange([rebuildRange[0], rebuildRange[1]]);
+    setRebuildModalOpen(true);
+  }, [rebuildRange]);
 
   const prevDate = useCallback(() => {
     setDates([moment(dates[0], 'YYYYMMDD').add(-1, 'd').format('YYYYMMDD')]);
@@ -419,7 +443,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           onClick={onRebuildHistory}
           loading={rebuildLoading && rebuildDone === 0}
           style={{ marginLeft: 6 }}
-          title="用 Tushare 精确重建所选区间的强势股池（60日新高 ∪ 近 T 日 ≥N 次涨停），写入数据库缓存；之后查询、板块「强势股」、回测都直接命中，不再实时计算。再次点击可暂停（当前这天算完后停止）"
+          title="弹窗指定一段区间，用 Tushare 精确重建该区间的强势股池（60日新高 ∪ 近 T 日 ≥N 次涨停），写入数据库缓存；之后查询、板块「强势股」、回测都直接命中，不再实时计算。重建中再次点击可暂停（当前这天算完后停止）"
         >
           {rebuildLoading ? `重建 ${rebuildDone}/${rebuildTotal}` : '重建历史'}
         </Button>
@@ -630,6 +654,43 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           </div>
         </>
       )}
+      <Modal
+        title="重建历史强势股池"
+        open={rebuildModalOpen}
+        okText="开始重建"
+        cancelText="取消"
+        onCancel={() => setRebuildModalOpen(false)}
+        onOk={() => {
+          const [s, e] = rebuildDraftRange;
+          if (!s || !e) {
+            message.warning('请选择重建区间');
+            return;
+          }
+          const start = s.format('YYYYMMDD');
+          const end = e.format('YYYYMMDD');
+          if (start > end) {
+            message.warning('重建开始日期不能晚于结束日期');
+            return;
+          }
+          setRebuildModalOpen(false);
+          setRebuildRange([s, e]);
+          Utils.SetStorage('QSList_REBUILD_RANGE', [start, end]);
+          runRebuild(start, end);
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <span>重建区间</span>
+          <DatePicker.RangePicker
+            value={rebuildDraftRange}
+            allowClear={false}
+            onChange={(v) => setRebuildDraftRange(v && v[0] && v[1] ? [v[0], v[1]] : [null, null])}
+          />
+        </div>
+        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--secondary-text-color)', lineHeight: 1.7 }}>
+          逐日调用 Tushare 精确重建（60日新高 ∪ 近 T 日 ≥{minLimitTimes} 次涨停），结果写入数据库缓存，
+          区间内交易日越多耗时越长；重建中可再次点击「重建历史」暂停（当前这天算完后停止，已完成的天已落库）。
+        </div>
+      </Modal>
     </>
   );
 };

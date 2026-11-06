@@ -1627,6 +1627,15 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
      * 训练日的分时只展示到这一刻，日K也要按这一刻重建（否则展示的是训练日收盘，属于未来数据）。
      */
     const trainClock = trainActive && trainDate ? TrainFilter.NormalizeTrainClock(trainTime) : '';
+    /**
+     * 训练时钟是否已「开始推进」（09:30 及之前算未开始）
+     *
+     * 未开始时训练日当天还属于未来：分时与当日日K都不展示，推进后才按当前时刻逐步出现。
+     */
+    const trainClockStarted = trainActive && !!trainDate && TrainFilter.IsTrainClockStarted(trainTime);
+    /** 供节流回调读取最新训练状态（handleTrends 是 useThrottleFn，闭包不会随渲染更新） */
+    const trainActiveRef = useRef(trainActive);
+    trainActiveRef.current = trainActive;
     // 训练模式：时序类请求的缓存按训练日期区分（ahooks 的 cacheKey 缓存不含日期会返回旧数据）
     // 忽略训练时用 '/live' 缓存键，即真实最新数据那份缓存
     const trainCacheSuffix = trainActive && trainDate ? `/${trainDate}` : '/live';
@@ -1651,10 +1660,10 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
      * 只在训练日变化时取一次数；训练时钟推进时在本地重新截断即可，不用每分钟重新请求。
      */
     const [trainTrendsRaw, setTrainTrendsRaw] = useState<Stock.TrendItem[]>([]);
-    /** 按共享训练时钟截断后的训练日分时（分时图 / 当日K重建都用它） */
+    /** 按共享训练时钟截断后的训练日分时（分时图 / 当日K重建都用它；未开始推进时为空） */
     const trainTrendsCut = useMemo(
-      () => (trainClock ? TrainFilter.CutTrendsByClock(trainTrendsRaw, trainClock) : trainTrendsRaw),
-      [trainTrendsRaw, trainClock]
+      () => (trainClockStarted ? TrainFilter.CutTrendsByClock(trainTrendsRaw, trainClock) : []),
+      [trainTrendsRaw, trainClock, trainClockStarted]
     );
     const trainTrendsCutRef = useRef(trainTrendsCut);
     trainTrendsCutRef.current = trainTrendsCut;
@@ -1762,6 +1771,11 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     const { run: handleTrends } = useThrottleFn(
       (trendd?: Stock.TrendItem[]) => {
         if (!trendd || trendd.length == 0) {
+          return;
+        }
+        // 训练模式：分时只由「按训练时钟截断后的训练日分时」驱动（见 trainTrendsCut 的 effect）。
+        // 这里拿到的是实时/整日分时，会越过训练时刻（未推进时甚至直接画出一整天），必须丢弃。
+        if (trainActiveRef.current) {
           return;
         }
         // 使用 ref 获取最新分时数据，避免 useThrottleFn 闭包过期导致重复拼接
@@ -1910,7 +1924,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     });
     useEffect(() => {
       if (!trendData.trends.length) {
-        if (!backtestDate && !requestTrends) {
+        // 训练模式的分时来自训练日历史分时（runGetTrainTrends），这里不再请求实时分时：
+        // 实时分时整日都会返回，绕开训练时钟就等于提前看到未来
+        if (!backtestDate && !trainActive && !requestTrends) {
           setRequestTrends(true);
           runGetTrends(kLineApiSourceSetting, secid);
         }
@@ -2068,18 +2084,44 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
           console.error('handeKline, ks is undefined');
           return;
         }
-        // 训练模式：用「截至共享训练时刻」的分时重建训练日当日K
-        // 时钟走到收盘（15:00）时不再重建，直接用真实日K
-        if (trainClock && trainDate && trainClock < TrainFilter.TRAIN_CLOCK_CLOSE && kt == KLineType.Day) {
+        // 训练模式：训练日当天的日K按共享训练时刻重建
+        // - 未开始推进（09:30 及之前）：当天日K整体不展示（数据源给的是收盘价，属于未来数据）
+        // - 推进中：用「截至当前时刻」的分时合成当日K
+        // - 走到收盘（15:00）：不再重建，直接用真实日K
+        if (trainActive && trainDate && kt == KLineType.Day) {
           const cut = trainTrendsCutRef.current;
           const lastK = ks[ks.length - 1];
           const trainDayStr = String(trainDate).substring(0, 10);
-          if (cut.length && lastK && String(lastK.date || '').substring(0, 10) === trainDayStr) {
-            const zsValue = ks.length > 1 ? ks[ks.length - 2].sp : cut[0].last || cut[0].current || 0;
-            const dailyK = buildDailyKFromTrends(cut, secid, zsValue, trainDayStr);
-            if (dailyK) {
-              ks = [...ks.slice(0, -1), dailyK];
+          const isTrainDayBar = !!lastK && String(lastK.date || '').substring(0, 10) === trainDayStr;
+          if (!trainClockStarted) {
+            if (isTrainDayBar) {
+              // 记住真实日K：推进后再放回/按分时重建
+              if (!trainDayBarRef.current) {
+                trainDayBarRef.current = { ...lastK };
+              }
+              ks = ks.slice(0, -1);
             }
+          } else if (trainClock < TrainFilter.TRAIN_CLOCK_CLOSE && isTrainDayBar) {
+            if (cut.length) {
+              const zsValue = ks.length > 1 ? ks[ks.length - 2].sp : cut[0].last || cut[0].current || 0;
+              const dailyK = buildDailyKFromTrends(cut, secid, zsValue, trainDayStr);
+              if (dailyK) {
+                ks = [...ks.slice(0, -1), dailyK];
+              }
+            } else {
+              // 已开始推进但训练日分时还没到：先不展示当天日K（收盘价仍属未来数据），等分时到达再合成
+              if (!trainDayBarRef.current) {
+                trainDayBarRef.current = { ...lastK };
+              }
+              ks = ks.slice(0, -1);
+            }
+          }
+          if (!ks.length) {
+            // 极端情况（只有训练日一根K）：藏起来后没有可画的K线，别把请求中的标记留着
+            const resetRequestKLines = [...requestKLines];
+            resetRequestKLines[DefaultKTypes.indexOf(kt)] = false;
+            setRequestKLines(resetRequestKLines);
+            return;
           }
         }
         // 交易日的任意非交易时段（午休、收盘后）也可用分时补当日K；非交易日则不用分时填K
@@ -2379,7 +2421,17 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     // 训练时钟推进 / 训练日分时到达：按时刻截断后同步到分时图与详情页
     //（分时图的昨收基准——涨跌幅 / 涨跌配色 / 昨收线——从首根的 last 取）
     useEffect(() => {
-      if (!trainActive || !trainDate || !trainTrendsCut.length) {
+      if (!trainActive || !trainDate) {
+        return;
+      }
+      if (!trainTrendsCut.length) {
+        // 未开始推进 / 该训练日没有分时：分时图留空，
+        // 既不展示整日分时，也不残留上一交易日或上一只股票的数据
+        setTrendData({ trends: [] });
+        updateTrendsOption({ trends: [] });
+        if (updateTrendData) {
+          updateTrendData([]);
+        }
         return;
       }
       setTrendData({ trends: trainTrendsCut });
@@ -2387,7 +2439,7 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       if (updateTrendData) {
         updateTrendData(trainTrendsCut);
       }
-    }, [trainTrendsCut]);
+    }, [trainTrendsCut, trainClockStarted, trainActive, trainDate]);
 
     // 训练日切换 / 退出训练 / 忽略训练：清空上一训练日的分时（真实日K的还原见下一个 effect）
     useEffect(() => {
@@ -2397,8 +2449,9 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     /**
      * 训练时钟推进后重建训练日当日K
      *
-     * 训练日收盘价在时钟走到 15:00 之前都属于未来数据：用「截至当前时刻」的分时合成当日K，
-     * 时钟走到收盘 / 关闭训练时再用真实日K还原。
+     * - 未开始推进（09:30 及之前）：训练日当天的日K直接不展示；
+     * - 推进中：训练日收盘价属于未来数据，用「截至当前时刻」的分时合成当日K；
+     * - 走到收盘（15:00）/ 关闭训练：用真实日K还原。
      */
     useEffect(() => {
       const dayIndex = DefaultKTypes.indexOf(KLineType.Day);
@@ -2410,27 +2463,56 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
       const lastDay = String(last?.date || '').substring(0, 10);
       const trainDayStr = trainDate ? String(trainDate).substring(0, 10) : '';
       const closed = !trainClock || trainClock >= TrainFilter.TRAIN_CLOCK_CLOSE;
+      const origin = trainDayBarRef.current;
+      const originDay = origin ? String(origin.date).substring(0, 10) : '';
+
+      // A. 当天日K曾被藏起来（记住的 origin 是训练日的，但图上最后一根不是）：按当前时刻决定是否放回
+      if (trainActive && originDay && originDay === trainDayStr && lastDay !== trainDayStr) {
+        if (closed || (trainClockStarted && trainTrendsCut.length)) {
+          handeKline({ ks: [...ks, origin], kt: KLineType.Day });
+          flushHandeKline();
+          if (closed) {
+            trainDayBarRef.current = null;
+          }
+        }
+        return;
+      }
+
+      // B. 未开始推进：当天日K整体隐藏（含数据源已给出的真实收盘K）
+      if (trainActive && !trainClockStarted) {
+        if (lastDay === trainDayStr && ks.length > 1) {
+          if (!trainDayBarRef.current) {
+            trainDayBarRef.current = { ...last };
+          }
+          handeKline({ ks: ks.slice(0, -1), kt: KLineType.Day });
+          flushHandeKline();
+        }
+        return;
+      }
+
+      // C. 收盘 / 图上最后一根不是训练日：用真实日K还原
       if (closed || lastDay !== trainDayStr) {
-        const origin = trainDayBarRef.current;
         if (!origin) {
           return;
         }
-        if (lastDay === String(origin.date).substring(0, 10) && last.sp !== origin.sp) {
+        if (lastDay === originDay && last.sp !== origin.sp) {
           handeKline({ ks: [...ks.slice(0, -1), origin], kt: KLineType.Day });
           flushHandeKline();
         }
         trainDayBarRef.current = null;
         return;
       }
+
+      // D. 推进中：记住真实日K，再按当前时刻用分时重建
       if (!trainTrendsCut.length) {
         return;
       }
-      if (!trainDayBarRef.current || String(trainDayBarRef.current.date).substring(0, 10) !== lastDay) {
+      if (!trainDayBarRef.current || originDay !== lastDay) {
         trainDayBarRef.current = { ...last };
       }
       handeKline({ ks, kt: KLineType.Day });
       flushHandeKline();
-    }, [trainClock, trainTrendsCut, trainDate, handeKline, flushHandeKline]);
+    }, [trainClock, trainClockStarted, trainActive, trainTrendsCut, trainDate, handeKline, flushHandeKline]);
 
     // 训练模式：进入训练 / 训练日期推进 / 「忽略训练」开关切换后重新取数
     // 数据层已按当前训练日期截断（忽略训练时按真实最新取），只有重新请求才能换掉本地已加载的数据
@@ -3565,6 +3647,14 @@ const PriceTrend: React.FC<PriceTrendProps> = React.memo(
     return (
       <ChartCard TitleBar={titleBar} auto={false}>
         <div className={styles.indicators}>
+          {trainActive && !!trainDate && !trainClockStarted && (
+            <span
+              style={{ fontSize: 12, color: 'var(--secondary-text-color)', marginRight: 8 }}
+              title="训练日当天的分时与日K要等训练时钟推进后才出现（上方训练条：+1分 / 推进 / 到收盘）"
+            >
+              未开始推进（{trainClock}）：当天分时 / 日K暂不展示
+            </span>
+          )}
           {typeIndex === 0 && (
             <>
               {trendDates.length > 0 && (
