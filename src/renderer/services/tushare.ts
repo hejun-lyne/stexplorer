@@ -73,6 +73,7 @@ const TRAIN_AS_OF_PARAM: Record<string, string> = {
   get_stk_shock: 'date',
   get_hk_hold: 'date',
   get_strong_stocks: 'date',
+  get_strong_pool: 'date',
   // 板块 / 成分股（dc_index / dc_member / index_member_all 均支持按交易日查历史）
   get_boards_by_date: 'date',
   get_boards_by_date_batch: 'dates',
@@ -1277,12 +1278,20 @@ export async function GetBankuaiCodeByNameFromTushare(name: string, fuzzy = true
 
 // ==================== 板块成分股 ====================
 
-export async function GetBankuaiStocksFromTushare(secid: string, date?: string): Promise<any> {
+export async function GetBankuaiStocksFromTushare(
+  secid: string,
+  date?: string,
+  options?: { latestMembers?: boolean }
+): Promise<any> {
   try {
     // 不传日期时 python 侧按「数据截止日」取（训练模式下即训练日）
     const params: Record<string, any> = { secid };
     if (date) {
       params.date = date;
+    }
+    // 行业板块没有历史成分数据：允许 python 退回最新交易日快照（行情仍按 date 取）
+    if (options?.latestMembers) {
+      params.latest_members = true;
     }
     const result = await callTushare('get_board_stocks', params);
     
@@ -1947,6 +1956,45 @@ export async function GetStrongStocksFromTushare(date: string): Promise<any> {
   } catch (error) {
     logError(error, 'GetStrongStocksFromTushare', '获取强势股票失败');
     return { stocks: [], date: date.replace(/-/g, ''), count: 0 };
+  }
+}
+
+/**
+ * 精确重建指定交易日的强势股池（与东财强势股池同口径）
+ *
+ * 60日新高 ∪ 近 T 日涨停次数 ≥ minLimitTimes：
+ * 涨停次数取自 limit_list_d 的 up_stat（"N/T"），需要 5000 积分；ST 不在涨跌停榜单里。
+ * 结果由 python 侧写入 api_cache（key = strong_pool_{date}_{n}，历史数据 10 年 TTL）。
+ */
+export async function GetStrongPoolFromTushare(
+  date: string,
+  options?: { minLimitTimes?: number; force?: boolean }
+): Promise<{
+  stocks: any[];
+  date: string;
+  count: number;
+  multi_limit_count?: number;
+  new_high_count?: number;
+  min_limit_times?: number;
+  /** limit_list_d=精确口径；limit_list=积分不足退化成「当日涨停」 */
+  limit_source?: string;
+  error?: string;
+}> {
+  const d = String(date || '').replace(/-/g, '');
+  try {
+    const result = await callTushare('get_strong_pool', {
+      date: d,
+      min_limit_times: options?.minLimitTimes ?? 2,
+      force: !!options?.force,
+    });
+    if (result?.error) {
+      console.error('[强势股池] Tushare 重建失败:', result.error);
+      return { stocks: [], date: d, count: 0, error: String(result.error) };
+    }
+    return result;
+  } catch (error) {
+    logError(error, 'GetStrongPoolFromTushare', '重建强势股池失败');
+    return { stocks: [], date: d, count: 0 };
   }
 }
 

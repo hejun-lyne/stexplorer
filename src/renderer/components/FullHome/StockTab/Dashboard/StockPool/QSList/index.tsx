@@ -3,6 +3,7 @@ import { Row, Col, DatePicker, Select, Button, InputNumber, Checkbox, message } 
 import styles from '../index.scss';
 import * as Utils from '@/utils';
 import * as Helpers from '@/helpers';
+import * as Services from '@/services';
 import { Stock } from '@/types/stock';
 import moment from 'moment';
 import classNames from 'classnames';
@@ -168,6 +169,114 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     [dates]
   );
 
+  // ===== 强势股池：重建历史（Tushare 精确口径，写库后查询直接命中） =====
+  const [rebuildLoading, setRebuildLoading] = useState(false);
+  const [rebuildDone, setRebuildDone] = useState(0);
+  const [rebuildTotal, setRebuildTotal] = useState(0);
+  const [rebuildLast, setRebuildLast] = useState('');
+  /** 近 T 日至少几次涨停算「多次涨停」（东财强势股池口径≈2） */
+  const [minLimitTimes, setMinLimitTimes] = useState(2);
+  const isRebuildPausedRef = useRef(false);
+  const rebuildRunningRef = useRef(false);
+
+  /** 把所选日历区间换成交易日列表（交易日历取不到时退回「去掉周末」） */
+  const buildRebuildDates = useCallback(async (start: string, end: string) => {
+    const days: string[] = [];
+    let d = moment(start, 'YYYYMMDD');
+    const e = moment(end, 'YYYYMMDD');
+    while (d.isSameOrBefore(e, 'day')) {
+      days.push(d.format('YYYYMMDD'));
+      d = d.add(1, 'day');
+    }
+    try {
+      const norm = (v: any) => String(v || '').replace(/-/g, '').substring(0, 8);
+      const years = Array.from(new Set(days.map((x) => x.substring(0, 4))));
+      const lists = await Promise.all(years.map((y) => Services.Tushare.GetTradeDatesFromTushare(y)));
+      const set = new Set<string>();
+      lists.forEach((arr) => (arr || []).forEach((x) => set.add(norm(x))));
+      const hit = days.filter((x) => set.has(x));
+      if (hit.length) {
+        return hit;
+      }
+    } catch (e) {
+      console.warn('[强势股池] 交易日历获取失败，按周末过滤:', e);
+    }
+    return days.filter((x) => {
+      const w = moment(x, 'YYYYMMDD').day();
+      return w !== 0 && w !== 6;
+    });
+  }, []);
+
+  /**
+   * 重建所选区间的历史强势股池
+   *
+   * 逐日调用 Tushare 精确重建（60日新高 ∪ up_stat≥N 次涨停）并写入数据库缓存，
+   * 之后 QSList 查询、STList 的「强势股」板块、回测都直接命中，不再实时计算。
+   * 再次点击视为暂停（当前这一天算完后停止，已完成的天已落库）。
+   */
+  const onRebuildHistory = useCallback(async () => {
+    if (rebuildRunningRef.current) {
+      isRebuildPausedRef.current = true;
+      return;
+    }
+    if (!dates.length) {
+      return;
+    }
+    const start = dates[0];
+    const end = dates[dates.length - 1];
+    rebuildRunningRef.current = true;
+    setRebuildLoading(true);
+    const days = await buildRebuildDates(start, end);
+    if (!days.length) {
+      rebuildRunningRef.current = false;
+      setRebuildLoading(false);
+      message.warning('所选区间没有交易日');
+      return;
+    }
+    isRebuildPausedRef.current = false;
+    setRebuildDone(0);
+    setRebuildTotal(days.length);
+    setRebuildLast('');
+    const failed: string[] = [];
+    let fallbackDays = 0;
+    try {
+      for (let i = 0; i < days.length; i += 1) {
+        if (isRebuildPausedRef.current) {
+          break;
+        }
+        const day = days[i];
+        // 串行：每日都要拉 60 个交易日的日线（走 daily_all 缓存），并发容易被限流
+        // eslint-disable-next-line no-await-in-loop
+        const res = await Helpers.Stock.RebuildStrongPoolDay(day, { minLimitTimes });
+        if (res.error) {
+          failed.push(day);
+          console.warn(`[强势股池] ${day} 重建失败：${res.error}`);
+        } else if (res.limitSource && res.limitSource !== 'limit_list_d') {
+          // 积分不足时退化成了「当日涨停」，口径会偏窄
+          fallbackDays += 1;
+        }
+        setRebuildDone(i + 1);
+        setRebuildLast(
+          `${day}：${res.count} 只（多次涨停 ${res.multiLimitCount} / 60日新高 ${res.newHighCount}）`
+        );
+      }
+    } finally {
+      rebuildRunningRef.current = false;
+      setRebuildLoading(false);
+    }
+    if (failed.length) {
+      message.warning(
+        `重建结束，失败 ${failed.length} 天（${failed.slice(0, 5).join('、')}${failed.length > 5 ? '…' : ''}）`
+      );
+    } else if (fallbackDays > 0) {
+      message.warning(
+        `重建完成，但有 ${fallbackDays} 天取不到 limit_list_d（已退化为「当日涨停」口径），请检查 Tushare 积分是否 ≥5000`
+      );
+    } else {
+      message.success('历史强势股池已重建完成，已写入数据库缓存');
+    }
+  }, [dates, minLimitTimes, buildRebuildDates]);
+
   const prevDate = useCallback(() => {
     setDates([moment(dates[0], 'YYYYMMDD').add(-1, 'd').format('YYYYMMDD')]);
   }, [dates]);
@@ -307,6 +416,30 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         &nbsp;
         <Button
           size="small"
+          onClick={onRebuildHistory}
+          loading={rebuildLoading && rebuildDone === 0}
+          style={{ marginLeft: 6 }}
+          title="用 Tushare 精确重建所选区间的强势股池（60日新高 ∪ 近 T 日 ≥N 次涨停），写入数据库缓存；之后查询、板块「强势股」、回测都直接命中，不再实时计算。再次点击可暂停（当前这天算完后停止）"
+        >
+          {rebuildLoading ? `重建 ${rebuildDone}/${rebuildTotal}` : '重建历史'}
+        </Button>
+        <span style={{ marginLeft: 6 }} title="近 T 日涨停次数阈值：≥N 次算「近期多次涨停」（东财口径约 2 次）">
+          涨停≥
+        </span>
+        <InputNumber
+          size="small"
+          min={2}
+          max={10}
+          value={minLimitTimes}
+          onChange={(v) => setMinLimitTimes(Number(v) || 2)}
+          style={{ width: 52 }}
+        />
+        <span>次</span>
+        {rebuildLast && (
+          <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>{rebuildLast}</span>
+        )}
+        <Button
+          size="small"
           onClick={onCalcTechIndicators}
           loading={techFilterLoading && techProgress === 0}
         >
@@ -414,9 +547,12 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                   </Col>
                   <Col span={2}>{s.hybk}</Col>
                   <Col span={2} className={Utils.GetValueColor(s.zdf).textClass}>
-                    {(s.zx > 1000 ? s.zx / 1000 : s.zx).toFixed(2)}
+                    {/* 东财池：价格 ×1000、市值单位元；Tushare 重建（带 strongType）：原始价、市值亿元 */}
+                    {((s as any).strongType ? s.zx : s.zx / 1000).toFixed(2)}
                   </Col>
-                  <Col span={2}>{(s.ltsz / 100000000).toFixed(2) + '亿'}</Col>
+                  <Col span={2}>
+                    {((s as any).strongType ? s.ltsz : s.ltsz / 100000000).toFixed(2) + '亿'}
+                  </Col>
                   <Col span={2}>
                     {firstAppearMap[s.secid]
                       ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天'

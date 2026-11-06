@@ -768,6 +768,11 @@ def _cached_dc_member(pro, ts_code: str, trade_date: str) -> Any:
     """获取 dc_member，按板块一个文件缓存，trade_date 为 key
 
     缓存结构: {trade_date: [records], ...}
+
+    dc_member 的日快照并不连续（例如 2025-01-02 不少板块没有记录），
+    按 trade_date 单日查询会返回空表，进而让「板块股票」整片变空。
+    单日为空时回退到「不晚于该日期的最近一份快照」：成分股口径仍停在训练日之前，
+    不会引入未来数据。
     """
     cache_key = f"dc_member_{ts_code}"
     cached = read_cache(cache_key, max_age_hours=24 * 7)
@@ -781,6 +786,22 @@ def _cached_dc_member(pro, ts_code: str, trade_date: str) -> Any:
     df = safe_api_call(pro.dc_member, ts_code=ts_code, trade_date=trade_date)
     if isinstance(df, dict) and df.get("error"):
         return df
+
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        try:
+            start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=45)).strftime("%Y%m%d")
+            hist = safe_api_call(
+                pro.query, "dc_member", ts_code=ts_code, start_date=start_date, end_date=trade_date
+            )
+            if isinstance(hist, dict) and hist.get("error"):
+                print(f"[dc_member] {ts_code} {trade_date} 区间回退失败: {hist.get('error')}")
+            elif isinstance(hist, pd.DataFrame) and not hist.empty:
+                latest = str(hist["trade_date"].astype(str).max())
+                df = hist[hist["trade_date"].astype(str) == latest].reset_index(drop=True)
+                print(f"[dc_member] {ts_code} {trade_date} 无快照，回退到 {latest}（{len(df)} 只）")
+        except Exception as e:
+            print(f"[dc_member] {ts_code} {trade_date} 区间回退异常: {e}")
+
     if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
         if not isinstance(cached, dict):
             cached = {}
@@ -3084,12 +3105,17 @@ class TushareAPI:
             return {"error": str(e)}
         
     @staticmethod
-    def get_board_stocks(secid: str, date: Optional[str] = None) -> Dict[str, Any]:
+    def get_board_stocks(
+        secid: str, date: Optional[str] = None, latest_members: bool = False
+    ) -> Dict[str, Any]:
         """获取板块成分股，支持东财和同花顺板块
 
         Args:
             secid: 板块ID，如 "90.BK0428"
             date: 指定查询日期(YYYYMMDD)，不传则默认最近交易日
+            latest_members: 历史日期取不到成分时，是否退回「最新交易日快照」。
+                行业板块的历史成分数据起点较晚（约 2025-05-30），训练模式需要它；
+                只替换成分股名单，行情仍按 date/训练日取，不会带出未来价格。
 
         自动判断板块类型：
         - BK 开头 → 东财板块（dc_member + moneyflow_dc）
@@ -3194,10 +3220,30 @@ class TushareAPI:
                 if isinstance(df, dict) and df.get("error"):
                     debug_info["dc_member_error"] = df.get("error")
                     return {"error": df.get("error"), "debug": debug_info}
-                
+
+                # 行业板块：东财 dc_member 的历史成分数据起点很晚（约 2025-05-30），
+                # 训练日早于该日期时历史查询必然为空。调用方（行业板块）允许直接用
+                # 「最新交易日快照」，这里只替换成分股名单；行情仍在下面按 target_date
+                # 取，不会带出训练日之后的收盘价/涨跌幅。
+                if (df is None or (isinstance(df, pd.DataFrame) and df.empty)) and latest_members:
+                    end = _real_today_str()
+                    start = (datetime.strptime(end, "%Y%m%d") - timedelta(days=30)).strftime("%Y%m%d")
+                    hist = safe_api_call(
+                        pro.query, "dc_member", ts_code=ts_code, start_date=start, end_date=end
+                    )
+                    if isinstance(hist, pd.DataFrame) and not hist.empty:
+                        latest_date = str(hist["trade_date"].astype(str).max())
+                        df = hist[hist["trade_date"].astype(str) == latest_date].reset_index(drop=True)
+                        debug_info["member_fallback"] = "latest_snapshot"
+                        debug_info["member_snapshot_date"] = latest_date
+                        print(
+                            f"[板块成分股] {secid} 训练日 {trade_date} 无历史成分，"
+                            f"改用最新快照 {latest_date}（{len(df)} 只）"
+                        )
+
                 if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-                    # dc_member 可按 trade_date 查询历史成分，但数据起始于 2024-12-20
-                    # 这里不做 fallback 到最新数据，避免历史日期混入最新成分股
+                    # dc_member 可按 trade_date 查询历史成分，但数据起始于 2024-12-20；
+                    # latest_members=True 时上面已退回最新快照，走到这里说明确实没有可用成分。
                     debug_info["dc_member_empty"] = True
                     debug_info["dc_member_limit_note"] = "dc_member history starts at 20241220"
                     if trade_date < "20241220":
@@ -7412,6 +7458,179 @@ class TushareAPI:
                 "limit_up_count": len([s for s in stocks if s['strongType'] == 'limit_up']),
                 "new_high_count": len([s for s in stocks if s['strongType'] == 'new_high_60']),
             }
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def get_strong_pool(date: str, min_limit_times: int = 2, force: bool = False) -> Dict[str, Any]:
+        """
+        强势股池（与东财 quote.eastmoney.com/ztb/detail#type=qsgc 同口径）：
+        「创下 60 日新高」∪「近期多次涨停」
+
+        与 get_strong_stocks 的区别：涨停条件不看「当日是否涨停」，而是用 limit_list_d 的
+        up_stat（N/T，即 T 个交易日内 N 次涨停）取 N >= min_limit_times，对应东财的「近期多次涨停」。
+        limit_list_d 数据从 2020 年起、且不含 ST；取不到时退回旧接口 limit_list（只能识别当日涨停）。
+
+        :param date: 交易日 YYYYMMDD / YYYY-MM-DD
+        :param min_limit_times: 近 T 日至少几次涨停算「多次涨停」（默认 2）
+        :param force: 忽略缓存强制重算（历史数据一般不需要）
+        """
+        try:
+            pro = get_pro()
+            d = str(date or '').replace('-', '')
+            if len(d) != 8:
+                return {"error": f"Invalid date: {date}"}
+            min_times = max(1, int(min_limit_times or 2))
+            cache_key = f"strong_pool_{d}_{min_times}"
+            if not force:
+                cached = read_cache(cache_key, max_age_hours=8760 * 10)  # 历史收盘数据几乎不变
+                if cached is not None:
+                    return cached
+
+            # 1. 当日全市场日线（优先读批量缓存，与 get_strong_stocks_batch 共用）
+            daily_key = f"daily_all_{d}"
+            cached_daily = read_cache(daily_key, max_age_hours=8760)
+            if cached_daily and isinstance(cached_daily, list):
+                today_df = pd.DataFrame(cached_daily)
+            else:
+                today_df = safe_api_call(pro.daily, trade_date=d)
+                if isinstance(today_df, dict) and today_df.get("error"):
+                    return today_df
+                if isinstance(today_df, pd.DataFrame) and not today_df.empty:
+                    write_cache(daily_key, df_to_records(today_df))
+            if today_df is None or today_df.empty:
+                return {"error": "No daily data"}
+
+            # 2. 涨停统计：limit_list_d.up_stat = "N/T"（T 日内 N 次涨停），N >= min_times 记为「多次涨停」
+            limit_times_map: Dict[str, int] = {}
+            multi_limit_codes = set()
+            limit_source = 'limit_list_d'
+            ldf = None
+            try:
+                ldf = safe_api_call(
+                    pro.limit_list_d,
+                    trade_date=d,
+                    limit_type='U',
+                    fields='ts_code,trade_date,name,up_stat,limit_times,limit',
+                )
+            except Exception as e:
+                print(f"[get_strong_pool] limit_list_d 不可用，回退 limit_list: {e}")
+                ldf = None
+            if not isinstance(ldf, pd.DataFrame) or ldf.empty:
+                # 旧接口没有 up_stat / limit_times：只能拿到当日涨停（等价于 N=1）
+                limit_source = 'limit_list'
+                ldf = safe_api_call(pro.limit_list, trade_date=d)
+                if isinstance(ldf, pd.DataFrame) and not ldf.empty and 'limit' in ldf.columns:
+                    ldf = ldf[ldf['limit'] == 'U']
+            if isinstance(ldf, pd.DataFrame) and not ldf.empty:
+                for _, r in ldf.iterrows():
+                    tc = str(r.get('ts_code') or '')
+                    if not tc:
+                        continue
+                    n = 0
+                    up_stat = str(r.get('up_stat') or '')
+                    if '/' in up_stat:
+                        try:
+                            n = int(float(up_stat.split('/')[0]))
+                        except Exception:
+                            n = 0
+                    n = max(n, _to_int(r.get('limit_times', 0)) or 0)
+                    limit_times_map[tc] = n
+                    if n >= min_times:
+                        multi_limit_codes.add(tc)
+
+            # 3. 前 60 个交易日最高价（日线走同一份 daily_all 缓存）
+            start_60 = (datetime.strptime(d, '%Y%m%d') - timedelta(days=90)).strftime('%Y%m%d')
+            # 交易日历按「查询区间」缓存，批量重建时不必每天重复请求
+            cal_key = f"trade_cal_{start_60}_{d}"
+            cal_df = read_cache(cal_key, max_age_hours=8760)
+            if cal_df is None:
+                cal_df = safe_api_call(pro.trade_cal, exchange='SSE', start_date=start_60, end_date=d, is_open='1')
+                if not (isinstance(cal_df, dict) and cal_df.get("error")) and cal_df is not None:
+                    write_cache(cal_key, cal_df)
+            if isinstance(cal_df, dict) and cal_df.get("error"):
+                return cal_df
+            trade_dates = sorted(cal_df['cal_date'].astype(str).tolist()) if cal_df is not None else []
+            if len(trade_dates) < 2:
+                return {"error": "Not enough trade dates"}
+            today_idx = trade_dates.index(d) if d in trade_dates else len(trade_dates) - 1
+            hist_dates = trade_dates[max(0, today_idx - 60):today_idx]
+
+            hist_frames = []
+            for hd in hist_dates:
+                key = f"daily_all_{hd}"
+                cached_hd = read_cache(key, max_age_hours=8760)
+                if cached_hd and isinstance(cached_hd, list):
+                    hist_frames.append(pd.DataFrame(cached_hd))
+                    continue
+                df = safe_api_call(pro.daily, trade_date=hd)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    write_cache(key, df_to_records(df))
+                    hist_frames.append(df)
+            high_60 = {}
+            if hist_frames:
+                high_60 = pd.concat(hist_frames, ignore_index=True).groupby('ts_code')['high'].max().to_dict()
+
+            # 4. 市值 / 名称 / 行业
+            basic_df = safe_api_call(pro.daily_basic, trade_date=d)
+            mv_map = {}
+            if isinstance(basic_df, pd.DataFrame) and not basic_df.empty:
+                for _, r in basic_df.iterrows():
+                    mv_map[str(r['ts_code'])] = {
+                        'total_mv': _to_float(r.get('total_mv', 0)) / 10000,   # 万元 → 亿
+                        'circ_mv': _to_float(r.get('circ_mv', 0)) / 10000,
+                        'turnover': _to_float(r.get('turnover_rate', 0)),
+                    }
+            name_map, industry_map = _get_stock_basic_maps()
+
+            # 5. 合并两个条件
+            stocks = []
+            for _, row in today_df.iterrows():
+                tc = str(row['ts_code'])
+                code = tc.split('.')[0]
+                zdf = _to_float(row['pct_chg'])
+                close = _to_float(row['close'])
+                is_multi_limit = tc in multi_limit_codes
+                # 历史没取到时不要把所有股票都判成新高
+                is_new_high = bool(high_60) and close >= high_60.get(tc, 0) * 0.999
+                if not is_multi_limit and not is_new_high:
+                    continue
+                amount = _to_float(row['amount']) * 1000
+                stocks.append({
+                    "secid": f"{'1' if code.startswith('6') else '0'}.{code}",
+                    "code": code,
+                    "name": name_map.get(tc, str(row.get('name') or '')),
+                    "zx": close,
+                    "jk": _to_float(row['open']),
+                    "zdf": zdf,
+                    "zg": _to_float(row['high']),
+                    "zd": _to_float(row['low']),
+                    "cjl": _to_int(row['vol']),
+                    "cje": round(amount, 2),
+                    "hsl": mv_map.get(tc, {}).get('turnover', 0),
+                    # 入选原因（东财口径）：multi_limit=近期多次涨停 / new_high_60=60日新高
+                    "strongType": "multi_limit" if is_multi_limit else "new_high_60",
+                    "limitTimes": limit_times_map.get(tc, 0),
+                    "hybk": industry_map.get(tc, ''),
+                    "ltsz": mv_map.get(tc, {}).get('circ_mv', 0),
+                    "zsz": mv_map.get(tc, {}).get('total_mv', 0),
+                })
+
+            # 与东财池默认排序一致：按涨跌幅降序
+            stocks.sort(key=lambda x: x['zdf'], reverse=True)
+            result = {
+                "stocks": stocks,
+                "date": d,
+                "count": len(stocks),
+                "multi_limit_count": len([s for s in stocks if s['strongType'] == 'multi_limit']),
+                "new_high_count": len([s for s in stocks if s['strongType'] == 'new_high_60']),
+                "min_limit_times": min_times,
+                "limit_source": limit_source,
+            }
+            write_cache(cache_key, result)
+            print(f"[get_strong_pool] {d} 共 {result['count']} 只"
+                  f"（多次涨停 {result['multi_limit_count']} / 60日新高 {result['new_high_count']}）")
+            return result
         except Exception as e:
             return {"error": str(e)}
 

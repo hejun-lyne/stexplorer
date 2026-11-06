@@ -665,12 +665,17 @@ def delete_cache(cache_key: str) -> None:
 
 
 def purge_expired() -> int:
-    """清理超过 90 天未更新的通用缓存条目，返回删除行数。"""
+    """清理超过 90 天未更新的通用缓存条目，返回删除行数。
+
+    注意：``local:`` 前缀是「用户本地数据/历史备份」（如强势股池每日成分、看板缓存），
+    属于长期保存的数据，不参与过期清理。
+    """
     cutoff = time.time() - 90 * 86400
-    row = _query_one(_META_DB, "SELECT COUNT(*) AS c FROM api_cache WHERE updated_at < ?", (cutoff,))
+    where = "updated_at < ? AND cache_key NOT LIKE 'local:%'"
+    row = _query_one(_META_DB, f"SELECT COUNT(*) AS c FROM api_cache WHERE {where}", (cutoff,))
     count = int(row["c"]) if row else 0
     if count:
-        _execute(_META_DB, "DELETE FROM api_cache WHERE updated_at < ?", (cutoff,))
+        _execute(_META_DB, f"DELETE FROM api_cache WHERE {where}", (cutoff,))
     return count
 
 

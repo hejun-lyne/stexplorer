@@ -190,6 +190,11 @@ export function getStorageRelPath(table: string, id?: number | string | object):
     return `${STRATEGIES_DIR}/${groupId}_${strategyId}`;
   }
 
+  // 强势股池 / QS 备份：一份一天，key 与旧文件路径一一对应（backups/qslist/YYYYMMDD）
+  if (table === 'qslist_backup') {
+    return `${QSLIST_BACKUP_DIR}/${id}`;
+  }
+
   const filename = FILE_MAP[table];
   if (!filename) {
     if (table.indexOf('kimi_analysis') >= 0) {

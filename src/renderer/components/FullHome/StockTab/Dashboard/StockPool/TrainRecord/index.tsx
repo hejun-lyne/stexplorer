@@ -1,10 +1,12 @@
-import React, { useMemo } from 'react';
-import { Empty, Popconfirm, Table, Tag, Tooltip } from 'antd';
+import React, { useMemo, useState } from 'react';
+import { Empty, Popconfirm, Table, Tabs, Tooltip } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import { useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { removeTrainTradeRecordAction, setTrainTradeRecordsAction } from '@/actions/train';
+import { BuildStockAttribution } from '@/helpers/trainAccount';
 import * as Utils from '@/utils';
+import TrainRecordDetail from './Detail';
 import styles from './index.scss';
 
 export interface TrainRecordProps {
@@ -33,7 +35,10 @@ function formatSignedPct(value: number) {
  *
  * 训练模式下每次「清仓」某只股票，都会把本轮（上一次清仓 → 本次清仓）的完整交易归档一条，
  * 数据落在 `state.train.tradeRecords`（store/train_trade_records.json），所以换训练日、
- * 重启应用后仍然保留。展开行可以看到本轮的全部买入明细（交易全过程）。
+ * 重启应用后仍然保留。
+ *
+ * 展开行按「买入日 ~ 卖出日」逐日展示：收盘、涨跌幅、短线评分、RSI、均线，
+ * 以及当天的买卖理由 / 复盘记录（见 ./Detail）。
  */
 const TrainRecord: React.FC<TrainRecordProps> = React.memo(({ onOpenStock }) => {
   const dispatch = useDispatch();
@@ -60,6 +65,110 @@ const TrainRecord: React.FC<TrainRecordProps> = React.memo(({ onOpenStock }) => 
     return { total, win, lose, winRate, avgRatio };
   }, [list]);
 
+  const [tab, setTab] = useState<'detail' | 'attribution'>('detail');
+
+  // 归因分析：由训练记录汇总个股 / 持仓周期 / 月度三维度
+  const attribution = useMemo(() => BuildStockAttribution(list), [list]);
+
+  const stockAttrColumns = [
+    { title: '股票', dataIndex: 'name', render: (v: string, r: Train.StockAttribution) => v || r.secid || '--' },
+    { title: '笔数', dataIndex: 'roundTrips', width: 70, align: 'right' as const },
+    {
+      title: '胜/负',
+      width: 70,
+      align: 'right' as const,
+      render: (_: unknown, r: Train.StockAttribution) => `${r.wins}/${r.losses}`,
+    },
+    {
+      title: '胜率',
+      dataIndex: 'winRate',
+      width: 70,
+      align: 'right' as const,
+      render: (v: number) => `${(v * 100).toFixed(1)}%`,
+    },
+    {
+      title: '累计盈亏',
+      dataIndex: 'profit',
+      width: 110,
+      align: 'right' as const,
+      render: (v: number) => <span className={Utils.GetValueColor(v).textClass}>{formatSignedMoney(v)}</span>,
+    },
+    {
+      title: '盈亏占比',
+      dataIndex: 'contribution',
+      width: 90,
+      align: 'right' as const,
+      render: (v: number) => (
+        <span className={Utils.GetValueColor(v).textClass}>
+          {v >= 0 ? '+' : ''}
+          {(v * 100).toFixed(1)}%
+        </span>
+      ),
+    },
+  ];
+
+  const holdingAttrColumns = [
+    { title: '持仓周期', dataIndex: 'label', width: 110 },
+    { title: '笔数', dataIndex: 'count', width: 70, align: 'right' as const },
+    {
+      title: '胜/负',
+      width: 70,
+      align: 'right' as const,
+      render: (_: unknown, r: Train.HoldingAttribution) => `${r.wins}/${r.losses}`,
+    },
+    {
+      title: '胜率',
+      dataIndex: 'winRate',
+      width: 70,
+      align: 'right' as const,
+      render: (v: number) => `${(v * 100).toFixed(1)}%`,
+    },
+    {
+      title: '平均收益',
+      dataIndex: 'avgReturn',
+      width: 90,
+      align: 'right' as const,
+      render: (v: number) => (
+        <span className={Utils.GetValueColor(v).textClass}>
+          {v >= 0 ? '+' : ''}
+          {v.toFixed(2)}%
+        </span>
+      ),
+    },
+    {
+      title: '累计盈亏',
+      dataIndex: 'profit',
+      width: 110,
+      align: 'right' as const,
+      render: (v: number) => <span className={Utils.GetValueColor(v).textClass}>{formatSignedMoney(v)}</span>,
+    },
+  ];
+
+  const monthAttrColumns = [
+    { title: '月份', dataIndex: 'month', width: 90 },
+    { title: '笔数', dataIndex: 'count', width: 70, align: 'right' as const },
+    {
+      title: '胜/负',
+      width: 70,
+      align: 'right' as const,
+      render: (_: unknown, r: Train.MonthAttribution) => `${r.wins}/${r.losses}`,
+    },
+    {
+      title: '胜率',
+      dataIndex: 'winRate',
+      width: 70,
+      align: 'right' as const,
+      render: (v: number) => `${(v * 100).toFixed(1)}%`,
+    },
+    {
+      title: '累计盈亏',
+      dataIndex: 'profit',
+      width: 110,
+      align: 'right' as const,
+      render: (v: number) => <span className={Utils.GetValueColor(v).textClass}>{formatSignedMoney(v)}</span>,
+    },
+  ];
+
   const columns = useMemo(
     () => [
       {
@@ -73,8 +182,28 @@ const TrainRecord: React.FC<TrainRecordProps> = React.memo(({ onOpenStock }) => 
           </a>
         ),
       },
-      { title: '买入日', dataIndex: 'buyDate', width: 100 },
-      { title: '卖出日', dataIndex: 'sellDate', width: 100 },
+      {
+        title: '买入',
+        dataIndex: 'buyDate',
+        width: 108,
+        render: (v: string, r: Train.StockTradeRecord) => (
+          <span className={styles.tradeCell}>
+            <span>{v}</span>
+            {r.buyTime ? <span className={styles.tradeTime}>{r.buyTime}</span> : null}
+          </span>
+        ),
+      },
+      {
+        title: '卖出',
+        dataIndex: 'sellDate',
+        width: 108,
+        render: (v: string, r: Train.StockTradeRecord) => (
+          <span className={styles.tradeCell}>
+            <span>{v}</span>
+            {r.sellTime ? <span className={styles.tradeTime}>{r.sellTime}</span> : null}
+          </span>
+        ),
+      },
       {
         title: '成本价',
         dataIndex: 'buyPrice',
@@ -179,42 +308,85 @@ const TrainRecord: React.FC<TrainRecordProps> = React.memo(({ onOpenStock }) => 
           </Popconfirm>
         )}
       </div>
-      <div className={styles.tableWrap}>
-        <Table
-          className={styles.table}
-          size="small"
-          rowKey="id"
-          dataSource={list}
-          columns={columns}
-          scroll={{ x: 1080, y: 'max(240px, calc(100vh - 340px))' }}
-          pagination={{ pageSize: 20, showSizeChanger: false, size: 'small' }}
-          locale={{
-            emptyText: (
+      <Tabs className={styles.tabs} activeKey={tab} onChange={setTab}>
+        <Tabs.TabPane tab="交易明细" key="detail">
+          <div className={styles.tableWrap}>
+            <Table
+              className={styles.table}
+              size="small"
+              rowKey="id"
+              dataSource={list}
+              columns={columns}
+              scroll={{ x: 1220, y: 'max(240px, calc(100vh - 390px))' }}
+              pagination={{ pageSize: 20, showSizeChanger: false, size: 'small' }}
+              locale={{
+                emptyText: (
+                  <Empty
+                    description="暂无训练记录：训练模式下清仓某只股票后，会自动把本轮交易归档到这里"
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  />
+                ),
+              }}
+              expandable={{
+                // 逐日明细：买入日 ~ 卖出日的涨跌幅 / 短线评分 / RSI / 均线 / 复盘记录
+                expandedRowRender: (r: Train.StockTradeRecord) => <TrainRecordDetail record={r} />,
+              }}
+            />
+          </div>
+        </Tabs.TabPane>
+        <Tabs.TabPane tab="归因分析" key="attribution">
+          <div className={styles.attrWrap}>
+            {attribution.byStock.length > 0 && (
+              <>
+                <div className={styles.attrTitle}>个股盈亏</div>
+                <Table
+                  className={styles.table}
+                  size="small"
+                  rowKey={(r: Train.StockAttribution) => r.secid || 'all'}
+                  dataSource={attribution.byStock}
+                  columns={stockAttrColumns}
+                  pagination={false}
+                  scroll={{ x: 620 }}
+                />
+              </>
+            )}
+            {attribution.byHolding.some((b) => b.count > 0) && (
+              <>
+                <div className={styles.attrTitle}>持仓周期</div>
+                <Table
+                  className={styles.table}
+                  size="small"
+                  rowKey="label"
+                  dataSource={attribution.byHolding.filter((b) => b.count > 0)}
+                  columns={holdingAttrColumns}
+                  pagination={false}
+                  scroll={{ x: 520 }}
+                />
+              </>
+            )}
+            {attribution.byMonth.length > 0 && (
+              <>
+                <div className={styles.attrTitle}>月度盈亏</div>
+                <Table
+                  className={styles.table}
+                  size="small"
+                  rowKey="month"
+                  dataSource={attribution.byMonth}
+                  columns={monthAttrColumns}
+                  pagination={false}
+                  scroll={{ x: 410 }}
+                />
+              </>
+            )}
+            {!attribution.byStock.length && !attribution.byMonth.length && (
               <Empty
-                description="暂无训练记录：训练模式下清仓某只股票后，会自动把本轮交易归档到这里"
+                description="暂无归因数据：清仓归档后这里会汇总个股 / 持仓周期 / 月度的盈亏归因"
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
               />
-            ),
-          }}
-          expandable={{
-            expandedRowRender: (r: Train.StockTradeRecord) => (
-              <div className={styles.buys}>
-                <span className={styles.buysLabel}>本轮买入（{r.buys?.length || 0} 笔）：</span>
-                {(r.buys || []).map((b, i) => (
-                  <Tag key={`${b.date}_${i}`}>
-                    {b.date} @ {Number(b.price).toFixed(2)}
-                    {b.amount ? ` · ${formatMoney(b.amount)}` : ''}
-                  </Tag>
-                ))}
-                {!(r.buys || []).length && <span className={styles.buysLabel}>无买入明细</span>}
-                <span className={styles.buysLabel}>
-                  持仓成本 {formatMoney(r.buyPrice * r.count)} ｜ 卖出佣金 {formatMoney(r.commission)}
-                </span>
-              </div>
-            ),
-          }}
-        />
-      </div>
+            )}
+          </div>
+        </Tabs.TabPane>
+      </Tabs>
     </div>
   );
 });

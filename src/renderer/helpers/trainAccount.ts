@@ -15,6 +15,7 @@
  */
 
 import { Stock } from '@/types/stock';
+import { BuildAttribution } from './trainSettle';
 
 /** 训练模式买卖点标记（与 actions/train 的 TRAIN_TYPE 一致；这里独立定义，避免 helpers 反向依赖 actions） */
 const TRAIN_MARK = 'train';
@@ -191,6 +192,8 @@ export function BuildStockTradeRecord(params: {
   secid: string;
   name?: string;
   sellDate: string;
+  /** 清仓时间 HH:mm[:ss]（训练模式为训练时钟） */
+  sellTime?: string;
   sellPrice: number;
   shares: number;
   costAmount: number;
@@ -225,12 +228,25 @@ export function BuildStockTradeRecord(params: {
 
   const buys = (params.buyPoints || [])
     .filter((p) => IsTrainMark(p?.t) && Number(p?.y) > 0)
-    .map((p) => ({ date: dayOf(p), price: Number(p.y), amount: p.a != null ? Number(p.a) : undefined }))
+    .map((p) => ({
+      date: dayOf(p),
+      time: p?.time ? String(p.time) : undefined,
+      price: Number(p.y),
+      amount: p.a != null ? Number(p.a) : undefined,
+      reason: p?.reason ? String(p.reason) : undefined,
+    }))
     .filter((b) => !!b.date && b.date <= sellDate)
     .filter((b) => (!trainStartDate || b.date >= trainStartDate) && (!prevSellDate || b.date > prevSellDate))
-    .sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0));
+    .sort((a, b) => {
+      if (a.date !== b.date) {
+        return a.date > b.date ? 1 : -1;
+      }
+      return String(a.time || '').localeCompare(String(b.time || ''));
+    });
 
   const buyDate = buys[0]?.date || sellDate;
+  const buyTime = buys[0]?.time || '';
+  const sellTime = params.sellTime ? String(params.sellTime) : '';
   const rawRate = Number(params.commissionRate);
   const rate = Number.isFinite(rawRate) && rawRate >= 0 ? rawRate : TRAIN_DEFAULT_COMMISSION;
   const amount = sellPrice * shares;
@@ -253,8 +269,10 @@ export function BuildStockTradeRecord(params: {
     secid,
     name: params.name || secid,
     buyDate,
+    buyTime,
     buyPrice: costAmount / shares,
     sellDate,
+    sellTime,
     sellPrice,
     count: shares,
     amount,
@@ -267,6 +285,32 @@ export function BuildStockTradeRecord(params: {
     trainStartDate,
     createdAt: new Date().toISOString().replace('T', ' ').substring(0, 19),
   };
+}
+
+/**
+ * 由训练记录（逐股清仓归档）汇总出归因分析（个股 / 持仓周期 / 月度）
+ *
+ * 每条 StockTradeRecord 本身就是一轮「建仓 → 清仓」的往返，字段与归因所需的
+ * RoundTrip 一一对应，这里逐条映射后复用 BuildAttribution 的聚合逻辑。
+ *
+ * 与整体结算的归因不同：这里是「按单股票逐次清仓」的记录集合，
+ * 个股维度 = 各标的累计盈亏贡献，持仓周期 / 月度维度 = 所有记录的分布。
+ */
+export function BuildStockAttribution(records: Train.StockTradeRecord[]): Train.Attribution {
+  return BuildAttribution(
+    (records || []).map((r) => ({
+      secid: r.secid,
+      name: r.name,
+      buyDate: r.buyDate,
+      sellDate: r.sellDate,
+      buyPrice: Number(r.buyPrice) || 0,
+      sellPrice: Number(r.sellPrice) || 0,
+      count: Number(r.count) || 0,
+      profit: Number(r.profit) || 0,
+      profitRatio: Number(r.profitRatio) || 0,
+      holdDays: Number(r.holdDays) || 0,
+    }))
+  );
 }
 
 /**

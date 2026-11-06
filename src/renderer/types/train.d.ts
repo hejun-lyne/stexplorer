@@ -127,10 +127,14 @@ declare namespace Train {
     name: string;
     /** 本轮首次买入日 */
     buyDate: string;
+    /** 本轮首次买入时间（HH:mm[:ss]，旧记录为空） */
+    buyTime?: string;
     /** 平均持仓成本价（含买入佣金） */
     buyPrice: number;
     /** 清仓日 */
     sellDate: string;
+    /** 清仓时间（HH:mm[:ss]，旧记录为空） */
+    sellTime?: string;
     /** 清仓成交价 */
     sellPrice: number;
     /** 清仓股数 */
@@ -148,7 +152,7 @@ declare namespace Train {
     /** 清仓理由 */
     reason: string;
     /** 本轮全部买入明细（交易全过程） */
-    buys: { date: string; price: number; amount?: number }[];
+    buys: { date: string; time?: string; price: number; amount?: number; reason?: string }[];
     /** 训练开始日（用于按训练会话筛选） */
     trainStartDate: string;
     createdAt: string;

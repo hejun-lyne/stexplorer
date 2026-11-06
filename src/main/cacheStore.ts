@@ -121,6 +121,17 @@ export async function readCacheMany(keys: string[]): Promise<Record<string, any>
   return result;
 }
 
+/** 按前缀列出数据库缓存 key（用于「列出某类缓存日期」这类场景） */
+export async function listCacheKeys(prefix: string): Promise<string[]> {
+  try {
+    const keys = await callCacheApi('keys', { prefix });
+    return Array.isArray(keys) ? keys.map((k: any) => String(k)) : [];
+  } catch (error) {
+    warnFallback(error);
+    return [];
+  }
+}
+
 /** 缓存规模信息（诊断用） */
 export async function cacheInfo(): Promise<any> {
   try {
@@ -146,6 +157,8 @@ const DB_BACKED_TABLES = new Set<string>([
   'stock_trend',
   'kline_cache',
   'board_stocks_cache',
+  // 强势股池 / QSList 每日备份：原来一天一个 JSON 文件，现统一落 api_cache
+  'qslist_backup',
 ]);
 
 /** 判断某张表是否已改为数据库存储 */

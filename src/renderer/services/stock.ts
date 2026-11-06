@@ -2024,7 +2024,8 @@ export async function GetBankuaiStocksFromDataSource(
   source: Enums.FundApiType,
   secid: string,
   count = 20,
-  date?: string
+  date?: string,
+  options?: { latestMembers?: boolean }
 ) {
   // const cacheTable = 'board_stocks_cache';
   // const cacheKey = `${secid}_${count}`;
@@ -2048,7 +2049,8 @@ export async function GetBankuaiStocksFromDataSource(
     result = await AkshareAPI.GetBankuaiStocksFromAkshare(secid, count);
   } else if (source === Enums.FundApiType.Tushare) {
     // 传了日期就按该交易日还原成分股与当日行情（训练模式）；不传则由 python 侧按数据截止日取
-    result = await TushareAPI.GetBankuaiStocksFromTushare(secid, date);
+    // latestMembers：行业板块历史成分缺失时改用最新交易日快照（行情仍按 date 取）
+    result = await TushareAPI.GetBankuaiStocksFromTushare(secid, date, options);
   } else {
     result = await GetBankuaiStocksFromEastmoney(secid, count);
   }

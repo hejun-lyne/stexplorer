@@ -22,11 +22,51 @@
   color: var(--secondary-text-color);
 }
 
-.tableWrap {
+.tabs {
   flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  :global {
+    .ant-tabs-nav {
+      margin: 0;
+      padding: 0 14px;
+    }
+    .ant-tabs-content-holder {
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    .ant-tabs-content,
+    .ant-tabs-tabpane {
+      height: 100%;
+    }
+  }
+}
+
+.tableWrap {
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   padding: 6px 10px 10px;
+}
+
+.attrWrap {
+  padding: 10px 14px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.attrTitle {
+  margin: 8px 0 4px;
+  font-size: 13px;
+  font-weight: bold;
+  color: var(--primary-text-color);
+
+  &:first-child {
+    margin-top: 0;
+  }
 }
 
 .table {
@@ -40,19 +80,245 @@
   cursor: pointer;
 
   &:hover {
-    color: var(--danger-color, #f5222d);
+    color: var(--increase-color);
   }
-}
-
-.buys {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--main-text-color);
 }
 
 .buysLabel {
   color: var(--secondary-text-color);
+}
+
+.tradeCell {
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.tradeTime {
+  font-size: 11px;
+  color: var(--secondary-text-color);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 逐日明细（展开行，亮色/暗色统一走主题变量） ===== */
+.detailWrap {
+  margin: 2px 0 6px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--main-border-color);
+  border-radius: 6px;
+  background: var(--top-background-color);
+}
+
+.detailHead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.detailTitle {
+  padding-left: 8px;
+  border-left: 3px solid var(--primary-color);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.15;
+  color: var(--main-text-color);
+}
+
+.detailRange {
+  font-size: 12px;
+  color: var(--secondary-text-color);
+
+  b {
+    font-weight: 600;
+    color: var(--main-text-color);
+  }
+}
+
+.arrow {
+  margin: 0 6px;
+  color: var(--reverse-text-color);
+}
+
+.detailCount {
+  margin-left: auto;
+  padding: 0 8px;
+  border-radius: 9px;
+  background: var(--nav-background-color);
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--secondary-text-color);
+}
+
+.detailBuys {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.detailCost {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--secondary-text-color);
+}
+
+.dot {
+  margin: 0 6px;
+  opacity: 0.5;
+}
+
+.detailEmptyText {
+  color: var(--secondary-text-color);
+}
+
+/* 小标签：主题色描边 + 主题涨跌底色，暗色下不会出现亮粉/亮绿块 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.chipBuy {
+  color: var(--increase-color);
+  border-color: var(--increase-color);
+  background: var(--increase-bg-color);
+}
+
+.chipSell {
+  color: var(--reduce-color);
+  border-color: var(--reduce-color);
+  background: var(--reduce-bg-color);
+}
+
+.chipReview {
+  color: var(--primary-color);
+  border-color: var(--primary-color);
+  background: transparent;
+}
+
+.detailTable {
+  :global {
+    .ant-table {
+      background: transparent;
+    }
+    .ant-table-container,
+    .ant-table-body {
+      background: transparent;
+    }
+    .ant-table-thead > tr > th {
+      padding: 6px 8px !important;
+      border-bottom: 1px solid var(--main-border-color) !important;
+      background: var(--nav-background-color) !important;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--secondary-text-color);
+      white-space: nowrap;
+    }
+    .ant-table-tbody > tr > td {
+      padding: 5px 8px !important;
+      border-bottom: 1px solid var(--border-color) !important;
+      background: transparent !important;
+      font-size: 12px;
+      color: var(--main-text-color);
+      font-variant-numeric: tabular-nums;
+    }
+    .ant-table-tbody > tr:hover > td {
+      background: var(--hover-color) !important;
+    }
+    /* 固定列必须是不透明背景，否则横向滚动时下面的数据会透出来 */
+    .ant-table-thead > tr > th.ant-table-cell-fix-left {
+      background: var(--nav-background-color) !important;
+    }
+    .ant-table-tbody > tr > td.ant-table-cell-fix-left {
+      background: var(--top-background-color) !important;
+    }
+    .ant-table-tbody > tr:hover > td.ant-table-cell-fix-left {
+      background: var(--hover-color) !important;
+    }
+    .ant-table-placeholder {
+      background: transparent;
+    }
+    .ant-empty-description {
+      color: var(--secondary-text-color);
+    }
+  }
+}
+
+/* 买卖日用左侧主题色竖条标记：不依赖背景色，暗色下也清晰 */
+.buyRow :global(td:first-child) {
+  box-shadow: inset 3px 0 0 var(--increase-color);
+}
+
+.sellRow :global(td:first-child) {
+  box-shadow: inset 3px 0 0 var(--reduce-color);
+}
+
+.dayCell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.dayText {
+  color: var(--main-text-color);
+  font-variant-numeric: tabular-nums;
+}
+
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.note {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.noteText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--secondary-text-color);
+}
+
+.detailLoading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+  padding: 18px 12px;
+  border: 1px dashed var(--main-border-color);
+  border-radius: 6px;
+  background: var(--top-background-color);
+  font-size: 12px;
+  color: var(--secondary-text-color);
+}
+
+.detailEmpty {
+  margin: 2px 0 6px;
+  padding: 16px 12px;
+  border: 1px dashed var(--main-border-color);
+  border-radius: 6px;
+  background: var(--top-background-color);
+
+  :global(.ant-empty-description) {
+    color: var(--secondary-text-color);
+  }
 }

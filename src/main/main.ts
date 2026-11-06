@@ -1208,9 +1208,10 @@ async function init() {
     }
   });
 
-  ipcMain.handle('qslist-backup-read', (event, { date }) => {
+  // QSList / 强势股池每日备份：统一存 stock_db（api_cache），不再一天一个 JSON 文件
+  ipcMain.handle('qslist-backup-read', async (event, { date }) => {
     try {
-      const result = localFileStorage.readQSListBackup(date);
+      const result = await cacheStore.readLocalData('qslist_backup', date);
       return { success: true, data: result };
     } catch (error: any) {
       console.error('[Main] Error reading QSList backup:', error);
@@ -1218,9 +1219,9 @@ async function init() {
     }
   });
 
-  ipcMain.handle('qslist-backup-write', (event, { date, data }) => {
+  ipcMain.handle('qslist-backup-write', async (event, { date, data }) => {
     try {
-      const result = localFileStorage.writeQSListBackup(date, data);
+      const result = await cacheStore.writeLocalData('qslist_backup', data, new Date().toISOString(), date);
       return { success: result };
     } catch (error: any) {
       console.error('[Main] Error writing QSList backup:', error);
@@ -1249,10 +1250,15 @@ async function init() {
     }
   });
 
-  ipcMain.handle('qslist-backup-list', () => {
+  ipcMain.handle('qslist-backup-list', async () => {
     try {
-      const result = localFileStorage.listQSListBackups();
-      return { success: true, dates: result };
+      // 数据库里的 key 形如 local:backups/qslist/20261106；同时兼容尚未迁移的旧 JSON 文件
+      const prefix = 'local:backups/qslist/';
+      const keys = await cacheStore.listCacheKeys(prefix);
+      const dbDates = keys.map((k) => k.substring(prefix.length)).filter((d) => /^\d{8}$/.test(d));
+      const fileDates = localFileStorage.listQSListBackups();
+      const dates = Array.from(new Set([...dbDates, ...fileDates])).sort();
+      return { success: true, dates };
     } catch (error: any) {
       console.error('[Main] Error listing QSList backups:', error);
       return { success: false, error: error.message };

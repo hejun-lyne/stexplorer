@@ -232,6 +232,43 @@ export function calculateIndicators(ks: Stock.KLineItem[], techType: TechIndicat
   };
 }
 
+/**
+ * 平均真实波幅 ATR（Wilder 平滑）
+ *
+ * TR = max(高-低, |高-昨收|, |低-昨收|)；首值取前 period 个 TR 的简单平均，之后按 Wilder 递推。
+ * 返回与 ks 等长的数组，前 period-1 个为 NaN（数据不足）。
+ */
+export function calculateATR(ks: Stock.KLineItem[], period = 14): number[] {
+  const n = ks.length;
+  const out: number[] = new Array(n).fill(NaN);
+  if (!n || period < 1) {
+    return out;
+  }
+  const tr = ks.map((k, i) => {
+    const high = Number(k.zg);
+    const low = Number(k.zd);
+    const prevClose = i > 0 ? Number(ks[i - 1].sp) : Number(k.kp);
+    return Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+  });
+  let prev = NaN;
+  for (let i = 0; i < n; i += 1) {
+    if (i < period - 1) {
+      continue;
+    }
+    if (i === period - 1) {
+      let sum = 0;
+      for (let j = 0; j < period; j += 1) {
+        sum += tr[j];
+      }
+      prev = sum / period;
+    } else {
+      prev = (prev * (period - 1) + tr[i]) / period;
+    }
+    out[i] = prev;
+  }
+  return out;
+}
+
 export function calculateJAX(ks: Stock.KLineItem[], count: number) {
   const ma = calculateMA(
     ks.map((_) => _.sp),

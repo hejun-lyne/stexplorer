@@ -215,7 +215,7 @@ const QuantTest: React.FC<QuantTestProps> = React.memo(({ active, openStock }) =
       title: '市值',
       dataIndex: 'lt',
       sorter: (a, b) => a.lt - b.lt,
-      render: (d) => d > 100000000 ? `${(d / 100000000).toFixed(2)}亿` : `${(d / 10000000).toFixed(2)}千万`
+      render: (d) => d > 100000000 ? `${(d / 100000000).toFixed(2)}亿` : `${(d / 10000000).toFixed(2)}千万`,
       width: 60,
       defaultSortOrder: 'ascend',
     },
@@ -436,7 +436,7 @@ const QuantTest: React.FC<QuantTestProps> = React.memo(({ active, openStock }) =
       title: '市值',
       dataIndex: 'lt',
       sorter: (a, b) => a.zsz - b.zsz,
-      render: (d) => d > 100000000 ? `${(d / 100000000).toFixed(2)}亿` : `${(d / 10000000).toFixed(2)}千万`
+      render: (d) => d > 100000000 ? `${(d / 100000000).toFixed(2)}亿` : `${(d / 10000000).toFixed(2)}千万`,
       width: 90,
       defaultSortOrder: 'ascend',
     },

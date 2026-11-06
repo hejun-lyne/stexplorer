@@ -811,7 +811,8 @@ export function fillPendingBuyTradesAction(secid: string, klines: Stock.KLineIte
         // 训练模式：补成交直接写入训练买卖点（与详情页共用同一个训练账户），并从待成交队列移除
         filled.forEach(({ order, date, open, amount }) => {
           console.log(`[待成交] ${secid} 涨停挂单回填成交：${date} 开盘价 ${open}，金额 ${amount}`);
-          dispatch(addStockTradePointAction(secid, date, open, true, TRAIN_MARK, amount, order.reason));
+          // 开盘集合竞价成交，时间固定记为 09:30
+          dispatch(addStockTradePointAction(secid, date, open, true, TRAIN_MARK, amount, order.reason, '09:30'));
         });
         const filledIds = new Set(filled.map((f) => f.order.id));
         dispatch(setStockTradingAction(tradings.filter((t) => !filledIds.has(t.id))));
@@ -1080,7 +1081,17 @@ export function deleteStockMarkLineAction(value: number, sid: string): ThunkActi
  * 用成交价补掉占位本身，否则占位会残留、补单逻辑还会反复触发。
  * 卖出仍保持「一天一个点」：卖出一律清仓，同一天再卖没有意义。
  */
-export function addStockTradePointAction(secid: string, date: string, value: number, isBuy: boolean, type:string, amount?: number, reason?: string): ThunkAction {
+export function addStockTradePointAction(
+  secid: string,
+  date: string,
+  value: number,
+  isBuy: boolean,
+  type: string,
+  amount?: number,
+  reason?: string,
+  /** 成交时间 HH:mm[:ss]（训练模式为训练时钟；不传则旧记录无时间） */
+  time?: string
+): ThunkAction {
   return (dispatch, getState) => {
     try {
       const {
@@ -1095,6 +1106,7 @@ export function addStockTradePointAction(secid: string, date: string, value: num
             t: type,
             a: amount && amount > 0 ? amount : undefined,
             reason: reason || undefined,
+            time: time || undefined,
           };
           // 复制一份再改：不要直接 push 到 state 里的数组
           const points = ss.buyPoints ? [...ss.buyPoints] : [];
@@ -1109,7 +1121,7 @@ export function addStockTradePointAction(secid: string, date: string, value: num
           }
           ss.buyPoints = points;
         } else {
-          const point = { x: date, y: value, t: type, reason: reason || undefined };
+          const point = { x: date, y: value, t: type, reason: reason || undefined, time: time || undefined };
           if (ss.sellPoints) {
             ss.sellPoints = ss.sellPoints.filter((p) => p.x != date);
             ss.sellPoints.push(point);

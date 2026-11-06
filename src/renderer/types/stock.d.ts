@@ -46,8 +46,8 @@ declare namespace Stock {
       qstype: DayTrendType; // 趋势类型
     };
     markLines?: number[]; // 标记线
-    buyPoints?: { x: string; y: number; t: string; a?: number; reason?: string }[]; // 买入标记（a：模拟训练的买入金额，缺省为全部可用资金）
-    sellPoints?: { x: string; y: number; t: string; reason?: string }[]; // 卖出标记
+    buyPoints?: { x: string; y: number; t: string; a?: number; reason?: string; time?: string }[]; // 买入标记（a：模拟训练的买入金额，缺省为全部可用资金；time：成交时间 HH:mm[:ss]）
+    sellPoints?: { x: string; y: number; t: string; reason?: string; time?: string }[]; // 卖出标记（time：成交时间 HH:mm[:ss]）
     similars?: SimilarItem[];
     periodMarks: PeriodMarkItem[];
   }

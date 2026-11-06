@@ -215,7 +215,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       return;
     }
     pending.forEach((p) => {
-      dispatch(addStockTradePointAction(secid, currentDay, close, true, TRAIN_TYPE, p.a));
+      // 历史遗留的 y=0 委托按当日收盘价补成交，时间统一记为收盘 15:00
+      dispatch(addStockTradePointAction(secid, currentDay, close, true, TRAIN_TYPE, p.a, undefined, '15:00'));
     });
   }, [ontrain, currentDay, dayClosesMap, config, secid]);
 
@@ -420,6 +421,8 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         message.warning(suspended ? `${currentDay} 该股停牌，无法交易` : '当前训练日期的收盘价还在加载中');
         return;
       }
+      // 成交时间点：详情页按当日收盘价成交，时间取当前训练时钟（未设置时钟时为 09:30）
+      const tradeClock = TrainFilter.NormalizeTrainClock(trainTime);
       if (isBuy) {
         // 买入：按当前训练日收盘价成交（T+1，成交当日不可卖出）
         // 买入校验：金额为空按全部可用资金处理，否则必须 > 0、不超过可用资金、且至少能买一手
@@ -437,7 +440,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
           message.warning(`买入金额不足一手（按当前收盘价估算至少需要 ${perLotCost.toFixed(2)} 元，含佣金）`);
           return;
         }
-        dispatch(addStockTradePointAction(secid, currentDay, todayClose, true, TRAIN_TYPE, input));
+        dispatch(addStockTradePointAction(secid, currentDay, todayClose, true, TRAIN_TYPE, input, undefined, tradeClock));
         message.success(`已买入：${currentDay} 按收盘价 ${todayClose.toFixed(2)} 成交（T+1，当日不可卖出）`);
         return;
       }
@@ -451,6 +454,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         secid,
         name: stockName,
         sellDate: currentDay,
+        sellTime: tradeClock,
         sellPrice: todayClose,
         shares: account.shares,
         costAmount: account.costPrice * account.shares,
@@ -460,7 +464,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
         sellPoints: config?.sellPoints,
         tradingDays: days,
       });
-      dispatch(addStockTradePointAction(secid, currentDay, todayClose, false, TRAIN_TYPE));
+      dispatch(addStockTradePointAction(secid, currentDay, todayClose, false, TRAIN_TYPE, undefined, undefined, tradeClock));
       if (tradeRecord) {
         dispatch(addTrainTradeRecordAction(tradeRecord));
       }
@@ -479,6 +483,7 @@ const TrainBar: React.FC<TrainBarProps> = React.memo(({ secid, addStock, removeS
       commission,
       boughtToday,
       ensureStockConfig,
+      trainTime,
     ]
   );
 

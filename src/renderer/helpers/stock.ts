@@ -4132,7 +4132,10 @@ export async function LoadSingleDateQS(
   autoBackup = true
 ): Promise<LoadSingleDateQSResult> {
   // 阶段1：优先读本地缓存
-  if (autoBackup) {
+  // 历史日期：强势股池一旦重建就不会再变，始终优先命中缓存（「重建历史」后查询不必再取数）；
+  // 今天：只有勾选「自动备份」才读缓存，避免盘中一直看到早上那份。
+  const isToday = date === dayjs().format('YYYYMMDD');
+  if (autoBackup || !isToday) {
     try {
       const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(date);
       if (backup?.data?.stocks) {
@@ -4243,6 +4246,170 @@ export async function LoadQSStocks(options: QSLoaderOptions): Promise<QSLoaderRe
     firstAppearMap: currentFirstAppearMap,
     loadedDates,
     fromCache,
+  };
+}
+
+/** 强势股池里的单只股票（东财池 / Tushare 重建统一口径） */
+export interface StrongPoolStock {
+  code: string;
+  name: string;
+  secid: string;
+  /** 最新价（东财池返回的是 ×1000 的整数，已在这里还原） */
+  zx: number;
+  zdf: number;
+  /** 换手率（%）：东财池有，Tushare 重建没有（回 0） */
+  hsl: number;
+  /** 流通市值（亿元）：与 DetailItem.lt 同口径 */
+  ltsz: number;
+  hybk: string;
+  /** 入选原因：new_high_60=60日新高 / multi_limit=近期多次涨停 */
+  reason: 'new_high_60' | 'multi_limit' | '';
+}
+
+/**
+ * 加载指定交易日的强势股池（60日新高 或 近期多次涨停）
+ *
+ * 取数顺序（与「强势股票」页面同源，保持口径一致）：
+ * 1. 本地备份（QSList 备份，已统一落到 stock_db 数据库）；
+ * 2. 东财 getTopicQSPool：语义最准（含「近期多次涨停」判定），但只保留最近约 10 个交易日；
+ * 3. 更早的日期回退 Tushare 精确重建（`get_strong_pool`：60日新高 ∪ up_stat≥N 次涨停），
+ *    结果写回同一份备份，下次直接命中（也可在「强势股票」页提前批量重建）。
+ */
+/**
+ * 是否是「旧口径」的 Tushare 备份（当日涨停 ∪ 60日新高）
+ *
+ * 旧实现只写 strongType，没有 limitTimes；新口径（get_strong_pool）每只都带 limitTimes（0 也算）。
+ * 命中旧备份时不要直接用，交给精确重算覆盖（东财池的备份没有 strongType，不受影响）。
+ */
+function IsStaleStrongPoolBackup(stocks: any[]): boolean {
+  for (const s of stocks) {
+    if (s?.strongType !== undefined && s?.limitTimes === undefined) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function LoadStrongPoolStocks(date?: string): Promise<StrongPoolStock[]> {
+  const explicit = String(date || '').replace(/-/g, '');
+  // 未指定日期（非训练模式）：从今天往前找最近一个有池子的交易日（周末/节假日自动回退）
+  const candidates = explicit
+    ? [explicit]
+    : [0, 1, 2, 3, 4, 5, 6].map((i) => dayjs().subtract(i, 'day').format('YYYYMMDD'));
+
+  // 1) 本地备份 / 东财池（东财池只保留最近约 10 个交易日，更早的日期返回空）
+  for (const d of candidates) {
+    try {
+      const { stocks } = await LoadSingleDateQS(d, undefined, -1, true);
+      if (stocks.length && !IsStaleStrongPoolBackup(stocks)) {
+        return stocks.map(NormalizeStrongPoolStock);
+      }
+    } catch (e) {
+      console.error(`[强势股池] 读取备份/东财池失败: ${d}`, e);
+    }
+  }
+
+  // 2) 更早的日期：Tushare 精确重建（60日新高 ∪ up_stat≥N），结果写回同一份备份
+  const d = candidates[0];
+  try {
+    const res = await TushareAPI.GetStrongPoolFromTushare(d);
+    const arr = (res?.stocks || []) as any[];
+    // 训练模式下日期会被截断：返回日期和请求日期不一致时不落库
+    const sameDay = String(res?.date || '') === d;
+    if (arr.length && sameDay) {
+      await Helpers.Storage.StorageHelper.WriteQSListBackup(d, res);
+      console.log(`[强势股池] Tushare 重建 ${d}：${arr.length} 只`);
+    } else if (res?.error) {
+      console.warn(`[强势股池] Tushare 重建 ${d} 失败：${res.error}`);
+    }
+    return arr.map(NormalizeStrongPoolStock);
+  } catch (e) {
+    console.error(`[强势股池] Tushare 重建失败: ${d}`, e);
+  }
+  return [];
+}
+
+/** 强势股池原始行（东财 QSItem / Tushare 重建行）→ 统一结构：价格还原、市值统一成亿元 */
+function NormalizeStrongPoolStock(s: any): StrongPoolStock {
+  const secid = String(s?.secid || `${s?.market ?? 0}.${s?.code || ''}`);
+  const rawZx = Number(s?.zx) || 0;
+  const bit = Number(s?.reason) || 0;
+  const rawLtsz = Number(s?.ltsz) || 0;
+  const strongType = String(s?.strongType || '');
+  return {
+    code: String(s?.code || secid.split('.').pop() || ''),
+    name: String(s?.name || ''),
+    secid,
+    // 东财池的价格是 ×1000 的整数（28.20 → 2820）；Tushare 重建给的是原始价（茅台 1500 不能除以 1000）
+    zx: strongType ? rawZx : rawZx / 1000,
+    zdf: Number(s?.zdf) || 0,
+    hsl: Number(s?.hsl) || 0,
+    // 东财池：流通市值单位是「元」；Tushare 重建（带 strongType）是「亿元」
+    ltsz: strongType ? rawLtsz : rawLtsz / 100000000,
+    hybk: String(s?.hybk || ''),
+    reason:
+      strongType === 'multi_limit' || strongType === 'limit_up'
+        ? 'multi_limit'
+        : strongType === 'new_high_60'
+          ? 'new_high_60'
+          : bit & 2
+            ? 'multi_limit'
+            : bit & 1
+              ? 'new_high_60'
+              : '',
+  };
+}
+
+/** 单日重建结果（供「强势股票」页批量重建历史时逐日展示进度） */
+export interface StrongPoolRebuildResult {
+  date: string;
+  count: number;
+  multiLimitCount: number;
+  newHighCount: number;
+  /** limit_list_d=精确口径；limit_list=积分不足退化成「当日涨停」 */
+  limitSource?: string;
+  error?: string;
+}
+
+/**
+ * 精确重建指定交易日的强势股池并落库（不做网络/缓存兜底，失败直接返回 error）
+ *
+ * 供「强势股票」页的「重建历史」使用：先把历史日期批量算好写进缓存，
+ * 之后 QSList / STList「强势股」/ 回测都直接命中，不用实时计算。
+ *
+ * @param date 交易日 YYYYMMDD
+ * @param options.minLimitTimes 近 T 日至少几次涨停算「多次涨停」（默认 2）
+ * @param options.force 忽略缓存强制重算
+ */
+export async function RebuildStrongPoolDay(
+  date: string,
+  options?: { minLimitTimes?: number; force?: boolean }
+): Promise<StrongPoolRebuildResult> {
+  const d = String(date || '').replace(/-/g, '');
+  const res = await TushareAPI.GetStrongPoolFromTushare(d, options);
+  if (res?.error) {
+    return { date: d, count: 0, multiLimitCount: 0, newHighCount: 0, error: String(res.error) };
+  }
+  // 训练模式下请求日期会被截断到训练日：日期对不上就不要写库，避免把训练日数据写成未来某天
+  if (String(res?.date || '') !== d) {
+    return {
+      date: d,
+      count: 0,
+      multiLimitCount: 0,
+      newHighCount: 0,
+      error: `返回日期 ${res?.date} 与请求日期 ${d} 不一致（训练模式下不能重建晚于训练日的日期）`,
+    };
+  }
+  const stocks = (res?.stocks || []) as any[];
+  if (stocks.length) {
+    await Helpers.Storage.StorageHelper.WriteQSListBackup(d, res);
+  }
+  return {
+    date: d,
+    count: stocks.length,
+    multiLimitCount: Number(res?.multi_limit_count) || 0,
+    newHighCount: Number(res?.new_high_count) || 0,
+    limitSource: res?.limit_source ? String(res.limit_source) : undefined,
   };
 }
 

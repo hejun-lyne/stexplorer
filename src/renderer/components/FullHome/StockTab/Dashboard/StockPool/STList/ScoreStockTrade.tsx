@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Input, InputNumber, Select, message } from 'antd';
+import { Button, Input, InputNumber, Select, Tooltip, message } from 'antd';
 import moment from 'moment';
 import { useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
@@ -15,7 +15,10 @@ import {
 import { BuildStockTradeRecord, ComputeTrainAccount, IsTrainMark } from '@/helpers/trainAccount';
 import { addTrainTradeRecordAction } from '@/actions/train';
 import { GetLimitUpPct, GetStockDetail, GetStockType } from '@/helpers/stock';
+import { calculateATR } from '@/helpers/tech';
 import { GetStorage, SetStorage } from '@/utils';
+import * as TrainFilter from '@/utils/trainFilter';
+import { ReadReviewRecords, ReviewRecord, WriteReviewRecords } from '@/helpers/trainReview';
 
 /** 一手股数 */
 const MIN_LOT = 100;
@@ -25,6 +28,10 @@ const DEFAULT_CAPITAL = 100000;
 const DEFAULT_COMMISSION = 0.0003;
 /** 训练买卖点标记（与详情页 TrainBar 的 TRAIN_TYPE 一致） */
 const TRAIN_MARK = 'train';
+/** ATR 趋势卖出信号（钱德退出）：ATR 周期 / 追踪高点回看天数 / 止损倍数 */
+const ATR_PERIOD = 14;
+const ATR_LOOKBACK = 20;
+const ATR_MULTIPLIER = 3;
 /** 仓位：全仓 / 可用资金（或持仓）的 1/2、1/3、1/4，与详情页买卖区一致 */
 export const POSITION_RATIOS = [
   { value: 1, label: '全仓' },
@@ -34,8 +41,6 @@ export const POSITION_RATIOS = [
 ];
 /** 「买入/卖出理由」草稿的本地存储键（按标的分开存） */
 const REASON_DRAFT_KEY = 'scoreStockTradeReasonDrafts';
-/** 「复盘」记录的本地存储键（按标的分开存） */
-const REVIEW_RECORD_KEY = 'scoreStockTradeReviewRecords';
 
 function formatMoney(v: number) {
   const n = Math.abs(Math.round(Number(v) || 0));
@@ -68,43 +73,6 @@ function writeReasonDraft(secid: string, text: string) {
     SetStorage(REASON_DRAFT_KEY, drafts);
   } catch (e) {
     console.log('保存买卖理由草稿出错', e);
-  }
-}
-
-/** 复盘记录（只保存理由，不产生买卖点 / 交易记录） */
-interface ReviewRecord {
-  id: string;
-  /** 复盘所属日期（训练模式为训练日） */
-  date: string;
-  /** 保存时间 HH:mm:ss */
-  time: string;
-  reason: string;
-  /** 保存时的价格，0 表示暂无行情 */
-  price: number;
-}
-
-/** 读取该标的的复盘记录 */
-function readReviewRecords(secid: string): ReviewRecord[] {
-  try {
-    const all = GetStorage<Record<string, ReviewRecord[]>>(REVIEW_RECORD_KEY, {}) || {};
-    const list = all[secid];
-    return Array.isArray(list) ? list : [];
-  } catch (e) {
-    return [];
-  }
-}
-
-/** 覆盖保存该标的的复盘记录 */
-function writeReviewRecords(secid: string, records: ReviewRecord[]) {
-  if (!secid) {
-    return;
-  }
-  try {
-    const all = GetStorage<Record<string, ReviewRecord[]>>(REVIEW_RECORD_KEY, {}) || {};
-    all[secid] = records;
-    SetStorage(REVIEW_RECORD_KEY, all);
-  } catch (e) {
-    console.log('保存复盘记录出错', e);
   }
 }
 
@@ -185,9 +153,8 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
   compact = false,
 }) => {
   const dispatch = useDispatch();
-  const { ontrain, trainDate, trainStartDate, initialCapital, commissionRate, kLineApiSourceSetting } = useSelector(
-    (state: StoreState) => state.setting.systemSetting
-  );
+  const { ontrain, trainDate, trainTime, trainStartDate, initialCapital, commissionRate, kLineApiSourceSetting } =
+    useSelector((state: StoreState) => state.setting.systemSetting);
   const { stockConfigsMapping, nowHolds, tradings } = useSelector((state: StoreState) => state.stock);
   /** 训练窗口交易日：用于把「持有天数」换算成交易日数 */
   const trainDays = useSelector((state: StoreState) => state.train.days);
@@ -212,7 +179,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
   const [reviewRecords, setReviewRecords] = useState<ReviewRecord[]>([]);
 
   useEffect(() => {
-    setReviewRecords(readReviewRecords(secid));
+    setReviewRecords(ReadReviewRecords(secid));
   }, [secid]);
 
   // ===== 买入/卖出理由草稿（按标的保存，切换股票 / 推进训练日后自动回填）=====
@@ -318,6 +285,39 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
   const cashBase = ontrain ? trainCash : availableCash;
   /** 可卖股数：训练模式为训练账户持仓，非训练模式为手工持仓 */
   const sellSharesBase = ontrain ? Number(trainPosition?.shares) || 0 : holdShares;
+  /**
+   * ATR 趋势卖出信号（钱德退出）：仅对持仓股票计算
+   *
+   * 止损线 = 近 ATR_LOOKBACK 日最高价（不含当日） − ATR_MULTIPLIER × ATR(ATR_PERIOD)；
+   * 当日收盘价跌破止损线即触发「趋势走坏」卖出提示。数据不足（日K太少 / ATR 未成形）时返回 null。
+   */
+  const atrSellSignal = useMemo(() => {
+    if (sellSharesBase <= 0 || !(klines && klines.length)) {
+      return null;
+    }
+    const bars = [...klines].sort((a, b) => (String(a.date) < String(b.date) ? -1 : 1));
+    const last = bars[bars.length - 1];
+    const close = Number(last.sp);
+    if (!Number.isFinite(close) || close <= 0) {
+      return null;
+    }
+    const atr = calculateATR(bars, ATR_PERIOD);
+    const atrNow = atr[atr.length - 1];
+    if (!Number.isFinite(atrNow) || atrNow <= 0) {
+      return null;
+    }
+    const lookback = Math.min(ATR_LOOKBACK, bars.length - 1);
+    if (lookback <= 0) {
+      return null;
+    }
+    const prior = bars.slice(bars.length - 1 - lookback, bars.length - 1);
+    const high = Math.max(...prior.map((k) => Number(k.zg)));
+    if (!Number.isFinite(high) || high <= 0) {
+      return null;
+    }
+    const stopLine = high - ATR_MULTIPLIER * atrNow;
+    return { close, atr: atrNow, high, stopLine, triggered: close < stopLine };
+  }, [klines, sellSharesBase]);
   /** 仓位基数：买入按可用资金，卖出按持仓市值 */
   const positionBase = tradeType === 'buy' ? cashBase : sellSharesBase * tradePrice;
 
@@ -476,6 +476,8 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
     const tradeDate = ontrain
       ? String(trainBar?.date).substring(0, 10)
       : String(lastBar?.date).substring(0, 10) || moment().format('YYYY-MM-DD');
+    // 成交时间点：训练模式取当前训练时钟（与分时价对应），非训练模式取真实时间
+    const tradeClock = ontrain ? TrainFilter.NormalizeTrainClock(trainTime) : moment(new Date()).format('HH:mm');
     const pendingBuy = submitType === 'buy' && limitUpToday;
 
     if (ontrain) {
@@ -502,7 +504,16 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           message.success(`当日涨停买不进，已挂下一交易日开盘价买入：${name}（${formatMoney(submitAmount)}）`);
         } else {
           dispatch(
-            addStockTradePointAction(secid, tradeDate, tradePrice, true, TRAIN_MARK, submitAmount, reasonText)
+            addStockTradePointAction(
+              secid,
+              tradeDate,
+              tradePrice,
+              true,
+              TRAIN_MARK,
+              submitAmount,
+              reasonText,
+              tradeClock
+            )
           );
           message.success(
             `已买入 ${name}：${tradePrice.toFixed(2)} × ${submitShares} 股（${formatMoney(submitOrderAmount)}）`
@@ -514,6 +525,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           secid,
           name: name || code,
           sellDate: tradeDate,
+          sellTime: tradeClock,
           sellPrice: tradePrice,
           shares: Number(trainPosition?.shares) || 0,
           costAmount: Number(trainPosition?.costAmount) || 0,
@@ -524,7 +536,9 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           sellPoints: config?.sellPoints,
           tradingDays: trainDays,
         });
-        dispatch(addStockTradePointAction(secid, tradeDate, tradePrice, false, TRAIN_MARK, undefined, reasonText));
+        dispatch(
+          addStockTradePointAction(secid, tradeDate, tradePrice, false, TRAIN_MARK, undefined, reasonText, tradeClock)
+        );
         if (tradeRecord) {
           dispatch(addTrainTradeRecordAction(tradeRecord));
         }
@@ -588,8 +602,8 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
       reason: reasonText,
       price: tradePrice > 0 ? tradePrice : 0,
     };
-    const next = [...readReviewRecords(secid), record];
-    writeReviewRecords(secid, next);
+    const next = [...ReadReviewRecords(secid), record];
+    WriteReviewRecords(secid, next);
     setReviewRecords(next);
     // 内容已经写进复盘记录，草稿清空
     writeReasonDraft(secid, '');
@@ -630,6 +644,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
         rows.push({
           key: `buy_${p.x}_${i}`,
           date: String(p.x).substring(0, 10),
+          time: p.time ? String(p.time) : '',
           type: 'buy',
           price,
           detail: budget > 0 ? formatMoney(budget) : '按可用资金',
@@ -644,6 +659,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
         rows.push({
           key: `sell_${p.x}_${i}`,
           date: String(p.x).substring(0, 10),
+          time: p.time ? String(p.time) : '',
           type: 'sell',
           price,
           detail: '一次清仓',
@@ -785,6 +801,32 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
     }
   };
 
+  /** ATR 趋势卖出信号提示（仅持仓时渲染，悬停看说明） */
+  const atrSellNode = atrSellSignal ? (
+    <Tooltip
+      title={
+        <div style={{ fontSize: 11, lineHeight: 1.6 }}>
+          趋势卖出信号（ATR 钱德退出，仅对持仓股计算）：止损线 = 近{ATR_LOOKBACK}日最高价{' '}
+          {atrSellSignal.high.toFixed(2)} − {ATR_MULTIPLIER}×ATR({ATR_PERIOD}，{atrSellSignal.atr.toFixed(2)}) ={' '}
+          {atrSellSignal.stopLine.toFixed(2)}；最新收盘 {atrSellSignal.close.toFixed(2)}。
+          {atrSellSignal.triggered
+            ? '收盘价已跌破止损线，波动通道下轨失守，中期趋势可能走坏，建议考虑卖出。'
+            : '收盘价未跌破止损线，趋势仍属正常，暂不提示卖出。'}
+        </div>
+      }
+    >
+      <span
+        style={{
+          color: atrSellSignal.triggered ? '#ff4d4f' : 'var(--secondary-text-color)',
+          fontWeight: atrSellSignal.triggered ? 'bold' : 'normal',
+          cursor: 'help',
+        }}
+      >
+        {atrSellSignal.triggered ? '⚠ 趋势卖出信号' : '趋势正常'}
+      </span>
+    </Tooltip>
+  ) : null;
+
   if (compact) {
     return (
       <div
@@ -805,6 +847,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
             持仓 <b>{sellSharesBase}</b> 股
           </span>
         ) : null}
+        {atrSellNode}
         <Button
           size="small"
           type="primary"
@@ -846,6 +889,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           {ontrain ? '训练模式 · 与详情页共用训练账户' : '手工交易记录'}
         </span>
       </div>
+      {atrSellNode ? <div style={{ marginBottom: 6 }}>{atrSellNode}</div> : null}
       <Input.TextArea
         rows={5}
         value={reason}
@@ -995,7 +1039,10 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
                   borderBottom: '1px dashed var(--border-color)',
                 }}
               >
-                <span style={{ width: 72, flex: '0 0 auto', color: 'var(--secondary-text-color)' }}>{r.date}</span>
+                <span style={{ width: 108, flex: '0 0 auto', color: 'var(--secondary-text-color)' }}>
+                  {r.date}
+                  {r.time ? ` ${String(r.time).substring(0, 5)}` : ''}
+                </span>
                 <span
                   style={{
                     flex: '0 0 auto',
@@ -1011,9 +1058,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
                   {r.type === 'review' ? '复盘' : r.pending ? '买入(待成交)' : r.type === 'buy' ? '买入' : '卖出'}
                 </span>
                 <span style={{ flex: '0 0 auto' }}>{r.price > 0 ? r.price.toFixed(2) : '—'}</span>
-                <span style={{ flex: '0 0 auto', color: 'var(--secondary-text-color)' }}>
-                  {r.type === 'review' && r.time ? `${r.detail} · ${String(r.time).substring(0, 5)}` : r.detail}
-                </span>
+                <span style={{ flex: '0 0 auto', color: 'var(--secondary-text-color)' }}>{r.detail}</span>
                 <span
                   style={{
                     flex: '1 1 auto',
