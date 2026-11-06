@@ -810,6 +810,67 @@ def _cached_dc_member(pro, ts_code: str, trade_date: str) -> Any:
     return df
 
 
+def _get_limit_list_d_df(trade_date: str) -> Any:
+    """当日涨跌停 / 炸板明细（limit_list_d，5000 积分），U/D/Z 全量，按日长期缓存
+
+    返回列：ts_code, name, limit(U/D/Z), limit_times, up_stat, first_time,
+    last_time, open_times, fd_amount, pct_chg, amount, float_mv。
+    历史交易日的明细不会变化，命中缓存后不再请求上游。
+    """
+    d = str(trade_date or "").replace("-", "")
+    cache_key = f"limit_list_d_all_{d}"
+    cached = read_cache(cache_key, max_age_hours=8760 * 10)
+    if isinstance(cached, list):
+        return pd.DataFrame(cached)
+    try:
+        pro = get_pro()
+        df = safe_api_call(pro.limit_list_d, trade_date=d)
+        if isinstance(df, dict) and df.get("error"):
+            print(f"[wind_vane] limit_list_d {d} 失败: {df.get('error')}")
+            return pd.DataFrame()
+        if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+            return pd.DataFrame()
+        write_cache(cache_key, df_to_records(df))
+        return df
+    except Exception as e:
+        print(f"[wind_vane] limit_list_d {d} 异常: {e}")
+        return pd.DataFrame()
+
+
+def _pct_ranks(values: List[float]) -> List[float]:
+    """横截面分位（0~1，等价 pandas rank(pct=True)，并列取平均位次）"""
+    n = len(values)
+    if n <= 1:
+        return [1.0] * n
+    order = sorted(range(n), key=lambda i: values[i])
+    out = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1
+        for k in range(i, j + 1):
+            out[order[k]] = avg / n
+        i = j + 1
+    return out
+
+
+def _hhmmss_to_minutes(text: Any) -> int:
+    """首封时间 HHMMSS / HH:MM:SS / 92500 → 距 09:30 的分钟数（越早越小）；无效返回 240（最晚）"""
+    s = str(text or "").replace(":", "").strip()
+    if not s.isdigit():
+        return 240
+    s = s.zfill(6)
+    if len(s) != 6:
+        return 240
+    try:
+        h, m = int(s[0:2]), int(s[2:4])
+    except Exception:
+        return 240
+    return max(0, min(240, h * 60 + m - (9 * 60 + 30)))
+
+
 # 申万成分股「按日期还原」的内存缓存：(index_code, date) -> records
 _SW_MEMBER_CACHE: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
 _SW_MEMBER_CACHE_MAX = 512
@@ -7630,6 +7691,144 @@ class TushareAPI:
             write_cache(cache_key, result)
             print(f"[get_strong_pool] {d} 共 {result['count']} 只"
                   f"（多次涨停 {result['multi_limit_count']} / 60日新高 {result['new_high_count']}）")
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def get_wind_vane(date: Optional[str] = None, min_limit_times: int = 2) -> Dict[str, Any]:
+        """从当日强势股池里挑一只「市场情绪风向标」（重建历史时逐日预计算）
+
+        只用 T 日收盘可得的数据（无前视）：
+        - 情绪闸门：涨停家数 / 炸板率 / 最高连板，冰点或退潮直接输出「无风向标」；
+        - 候选：当日强势股池（60日新高 ∪ 近 T 日 ≥N 次涨停）；
+        - 五维打分（横截面分位后加权）：带动性 30% / 身位 25% / 抗分歧 20% / 共识 15% / 延续 10%。
+
+        :param date: 交易日 YYYYMMDD / YYYY-MM-DD
+        :param min_limit_times: 强势股池「多次涨停」阈值（与 get_strong_pool 一致）
+        """
+        try:
+            d = str(_standardize_date(date) if date else _now("%Y-%m-%d")).replace("-", "")[:8]
+            min_times = max(1, int(min_limit_times or 2))
+            ldf = _get_limit_list_d_df(d)
+            gate = {"zt": 0, "dt": 0, "zb": 0, "zbl": 0.0, "height": 0, "min_limit_times": min_times}
+            if ldf.empty:
+                return {"date": d, "level": "无风向标", "gate": gate, "reason": "limit_list_d 无数据"}
+
+            if "limit" not in ldf.columns:
+                return {"date": d, "level": "无风向标", "gate": gate, "reason": "limit_list_d 缺少涨跌停类型"}
+            limits = ldf["limit"].astype(str).str.upper()
+            zt = int((limits == "U").sum())
+            dt_count = int((limits == "D").sum())
+            zb = int((limits == "Z").sum())
+            zbl = round(zb / max(zt + zb, 1), 4)
+            ups = ldf[limits == "U"]
+            heights = [
+                _to_int(v)
+                for v in (ups["limit_times"].tolist() if "limit_times" in ups.columns else [])
+                if pd.notna(v)
+            ]
+            height = int(max(heights) if heights else 0)
+            gate.update({"zt": zt, "dt": dt_count, "zb": zb, "zbl": zbl, "height": height})
+
+            pool = TushareAPI.get_strong_pool(d, min_times) or {}
+            stocks = pool.get("stocks") or []
+            if pool.get("error") or not stocks:
+                return {"date": d, "level": "无风向标", "gate": gate, "reason": pool.get("error") or "当日无强势股"}
+
+            # 情绪闸门：冰点 / 退潮期宁可不给锚
+            if zt < 20 or height <= 2 or zbl > 0.5:
+                level = "无风向标"
+            elif zt < 50 or height <= 4:
+                level = "低可信度"
+            else:
+                level = "正常"
+
+            ld_map: Dict[str, Any] = {}
+            for _, r in ldf.iterrows():
+                ld_map[str(r.get("ts_code", "")).split(".")[0]] = r
+
+            rows: List[Dict[str, Any]] = []
+            for s in stocks:
+                code = str(s.get("code") or "")
+                lr = ld_map.get(code)
+                ltsz = _to_float(s.get("ltsz"))  # 亿元
+                fd_amount = _to_float(lr.get("fd_amount")) if lr is not None else 0.0  # 元
+                up_stat = str(lr.get("up_stat") or "") if lr is not None else ""
+                rows.append({
+                    "secid": str(s.get("secid") or ""),
+                    "code": code,
+                    "name": str(s.get("name") or ""),
+                    "hybk": str(s.get("hybk") or ""),
+                    "zdf": _to_float(s.get("zdf")),
+                    "amount": _to_float(s.get("cje")),
+                    "limit_times": _to_int(lr.get("limit_times")) if lr is not None else _to_int(s.get("limitTimes")),
+                    "n_up": _to_int(up_stat.split("/")[0]) if "/" in up_stat else 0,
+                    "first_time": _hhmmss_to_minutes(lr.get("first_time")) if lr is not None else _hhmmss_to_minutes(""),
+                    "open_times": _to_int(lr.get("open_times")) if lr is not None else 0,
+                    # 封单额 / 流通市值：封板质量（越大越强，元 / 元）
+                    "fd_ratio": (fd_amount / (ltsz * 1e8)) if (fd_amount > 0 and ltsz > 0) else 0.0,
+                })
+
+            # 带动性代理：相对同板块（池内）平均涨幅的超额收益
+            by_bk: Dict[str, List[float]] = {}
+            for r in rows:
+                by_bk.setdefault(r["hybk"], []).append(r["zdf"])
+            for r in rows:
+                arr = by_bk.get(r["hybk"]) or []
+                avg = sum(arr) / len(arr) if arr else r["zdf"]
+                r["rel"] = r["zdf"] - avg
+
+            lead = _pct_ranks([r["rel"] for r in rows])
+            position = [
+                0.6 * a + 0.4 * b
+                for a, b in zip(
+                    _pct_ranks([r["limit_times"] for r in rows]),
+                    _pct_ranks([-r["first_time"] for r in rows]),
+                )
+            ]
+            resist = [
+                0.75 * a + 0.25 * b
+                for a, b in zip(
+                    _pct_ranks([r["fd_ratio"] for r in rows]),
+                    _pct_ranks([-r["open_times"] for r in rows]),
+                )
+            ]
+            consensus = _pct_ranks([r["amount"] for r in rows])
+            streak = _pct_ranks([r["n_up"] for r in rows])
+            for i, r in enumerate(rows):
+                r["score"] = round(
+                    0.30 * lead[i] + 0.25 * position[i] + 0.20 * resist[i] + 0.15 * consensus[i] + 0.10 * streak[i],
+                    4,
+                )
+            rows.sort(key=lambda x: x["score"], reverse=True)
+
+            result: Dict[str, Any] = {
+                "date": d,
+                "level": level,
+                "gate": gate,
+                "candidates": [
+                    {
+                        "secid": r["secid"],
+                        "code": r["code"],
+                        "name": r["name"],
+                        "score": r["score"],
+                        "limit_times": r["limit_times"],
+                        "zdf": round(r["zdf"], 2),
+                    }
+                    for r in rows[:5]
+                ],
+            }
+            if level == "无风向标":
+                result["reason"] = "情绪冰点/退潮"
+            else:
+                top = rows[0]
+                result.update({
+                    "secid": top["secid"],
+                    "code": top["code"],
+                    "name": top["name"],
+                    "score": top["score"],
+                })
             return result
         except Exception as e:
             return {"error": str(e)}

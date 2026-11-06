@@ -1,10 +1,11 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Row, Col, DatePicker, Select, Button, InputNumber, Checkbox, Modal, message } from 'antd';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { Row, Col, DatePicker, Select, Button, InputNumber, Checkbox, Modal, Tag, Tooltip, message } from 'antd';
 import styles from '../index.scss';
 import * as Utils from '@/utils';
 import * as Helpers from '@/helpers';
 import * as Services from '@/services';
 import { Stock } from '@/types/stock';
+import type { WindVaneResult } from '@/helpers/stock';
 import moment from 'moment';
 import classNames from 'classnames';
 import { SlidersOutlined, UnorderedListOutlined } from '@ant-design/icons';
@@ -26,6 +27,8 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [loading, setLoading] = useState(false);
   const [noMore, setNoMore] = useState(false);
   const [firstAppearMap, setFirstAppearMap] = useState<Record<string, string>>({});
+  /** 各交易日的「情绪风向标」（重建强势股池时预计算并写进备份），用于列表标记与置顶 */
+  const [windVaneMap, setWindVaneMap] = useState<Record<string, WindVaneResult>>({});
   const [techFilterLoading, setTechFilterLoading] = useState(false);
   const [maResults, setMaResults] = useState<
     Record<string, { ma: boolean; macd: boolean; rsi: boolean; maScore?: number; macdScore?: number; rsiScore?: number }>
@@ -63,6 +66,27 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     return count;
   }, []);
 
+  /** secid → 该股在所选区间内最近一次成为「情绪风向标」的日期与结果 */
+  const vaneBySecid = useMemo(() => {
+    const map: Record<string, { date: string; vane: WindVaneResult }> = {};
+    Object.keys(windVaneMap)
+      .sort()
+      .forEach((date) => {
+        const v = windVaneMap[date];
+        if (v?.secid) {
+          // 日期升序遍历，后写入的即最近一次
+          map[String(v.secid)] = { date, vane: v };
+        }
+      });
+    return map;
+  }, [windVaneMap]);
+
+  /** 区间内最近一天的风向标（页头提示用） */
+  const latestVane = useMemo(() => {
+    const keys = Object.keys(windVaneMap).sort();
+    return keys.length ? windVaneMap[keys[keys.length - 1]] : null;
+  }, [windVaneMap]);
+
   // 核心查询：使用抽离的接口加载数据
   const startQuery = useCallback(async () => {
     if (!dates.length) return;
@@ -77,6 +101,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     currentIndexRef.current = 0;
     setMaResults({});
     setTechPending({});
+    setWindVaneMap({});
     setFilterMA(false);
     setFilterMACD(false);
     setFilterRSI(false);
@@ -100,7 +125,17 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           if (code.startsWith('8') || code.startsWith('9')) return false;
           return true;
         });//.slice(0, 20); // 取前20只，避免数据过多导致后续处理缓慢
-      setStocks(filteredStocks || []);
+      const vaneMap = result.windVaneMap || {};
+      setWindVaneMap(vaneMap);
+      const list = (filteredStocks || []) as Stock.QSItem[];
+      // 情绪风向标置顶：命中的股票排到最前面，组内保持原有顺序
+      const vaneSecids = new Set(
+        Object.keys(vaneMap)
+          .map((dt) => String(vaneMap[dt]?.secid || ''))
+          .filter(Boolean)
+      );
+      list.sort((a, b) => (vaneSecids.has(a.secid) ? 0 : 1) - (vaneSecids.has(b.secid) ? 0 : 1));
+      setStocks(list);
       setHybks(result.hybks);
       setFirstAppearMap(result.firstAppearMap);
       setNoMore(true);
@@ -269,7 +304,10 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           }
           setRebuildDone(i + 1);
           setRebuildLast(
-            `${day}：${res.count} 只（多次涨停 ${res.multiLimitCount} / 60日新高 ${res.newHighCount}）`
+            `${day}：${res.count} 只（多次涨停 ${res.multiLimitCount} / 60日新高 ${res.newHighCount}）` +
+              (res.windVane?.secid
+                ? ` · 风向标 ${res.windVane.name}（${res.windVane.level}）`
+                : ' · 无风向标')
           );
         }
       } finally {
@@ -285,7 +323,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           `重建完成，但有 ${fallbackDays} 天取不到 limit_list_d（已退化为「当日涨停」口径），请检查 Tushare 积分是否 ≥5000`
         );
       } else {
-        message.success(`已重建 ${start} ~ ${end} 的强势股池，已写入数据库缓存`);
+        message.success(`已重建 ${start} ~ ${end} 的强势股池（含每日情绪风向标），点「查询」查看标记`);
       }
     },
     [minLimitTimes, buildRebuildDates]
@@ -462,6 +500,20 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
         {rebuildLast && (
           <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}>{rebuildLast}</span>
         )}
+        {latestVane && (
+          <span
+            style={{ marginLeft: 8, fontSize: 12, color: 'var(--secondary-text-color)' }}
+            title={
+              `情绪闸门：涨停 ${latestVane.gate?.zt ?? '--'} 家 / 炸板 ${
+                latestVane.gate?.zb ?? '--'
+              } 家（${latestVane.gate ? (latestVane.gate.zbl * 100).toFixed(1) : '--'}%）/ 最高 ${
+                latestVane.gate?.height ?? '--'
+              } 板` + (latestVane.reason ? ` · ${latestVane.reason}` : '')
+            }
+          >
+            风向标 {latestVane.date}：{latestVane.secid ? `${latestVane.name}（${latestVane.level}）` : '无'}
+          </span>
+        )}
         <Button
           size="small"
           onClick={onCalcTechIndicators}
@@ -567,6 +619,19 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                     style={{ cursor: 'pointer' }}
                     onClick={() => onOpenStock(s.secid, s.name, firstAppearMap[s.secid])}
                   >
+                    {vaneBySecid[s.secid] && (
+                      <Tooltip
+                        title={`${vaneBySecid[s.secid].date} 情绪风向标 · ${vaneBySecid[s.secid].vane.level}${
+                          typeof vaneBySecid[s.secid].vane.score === 'number'
+                            ? ` · 得分 ${vaneBySecid[s.secid].vane.score.toFixed(3)}`
+                            : ''
+                        }`}
+                      >
+                        <Tag color="gold" style={{ marginRight: 4, transform: 'scale(0.85)' }}>
+                          风向标
+                        </Tag>
+                      </Tooltip>
+                    )}
                     {s.name}
                   </Col>
                   <Col span={2}>{s.hybk}</Col>

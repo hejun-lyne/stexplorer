@@ -2004,6 +2004,64 @@ export async function GetStrongPoolFromTushare(
   }
 }
 
+/** 情绪风向标候选（得分前 N，便于界面展示/复盘） */
+export interface WindVaneCandidate {
+  secid: string;
+  code: string;
+  name: string;
+  score: number;
+  limit_times?: number;
+  zdf?: number;
+}
+
+/** 单日「市场情绪风向标」结果（由 python get_wind_vane 计算，只用 T 日收盘数据） */
+export interface WindVaneResult {
+  date: string;
+  /** 正常 / 低可信度 / 无风向标 */
+  level: string;
+  secid?: string;
+  code?: string;
+  name?: string;
+  score?: number;
+  /** 情绪闸门原始读数：涨停/跌停/炸板家数、炸板率、最高连板 */
+  gate?: {
+    zt: number;
+    dt: number;
+    zb: number;
+    zbl: number;
+    height: number;
+    min_limit_times?: number;
+  };
+  candidates?: WindVaneCandidate[];
+  reason?: string;
+  error?: string;
+}
+
+/**
+ * 计算指定交易日的市场情绪风向标（重建强势股池时逐日调用）
+ *
+ * 口径：情绪闸门（涨停家数 / 炸板率 / 最高连板）→ 强势股池候选 →
+ * 五维横截面分位打分（带动性 30 / 身位 25 / 抗分歧 20 / 共识 15 / 延续 10）。
+ * 历史回填与训练模式无关，固定 ignoreTrain，落库后再按训练日读取。
+ */
+export async function GetWindVaneFromTushare(date: string, minLimitTimes = 2): Promise<WindVaneResult> {
+  const d = String(date || '').replace(/-/g, '');
+  try {
+    const result = await callTushare(
+      'get_wind_vane',
+      { date: d, min_limit_times: minLimitTimes },
+      { ignoreTrain: true }
+    );
+    if (!result || result.error) {
+      return { date: d, level: '无风向标', reason: String(result?.error || '计算失败') };
+    }
+    return { ...result, date: String(result.date || d) };
+  } catch (error) {
+    logError(error, 'GetWindVaneFromTushare', '计算情绪风向标失败');
+    return { date: d, level: '无风向标', reason: '计算失败' };
+  }
+}
+
 /**
  * 批量生成指定时间段的每日强势股票（回测预生成用）
  * 返回按日期分组的对象

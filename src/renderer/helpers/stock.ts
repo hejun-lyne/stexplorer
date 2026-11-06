@@ -4148,6 +4148,8 @@ export function CalcQSHybks(stockList: Stock.QSItem[]): Record<string, number> {
 export interface LoadSingleDateQSResult {
   stocks: Stock.QSItem[];
   fromCache: boolean;
+  /** 当日情绪风向标：只有用 Tushare 精确重建过的日期才有 */
+  windVane?: WindVaneResult;
 }
 
 /** 加载单日期 QS 数据（自动处理分页 + 缓存优先） */
@@ -4168,6 +4170,7 @@ export async function LoadSingleDateQS(
         return {
           stocks: backup.data.stocks as Stock.QSItem[],
           fromCache: true,
+          windVane: (backup.data.windVane || undefined) as WindVaneResult | undefined,
         };
       }
     } catch (error) {
@@ -4204,6 +4207,8 @@ export interface QSLoaderResult {
   firstAppearMap: Record<string, string>;
   loadedDates: string[];
   fromCache: Set<string>;
+  /** 交易日 → 当日情绪风向标（重建时写入备份，读取命中即带回） */
+  windVaneMap: Record<string, WindVaneResult>;
 }
 
 export interface QSLoaderOptions {
@@ -4225,10 +4230,11 @@ export async function LoadQSStocks(options: QSLoaderOptions): Promise<QSLoaderRe
   let currentFirstAppearMap: Record<string, string> = {};
   const fromCache = new Set<string>();
   const loadedDates: string[] = [];
+  const windVaneMap: Record<string, WindVaneResult> = {};
 
   for (const date of dates) {
     if (signal?.aborted) break;
-    const { stocks: dateStocks, fromCache: isFromCache } = await LoadSingleDateQS(
+    const { stocks: dateStocks, fromCache: isFromCache, windVane } = await LoadSingleDateQS(
       date,
       signal,
       loadAll ? -1 : 100,
@@ -4236,6 +4242,9 @@ export async function LoadQSStocks(options: QSLoaderOptions): Promise<QSLoaderRe
     );
     if (signal?.aborted) break;
 
+    if (windVane) {
+      windVaneMap[date] = windVane;
+    }
     stocksMap[date] = dateStocks;
     dateStocks.forEach((s) => {
       if (!currentFirstAppearMap[s.secid]) {
@@ -4272,6 +4281,7 @@ export async function LoadQSStocks(options: QSLoaderOptions): Promise<QSLoaderRe
     firstAppearMap: currentFirstAppearMap,
     loadedDates,
     fromCache,
+    windVaneMap,
   };
 }
 
@@ -4394,8 +4404,13 @@ export interface StrongPoolRebuildResult {
   newHighCount: number;
   /** limit_list_d=精确口径；limit_list=积分不足退化成「当日涨停」 */
   limitSource?: string;
+  /** 当日情绪风向标（重建时一并算好，随 QSList 备份落库） */
+  windVane?: WindVaneResult;
   error?: string;
 }
+
+/** 市场情绪风向标（类型直接复用 services 里的定义） */
+export type WindVaneResult = TushareAPI.WindVaneResult;
 
 /**
  * 精确重建指定交易日的强势股池并落库（不做网络/缓存兜底，失败直接返回 error）
@@ -4429,8 +4444,13 @@ export async function RebuildStrongPoolDay(
     };
   }
   const stocks = (res?.stocks || []) as any[];
+  // 重建时顺手算好当日「情绪风向标」：只用 T 日收盘可得数据，
+  // 与强势股池放在同一份备份里落库，之后 QSList 查询 / 训练回放直接命中
+  const windVane = stocks.length
+    ? await TushareAPI.GetWindVaneFromTushare(d, options?.minLimitTimes ?? 2)
+    : undefined;
   if (stocks.length) {
-    await Helpers.Storage.StorageHelper.WriteQSListBackup(d, res);
+    await Helpers.Storage.StorageHelper.WriteQSListBackup(d, { ...res, windVane });
   }
   return {
     date: d,
@@ -4438,6 +4458,7 @@ export async function RebuildStrongPoolDay(
     multiLimitCount: Number(res?.multi_limit_count) || 0,
     newHighCount: Number(res?.new_high_count) || 0,
     limitSource: res?.limit_source ? String(res.limit_source) : undefined,
+    windVane,
   };
 }
 
