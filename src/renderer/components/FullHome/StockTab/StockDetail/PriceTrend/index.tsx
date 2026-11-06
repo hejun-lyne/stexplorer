@@ -1143,7 +1143,11 @@ function setupTrendChart(darkMode: boolean, trends: Stock.TrendItem[], zs: numbe
   options.tooltip.formatter = tChartTipFormatter(zs);
   const dates = trends.map(({ datetime }) => datetime.length >= 10 ? datetime.split(' ')[1] : datetime);
   options.xAxis = getxAxis(dates);
-  const vals = trends.map((t) => t.current).concat(trends.map((t) => t.average));
+  // 停牌 / 训练日尚未推进时可能拿到空分时：不能对空数组取 trends[0]，用昨收撑开一个默认区间
+  const hasAverage = trends.some((t) => !!t.average);
+  const vals = trends.length
+    ? trends.map((t) => t.current).concat(hasAverage ? trends.map((t) => t.average) : [])
+    : [zs > 0 ? zs : 1];
   const yMin = Math.min(...vals) * 0.999;
   const yMax = Math.max(...vals) * 1.001;
   options.yAxis = getyAxis(darkMode, [yMin, yMax]);
@@ -1174,7 +1178,7 @@ function setupTrendChart(darkMode: boolean, trends: Stock.TrendItem[], zs: numbe
     getVolSeries(trends.map(({ vol, up }, i) => [i, vol, up])),
     // ...getMACDSeries(macds),
   ];
-  if (trends[0].average) {  
+  if (hasAverage) {
     options.series.push(getAvgSeries(trends));
   }
   return options;
@@ -1196,7 +1200,8 @@ function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[
     opts.series[0].markLine.data = getMarkLineData(darkMode, zs, undefined);
     return;
   }
-  const vals = trends.map((t) => t.current).concat(trends[0].average ? trends.map((t) => t.average) : []);
+  const hasAverage = trends.some((t) => !!t.average);
+  const vals = trends.map((t) => t.current).concat(hasAverage ? trends.map((t) => t.average) : []);
   const yMin = Math.min(...vals) * 0.999;
   const yMax = Math.max(...vals) * 1.001;
   opts.yAxis[0].min = yMin;
@@ -1204,8 +1209,15 @@ function updateTrendChart(opts: any, darkMode: boolean, trends: Stock.TrendItem[
   opts.series[0].lineStyle.color = Utils.GetValueColor(Number(trends[trends.length - 1]?.current) - zs).color;
   opts.series[0].data = trends.map(({ current }) => current); // 价格
   opts.series[1].data = trends.map(({ current, vol, last }, i) => [i, vol, current > last ? 1 : -1]); // 成交量
-  if (opts.series.length > 2) {
-    opts.series[2].data = trends.map(({ average }) => average); // 平均价格
+  if (hasAverage) {
+    // 首次拿到空分时时没建均价序列（见 setupTrendChart），这里补上后再填数据
+    if (opts.series.length > 2) {
+      opts.series[2].data = trends.map(({ average }) => average); // 平均价格
+    } else {
+      opts.series.push(getAvgSeries(trends));
+    }
+  } else if (opts.series.length > 2) {
+    opts.series[2].data = [];
   }
   // 更新 markLine：保留昨收和 GSpot，替换 stockMarkLines
   const currentPrice = Number(trends[trends.length - 1]?.current);
