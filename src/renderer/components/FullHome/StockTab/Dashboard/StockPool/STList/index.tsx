@@ -4534,6 +4534,43 @@ const STList: React.FC<STListProps> = ({
                         <SyncOutlined spin={boardStageLoading} /> 重算
                       </a>
                     </div>
+                    {/*
+                      规格用的是 stock_basic 的 110 个行业名，与东财「所属板块」名称只对上一部分，
+                      所以除了在能匹配上的板块名后打标，这里再单列当日「板块效应候选 / 启动」行业。
+                    */}
+                    {(() => {
+                      const stages = Object.values(boardStageMap)
+                        .filter((s) => s.start || s.s2_candidate)
+                        .sort((a, b) => Number(b.start) - Number(a.start) || b.quality - a.quality)
+                        .slice(0, 12);
+                      if (!stages.length) {
+                        return null;
+                      }
+                      return (
+                        <div
+                          style={{
+                            padding: '4px',
+                            marginBottom: 6,
+                            border: '1px solid var(--border-color)',
+                            borderRadius: 4,
+                            maxHeight: 96,
+                            overflowY: 'auto',
+                          }}
+                        >
+                          <div style={{ fontSize: 10, color: 'var(--hint-color)', marginBottom: 2 }}>
+                            当日板块效应候选（110 行业口径，启动优先）
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 8px', fontSize: 11 }}>
+                            {stages.map((s) => (
+                              <span key={s.industry} style={{ whiteSpace: 'nowrap' }}>
+                                {s.industry}
+                                <BoardStageMark stage={s} compact />
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     <div className={styles.shapeFilterActions}>
                       <Checkbox
                         checked={

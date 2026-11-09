@@ -2041,6 +2041,8 @@ export interface BoardStageItem {
   trade_date: string;
   /** 是否「启动」（复盘标签，不是买点） */
   start: boolean;
+  /** 是否进入第一层「板块效应」候选（观察分只在该池内部有区分度） */
+  s2_candidate: boolean;
   /** 延续性观察分 0~1 */
   quality: number;
   /** 当日 S2 候选的 60 分位阈值；无候选时为 null */
