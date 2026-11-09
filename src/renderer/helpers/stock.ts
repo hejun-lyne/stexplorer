@@ -4353,7 +4353,9 @@ export async function LoadStrongPoolStocks(date?: string): Promise<StrongPoolSto
     // 训练模式下日期会被截断：返回日期和请求日期不一致时不落库
     const sameDay = String(res?.date || '') === d;
     if (arr.length && sameDay) {
-      await Helpers.Storage.StorageHelper.WriteQSListBackup(d, res);
+      // 顺带算好当日情绪风向标（与「重建历史」同口径），列表才能标记
+      const windVane = await TushareAPI.GetWindVaneFromTushare(d);
+      await Helpers.Storage.StorageHelper.WriteQSListBackup(d, { ...res, windVane });
       console.log(`[强势股池] Tushare 重建 ${d}：${arr.length} 只`);
     } else if (res?.error) {
       console.warn(`[强势股池] Tushare 重建 ${d} 失败：${res.error}`);
@@ -4363,6 +4365,49 @@ export async function LoadStrongPoolStocks(date?: string): Promise<StrongPoolSto
     console.error(`[强势股池] Tushare 重建失败: ${d}`, e);
   }
   return [];
+}
+
+/** 读取指定交易日的情绪风向标（来自强势股池备份；没有重建过的日期返回 null） */
+export async function GetWindVaneOfDate(date: string): Promise<WindVaneResult | null> {
+  const d = String(date || '').replace(/-/g, '');
+  if (!d) {
+    return null;
+  }
+  try {
+    const backup = await Helpers.Storage.StorageHelper.ReadQSListBackup(d);
+    const vane = backup?.data?.windVane;
+    return vane && typeof vane === 'object' ? (vane as WindVaneResult) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+export interface StrongPoolWithVane {
+  stocks: StrongPoolStock[];
+  windVane: WindVaneResult | null;
+  /** 实际命中的交易日（未指定日期时会往更早的交易日回退） */
+  date: string;
+}
+
+/**
+ * 强势股池 + 当日情绪风向标（STList「强势股」虚拟板块用）
+ *
+ * date 为空时与 LoadStrongPoolStocks 一致：按「训练日 / 今天」往前回退，
+ * 风向标也按同样的回退顺序找，找不到（没重建过）就返回 null。
+ */
+export async function LoadStrongPoolStocksWithVane(date?: string): Promise<StrongPoolWithVane> {
+  const explicit = String(date || '').replace(/-/g, '');
+  const stocks = await LoadStrongPoolStocks(explicit || undefined);
+  const start = explicit || TrainFilter.GetTrainToDate()?.replace(/-/g, '') || dayjs().format('YYYYMMDD');
+  for (let i = 0; i < 7; i += 1) {
+    const d = moment(start, 'YYYYMMDD').subtract(i, 'day').format('YYYYMMDD');
+    // eslint-disable-next-line no-await-in-loop
+    const windVane = await GetWindVaneOfDate(d);
+    if (windVane) {
+      return { stocks, windVane, date: d };
+    }
+  }
+  return { stocks, windVane: null, date: start };
 }
 
 /** 强势股池原始行（东财 QSItem / Tushare 重建行）→ 统一结构：价格还原、市值统一成亿元 */

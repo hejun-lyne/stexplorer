@@ -1,10 +1,12 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Empty, Popconfirm, Table, Tabs, Tooltip } from 'antd';
 import { DeleteOutlined } from '@ant-design/icons';
 import { useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
 import { removeTrainTradeRecordAction, setTrainTradeRecordsAction } from '@/actions/train';
 import { BuildStockAttribution } from '@/helpers/trainAccount';
+import { ListPreopenNotes, RemovePreopenNote } from '@/helpers/trainPreopen';
+import type { PreopenNote } from '@/helpers/trainPreopen';
 import * as Utils from '@/utils';
 import TrainRecordDetail from './Detail';
 import styles from './index.scss';
@@ -65,7 +67,18 @@ const TrainRecord: React.FC<TrainRecordProps> = React.memo(({ onOpenStock }) => 
     return { total, win, lose, winRate, avgRatio };
   }, [list]);
 
-  const [tab, setTab] = useState<'detail' | 'attribution'>('detail');
+  const [tab, setTab] = useState<'detail' | 'attribution' | 'preopen'>('detail');
+
+  /**
+   * 盘前分析：按交易日存一条（不是按个股），来自「短线评分结果列表」下方的输入区。
+   * 切到该页签时重新读一次本地存储，保证刚保存的内容立即出现。
+   */
+  const [preopenNotes, setPreopenNotes] = useState<PreopenNote[]>([]);
+  useEffect(() => {
+    if (tab === 'preopen') {
+      setPreopenNotes(ListPreopenNotes());
+    }
+  }, [tab]);
 
   // 归因分析：由训练记录汇总个股 / 持仓周期 / 月度三维度
   const attribution = useMemo(() => BuildStockAttribution(list), [list]);
@@ -166,6 +179,42 @@ const TrainRecord: React.FC<TrainRecordProps> = React.memo(({ onOpenStock }) => 
       width: 110,
       align: 'right' as const,
       render: (v: number) => <span className={Utils.GetValueColor(v).textClass}>{formatSignedMoney(v)}</span>,
+    },
+  ];
+
+  const preopenColumns = [
+    { title: '交易日', dataIndex: 'date', width: 110 },
+    {
+      title: '盘前分析',
+      dataIndex: 'text',
+      render: (v: string) => (
+        <div style={{ whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.7, wordBreak: 'break-word' }}>{v}</div>
+      ),
+    },
+    {
+      title: '更新时间',
+      dataIndex: 'updatedAt',
+      width: 150,
+      render: (v: string) => (v ? new Date(v).toLocaleString('zh-CN', { hour12: false }) : '--'),
+    },
+    {
+      title: '操作',
+      key: 'op',
+      width: 56,
+      align: 'center' as const,
+      render: (_: unknown, r: PreopenNote) => (
+        <Popconfirm
+          title="删除这天的盘前分析？"
+          okText="删除"
+          cancelText="取消"
+          onConfirm={() => {
+            RemovePreopenNote(r.date);
+            setPreopenNotes(ListPreopenNotes());
+          }}
+        >
+          <DeleteOutlined className={styles.del} title="删除盘前分析" />
+        </Popconfirm>
+      ),
     },
   ];
 
@@ -330,6 +379,27 @@ const TrainRecord: React.FC<TrainRecordProps> = React.memo(({ onOpenStock }) => 
               expandable={{
                 // 逐日明细：买入日 ~ 卖出日的涨跌幅 / 短线评分 / RSI / 均线 / 复盘记录
                 expandedRowRender: (r: Train.StockTradeRecord) => <TrainRecordDetail record={r} />,
+              }}
+            />
+          </div>
+        </Tabs.TabPane>
+        <Tabs.TabPane tab="盘前分析" key="preopen">
+          <div className={styles.tableWrap}>
+            <Table
+              className={styles.table}
+              size="small"
+              rowKey="date"
+              dataSource={preopenNotes}
+              columns={preopenColumns}
+              pagination={{ pageSize: 20, showSizeChanger: false, size: 'small' }}
+              scroll={{ x: 640, y: 'max(240px, calc(100vh - 390px))' }}
+              locale={{
+                emptyText: (
+                  <Empty
+                    description="暂无盘前分析：在「股票列表 / 短线评分结果」下方的输入区记录后，这里会按交易日列出"
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  />
+                ),
               }}
             />
           </div>

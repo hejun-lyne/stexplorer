@@ -16,6 +16,7 @@ yarn-error.log*
 dist/
 build/release/
 build/app/
+build/dev/
 *.tsbuildinfo
 
 # =========================

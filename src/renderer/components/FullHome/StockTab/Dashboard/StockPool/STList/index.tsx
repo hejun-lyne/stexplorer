@@ -242,6 +242,37 @@ const nameOfListItem = (item: any): string => {
   return String(item.name ?? item.stockName ?? '');
 };
 
+/** 「情绪风向标」标记：列表行名前面用一个金色小标签，悬停看当日闸门与得分 */
+const WindVaneTag: React.FC<{ vane: Helpers.Stock.WindVaneResult }> = ({ vane }) => (
+  <span
+    title={
+      `${vane.date} 情绪风向标 · ${vane.level}` +
+      (typeof vane.score === 'number' ? ` · 得分 ${vane.score.toFixed(3)}` : '') +
+      (vane.gate
+        ? ` ｜ 涨停 ${vane.gate.zt} 家 / 炸板 ${vane.gate.zb} 家（${(vane.gate.zbl * 100).toFixed(1)}%）/ 最高 ${
+            vane.gate.height
+          } 板`
+        : '')
+    }
+    style={{
+      display: 'inline-block',
+      flex: '0 0 auto',
+      padding: '0 3px',
+      marginRight: 3,
+      borderRadius: 3,
+      border: '1px solid #ffe7ba',
+      background: '#fff7e6',
+      color: '#ad6800',
+      fontSize: 10,
+      lineHeight: '14px',
+      whiteSpace: 'nowrap',
+      verticalAlign: 'middle',
+    }}
+  >
+    风向标
+  </span>
+);
+
 /** 每只股票「所属板块」只用前 3 个：列展示、表头统计、筛选统一这个口径 */
 const BOARD_COLUMN_LIMIT = 3;
 
@@ -363,6 +394,8 @@ const STList: React.FC<STListProps> = ({
 
   // 选股流程状态
   const [displayMode, setDisplayMode] = useState<'stocks' | 'leaders' | 'risk' | 'signals' | 'mainIn' | 'shortScore'>('stocks');
+  /** 强势股池当日的「情绪风向标」（重建强势股池时算好并落库），用于列表标记 */
+  const [windVane, setWindVane] = useState<Helpers.Stock.WindVaneResult | null>(null);
 
   // 龙头股识别
   const [leaderLoading, setLeaderLoading] = useState(false);
@@ -602,6 +635,11 @@ const STList: React.FC<STListProps> = ({
   }, [selectedSecids, themeBoardSecids, conceptBoardSecids, styleBoardSecids]);
   const effectiveSecidsRef = React.useRef<string[]>([]);
   effectiveSecidsRef.current = effectiveSecids;
+  /** 只有当前在看「强势股」虚拟板块时才标记风向标（其它板块的成分股不适用） */
+  const activeWindVane = React.useMemo(
+    () => (effectiveSecids.indexOf(STRONG_POOL_SECID) >= 0 ? windVane : null),
+    [effectiveSecids, windVane]
+  );
   /** 展开后的板块组合签名：伪选项展开结果变化（如板块列表加载完成）时也要重新拉取成分股 */
   const effectiveBoardsKey = React.useMemo(() => [...effectiveSecids].sort().join(','), [effectiveSecids]);
   const effectiveBoardsKeyRef = React.useRef('');
@@ -749,6 +787,30 @@ const STList: React.FC<STListProps> = ({
    * 但成分股缓存按交易日分片，前端不显式带日期就可能一直复用同一份列表（切训练日不刷新）。
    */
   const trainDay = ontrain && trainDate ? String(trainDate).replace(/-/g, '') : '';
+
+  // ========== 盘前分析（按训练日存一条，展示在「训练记录 · 盘前分析」） ==========
+  /** 当前要写的盘前分析所属日期：训练日优先，非训练模式用今天 */
+  const preopenDate = trainDay
+    ? `${trainDay.substring(0, 4)}-${trainDay.substring(4, 6)}-${trainDay.substring(6, 8)}`
+    : dayjs().format('YYYY-MM-DD');
+  const [preopenText, setPreopenText] = useState('');
+  const [preopenSavedText, setPreopenSavedText] = useState('');
+  const [preopenSavedAt, setPreopenSavedAt] = useState('');
+  /** 输入区默认展开（列表下方整宽 footer，可收起给列表让出高度） */
+  const [preopenOpen, setPreopenOpen] = useState(true);
+  // 训练日 / 日期切换时载入当天的盘前分析（不同训练日互不覆盖）
+  useEffect(() => {
+    const note = Helpers.TrainPreopen.ReadPreopenNote(preopenDate);
+    setPreopenText(note?.text || '');
+    setPreopenSavedText(note?.text || '');
+    setPreopenSavedAt(note?.updatedAt || '');
+  }, [preopenDate]);
+  const savePreopen = useCallback(() => {
+    const note = Helpers.TrainPreopen.WritePreopenNote(preopenDate, preopenText);
+    setPreopenSavedText(note?.text || '');
+    setPreopenSavedAt(note?.updatedAt || '');
+    message.success(note ? '盘前分析已保存，可在「训练记录 · 盘前分析」查看' : '盘前分析已清空');
+  }, [preopenDate, preopenText]);
 
   // ========== 训练时间推进（09:25 ~ 15:00，跳过非交易时间） ==========
   // 时间轴按训练日内的「时刻」推进：列表的 K线形态、详情页的分时与日K都只展示到这个时刻为止。
@@ -1072,7 +1134,7 @@ const STList: React.FC<STListProps> = ({
    * 与板块成分股一致：空结果不覆盖旧缓存，返回后重建合并列表；训练日切走后丢弃上一日的返回。
    */
   const strongPoolDateRef = React.useRef('');
-  const { run: runGetStrongPool } = useRequest(Helpers.Stock.LoadStrongPoolStocks, {
+  const { run: runGetStrongPool } = useRequest(Helpers.Stock.LoadStrongPoolStocksWithVane, {
     throwOnError: true,
     manual: true,
     onError: () => {
@@ -1085,7 +1147,9 @@ const STList: React.FC<STListProps> = ({
         // 训练日/日期已经切走：这一份属于上一日，丢弃
         return;
       }
-      const fetched = ((data || []) as Helpers.Stock.StrongPoolStock[]).map(strongPoolToDetail);
+      // 当日情绪风向标（没重建过的日期为 null，列表就不标记）
+      setWindVane(data?.windVane || null);
+      const fetched = ((data?.stocks || []) as Helpers.Stock.StrongPoolStock[]).map(strongPoolToDetail);
       if (fetched.length) {
         boardStocksCacheRef.current[STRONG_POOL_SECID] = fetched;
       } else if (!boardStocksCacheRef.current[STRONG_POOL_SECID]) {
@@ -4408,6 +4472,9 @@ const STList: React.FC<STListProps> = ({
         >
           <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
             共 {displayList.length} 条 · 第 {currentPage} 页
+            {activeWindVane
+              ? ` · 风向标 ${activeWindVane.secid ? `${activeWindVane.name || activeWindVane.code}（${activeWindVane.level}）` : '无'}`
+              : ''}
           </span>
           <Pagination
             current={currentPage}
@@ -4423,6 +4490,9 @@ const STList: React.FC<STListProps> = ({
           displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
             <Row key={s.code} className={styles.row}>
               <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
+                {activeWindVane && activeWindVane.code === codeOfListItem(s) && (
+                  <WindVaneTag vane={activeWindVane} />
+                )}
                 {s.name}
               </Col>
               <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
@@ -4612,6 +4682,7 @@ const STList: React.FC<STListProps> = ({
                     >
                       {rowFavorited ? <StarFilled /> : <StarOutlined />}
                     </span>
+                    {activeWindVane && activeWindVane.code === rowCode && <WindVaneTag vane={activeWindVane} />}
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{rowName}</span>
                     {newEntryCodes.has(s.code) && (
                       <span
@@ -4834,6 +4905,73 @@ const STList: React.FC<STListProps> = ({
           })
         )}
       </div>
+        {/* 盘前分析：仅执行「短线评分」后出现（固定在左侧评分结果列表下方，不挤压右侧个股面板），保存后展示在「训练记录 · 盘前分析」 */}
+        {displayMode === 'shortScore' && (
+          <div
+            style={{
+              flex: '0 1 auto',
+              minHeight: 0,
+              maxHeight: '40vh',
+              overflowY: 'auto',
+              borderTop: '1px solid var(--border-color)',
+              background: 'var(--background-color)',
+              padding: '4px 10px 14px',
+              boxSizing: 'border-box',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+              <a onClick={() => setPreopenOpen((v) => !v)} style={{ flex: '0 0 auto' }}>
+                {preopenOpen ? '▾' : '▸'} 盘前分析（{preopenDate}）
+              </a>
+              <span style={{ color: 'var(--reverse-text-color)', fontSize: 11, flex: '0 0 auto' }}>
+                {preopenSavedText
+                  ? `已保存${preopenSavedAt ? ` ${dayjs(preopenSavedAt).format('MM-DD HH:mm')}` : ''}`
+                  : '未填写'}
+              </span>
+              <span
+                style={{
+                  color: 'var(--reverse-text-color)',
+                  fontSize: 11,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                保存后可在「训练记录 · 盘前分析」查看
+              </span>
+              <Button
+                size="small"
+                type="primary"
+                style={{ marginLeft: 'auto', flex: '0 0 auto' }}
+                disabled={preopenText === preopenSavedText}
+                onClick={savePreopen}
+              >
+                保存
+              </Button>
+            </div>
+            {preopenOpen && (
+              <Input.TextArea
+                value={preopenText}
+                onChange={(e) => setPreopenText(e.target.value)}
+                onBlur={() => {
+                  if (preopenText !== preopenSavedText) {
+                    savePreopen();
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    savePreopen();
+                  }
+                }}
+                autoSize={{ minRows: 5, maxRows: 10 }}
+                placeholder="盘前分析：今日情绪判断、主线与分歧、重点标的与计划（Ctrl/⌘+Enter 或失焦保存）"
+                style={{ fontSize: 12, marginTop: 4, width: '100%', boxSizing: 'border-box', resize: 'none' }}
+              />
+            )}
+          </div>
+        )}
         </div>
         {panelRow && panelStockSecid ? (
           <ScoreStockPanel

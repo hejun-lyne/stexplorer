@@ -28,7 +28,6 @@ declare namespace IndexScssNamespace {
     shapeFilterActions: string;
     shapeFilterCount: string;
     shapeFilterList: string;
-    shapeFilterOverlay: string;
     shapeFilterPanel: string;
     sortbtn: string;
     table: string;

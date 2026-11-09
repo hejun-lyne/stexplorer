@@ -65,8 +65,8 @@ class NodeWorkerPool {
     this.onLog = onLog;
     this.onProgress = onProgress;
 
-    const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
-    this.execArgv = isDev ? ['-r', 'ts-node/register', '-r', 'tsconfig-paths/register'] : [];
+    // 开发/生产环境的 worker 入口都是 webpack 打包出的 .js，无需额外的执行参数
+    this.execArgv = [];
 
     for (let i = 0; i < workerCount; i++) {
       this.spawnWorker(i);
@@ -402,7 +402,9 @@ async function init() {
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
   let workerPath: string;
   if (isDev) {
-    workerPath = path.join(__dirname, 'backtest.worker.ts');
+    // worker_threads 只接受 .js/.mjs/.cjs 入口，且 worker 依赖中含纯 ESM 包，
+    // 开发环境同样使用 webpack 打包出的 worker（yarn build:worker:dev 生成）
+    workerPath = path.join(__dirname, '../../build/dev/backtest.worker.js');
   } else {
     // 生产环境下，asar 归档中的文件无法被 worker_threads 直接加载
     // 需要指向 app.asar.unpacked 中的实际文件路径

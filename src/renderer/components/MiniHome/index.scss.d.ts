@@ -1,5 +1,6 @@
 declare namespace IndexScssNamespace {
   export interface IIndexScss {
+    content: string;
     layout: string;
     lowKey: string;
   }

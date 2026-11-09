@@ -7,6 +7,7 @@ import { GetStockCode } from '@/helpers/stock';
 import { calculateMA, calculateRSI } from '@/helpers/tech';
 import { loadScoreSeries, pickScoreRow, SHORT_SCORE_SOURCE } from '@/helpers/shortTermScoreList';
 import { ReadReviewRecords } from '@/helpers/trainReview';
+import { ReadAllPreopenNotes } from '@/helpers/trainPreopen';
 import styles from './index.scss';
 
 /** 日线缓存（指标只与K线有关，复盘/评分每次展开都重新读） */
@@ -30,7 +31,7 @@ interface DayRow {
   /** 当天是否买入 / 卖出 */
   buys: { time?: string; price: number; amount?: number; reason?: string }[];
   sell?: { time?: string; price: number; reason?: string };
-  notes: { time: string; text: string; kind: 'buy' | 'sell' | 'review' }[];
+  notes: { time: string; text: string; kind: 'buy' | 'sell' | 'review' | 'preopen' }[];
 }
 
 function num(v: any): number | null {
@@ -104,6 +105,8 @@ const TrainRecordDetail: React.FC<{ record: Train.StockTradeRecord }> = ({ recor
 
   /** 复盘记录（按日期归并到逐日明细里） */
   const reviews = useMemo(() => ReadReviewRecords(secid), [secid]);
+  /** 盘前分析（按交易日一条，与个股无关：当天所有记录共用同一条） */
+  const preopenNotes = useMemo(() => ReadAllPreopenNotes(), []);
 
   const rows = useMemo<DayRow[]>(() => {
     if (!bars.length) {
@@ -124,6 +127,7 @@ const TrainRecordDetail: React.FC<{ record: Train.StockTradeRecord }> = ({ recor
         const hits = (record.buys || []).filter((b) => b.date === date);
         const sell = date === sellDate ? { time: record.sellTime, price: record.sellPrice, reason: record.reason } : undefined;
         const dayReviews = reviews.filter((r) => r.date === date);
+        const dayPreopen = preopenNotes[date];
         const notes: DayRow['notes'] = [
           ...hits.map((b) => ({
             time: b.time || '',
@@ -131,8 +135,9 @@ const TrainRecordDetail: React.FC<{ record: Train.StockTradeRecord }> = ({ recor
             kind: 'buy' as const,
           })),
           ...(sell ? [{ time: sell.time || '', text: sell.reason || '', kind: 'sell' as const }] : []),
+          ...(dayPreopen?.text ? [{ time: '', text: dayPreopen.text, kind: 'preopen' as const }] : []),
           ...dayReviews.map((r) => ({ time: r.time || '', text: r.reason || '', kind: 'review' as const })),
-        ].filter((n) => !!n.text || n.kind !== 'review');
+        ].filter((n) => !!n.text || (n.kind !== 'review' && n.kind !== 'preopen'));
 
         const scoreHit = pickScoreRow(scoreSeries, date);
         return {
@@ -161,6 +166,7 @@ const TrainRecordDetail: React.FC<{ record: Train.StockTradeRecord }> = ({ recor
     sellDate,
     scoreSeries,
     reviews,
+    preopenNotes,
     record.buys,
     record.buyPrice,
     record.sellTime,
@@ -258,7 +264,7 @@ const TrainRecordDetail: React.FC<{ record: Train.StockTradeRecord }> = ({ recor
                     n.kind === 'buy' ? styles.chipBuy : n.kind === 'sell' ? styles.chipSell : styles.chipReview
                   }`}
                 >
-                  {n.kind === 'buy' ? '买' : n.kind === 'sell' ? '卖' : '复盘'}
+                  {n.kind === 'buy' ? '买' : n.kind === 'sell' ? '卖' : n.kind === 'preopen' ? '盘前' : '复盘'}
                   {n.time ? ` ${n.time}` : ''}
                 </span>
                 {n.text ? (

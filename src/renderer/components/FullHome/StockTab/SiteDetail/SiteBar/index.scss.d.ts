@@ -8,34 +8,34 @@ declare namespace IndexScssNamespace {
     enable: string;
     sort: string;
     star: string;
-    // video popover styles
-    videoPopover: string;
-    videoHeader: string;
-    videoHeaderTitle: string;
-    videoHeaderActions: string;
-    videoList: string;
+    videoAction: string;
     videoCard: string;
+    videoCardActions: string;
+    videoCardBtn: string;
     videoCardHeader: string;
-    videoType: string;
-    videoTypeLabel: string;
+    videoEmpty: string;
+    videoEmptyHint: string;
+    videoEmptyText: string;
+    videoHeader: string;
+    videoHeaderActions: string;
+    videoHeaderTitle: string;
     videoIndex: string;
-    videoTitle: string;
-    videoUrlRow: string;
-    videoSrc: string;
+    videoItem: string;
+    videoList: string;
     videoMime: string;
     videoMimeTag: string;
+    videoPopover: string;
+    videoPopoverOverlay: string;
     videoProgress: string;
     videoProgressDone: string;
     videoProgressDoneIcon: string;
     videoProgressDoneText: string;
-    videoCardActions: string;
-    videoCardBtn: string;
-    videoEmpty: string;
-    videoEmptyText: string;
-    videoEmptyHint: string;
-    videoPopoverOverlay: string;
-    videoItem: string;
-    videoAction: string;
+    videoProgressHint: string;
+    videoSrc: string;
+    videoTitle: string;
+    videoType: string;
+    videoTypeLabel: string;
+    videoUrlRow: string;
   }
 }
 

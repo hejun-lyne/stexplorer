@@ -295,6 +295,11 @@ export default merge(baseConfig, {
       disableDotRule: false,
     },
     onBeforeSetupMiddleware() {
+      // VS Code 调试时会由调试器单独启动主进程，这里避免重复启动
+      if (process.env.SKIP_MAIN === 'true') {
+        console.log('SKIP_MAIN=true, 主进程由调试器启动');
+        return;
+      }
       console.log('Starting Main Process...');
       spawn('npm', ['run', 'start:main'], {
         shell: true,

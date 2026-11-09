@@ -16,6 +16,7 @@
     "build": "concurrently \"yarn build:main\" \"yarn build:renderer\"",
     "build:preload": "yarn tsc ./src/main/preload.ts --resolveJsonModule",
     "build:main": "cross-env NODE_ENV=production webpack --config ./.erb/configs/webpack.config.main.prod.babel.js",
+    "build:worker:dev": "cross-env NODE_ENV=development webpack --config ./.erb/configs/webpack.config.worker.dev.babel.js",
     "build:renderer": "cross-env NODE_ENV=production --max-old-space-size=4076 webpack --config ./.erb/configs/webpack.config.renderer.prod.babel.js",
     "rebuild": "electron-rebuild --parallel --types prod,dev,optional --module-dir src",
     "lint": "cross-env NODE_ENV=development eslint . --cache --ext .js,.jsx,.ts,.tsx",
@@ -27,7 +28,7 @@
     "release-all": "rm -rf build/release && yarn build && electron-builder build -mwl -p always",
     "postinstall": "node -r @babel/register .erb/scripts/check-native-dep.js && electron-builder install-app-deps && yarn cross-env NODE_ENV=development webpack --config ./.erb/configs/webpack.config.renderer.dev.dll.babel.js && opencollective-postinstall && yarn-deduplicate yarn.lock",
     "start": "yarn build:preload && yarn start:renderer",
-    "start:main": "cross-env NODE_ENV=production && electron -r ts-node/register ./src/main/main.ts",
+    "start:main": "yarn build:worker:dev && cross-env NODE_ENV=development electron -r ts-node/register ./src/main/main.ts",
     "start:renderer": "cross-env NODE_ENV=development webpack serve --config ./.erb/configs/webpack.config.renderer.dev.babel.js",
     "test": "jest"
   },
@@ -302,11 +303,6 @@
     "swiper": "^7.0.1",
     "trading-signals": "^5.0.4",
     "url-parse": "^1.5.3"
-  },
-  "devEngines": {
-    "node": ">=10.x",
-    "npm": ">=6.x",
-    "yarn": ">=1.21.3"
   },
   "browserslist": [],
   "renovate": {

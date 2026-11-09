@@ -48,7 +48,8 @@ export async function checkEnvTool() {
     require('electron-debug')();
   }
   if (process.env.NODE_ENV === 'development' || process.env.DEBUG_PROD === 'true') {
-    await installExtensions();
+    // 不阻塞主进程启动：扩展从 Chrome 商店下载，网络不通时会长时间挂起导致调试启动卡死
+    void installExtensions();
   }
 }
 
