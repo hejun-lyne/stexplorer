@@ -311,6 +311,9 @@ const BoardStageMark: React.FC<{ stage: BoardStageItem; compact?: boolean }> = (
       <div>
         近 3 日主力净额 {fmt(e.mf3, 2)} 亿（分位 {fmt((e.q_mf3 || 0) * 100)}%，资金项反向计分）
       </div>
+      <div style={{ color: '#ffa39e' }}>
+        {stage.s2_candidate ? '当日进入板块效应候选（S2）' : '非 S2 候选'}；观察分只在 S2 候选内部有区分度，不作全市场打分
+      </div>
     </div>
   );
   return (
