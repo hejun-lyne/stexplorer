@@ -300,8 +300,12 @@ export default merge(baseConfig, {
         console.log('SKIP_MAIN=true, 主进程由调试器启动');
         return;
       }
+      // DEBUG_MAIN=5858 时让主进程打开 inspector，供调试器附加
+      const inspectArgs = process.env.DEBUG_MAIN
+        ? [`--inspect=${process.env.DEBUG_MAIN}`, '--remote-debugging-port=9223']
+        : [];
       console.log('Starting Main Process...');
-      spawn('npm', ['run', 'start:main'], {
+      spawn('yarn', ['start:main', ...inspectArgs], {
         shell: true,
         env: process.env,
         stdio: 'inherit',

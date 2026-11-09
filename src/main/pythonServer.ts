@@ -14,6 +14,7 @@
 
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import { app } from 'electron';
+import * as fs from 'fs';
 import * as path from 'path';
 
 /**
@@ -43,10 +44,23 @@ export function resolvePythonScriptDir(): string {
   if (process.env.PYTHON_SCRIPT_PATH) {
     return process.env.PYTHON_SCRIPT_PATH;
   }
-  if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-    return path.join(__dirname, '../python');
+  if (app.isPackaged) {
+    // 打包后 extraResources 把 src/main/python 放到 resources/python
+    const packaged = path.join(process.resourcesPath, 'python');
+    if (fs.existsSync(path.join(packaged, 'py_service.py'))) {
+      return packaged;
+    }
   }
-  return path.join(process.resourcesPath, 'python');
+
+  // 开发环境由 ts-node 直接运行 src/main/main.ts，__dirname === src/main，
+  // 脚本就在同级的 python/ 下（不是 ../python）。按实际文件存在性兜底，
+  // 兼容 dist/main 下运行或从项目根启动等其它布局。
+  const candidates = [
+    path.join(__dirname, 'python'),
+    path.join(process.cwd(), 'src/main/python'),
+    path.join(__dirname, '../python'),
+  ];
+  return candidates.find((dir) => fs.existsSync(path.join(dir, 'py_service.py'))) || candidates[0];
 }
 
 /**
@@ -69,13 +83,26 @@ class PythonService {
    * 调用常驻进程，返回 stdout 行数组（末行为 JSON 结果），与旧 execPyScript 一致
    */
   run(fileName: string, args: string[]): Promise<string[]> {
-    const child = this.acquireChild(fileName);
     return new Promise<string[]>((resolve, reject) => {
+      let child: PyChild;
+      try {
+        child = this.acquireChild(fileName);
+      } catch (error) {
+        reject(error);
+        return;
+      }
       const id = child.seq + 1;
       child.seq = id;
       child.pending.set(id, { resolve, reject });
+      // stream 的写错误是异步 emit 的，try/catch 拦不住，必须用 write 回调捕获；
+      // spawnChild 里另外挂了 stdin 的 error 监听，避免 EPIPE 变成 Uncaught Exception
       try {
-        child.proc.stdin.write(`${JSON.stringify({ id, args })}\n`);
+        child.proc.stdin.write(`${JSON.stringify({ id, args })}\n`, (error) => {
+          if (error) {
+            child.pending.delete(id);
+            reject(error);
+          }
+        });
       } catch (error) {
         child.pending.delete(id);
         reject(error);
@@ -104,12 +131,23 @@ class PythonService {
   private spawnChild(fileName: string): PyChild {
     const scriptDir = resolvePythonScriptDir();
     const serviceScript = path.join(scriptDir, 'py_service.py');
+    if (!fs.existsSync(serviceScript)) {
+      throw new Error(`[py] 找不到常驻服务脚本: ${serviceScript} (解释器: ${this.pythonPath})`);
+    }
     const proc = spawn(this.pythonPath, ['-u', serviceScript, fileName], {
       cwd: scriptDir,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
     }) as ChildProcessWithoutNullStreams;
 
     const child: PyChild = { proc, stdoutBuffer: '', pending: new Map(), seq: 0 };
+
+    // spawn 失败（解释器/脚本/cwd 不存在）时 stdin 会立刻 EPIPE；
+    // 没有 error 监听器就会冒泡成 Electron 的 Uncaught Exception 把应用打挂
+    proc.stdin.on('error', (err: Error) => {
+      console.error(`[py:${fileName}] stdin 写入失败:`, err.message);
+      this.removeChild(fileName, child);
+      this.rejectAll(child, err);
+    });
     const pool = this.children.get(fileName) || [];
     pool.push(child);
     this.children.set(fileName, pool);

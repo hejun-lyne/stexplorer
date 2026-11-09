@@ -2,8 +2,13 @@ import { contextBridge, ipcRenderer, shell, clipboard, nativeImage, app } from '
 import got from 'got';
 import { encode, decode } from 'js-base64';
 import * as fs from 'fs';
-import { base64ToBuffer } from './util';
 import { version } from '../../build/app/package.json';
+
+// 直接内联，避免 build:preload 因 tsc 追踪本地模块而生成 util.js 覆盖 util.ts
+const base64ToBuffer = (dataUrl: string) => {
+  const data = dataUrl.match(/^data:([A-Za-z\-+/]+);base64,(.+)$/);
+  return Buffer.from(data![2], 'base64');
+};
 const FormData = require('form-data');
 const CryptoJS = require('crypto-js');
 const fss = require('fs-slice');

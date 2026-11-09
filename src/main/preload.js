@@ -51,8 +51,12 @@ var electron_1 = require("electron");
 var got_1 = require("got");
 var js_base64_1 = require("js-base64");
 var fs = require("fs");
-var util_1 = require("./util");
 var package_json_1 = require("../../build/app/package.json");
+// 直接内联，避免 build:preload 因 tsc 追踪本地模块而生成 util.js 覆盖 util.ts
+var base64ToBuffer = function (dataUrl) {
+    var data = dataUrl.match(/^data:([A-Za-z\-+/]+);base64,(.+)$/);
+    return Buffer.from(data[2], 'base64');
+};
 var FormData = require('form-data');
 var CryptoJS = require('crypto-js');
 var fss = require('fs-slice');
@@ -149,7 +153,7 @@ electron_1.contextBridge.exposeInMainWorld('contextModules', {
             list: function () { return electron_1.ipcRenderer.invoke('download-list'); }
         },
         saveImage: function (filePath, dataUrl) {
-            var imageBuffer = (0, util_1.base64ToBuffer)(dataUrl);
+            var imageBuffer = base64ToBuffer(dataUrl);
             fs.writeFileSync(filePath, imageBuffer);
         },
         saveString: function (fileName, content) { return __awaiter(void 0, void 0, void 0, function () {
