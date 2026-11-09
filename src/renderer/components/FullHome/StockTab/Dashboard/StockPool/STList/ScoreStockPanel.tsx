@@ -1,6 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Radio, Select, Slider, Spin, Switch, Tag, Tooltip } from 'antd';
-import { UnorderedListOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
+import {
+  LeftOutlined,
+  RightOutlined,
+  UnorderedListOutlined,
+  ZoomInOutlined,
+  ZoomOutOutlined,
+} from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
@@ -1024,6 +1030,19 @@ type PanelMode = 'single' | 'list';
 /** 模式与仓位的本地存储键（记住上次的选择） */
 const PANEL_MODE_KEY = 'scoreStockPanelMode';
 const PANEL_RATIO_KEY = 'scoreStockPanelPositionRatio';
+/** 面板宽度 / 是否收起的本地存储键（展开位置以最后停留的位置为准） */
+const PANEL_WIDTH_KEY = 'scoreStockPanelWidth';
+const PANEL_COLLAPSED_KEY = 'scoreStockPanelCollapsed';
+/** 收起后的窄条宽度（只剩分隔线与展开按钮） */
+const PANEL_RAIL_WIDTH = 18;
+/** 分隔线拖动区宽度（覆盖在分隔线上，含收起/展开按钮） */
+const PANEL_HANDLE_WIDTH = 18;
+/** 面板可拖到的最小宽度 */
+const PANEL_MIN_WIDTH = 320;
+/** 拖动到该宽度以下即视为收起（相当于把分隔线拖到最右侧） */
+const PANEL_COLLAPSE_THRESHOLD = 120;
+/** 左侧结果列表至少保留的宽度，面板最大宽度据此计算 */
+const PANEL_MIN_LIST_WIDTH = 360;
 
 /** 6 位代码 -> secid（与列表里的面板股票口径一致） */
 const secidOfCode = (code: string) => `${String(code || '').startsWith('6') ? '1' : '0'}.${String(code || '')}`;
@@ -1120,6 +1139,13 @@ export interface ScoreStockDetailProps extends ScoreStockPanelProps {
   onRatioChange?: (ratio: number) => void;
   /** 单股模式下的「切换到列表模式」入口 */
   onSwitchToList?: () => void;
+  /**
+   * 由外层容器决定宽度（面板可拖动调整宽度 / 收起）
+   *
+   * 为 true 时本组件不再自带 flex 宽度与左边框，而是撑满容器，
+   * 分隔线与拖动条由 `ScoreStockPanel` 统一维护。
+   */
+  fill?: boolean;
 }
 
 /**
@@ -1141,6 +1167,7 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   ratio,
   onRatioChange,
   onSwitchToList,
+  fill = false,
 }) => {
   const isList = layout === 'list';
   const [intro, setIntro] = useState('');
@@ -1576,25 +1603,35 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   return (
     <aside
       style={
-        isList
+        fill
           ? {
-              // 列表模式：本身是一段内容，滚动交给外层容器（顶部头部用 sticky 固定）
-              flex: '0 0 auto',
-              minWidth: 0,
-              boxSizing: 'border-box',
-              padding: '8px 12px 14px',
-              borderBottom: '1px dashed var(--border-color)',
-            }
-          : {
-              // 与左侧结果列表平分宽度
-              flex: '1 1 50%',
+              // 由外层容器决定宽度（可拖动 / 可收起）：撑满容器，自己负责纵向滚动
+              flex: '1 1 auto',
               minWidth: 0,
               height: '100%',
               overflowY: 'auto',
               boxSizing: 'border-box',
-              padding: '4px 12px 12px',
-              borderLeft: '1px solid var(--border-color)',
+              padding: isList ? '8px 12px 14px' : '4px 12px 12px',
             }
+          : isList
+            ? {
+                // 列表模式：本身是一段内容，滚动交给外层容器（顶部头部用 sticky 固定）
+                flex: '0 0 auto',
+                minWidth: 0,
+                boxSizing: 'border-box',
+                padding: '8px 12px 14px',
+                borderBottom: '1px dashed var(--border-color)',
+              }
+            : {
+                // 与左侧结果列表平分宽度
+                flex: '1 1 50%',
+                minWidth: 0,
+                height: '100%',
+                overflowY: 'auto',
+                boxSizing: 'border-box',
+                padding: '4px 12px 12px',
+                borderLeft: '1px solid var(--border-color)',
+              }
       }
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, lineHeight: 2 }}>
@@ -1902,6 +1939,154 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
     Utils.SetStorage(PANEL_RATIO_KEY, v);
   }, []);
 
+  // ===== 可拖动 / 可收起：宽度与收起状态 =====
+  const rootRef = useRef<HTMLDivElement>(null);
+  /** 展开宽度（null = 默认与左侧列表平分） */
+  const [width, setWidth] = useState<number | null>(() => {
+    const saved = Number(Utils.GetStorage(PANEL_WIDTH_KEY, 0));
+    return Number.isFinite(saved) && saved > 0 ? saved : null;
+  });
+  const [collapsed, setCollapsed] = useState<boolean>(
+    () => Utils.GetStorage<boolean>(PANEL_COLLAPSED_KEY, false) === true
+  );
+  /** 最近一次拖动到的展开宽度（收起时保留它，展开就回到这个位置） */
+  const lastWidthRef = useRef<number | null>(width);
+  /** 本次按下是否发生了拖动：拖动后松开产生的 click 不再当成「切换收起」 */
+  const dragMovedRef = useRef(false);
+  /** 拖动中挂载的全局监听清理函数（组件卸载时兜底） */
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(
+    () => () => {
+      dragCleanupRef.current?.();
+    },
+    []
+  );
+
+  const applyCollapsed = useCallback((next: boolean) => {
+    setCollapsed(next);
+    Utils.SetStorage(PANEL_COLLAPSED_KEY, next);
+  }, []);
+
+  /** 面板最大宽度：给左侧结果列表留出可读空间（容器还没布局时返回 0，避免误夹紧） */
+  const maxPanelWidth = useCallback(() => {
+    const parent = rootRef.current?.parentElement;
+    const total = parent ? parent.getBoundingClientRect().width : 0;
+    if (!total) {
+      return 0;
+    }
+    return Math.max(PANEL_MIN_WIDTH, total - PANEL_MIN_LIST_WIDTH);
+  }, []);
+
+  // 记住的宽度超过当前可用空间时（窗口变小 / 换屏幕）拉回来，避免把左侧列表挤没
+  useEffect(() => {
+    if (width == null) {
+      return;
+    }
+    const max = maxPanelWidth();
+    if (max > 0 && width > max) {
+      setWidth(max);
+    }
+  }, [width, maxPanelWidth]);
+
+  useEffect(() => {
+    const onResize = () => {
+      const max = maxPanelWidth();
+      if (!max) {
+        return;
+      }
+      setWidth((w) => (w == null ? w : Math.min(Math.max(w, PANEL_MIN_WIDTH), max)));
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [maxPanelWidth]);
+
+  /**
+   * 拖动分隔线调整宽度
+   *
+   * 向左拖变宽、向右拖变窄；宽度小于阈值（相当于拖到最右侧）直接收起。
+   * 收起后仍可继续向左拖，一离开阈值就重新展开。
+   */
+  const startResize = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button !== 0) {
+        return;
+      }
+      // 阻止拖拽时选中文字；按钮自己的 click 仍会正常触发
+      e.preventDefault();
+      dragMovedRef.current = false;
+      const startX = e.clientX;
+      const startWidth = collapsed ? PANEL_RAIL_WIDTH : rootRef.current?.getBoundingClientRect().width || 0;
+      /** 拖动前的展开宽度：拖到最右侧收起时，展开仍回到这个位置 */
+      const preDragWidth = collapsed ? 0 : Math.round(startWidth);
+      const maxW = maxPanelWidth() || Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_MIN_LIST_WIDTH);
+      let isCollapsedNow = collapsed;
+      const prevUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = 'none';
+
+      const onMove = (ev: MouseEvent) => {
+        const dx = startX - ev.clientX;
+        if (Math.abs(dx) > 2) {
+          dragMovedRef.current = true;
+        }
+        const next = startWidth + dx;
+        if (next < PANEL_COLLAPSE_THRESHOLD) {
+          // 拖到最右侧：收起（不动 lastWidthRef，展开时回到最后停留的位置）
+          if (!isCollapsedNow) {
+            isCollapsedNow = true;
+            applyCollapsed(true);
+          }
+          return;
+        }
+        const clamped = Math.min(Math.max(next, PANEL_MIN_WIDTH), maxW);
+        lastWidthRef.current = clamped;
+        if (isCollapsedNow) {
+          isCollapsedNow = false;
+          applyCollapsed(false);
+        }
+        setWidth(clamped);
+      };
+
+      const cleanup = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.style.userSelect = prevUserSelect;
+        dragCleanupRef.current = null;
+      };
+
+      const onUp = () => {
+        cleanup();
+        // 记住最后停留的位置：下次展开就是这里（纯点击不落盘）。
+        // 若这次拖动最终停在收起状态，则保留拖动前的展开宽度（拖动过程里的最小值不算「停留」）。
+        if (dragMovedRef.current) {
+          const restore = (isCollapsedNow ? preDragWidth : lastWidthRef.current) || 0;
+          if (restore > 0) {
+            lastWidthRef.current = restore;
+            Utils.SetStorage(PANEL_WIDTH_KEY, restore);
+          }
+        }
+        // click 事件在本轮事件循环里紧跟着触发，用定时器复位让这次的 click 被忽略
+        window.setTimeout(() => {
+          dragMovedRef.current = false;
+        }, 0);
+      };
+
+      dragCleanupRef.current = cleanup;
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [collapsed, maxPanelWidth, applyCollapsed]
+  );
+
+  /** 分隔线中间的收起 / 展开按钮 */
+  const handleToggleClick = useCallback(() => {
+    if (dragMovedRef.current) {
+      dragMovedRef.current = false;
+      return;
+    }
+    applyCollapsed(!collapsed);
+  }, [collapsed, applyCollapsed]);
+
   /** 收藏列表：按 6 位代码去重（名称由外部解析） */
   const favorites = useMemo(() => {
     const seen = new Set<string>();
@@ -1916,8 +2101,8 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
       });
   }, [favoriteStocks]);
 
-  if (mode === 'single') {
-    return (
+  // 收起时不构建内容：列表模式有很多图表，没必要在看不见时还挂在那里
+  const panelContent = collapsed ? null : mode === 'single' ? (
       <ScoreStockDetail
         code={code}
         secid={secid}
@@ -1927,26 +2112,23 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
         onOpenStock={onOpenStock}
         layout="single"
         showIntro
+        fill
         ratio={ratio}
         onRatioChange={changeRatio}
         onSwitchToList={() => switchMode('list')}
       />
-    );
-  }
-
-  return (
-    <aside
-      style={{
-        // 与左侧结果列表平分宽度
-        flex: '1 1 50%',
-        minWidth: 0,
-        height: '100%',
-        overflowY: 'auto',
-        boxSizing: 'border-box',
-        padding: '0 12px 12px',
-        borderLeft: '1px solid var(--border-color)',
-      }}
-    >
+    ) : (
+      <aside
+        style={{
+          // 外层容器决定宽度（可拖动 / 可收起），这里只负责内容与纵向滚动
+          flex: '1 1 auto',
+          minWidth: 0,
+          height: '100%',
+          overflowY: 'auto',
+          boxSizing: 'border-box',
+          padding: '0 12px 12px',
+        }}
+      >
       {/* 顶部固定：资金情况 + 仓位选择 + 模式切换（不跟随下方图表滚动） */}
       <div
         style={{
@@ -2004,7 +2186,81 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
           暂无收藏股票：在列表里点击星标收藏后，这里会按顺序显示它们的分时走势与买卖操作。
         </div>
       )}
-    </aside>
+      </aside>
+    );
+
+  return (
+    <div
+      ref={rootRef}
+      style={{
+        position: 'relative',
+        display: 'flex',
+        height: '100%',
+        minWidth: 0,
+        boxSizing: 'border-box',
+        borderLeft: '1px solid var(--border-color)',
+        // 收起 = 只剩最右侧一条窄边；展开 = 用户最后拖动的位置（没拖过则与列表平分）
+        flex: collapsed
+          ? `0 0 ${PANEL_RAIL_WIDTH}px`
+          : width != null
+            ? `0 0 ${width}px`
+            : '1 1 50%',
+      }}
+    >
+      {/* 中间分隔线：竖直拖动调整宽度；中间的按钮负责收起 / 展开 */}
+      <div
+        onMouseDown={startResize}
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: PANEL_HANDLE_WIDTH,
+          zIndex: 20,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: collapsed ? 'pointer' : 'col-resize',
+        }}
+        title={collapsed ? '点击展开面板，或按住向左拖动展开' : '拖动调整面板宽度；拖到最右侧即收起'}
+      >
+        <div
+          onClick={handleToggleClick}
+          title={collapsed ? '展开面板' : '收起面板'}
+          style={{
+            width: 16,
+            height: 46,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'var(--inner-color)',
+            border: '1px solid var(--border-color)',
+            borderRadius: 4,
+            cursor: 'pointer',
+            color: 'var(--secondary-text-color)',
+            fontSize: 10,
+            boxShadow: '0 1px 4px rgba(0, 0, 0, 0.18)',
+            userSelect: 'none',
+          }}
+        >
+          {collapsed ? <LeftOutlined /> : <RightOutlined />}
+        </div>
+      </div>
+
+      <div
+        style={{
+          flex: '1 1 auto',
+          minWidth: 0,
+          height: '100%',
+          display: 'flex',
+          // 给分隔线/按钮留出位置，内容不会被它压住
+          paddingLeft: PANEL_HANDLE_WIDTH,
+          boxSizing: 'border-box',
+        }}
+      >
+        {panelContent}
+      </div>
+    </div>
   );
 };
 
