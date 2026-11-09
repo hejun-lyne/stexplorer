@@ -74,6 +74,7 @@ const TRAIN_AS_OF_PARAM: Record<string, string> = {
   get_hk_hold: 'date',
   get_strong_stocks: 'date',
   get_strong_pool: 'date',
+  get_board_stage: 'date',
   // 板块 / 成分股（dc_index / dc_member / index_member_all 均支持按交易日查历史）
   get_boards_by_date: 'date',
   get_boards_by_date_batch: 'dates',
@@ -2001,6 +2002,98 @@ export async function GetStrongPoolFromTushare(
   } catch (error) {
     logError(error, 'GetStrongPoolFromTushare', '重建强势股池失败');
     return { stocks: [], date: d, count: 0 };
+  }
+}
+
+/**
+ * 板块效应启动判定（复盘标签 + 延续性观察分）
+ *
+ * 口径见《板块效应启动判定-实现规格》：只用 T 日及之前的 110 个东财行业数据，
+ * 先圈板块效应（连续 3 日强势股 ≥3 且 20 日位置 ≤60 分位），再在候选内部按
+ * 封板质量 / 反向资金分排序取 60 分位软阈值。`start` 天然滞后 2 日，是复盘标签。
+ */
+export interface BoardStageEffect {
+  /** 行业内强势股数（T 日，已剔除 ST） */
+  N: number;
+  /** 截至 T 连续 N>=3 的交易日数 */
+  run_len: number;
+  /** 行业全体 20 日累计收益 / 当日横截面分位 */
+  r20: number;
+  q_r20: number;
+  q_zt: number;
+  /** 涨停 / 炸板家数、炸板率、最高连板、多次涨停家数 */
+  zt_n: number;
+  zbl: number;
+  max_lb: number;
+  multi_zt: number;
+  /** 封单额中位数（元）、平均首封时间（距 09:30 分钟数，越小越好） */
+  fd_med: number;
+  first_min: number;
+  /** 近 3 日行业主力净额（亿元，逐股聚合）及其横截面分位 */
+  mf3: number;
+  q_mf3: number;
+}
+
+export interface BoardStageItem {
+  /** 行业名（stock_basic.industry，与强势股池 hybk 同口径） */
+  industry: string;
+  /** 判定基准交易日 YYYYMMDD */
+  trade_date: string;
+  /** 是否「启动」（复盘标签，不是买点） */
+  start: boolean;
+  /** 延续性观察分 0~1 */
+  quality: number;
+  /** 当日 S2 候选的 60 分位阈值；无候选时为 null */
+  quality_threshold: number | null;
+  effect: BoardStageEffect;
+  reason: string;
+  is_review_label: boolean;
+}
+
+export interface BoardStageResult {
+  trade_date: string;
+  industry_count: number;
+  s2_count: number;
+  start_count: number;
+  quality_threshold: number | null;
+  boards: BoardStageItem[];
+  /** 降级说明（某类数据缺失时对应维度按中性处理） */
+  degraded: string[];
+  error?: string;
+}
+
+/**
+ * 取 T 日全部行业的「启动标签 + 观察分」
+ *
+ * @param date 评分基准日（训练模式下由 callTushare 自动收敛到训练日）
+ * @param poolCodes 界面当前选中的强势股池代码：QSList 备份不一定写入 api_cache，
+ *                  传入后用于覆盖 T 日的行业内强势股数 N
+ */
+export async function GetBoardStageFromTushare(date: string, poolCodes?: string[]): Promise<BoardStageResult> {
+  const d = String(date || '').replace(/-/g, '');
+  const empty: BoardStageResult = {
+    trade_date: d,
+    industry_count: 0,
+    s2_count: 0,
+    start_count: 0,
+    quality_threshold: null,
+    boards: [],
+    degraded: [],
+  };
+  try {
+    const result = await callTushare('get_board_stage', {
+      date: d,
+      min_limit_times: 2,
+      pool_codes: Array.isArray(poolCodes) ? poolCodes.slice(0, 3000) : [],
+    });
+    if (result?.error) {
+      console.error('[板块阶段] 判定失败:', result.error);
+      return { ...empty, error: String(result.error), degraded: result.degraded || [] };
+    }
+    return { ...empty, ...result } as BoardStageResult;
+  } catch (error) {
+    logError(error, 'GetBoardStageFromTushare', '板块阶段判定失败');
+    return { ...empty, error: String(error) };
   }
 }
 

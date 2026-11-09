@@ -33,6 +33,8 @@ import {
   RiskFilterStocksFromTushare,
   CheckBuySignalsFromTushare,
   MainInFilterStocksFromTushare,
+  BoardStageEffect,
+  BoardStageItem,
 } from '@/services/tushare';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { BKType, KFilterType, KFilterTypeNames, KLineType } from '@/utils/enums';
@@ -49,6 +51,7 @@ import {
   StarFilled,
   StarOutlined,
   StepForwardOutlined,
+  SyncOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
@@ -273,6 +276,79 @@ const WindVaneTag: React.FC<{ vane: Helpers.Stock.WindVaneResult }> = ({ vane })
   </span>
 );
 
+/**
+ * 板块阶段标记：「启动」复盘标签 + 延续性观察分
+ *
+ * 判定只覆盖 110 个东财行业（stock_basic.industry），概念 / 风格板块没有结果就不显示。
+ * `start` 需要连续 3 日板块效应，天然滞后 2 日，属于复盘标签而不是买点；
+ * 观察分只在 S2 候选内部有区分度，悬停可看完整因子与当日 60 分位阈值。
+ */
+const BoardStageMark: React.FC<{ stage: BoardStageItem; compact?: boolean }> = ({ stage, compact }) => {
+  const e = (stage.effect || {}) as BoardStageEffect;
+  const score = Math.round((stage.quality || 0) * 100);
+  const threshold = stage.quality_threshold == null ? '—' : Math.round(stage.quality_threshold * 100);
+  const fmt = (v: number | undefined, digits = 0) => (Number(v) || 0).toFixed(digits);
+  const tip = (
+    <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+      <div style={{ fontWeight: 600 }}>
+        {stage.industry} · {stage.trade_date} 板块效应启动判定（复盘标签，非买点）
+      </div>
+      <div>{stage.start ? '结论：启动' : `结论：未启动 · ${stage.reason}`}</div>
+      <div>
+        观察分 {score} / S2 候选 60 分位阈值 {threshold}
+      </div>
+      <div>
+        强势股 N {fmt(e.N)} · 连续 N≥3 天数 {fmt(e.run_len)} · 20 日收益 {fmt(e.r20, 2)}%（位置分位{' '}
+        {fmt((e.q_r20 || 0) * 100)}%）
+      </div>
+      <div>
+        涨停 {fmt(e.zt_n)} 家 · 炸板率 {fmt((e.zbl || 0) * 100, 1)}% · 最高连板 {fmt(e.max_lb)} · 多次涨停{' '}
+        {fmt(e.multi_zt)} 家
+      </div>
+      <div>
+        封单中位数 {fmt((e.fd_med || 0) / 1e8, 2)} 亿 · 平均首封 {fmt(e.first_min)} 分钟
+      </div>
+      <div>
+        近 3 日主力净额 {fmt(e.mf3, 2)} 亿（分位 {fmt((e.q_mf3 || 0) * 100)}%，资金项反向计分）
+      </div>
+    </div>
+  );
+  return (
+    <Tooltip title={tip}>
+      <span
+        style={{
+          display: 'inline-block',
+          marginLeft: compact ? 2 : 4,
+          whiteSpace: 'nowrap',
+          verticalAlign: 'middle',
+          fontSize: compact ? 9 : 10,
+          lineHeight: '14px',
+          cursor: 'help',
+        }}
+      >
+        {stage.start ? (
+          <span
+            style={{
+              padding: '0 3px',
+              marginRight: 2,
+              borderRadius: 3,
+              border: '1px solid #ffa39e',
+              background: '#fff1f0',
+              color: '#cf1322',
+              fontWeight: 600,
+            }}
+          >
+            {compact ? '启' : '启动'}
+          </span>
+        ) : null}
+        <span style={{ color: stage.start ? '#cf1322' : 'var(--hint-color)' }}>
+          {compact ? `观${score}` : `观察${score}`}
+        </span>
+      </span>
+    </Tooltip>
+  );
+};
+
 /** 每只股票「所属板块」只用前 3 个：列展示、表头统计、筛选统一这个口径 */
 const BOARD_COLUMN_LIMIT = 3;
 
@@ -493,6 +569,18 @@ const STList: React.FC<STListProps> = ({
    * 「信号」列要按这个日期把这行分数放进评分序列，否则会把昨天的分当成今天的分算信号。
    */
   const [shortScoreBaseDay, setShortScoreBaseDay] = useState('');
+  /**
+   * 板块效应启动判定结果：行业名 -> 「启动标签 + 延续性观察分」
+   *
+   * 只覆盖 110 个东财行业；在「所属板块」列头筛选与每行的板块名后显示。
+   */
+  const [boardStageMap, setBoardStageMap] = useState<Record<string, BoardStageItem>>({});
+  const [boardStageLoading, setBoardStageLoading] = useState(false);
+  const [boardStageInfo, setBoardStageInfo] = useState('');
+  /** 手动重新计算时的计数（数据缺失补拉后可重试） */
+  const [boardStageNonce, setBoardStageNonce] = useState(0);
+  /** 同一个「基准日 + 板块池」只判定一次，避免列表刷新反复打后端 */
+  const boardStageRequestedRef = React.useRef('');
   /** 历史缺口补算进度：执行短线评分时顺带补齐近 N 个交易日缺的评分 */
   const [shortScoreBackfill, setShortScoreBackfill] = useState<{ done: number; total: number } | null>(null);
   // 过滤：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的股票
@@ -3338,6 +3426,67 @@ const STList: React.FC<STListProps> = ({
       .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   }, [visibleShowList, stockBankuaisMap]);
 
+  /**
+   * 板块效应启动判定：短线评分跑完后按「评分基准日」算一次
+   *
+   * 规格只认 110 个东财行业，与「所属板块」里的行业名直接对齐；选中「强势股池」时
+   * 把当前池子代码传给后端覆盖 T 日的 N（QSList 备份不一定写入 api_cache）。
+   * 判定是纯复盘（只用 T 日及之前数据），不影响评分结果与排序。
+   */
+  useEffect(() => {
+    if (displayMode !== 'shortScore' || shortScoreLoading || todayScoreLoading || !shortScoreBaseDay || !shortScoreData.length) {
+      return;
+    }
+    const day = String(shortScoreBaseDay).replace(/-/g, '');
+    const strongSelected = effectiveSecids.indexOf(STRONG_POOL_SECID) >= 0;
+    const codes = strongSelected
+      ? Array.from(new Set((shortScoreData as any[]).map((r) => codeOfListItem(r)).filter(Boolean)))
+      : [];
+    const key = `${day}|${boardsKey}|${strongSelected}|${codes.length}|${boardStageNonce}`;
+    if (boardStageRequestedRef.current === key) {
+      return;
+    }
+    boardStageRequestedRef.current = key;
+    let canceled = false;
+    setBoardStageLoading(true);
+    Services.Tushare.GetBoardStageFromTushare(day, codes)
+      .then((res) => {
+        if (canceled) {
+          return;
+        }
+        const map: Record<string, BoardStageItem> = {};
+        (res.boards || []).forEach((b) => {
+          if (b?.industry) {
+            map[b.industry] = b;
+          }
+        });
+        setBoardStageMap(map);
+        setBoardStageInfo(
+          res.error
+            ? `判定失败：${res.error}`
+            : `${res.trade_date} · ${res.industry_count} 行业 · S2候选 ${res.s2_count} · 启动 ${res.start_count}` +
+                (res.degraded?.length ? ` · 降级 ${res.degraded.length} 项：${res.degraded[0]}` : '')
+        );
+      })
+      .finally(() => {
+        if (!canceled) {
+          setBoardStageLoading(false);
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [
+    displayMode,
+    shortScoreLoading,
+    todayScoreLoading,
+    shortScoreBaseDay,
+    shortScoreData.length,
+    effectiveSecids,
+    boardsKey,
+    boardStageNonce,
+  ]);
+
   /** 取一只股票所属板块：ok=false 表示请求失败（可重试），空数组表示接口确实没给板块 */
   const fetchBankuaisOf = React.useCallback(
     async (code: string): Promise<{ code: string; list: Stock.BanKuai[]; ok: boolean }> => {
@@ -4355,7 +4504,7 @@ const STList: React.FC<STListProps> = ({
           <Col span={6} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="股票所属板块（东财「所属板块」，与详情页板块列表同一接口）。每只股票只取前 3 个板块（列展示、筛选项统计、过滤都按这 3 个）。点漏斗可按板块勾选过滤（Excel 式多选，属于任一所选板块即显示；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）"
+              title="股票所属板块（东财「所属板块」，与详情页板块列表同一接口）。每只股票只取前 3 个板块（列展示、筛选项统计、过滤都按这 3 个）。行业板块名后的「启动」是板块效应复盘标签、「观察xx」是延续性观察分（只用 T 日及之前数据，110 个东财行业口径）。点漏斗可按板块勾选过滤（Excel 式多选，属于任一所选板块即显示；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）"
             >
               <span className={styles.klineShapeHeaderText}>所属板块</span>
               <Dropdown
@@ -4364,6 +4513,27 @@ const STList: React.FC<STListProps> = ({
                 overlayClassName={styles.shapeFilterOverlay}
                 overlay={
                   <div className={styles.shapeFilterPanel} onClick={(e) => e.stopPropagation()}>
+                    {/* 板块阶段判定状态：「启动」需连续 3 日板块效应，是滞后 2 日的复盘标签 */}
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '2px 4px 6px',
+                        fontSize: 10,
+                        color: 'var(--hint-color)',
+                      }}
+                      title="板块效应启动判定：只用 110 个东财行业与 T 日及之前数据，先圈板块效应再按封板质量/反向资金算观察分。启动标签连续 3 日确认，天然滞后 2 日，属复盘标签而非买点"
+                    >
+                      <span style={{ flex: '1 1 auto', minWidth: 0 }}>
+                        {boardStageLoading
+                          ? '板块阶段判定中…'
+                          : boardStageInfo || '板块阶段未判定（短线评分完成后自动计算）'}
+                      </span>
+                      <a onClick={() => setBoardStageNonce((n) => n + 1)}>
+                        <SyncOutlined spin={boardStageLoading} /> 重算
+                      </a>
+                    </div>
                     <div className={styles.shapeFilterActions}>
                       <Checkbox
                         checked={
@@ -4393,6 +4563,7 @@ const STList: React.FC<STListProps> = ({
                         >
                           {o.label}
                           <span className={styles.shapeFilterCount}>({o.count})</span>
+                          {boardStageMap[o.label] ? <BoardStageMark stage={boardStageMap[o.label]} /> : null}
                         </Checkbox>
                       ))}
                     </Checkbox.Group>
@@ -4790,7 +4961,20 @@ const STList: React.FC<STListProps> = ({
                       );
                     }
                     const names = bks.map((b) => b.name).slice(0, BOARD_COLUMN_LIMIT);
-                    return <span title={`所属板块：${names.join('、')}`}>{names.join('、')}</span>;
+                    // 行业板块名后追加「启动」复盘标签 + 观察分（概念/风格板块没有判定结果）
+                    return (
+                      <span title={`所属板块：${names.join('、')}`} style={{ whiteSpace: 'nowrap' }}>
+                        {bks.slice(0, BOARD_COLUMN_LIMIT).map((b, idx) => (
+                          <React.Fragment key={`${b.code}-${idx}`}>
+                            {idx > 0 ? '、' : null}
+                            {b.name}
+                            {boardStageMap[b.name] ? (
+                              <BoardStageMark stage={boardStageMap[b.name]} compact />
+                            ) : null}
+                          </React.Fragment>
+                        ))}
+                      </span>
+                    );
                   })()}
                 </Col>
               </Row>
