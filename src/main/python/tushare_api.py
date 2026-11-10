@@ -8050,6 +8050,8 @@ class TushareAPI:
             result_cache_key = f"board_stage_{T}_{min_times}_{pool_sig}"
             cached = read_cache(result_cache_key, max_age_hours=24)
             if isinstance(cached, dict) and cached.get('boards') and not cached.get('degraded'):
+                # 旧缓存可能没有个股→行业映射，就地补齐，前端才能用同一口径聚合并展示启动行业
+                cached.setdefault('industry_by_code', {c: i for c, i in code2ind.items() if i})
                 return cached
 
             # ---- 3. 强势股池 N[t] / run_len（含 ST 过滤）----
@@ -8301,6 +8303,9 @@ class TushareAPI:
                 'start_count': sum(1 for b in boards if b['start']),
                 'quality_threshold': round(threshold, 4) if threshold is not None else None,
                 'boards': boards,
+                # 判定时用的就是这张 code6 -> 行业 映射，回传给列表按同一口径聚合，
+                # 避免「只取东财 slist 前 3 个板块」把判定为启动的行业漏掉
+                'industry_by_code': {c: i for c, i in code2ind.items() if i},
                 'degraded': degraded[:20],
             }
             if not degraded:

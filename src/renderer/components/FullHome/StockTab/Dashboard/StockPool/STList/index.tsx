@@ -352,8 +352,16 @@ const BoardStageMark: React.FC<{ stage: BoardStageItem; compact?: boolean }> = (
   );
 };
 
-/** 每只股票「所属板块」只用前 3 个：列展示、表头统计、筛选统一这个口径 */
+/** 每只股票「所属板块」只用前 3 个：列展示、表头统计、筛选统一这个口径（东财 slist 兜底时） */
 const BOARD_COLUMN_LIMIT = 3;
+
+/**
+ * 表头板块筛选项的值前缀：行业口径用 `IND:行业名`，东财 slist 口径用 `BKxxxx`
+ *
+ * 两者刻意不共用前缀：短线评分结果有板块阶段判定数据后，筛选项会切成与判定同源的
+ * 110 行业口径；用户上一次可能还留着 BK 代码的勾选，混在一起不会互相误命中。
+ */
+const INDUSTRY_BOARD_PREFIX = 'IND:';
 
 /**
  * 列表「信号」列使用的策略参数
@@ -578,6 +586,13 @@ const STList: React.FC<STListProps> = ({
    * 只覆盖 110 个东财行业；在「所属板块」列头筛选与每行的板块名后显示。
    */
   const [boardStageMap, setBoardStageMap] = useState<Record<string, BoardStageItem>>({});
+  /**
+   * 个股 6 位代码 -> 行业（stock_basic.industry）
+   *
+   * 与后端板块效应判定内部用的映射完全同源。有它之后「所属板块」列按 110 行业口径聚合，
+   * 不再只统计东财 slist 返回的前 3 个板块，判定为启动的行业才能在列头 / 行里出现。
+   */
+  const [stockIndustryMap, setStockIndustryMap] = useState<Record<string, string>>({});
   const [boardStageLoading, setBoardStageLoading] = useState(false);
   const [boardStageInfo, setBoardStageInfo] = useState('');
   /** 手动重新计算时的计数（数据缺失补拉后可重试） */
@@ -3267,12 +3282,18 @@ const STList: React.FC<STListProps> = ({
       }
       const boardSet = headerFilter.boards;
       if (boardSet) {
-        const boards = (stockBankuaisMap[codeOfListItem(row)] || []).slice(0, BOARD_COLUMN_LIMIT);
-        return !boards.some((b) => boardSet.has(b.code));
+        const code = codeOfListItem(row);
+        // 行业口径（与板块效应判定同源）：每只股票只有一个行业，不再被「前 3 个板块」截断
+        const industry = stockIndustryMap[code];
+        if (industry && boardSet.has(`${INDUSTRY_BOARD_PREFIX}${industry}`)) {
+          return false;
+        }
+        // 兼容此前勾选的东财板块代码（BKxxxx），不再限制前 3 个
+        return !(stockBankuaisMap[code] || []).some((b) => boardSet.has(b.code));
       }
       return false;
     },
-    [isFavorited, headerFilter, isJumpBuyRow, stockBankuaisMap]
+    [isFavorited, headerFilter, isJumpBuyRow, stockBankuaisMap, stockIndustryMap]
   );
 
   const displayList = React.useMemo(() => {
@@ -3402,19 +3423,52 @@ const STList: React.FC<STListProps> = ({
   /** 当前可见的股票数：即「当日评分」实际会处理的数量（全部页，含表头勾选过滤），直接标在按钮上 */
   const todayScoreCount = displayList.length;
 
+  /** 板块阶段判定是否给出了「个股 -> 行业」映射：有则整个「所属板块」列切到 110 行业口径 */
+  const industryBoardScope = React.useMemo(() => Object.keys(stockIndustryMap).length > 0, [stockIndustryMap]);
+
+  // 切到行业口径时清掉旧口径（东财 BK 代码）的勾选：下拉里已不再列出这些项，
+  // 留着会变成一个「看不见但仍在生效」的隐藏过滤条件
+  useEffect(() => {
+    if (!industryBoardScope) {
+      return;
+    }
+    setShortScoreBoards((prev) => {
+      const next = prev.filter((v) => v.startsWith(INDUSTRY_BOARD_PREFIX));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [industryBoardScope]);
+
   /**
    * 表头板块筛选项（带当前列表的股票数）
    *
    * 统计口径同 K线形态 / RSI形态：基于 visibleShowList（不含其它列的表头勾选），
-   * 勾选后各项数量保持稳定。只列出当前结果里出现过的板块（按股票数降序），
-   * 避免把几十个板块全塞进下拉。值用板块代码（BKxxxx），展示用板块名称。
+   * 勾选后各项数量保持稳定。
    *
-   * 每只股票只统计前 3 个板块（与列里展示的一致），保证「勾选后看到的股票」都在这 3 个里。
+   * 有板块阶段判定数据时按 **110 行业口径** 聚合（与判定的 `industry_by_code` 同源）：
+   * 每只股票只归一个行业，不再像以前那样只取东财 slist 返回的前 3 个板块——
+   * 那样会把判定为「启动」的行业漏掉（例如「专用机械」常常排在某只股票的第 5 个板块之后，
+   * 甚至整个 slist 名称体系都与行业名不同）。
+   * 判定还没回来 / 失败时回退到原来的东财 slist 前 3 个口径。
+   *
+   * 启动行业排在下拉最前，保证一打开就能看到。
    */
   const boardFilterItems = React.useMemo(() => {
     const counts: Record<string, { label: string; count: number }> = {};
     (visibleShowList as any[]).forEach((row: any) => {
-      (stockBankuaisMap[codeOfListItem(row)] || []).slice(0, BOARD_COLUMN_LIMIT).forEach((b) => {
+      const code = codeOfListItem(row);
+      if (industryBoardScope) {
+        const industry = stockIndustryMap[code];
+        if (!industry) {
+          return;
+        }
+        const value = `${INDUSTRY_BOARD_PREFIX}${industry}`;
+        if (!counts[value]) {
+          counts[value] = { label: industry, count: 0 };
+        }
+        counts[value].count += 1;
+        return;
+      }
+      (stockBankuaisMap[code] || []).slice(0, BOARD_COLUMN_LIMIT).forEach((b) => {
         if (!b?.code) {
           return;
         }
@@ -3425,9 +3479,13 @@ const STList: React.FC<STListProps> = ({
       });
     });
     return Object.keys(counts)
-      .map((code) => ({ value: code, label: counts[code].label, count: counts[code].count }))
-      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-  }, [visibleShowList, stockBankuaisMap]);
+      .map((value) => ({ value, label: counts[value].label, count: counts[value].count }))
+      .sort((a, b) => {
+        const aStart = boardStageMap[a.label]?.start ? 1 : 0;
+        const bStart = boardStageMap[b.label]?.start ? 1 : 0;
+        return bStart - aStart || b.count - a.count || a.label.localeCompare(b.label);
+      });
+  }, [visibleShowList, stockBankuaisMap, stockIndustryMap, industryBoardScope, boardStageMap]);
 
   /**
    * 板块效应启动判定：短线评分跑完后按「评分基准日」算一次
@@ -3464,6 +3522,8 @@ const STList: React.FC<STListProps> = ({
           }
         });
         setBoardStageMap(map);
+        // 同一份个股行业映射：列头聚合 / 行展示都改用它，与后端判定口径一致
+        setStockIndustryMap(res.industry_by_code || {});
         setBoardStageInfo(
           res.error
             ? `判定失败：${res.error}`
@@ -4507,7 +4567,7 @@ const STList: React.FC<STListProps> = ({
           <Col span={6} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="股票所属板块（东财「所属板块」，与详情页板块列表同一接口）。每只股票只取前 3 个板块（列展示、筛选项统计、过滤都按这 3 个）。行业板块名后的「启动」是板块效应复盘标签、「观察xx」是延续性观察分（只用 T 日及之前数据，110 个东财行业口径）。点漏斗可按板块勾选过滤（Excel 式多选，属于任一所选板块即显示；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）"
+              title="股票所属行业 / 板块。有板块效应判定数据时，列头聚合、筛选与行内展示统一按判定同源的 110 行业口径（stock_basic.industry，每只股票一个行业），东财「所属板块」只作为次要参考显示前 3 个；判定未就绪时回退到东财 slist 前 3 个口径。行业名后的「启动」是板块效应复盘标签、「观察xx」是延续性观察分（只用 T 日及之前数据）。点漏斗可按行业勾选过滤（Excel 式多选；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）"
             >
               <span className={styles.klineShapeHeaderText}>所属板块</span>
               <Dropdown
@@ -4538,8 +4598,8 @@ const STList: React.FC<STListProps> = ({
                       </a>
                     </div>
                     {/*
-                      规格用的是 stock_basic 的 110 个行业名，与东财「所属板块」名称只对上一部分，
-                      所以除了在能匹配上的板块名后打标，这里再单列当日「板块效应候选 / 启动」行业。
+                      这里单列当日「板块效应候选 / 启动」行业：下方复选框只统计当前结果里出现过的行业，
+                      启动行业若没有成份股落在当前列表，仍要能在这里看到。
                     */}
                     {(() => {
                       const stages = Object.values(boardStageMap)
@@ -4574,6 +4634,11 @@ const STList: React.FC<STListProps> = ({
                         </div>
                       );
                     })()}
+                    <div style={{ padding: '0 4px 4px', fontSize: 10, color: 'var(--hint-color)' }}>
+                      {industryBoardScope
+                        ? '筛选项按 110 行业口径聚合（与板块效应判定同源），启动行业置顶'
+                        : '判定数据未就绪：暂按东财「所属板块」前 3 个聚合'}
+                    </div>
                     <div className={styles.shapeFilterActions}>
                       <Checkbox
                         checked={
@@ -4983,28 +5048,44 @@ const STList: React.FC<STListProps> = ({
                   style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
                   {(() => {
-                    // 所属板块：来自东财「所属板块」（与详情页 BanKuai 同一接口），只取前 3 个展示
+                    // 有判定数据时按同一套 110 行业口径展示：行业名放最前并带「启动 / 观察分」标记，
+                    // 东财 slist 的前 3 个板块退为次要参考（不再决定列头聚合与过滤）。
+                    const industry = industryBoardScope ? stockIndustryMap[rowCode] : '';
+                    const industryStage = industry ? boardStageMap[industry] : undefined;
                     const bks = stockBankuaisMap[rowCode];
-                    if (bks === undefined) {
-                      // 还没取回来：用省略号区分「取数中」与「确实没有板块」
+                    if (!industry && bks === undefined) {
                       return (
-                        <span style={{ color: 'var(--hint-color)' }} title="所属板块取数中">
+                        <span style={{ color: 'var(--hint-color)' }} title="所属行业取数中">
                           …
                         </span>
                       );
                     }
-                    if (!bks.length) {
+                    if (!industry && !bks?.length) {
                       return (
                         <span style={{ color: 'var(--reverse-text-color)' }} title="未取到所属板块">
                           --
                         </span>
                       );
                     }
-                    const names = bks.map((b) => b.name).slice(0, BOARD_COLUMN_LIMIT);
-                    // 行业板块名后追加「启动」复盘标签 + 观察分（概念/风格板块没有判定结果）
+                    const names = (bks || []).map((b) => b.name).slice(0, BOARD_COLUMN_LIMIT);
+                    if (industry) {
+                      return (
+                        <span
+                          title={`所属行业：${industry}；东财所属板块：${names.join('、') || '—'}`}
+                          style={{ whiteSpace: 'nowrap' }}
+                        >
+                          <span style={{ color: 'var(--main-text-color)' }}>{industry}</span>
+                          {industryStage ? <BoardStageMark stage={industryStage} compact /> : null}
+                          {names.length ? (
+                            <span style={{ color: 'var(--hint-color)' }}> · {names.join('、')}</span>
+                          ) : null}
+                        </span>
+                      );
+                    }
+                    // 判定数据未就绪：沿用东财 slist 前 3 个板块，名称能匹配上行业时也打标记
                     return (
                       <span title={`所属板块：${names.join('、')}`} style={{ whiteSpace: 'nowrap' }}>
-                        {bks.slice(0, BOARD_COLUMN_LIMIT).map((b, idx) => (
+                        {(bks || []).slice(0, BOARD_COLUMN_LIMIT).map((b, idx) => (
                           <React.Fragment key={`${b.code}-${idx}`}>
                             {idx > 0 ? '、' : null}
                             {b.name}

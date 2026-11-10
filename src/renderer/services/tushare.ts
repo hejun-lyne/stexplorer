@@ -2059,6 +2059,13 @@ export interface BoardStageResult {
   start_count: number;
   quality_threshold: number | null;
   boards: BoardStageItem[];
+  /**
+   * 个股 6 位代码 -> 行业（stock_basic.industry）
+   *
+   * 与判定内部用的 `code2ind` 完全同源，列表按它聚合「所属板块」列，
+   * 才能保证判定为启动的行业一定能出现在列头与行里（东财 slist 前 3 个板块会漏）。
+   */
+  industry_by_code: Record<string, string>;
   /** 降级说明（某类数据缺失时对应维度按中性处理） */
   degraded: string[];
   error?: string;
@@ -2080,6 +2087,7 @@ export async function GetBoardStageFromTushare(date: string, poolCodes?: string[
     start_count: 0,
     quality_threshold: null,
     boards: [],
+    industry_by_code: {},
     degraded: [],
   };
   try {
