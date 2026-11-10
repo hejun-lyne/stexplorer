@@ -45,6 +45,9 @@ VERSION = "1.0"
 ENGINE = "sector_engine"
 NAN = float("nan")
 
+# 《板块内角色绑定-实现规格》第 3 节：三个角色固定互斥，只标注「该关注哪三只股票」
+ROLE_LABEL = {"leader": "龙头", "middle": "中军", "laggard": "补涨"}
+
 # 离线补拉数据目录（只读）。可由配置 data_dir 或环境变量 SECTOR_ENGINE_DATA_DIR 覆盖。
 _OFFLINE_DATA_CANDIDATES = [
     "/Users/lihejun/WorkBuddy/2026-11-06-15-17-36",
@@ -178,7 +181,13 @@ class SectorEngine:
         "cross_section_scope": "all",
         "warmup": 20,
         "filter_st": True,
-        "roles_for_all": False,
+        # 角色绑定（第 3 节）：默认对全部 110 行业逐日产出，前端才能给任意股票打标签
+        "roles_for_all": True,
+        "role_min_pool": 3,
+        "role_min_members": 5,
+        "role_lookback": 20,
+        "role_min_list_days": 60,
+        "role_min_daily_rows": 3000,
         "experimental_divergence": True,
         "data_dir": None,
         "db_root": None,
@@ -262,17 +271,29 @@ class SectorEngine:
         self.code2ind = {}
         self.names = {}
         self.ind_codes = defaultdict(list)
-        for ts, nm, ind in con.execute("SELECT ts_code,name,industry FROM stock_basic"):
+        # 角色绑定的 members：行业全体成分（不是强势股），按规格排除 ST / 退市 / 非正常上市
+        self.role_base = defaultdict(list)
+        self.list_date = {}
+        for ts, nm, ind, ld, ls in con.execute(
+                "SELECT ts_code,name,industry,list_date,list_status FROM stock_basic"):
             c = str(ts)[:6]
-            self.names[c] = str(nm or "")
+            name = str(nm or "")
+            self.names[c] = name
+            # 统一成 YYYYMMDD，便于与交易日历直接比较上市是否满 60 个交易日
+            self.list_date[c] = str(ld or "").replace("-", "")
             if ind:
-                self.code2ind[c] = str(ind)
-                self.ind_codes[str(ind)].append(c)
+                industry = str(ind)
+                self.code2ind[c] = industry
+                self.ind_codes[industry].append(c)
+                # 判定的「行业全体收益」仍用全量成分，角色候选才做过滤，两者刻意分开
+                if str(ls or "L") == "L" and "ST" not in name.upper() and "退" not in name:
+                    self.role_base[industry].append(c)
         con.close()
         self.industries = sorted(self.ind_codes)
         if len(self.industries) != 110:
             raise RuntimeError("行业数应为 110，实际为 %d" % len(self.industries))
         self.ind_codes = dict(self.ind_codes)
+        self.role_base = dict(self.role_base)
 
     # ------------------------------------------------------------ 4.1 全市场日线
     def _load_daily(self):
@@ -286,6 +307,8 @@ class SectorEngine:
         # 只保留需要的字段：日收益（小数）+ 复权净值（角色补涨 gain20 用）
         self.px = {}
         self.nav = {}
+        # 每日全市场日线行数：少于阈值的那天视为应用正在增量写入，角色不产出
+        self.daily_rows = {}
         for key in keys:
             d = key.rsplit("_", 1)[-1]
             ti = self.ti_of.get(d)
@@ -294,7 +317,9 @@ class SectorEngine:
             row = con.execute("SELECT payload FROM api_cache WHERE cache_key=?", (key,)).fetchone()
             if not row:
                 continue
-            for r in json.loads(row[0]):
+            rows = json.loads(row[0])
+            self.daily_rows[d] = len(rows)
+            for r in rows:
                 c = str(r.get("ts_code") or "")[:6]
                 if not c:
                     continue
@@ -664,8 +689,13 @@ class SectorEngine:
     def _finalize_stages(self):
         """把每个交易日的结果整理成第 5 节输出 schema。"""
         cfg = self.config
+        # 行业 -> 上一交易日三角色代码：只用于「换人」标记，不参与任何判定
+        prev_role_codes = {}
         for ti, date in enumerate(self.dates):
             day = self.panel[date]
+            # 上市满 60 个交易日的成分才进 members（严格 point-in-time，只用 T 及之前的日历）
+            list_cut = self.dates[max(0, ti - int(cfg["role_min_list_days"]))]
+            listed = {c for c, ld in self.list_date.items() if ld and ld <= list_cut}
             records = []
             stage_counts = {"冷": 0, "启动": 0, "延续": 0, "退潮": 0}
             for ind in self.industries:
@@ -705,9 +735,29 @@ class SectorEngine:
                     "first_divergence": f["first_divergence"],
                     "first_divergence_experimental": bool(cfg["experimental_divergence"]),
                     "roles": None,
+                    "role_flags": None,
                 }
+                # 角色候选池是「行业全体成分」，与主判定用的 ind_codes 分开（已过滤 ST / 新股）
+                members = [c for c in self.role_base.get(ind, []) if c in listed]
+                roles = None
+                role_flags = {"n_members": len(members), "n_strong": 0,
+                              "degraded": False, "changed_vs_prev": {}}
                 if cfg["roles_for_all"] or rec["start"] or rec["stage"] != "冷":
-                    rec["roles"] = self._roles(date, ti, ind)
+                    roles, role_flags = self._roles(date, ti, ind, members)
+                    if role_flags.get("skipped"):
+                        roles = None
+                # 「换人」只与上一交易日对比，绝不使用 T 之后的数据
+                changed = {}
+                for r in ROLE_LABEL:
+                    code = ((roles or {}).get(r) or {}).get("code")
+                    prev = prev_role_codes.get(ind, {}).get(r)
+                    changed[r] = bool(code) and prev is not None and prev != code
+                role_flags["changed_vs_prev"] = changed
+                prev_role_codes[ind] = {
+                    r: ((roles or {}).get(r) or {}).get("code") for r in ROLE_LABEL
+                }
+                rec["roles"] = roles
+                rec["role_flags"] = role_flags
                 records.append(rec)
 
             starts = [r["industry"] for r in records if r["start"]]
@@ -776,36 +826,66 @@ class SectorEngine:
         return "板块效应(数量分位+延续)+低位+封板质量达标"
 
     # ------------------------------------------------------------ 第 7 节 角色绑定
-    def _roles(self, date, ti, ind):
-        """龙头 / 中军 / 补涨强制互斥；中军按行业全体总市值，补涨按近 20 日涨幅最低。"""
-        snap = self.snap.get(date, {})
-        pool = [c for c, s in snap.items() if s["ind"] == ind]
-        leader = None
-        if pool:
-            leader = max(pool, key=lambda c: (
-                snap[c]["limitTimes"] or 0, snap[c]["zdf"], snap[c]["cje"]))
+    def _roles(self, date, ti, ind, members):
+        """按《板块内角色绑定-实现规格》第 3 节绑定三角色，返回 (roles, flags)。
 
-        caps = self._cap_at(str(date).replace("-", ""))
-        all_codes = self.ind_codes.get(ind, [])
-        middle = None
-        cap_codes = [c for c in all_codes if c in caps and c != leader]
-        if cap_codes:
-            middle = max(cap_codes, key=lambda c: _to_float(caps[c].get("total_mv")))
+        龙头候选 = 当日强势股池（连板数→涨幅→成交额）；
+        中军 / 补涨候选 = 行业全体成分（中军按总市值最大，补涨按当日上涨且近 20 日
+        前复权涨幅最低）；三角色强制互斥，候选为空时只留 null，不用其他角色填充。
+        """
+        cfg = self.config
+        day_key = str(date).replace("-", "")
+        snap = self.snap.get(date, {})
+        flags = {"n_members": len(members), "n_strong": 0,
+                 "degraded": False, "mv_source": None, "st_filtered": True}
+        # 规格 5.10：应用正在增量写日线时，该日数据不完整，不产出角色
+        if self.daily_rows.get(date, 0) < int(cfg["role_min_daily_rows"]):
+            return None, dict(flags, skipped="当日日线不完整")
+        # 规格 5.5：停牌 / 当日无行情从 pool 与补涨候选剔除
+        pool = [c for c, s in snap.items()
+                if s["ind"] == ind and c in self.px and not math.isnan(self.px[c][ti])]
+        flags["n_strong"] = len(pool)
+        # 规格 3.1：不满足门槛就整条不产出，不降级成 2 只硬凑
+        if len(pool) < int(cfg["role_min_pool"]) or len(members) < int(cfg["role_min_members"]):
+            return None, dict(flags, skipped="强势股或行业成分不足")
+
+        caps = self._cap_at(day_key)
+        cap_key = max((d for d in self.cap_dates if d <= day_key), default="")
+        flags["mv_source"] = ("market_cap_snapshots|%s" % cap_key) if cap_key else "缺失"
+
+        leader = max(pool, key=lambda c: (
+            snap[c]["limitTimes"] or 0, snap[c]["zdf"], snap[c]["cje"]))
+        # 中军只能用总市值，不能以成交额 / 流通市值顶替；市值缺失则置 null 并标降级
+        mid_cand = [c for c in members
+                    if c != leader and _to_float(caps.get(c, {}).get("total_mv")) > 0]
+        middle = max(mid_cand, key=lambda c: _to_float(caps[c].get("total_mv"))) if mid_cand else None
 
         laggard = None
         gain20 = None
-        if ti >= 20:
+        lookback = int(cfg["role_lookback"])
+        if ti >= lookback:
             candidates = []
-            for c in all_codes:
+            for c in members:
                 if c in (leader, middle) or c not in self.px:
                     continue
                 pct = self.px[c][ti]
                 if math.isnan(pct) or pct <= 0:
                     continue
-                g = (self.nav[c][ti] / self.nav[c][ti - 20] - 1.0) * 100.0
-                candidates.append((g, c))
+                # 近 20 个交易日序列不足的股票直接剔除，避免把新股当成「位置最低」
+                if math.isnan(self.px[c][ti - lookback]):
+                    continue
+                base = self.nav[c][ti - lookback]
+                if not base:
+                    continue
+                candidates.append(((self.nav[c][ti] / base - 1.0) * 100.0, c))
             if candidates:
                 gain20, laggard = min(candidates)
+
+        picked = [c for c in (leader, middle, laggard) if c]
+        if len(picked) != len(set(picked)):
+            _log("[角色绑定] %s %s 三角色出现重复代码，丢弃当日该行业记录" % (date, ind))
+            return None, dict(flags, skipped="角色互斥校验失败")
+        flags["degraded"] = middle is None or laggard is None
 
         def pack(code, extra):
             if not code:
@@ -814,25 +894,70 @@ class SectorEngine:
             d.update(extra)
             return d
 
-        return {
+        roles = {
             "leader": pack(leader, {
-                "limit_times": snap[leader]["limitTimes"] if leader else 0,
-                "zdf": snap[leader]["zdf"] if leader else 0.0,
-                "cje": snap[leader]["cje"] if leader else 0.0,
-                "reason": "当日强势股成员中连板数→涨幅→成交额最高",
+                "limit_times": snap[leader]["limitTimes"],
+                "zdf": snap[leader]["zdf"],
+                "cje": snap[leader]["cje"],
+                "reason": "当日强势股中连板数→涨幅→成交额最高（情绪温度计，不是买入标的）",
             }),
             "middle": pack(middle, {
                 "total_mv": _to_float(caps.get(middle, {}).get("total_mv")) if middle else None,
-                "reason": "行业全体成分中总市值最大（取不晚于 T 的最近快照）",
+                "reason": "行业全体成分中总市值最大（按市值而非成交额，取不晚于 T 的最近快照）",
             }),
             "laggard": pack(laggard, {
                 "gain20": round(gain20, 4) if gain20 is not None else None,
                 "zdf": round(self.px[laggard][ti] * 100.0, 4) if laggard else None,
-                "reason": "行业全体中当日上涨且近 20 日涨幅最低",
+                "reason": "行业全体中当日上涨且近 20 日前复权涨幅最低（扩散到末端的后段信号）",
             }),
         }
+        return roles, flags
 
     # ------------------------------------------------------------ 对外接口
+    def _attach_roles(self, result):
+        """按股票 6 位代码反查当日角色，供前端给每只股票打标签。
+
+        只在结果被请求时构建，不把 507 天的反查表常驻内存；渲染层不重算任何角色。
+        """
+        by_code = {}
+        n_ind = 0
+        n_degraded = 0
+        for rec in result.get("records") or []:
+            roles = rec.get("roles")
+            if not roles:
+                continue
+            n_ind += 1
+            flags = rec.get("role_flags") or {}
+            if flags.get("degraded"):
+                n_degraded += 1
+            changed = flags.get("changed_vs_prev") or {}
+            for key, label in ROLE_LABEL.items():
+                item = roles.get(key)
+                if not item or not item.get("code"):
+                    continue
+                by_code[item["code"]] = {
+                    "role": label,
+                    "industry": rec["industry"],
+                    "trade_date": rec["trade_date"],
+                    "name": item.get("name", ""),
+                    "reason": item.get("reason", ""),
+                    "changed": bool(changed.get(key)),
+                    "degraded": bool(flags.get("degraded")),
+                    "n_members": flags.get("n_members", 0),
+                    "n_strong": flags.get("n_strong", 0),
+                    "limit_times": item.get("limit_times"),
+                    "total_mv": item.get("total_mv"),
+                    "gain20": item.get("gain20"),
+                    "zdf": item.get("zdf"),
+                }
+        result["role_by_code"] = by_code
+        result["role_summary"] = {
+            "n_industries": n_ind,
+            "n_stocks": len(by_code),
+            "n_degraded": n_degraded,
+        }
+        return result
+
     def evaluate(self, trade_date=None):
         """单日判定，返回全部 110 行业的可序列化 dict。"""
         d = str(trade_date or (_as_of_date or self.dates[-1])).replace("-", "")[:8]
@@ -840,9 +965,13 @@ class SectorEngine:
             d = _as_of_date
         if d not in self.ti_of:
             d = max((x for x in self.dates if x <= d), default=self.dates[0])
-        return self.results.get(d, {"engine": ENGINE, "version": VERSION,
-                                   "trade_date": self._dashed(d), "records": [],
-                                   "coverage": {"warnings": ["该交易日不在面板内"]}})
+        base = self.results.get(d)
+        if base is None:
+            base = {"engine": ENGINE, "version": VERSION,
+                    "trade_date": self._dashed(d), "records": [],
+                    "industry_by_code": {},
+                    "coverage": {"warnings": ["该交易日不在面板内"]}}
+        return self._attach_roles(dict(base))
 
     def evaluate_range(self, start, end):
         """区间回放：只输出该区间内的交易日结果，并受训练日截止约束。"""
@@ -850,7 +979,8 @@ class SectorEngine:
         e = str(end).replace("-", "")[:8]
         if _as_of_date:
             e = min(e, _as_of_date)
-        return [self.results[d] for d in self.dates if s <= d <= e]
+        return [self._attach_roles(dict(self.results[d]))
+                for d in self.dates if s <= d <= e]
 
     # ------------------------------------------------------------ 离线自检用只读视图
     def facts_input(self):

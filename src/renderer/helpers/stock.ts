@@ -4302,6 +4302,16 @@ export interface StrongPoolStock {
   reason: 'new_high_60' | 'multi_limit' | '';
 }
 
+/** 带独立观察名单标记的 QSList 行 */
+export interface WatchlistQSItem extends Stock.QSItem {
+  watchlist?: TushareAPI.StrongWatchlistMeta;
+}
+
+/** 带独立观察名单标记的强势股池行 */
+export interface WatchlistStrongPoolStock extends StrongPoolStock {
+  watchlist?: TushareAPI.StrongWatchlistMeta;
+}
+
 /**
  * 加载指定交易日的强势股池（60日新高 或 近期多次涨停）
  *
@@ -4383,31 +4393,44 @@ export async function GetWindVaneOfDate(date: string): Promise<WindVaneResult | 
 }
 
 export interface StrongPoolWithVane {
-  stocks: StrongPoolStock[];
+  stocks: WatchlistStrongPoolStock[];
   windVane: WindVaneResult | null;
   /** 实际命中的交易日（未指定日期时会往更早的交易日回退） */
   date: string;
+  /** 本次展示采用哪一天的合并观察名单 */
+  watchlist?: TushareAPI.StrongWatchlistDayResult;
 }
 
 /**
- * 强势股池 + 当日情绪风向标（STList「强势股」虚拟板块用）
+ * 强势股池 + 当日情绪风向标 + 合并观察名单（STList「强势股」虚拟板块用）
  *
  * date 为空时与 LoadStrongPoolStocks 一致：按「训练日 / 今天」往前回退，
  * 风向标也按同样的回退顺序找，找不到（没重建过）就返回 null。
+ * 观察名单由后端独立派生表给出，和当日强势股按代码去重后一起展示。
  */
 export async function LoadStrongPoolStocksWithVane(date?: string): Promise<StrongPoolWithVane> {
   const explicit = String(date || '').replace(/-/g, '');
   const stocks = await LoadStrongPoolStocks(explicit || undefined);
   const start = explicit || TrainFilter.GetTrainToDate()?.replace(/-/g, '') || dayjs().format('YYYYMMDD');
+  let watchlist: TushareAPI.StrongWatchlistDayResult | undefined;
+  try {
+    const watchRes = await TushareAPI.GetStrongWatchlistFromTushare([start]);
+    watchlist =
+      watchRes.results?.[start] ||
+      Object.values(watchRes.results || {}).sort((a, b) => b.trade_date.localeCompare(a.trade_date))[0];
+  } catch (error) {
+    console.error('[强势股池] 观察名单合并失败', error);
+  }
+  const merged = MergeStrongPoolStocksWithWatchlist(stocks, watchlist);
   for (let i = 0; i < 7; i += 1) {
     const d = moment(start, 'YYYYMMDD').subtract(i, 'day').format('YYYYMMDD');
     // eslint-disable-next-line no-await-in-loop
     const windVane = await GetWindVaneOfDate(d);
     if (windVane) {
-      return { stocks, windVane, date: d };
+      return { stocks: merged, windVane, date: d, watchlist };
     }
   }
-  return { stocks, windVane: null, date: start };
+  return { stocks: merged, windVane: null, date: start, watchlist };
 }
 
 /** 强势股池原始行（东财 QSItem / Tushare 重建行）→ 统一结构：价格还原、市值统一成亿元 */
@@ -4439,6 +4462,110 @@ function NormalizeStrongPoolStock(s: any): StrongPoolStock {
               ? 'new_high_60'
               : '',
   };
+}
+
+/** 从强势股池行、QSList 行或观察名单记录里统一取 6 位代码 */
+function watchCodeOf(s: any): string {
+  const digits = String(s?.code || s?.secid || '').replace(/\D/g, '');
+  return digits.length >= 6 ? digits.slice(-6) : '';
+}
+
+/** 观察名单记录 → QSList 行；后端已把价格与流通市值归一化 */
+function watchlistToQSItem(record: TushareAPI.StrongWatchlistRecord): WatchlistQSItem {
+  const secid = String(record.secid || `${record.market ?? 0}.${record.code || ''}`);
+  const meta = record.watchlist;
+  return {
+    code: String(record.code || ''),
+    name: String(record.name || ''),
+    market: Number(secid.split('.')[0]) || 0,
+    secid,
+    firstAppear: String(meta?.first_seen_date || record.snapshot_date || ''),
+    strongType: String(record.strongType || 'watchlist'),
+    reason: Number(record.reason) || 0,
+    zx: Number(record.zx) || 0,
+    zdf: Number(record.zdf) || 0,
+    hsl: Number(record.hsl) || 0,
+    lb: Number(record.lb) || 0,
+    nh: false,
+    ltsz: Number(record.ltsz) || 0,
+    hybk: String(record.hybk || ''),
+    zttj: { ct: 0, days: 0 },
+    watchlist: meta,
+  } as WatchlistQSItem;
+}
+
+/** 观察名单记录 → STList「强势股」虚拟板块行；价格与流通市值已是统一口径 */
+function watchlistToStrongPoolStock(record: TushareAPI.StrongWatchlistRecord): WatchlistStrongPoolStock {
+  const bit = Number(record.reason) || 0;
+  return {
+    code: String(record.code || ''),
+    name: String(record.name || ''),
+    secid: String(record.secid || ''),
+    zx: Number(record.zx) || 0,
+    zdf: Number(record.zdf) || 0,
+    hsl: Number(record.hsl) || 0,
+    ltsz: Number(record.ltsz) || 0,
+    hybk: String(record.hybk || ''),
+    reason: bit === 1 ? 'new_high_60' : bit === 2 ? 'multi_limit' : '',
+    watchlist: record.watchlist,
+  };
+}
+
+/** QSList：把「未移出观察成员」与当日强势股按代码合并去重 */
+export function MergeQSStocksWithWatchlist(
+  stocks: Stock.QSItem[],
+  result?: TushareAPI.StrongWatchlistDayResult | null
+): WatchlistQSItem[] {
+  const byCode = new Map<string, WatchlistQSItem>();
+  stocks.forEach((s) => {
+    const code = watchCodeOf(s);
+    if (code) byCode.set(code, s as WatchlistQSItem);
+  });
+  (result?.records || []).forEach((record) => {
+    const code = watchCodeOf(record);
+    if (!code) return;
+    const existing = byCode.get(code);
+    if (existing) {
+      if (record.watchlist) existing.watchlist = record.watchlist;
+      if (!existing.firstAppear && record.watchlist?.first_seen_date) {
+        existing.firstAppear = record.watchlist.first_seen_date;
+      }
+    } else {
+      byCode.set(code, watchlistToQSItem(record));
+    }
+  });
+  return Array.from(byCode.values()).sort((a, b) => {
+    const aw = a.watchlist;
+    const bw = b.watchlist;
+    return Number(!!bw?.is_today) - Number(!!aw?.is_today) || (bw?.weight || 0) - (aw?.weight || 0);
+  });
+}
+
+/** STList「强势股」虚拟板块：把观察名单与当日强势股按代码合并去重 */
+export function MergeStrongPoolStocksWithWatchlist(
+  stocks: StrongPoolStock[],
+  result?: TushareAPI.StrongWatchlistDayResult | null
+): WatchlistStrongPoolStock[] {
+  const byCode = new Map<string, WatchlistStrongPoolStock>();
+  stocks.forEach((s) => {
+    const code = watchCodeOf(s);
+    if (code) byCode.set(code, s as WatchlistStrongPoolStock);
+  });
+  (result?.records || []).forEach((record) => {
+    const code = watchCodeOf(record);
+    if (!code) return;
+    const existing = byCode.get(code);
+    if (existing) {
+      if (record.watchlist) existing.watchlist = record.watchlist;
+    } else {
+      byCode.set(code, watchlistToStrongPoolStock(record));
+    }
+  });
+  return Array.from(byCode.values()).sort((a, b) => {
+    const aw = a.watchlist;
+    const bw = b.watchlist;
+    return Number(!!bw?.is_today) - Number(!!aw?.is_today) || (bw?.weight || 0) - (aw?.weight || 0);
+  });
 }
 
 /** 单日重建结果（供「强势股票」页批量重建历史时逐日展示进度） */

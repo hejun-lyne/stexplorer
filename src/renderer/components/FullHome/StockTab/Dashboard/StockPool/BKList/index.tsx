@@ -37,6 +37,13 @@ import {
 } from '@/helpers/klineShape';
 import { isThemeBoard } from '@/helpers/boardFilter';
 
+/**
+ * 短线评分界面开关：与 STList 保持一致，评分专用控件先隐藏、实现全部保留，
+ * 后续要恢复只改这一个开关即可。保留「当日形态」与板块结果列表本身。
+ * 显式标注 boolean，避免 TS 把字面量折叠后把后面的分支判为不可达。
+ */
+const SHOW_SHORT_SCORE_UI: boolean = false;
+
 export interface BKListProps {
   type: BKType;
   onBankuaisUpdate: (t: BKType, bks: Stock.BanKuaiItem[]) => void;
@@ -106,7 +113,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [scoreSeries, setScoreSeries] = useState<BoardScoreSeries>({});
   /** 历史列补算进度（null = 无补算） */
   const [historyProgress, setHistoryProgress] = useState<{ done: number; total: number } | null>(null);
-  // ========== 当日评分（只补当日K线形态 + RSI，与 STList 一致） ==========
+  // ========== 当日形态（只补当日K线形态 + RSI，与 STList 一致） ==========
   const [todayScoreLoading, setTodayScoreLoading] = useState(false);
   const [todayScoreProgress, setTodayScoreProgress] = useState(0);
   const isTodayScorePausedRef = React.useRef(false);
@@ -346,7 +353,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
    * 「K线形态」表头勾选过滤（仅板块短线评分列表）
    *
    * 决定列表显示哪些行，分页也用它，保证页码与可见行数一致。
-   * 勾选生效时评分候选池同样收缩（见 scorePoolCodes）：「短线评分 / 当日评分」只处理可见的板块。
+   * 勾选生效时评分候选池同样收缩（见 scorePoolCodes）：「交易模式 / 当日形态」只处理可见的板块。
    */
   const displayList = useMemo(() => {
     if (displayMode !== 'boardScore' || !scoreKlineShapes.length) {
@@ -359,7 +366,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   /**
    * 评分候选池（板块）
    *
-   * 表头勾选的K线形态过滤生效时，评分池跟着列表收缩：「短线评分 / 当日评分」只对当前可见的板块计算。
+   * 表头勾选的K线形态过滤生效时，评分池跟着列表收缩：「交易模式 / 当日形态」只对当前可见的板块计算。
    * 过滤未生效时返回 null，表示沿用原来的全量板块池。
    */
   const scorePoolCodes = useMemo<Set<string> | null>(() => {
@@ -695,9 +702,9 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   }, [scoreLoading, bankuais, kLineApiSourceSetting, scoreDays, boardScoreHistoryDays, scorePoolCodes]);
 
   /**
-   * 板块「当日评分」
+   * 板块「当日形态」
    *
-   * 与 STList 的「当日评分」一致：只更新「只依赖K线」的部分 —— 当日K线形态（含阴阳 / 放量）与 RSI。
+   * 与 STList 的「当日形态」一致：只更新「只依赖K线」的部分 —— 当日K线形态（含阴阳 / 放量）与 RSI。
    * 板块日K盘中还没有当日那根时，用当日分时合成一根日K再算；当日不给综合分（列表评分列显示「待评分」），
    * 也不写评分序列缓存。再次点击视为暂停：当前板块算完后停止，已更新的结果保留。
    */
@@ -779,9 +786,9 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           return next;
         });
       }
-      console.log(`[板块当日评分] 完成：更新 ${res.filled} 个板块，未取到 ${res.skipped} 个`);
+      console.log(`[板块当日形态] 完成：更新 ${res.filled} 个板块，未取到 ${res.skipped} 个`);
     } catch (e) {
-      console.error('板块当日评分失败:', e);
+      console.error('板块当日形态失败:', e);
     } finally {
       setTodayScoreLoading(false);
     }
@@ -945,26 +952,26 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                 onClick={handleTodayBoardScore}
                 loading={todayScoreLoading}
                 style={{ marginLeft: 4 }}
-                title="处理当前过滤结果的全部板块（不分页）：只更新当日K线形态（含阴阳/放量）与 RSI —— 当日日K还没生成时用当日分时合成一根日K。当日不计算综合分，评分列显示「待评分」；K线形态表头勾选同样参与候选板块（只处理列表可见的板块）"
+                title="当日形态识别：处理当前过滤结果的全部板块（不分页），只更新当日K线形态（含阴阳/放量）与 RSI —— 当日日K还没生成时用当日分时合成一根日K。不计算综合评分，也不产出买点；K线形态表头勾选同样参与候选板块"
               >
-                {todayScoreLoading ? `当日评分中 ${todayScoreProgress}%` : `当日评分(${displayList.length})`}
+                {todayScoreLoading ? `当日形态中 ${todayScoreProgress}%` : `当日形态(${displayList.length})`}
               </Button>
               <Button
                 size="small"
                 onClick={handleBoardScore}
                 loading={scoreLoading && scoreProgress === 0}
                 style={{ marginLeft: 4 }}
-                title={`对当前列表的板块做短线评分（K线形态表头勾选生效时只评可见的板块）：板块趋势位置 + 主力资金 + 量能活跃度 + RSI，并补算近 ${boardScoreHistoryDays} 个交易日的历史评分（再次点击可暂停，已出分的保留）`}
+                title="进入交易模式：按当前列表加载板块结果，用于观察K线形态、RSI、量能与资金（K线形态表头勾选生效时只处理可见的板块；再次点击可暂停，已加载的保留）"
               >
                 {scoreLoading
-                  ? `评分中 ${scoreProgress}%`
+                  ? `加载中 ${scoreProgress}%`
                   : scoreRemainingRef.current.length
-                  ? '继续评分'
+                  ? '继续加载'
                   : displayMode === 'boardScore'
-                  ? '重新评分'
-                  : '短线评分'}
+                  ? '重新加载'
+                  : '交易模式'}
               </Button>
-              {ontrain && (
+              {SHOW_SHORT_SCORE_UI && ontrain && (
                 <Button
                   size="small"
                   onClick={handlePrecomputeBoardScores}
@@ -977,7 +984,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               )}
             </>
           )}
-          {displayMode === 'boardScore' && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'boardScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <span>最低分</span>
               <InputNumber
@@ -994,7 +1001,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               />
             </span>
           )}
-          {displayMode === 'boardScore' && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'boardScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <Checkbox
                 checked={scoreFilterEnabled}
@@ -1045,7 +1052,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               <span>分</span>
             </span>
           )}
-          {displayMode === 'boardScore' && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'boardScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <Checkbox
                 checked={scoreRsiFilterEnabled}
@@ -1070,12 +1077,12 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               <span>分</span>
             </span>
           )}
-          {displayMode === 'boardScore' && historyProgress && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'boardScore' && historyProgress && (
             <span style={{ marginLeft: 8, fontSize: 12, color: '#faad14' }}>
               历史补算 {historyProgress.done}/{historyProgress.total}
             </span>
           )}
-          {(precomputing || precomputeMessage) && (
+          {SHOW_SHORT_SCORE_UI && (precomputing || precomputeMessage) && (
             <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--reverse-text-color)' }}>{precomputeMessage}</span>
           )}
           {displayMode !== 'boards' && (
@@ -1167,7 +1174,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       ) : (
         <Row className={styles.header}>
           <Col span={2}>板块名称</Col>
-          <Col span={1} title="RSI 仅计算与展示，不计入板块综合分（短线评分偏选板块，不用于择时）">
+          <Col span={1} title="RSI 仅计算与展示，不计入板块综合分（用于形态识别，不用于择时）">
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
@@ -1179,7 +1186,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             RSI形态识别
           </Col>
           <Col span={2} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span className={styles.klineShapeHeader} title="最新交易日（含「当日评分」用分时补出的当日K线）的单根K线形态（复用技术形态识别）。点漏斗可勾选形态过滤（Excel 式，影响列表显示，并缩小「短线评分 / 当日评分」的候选板块）；排序：先阳线后阴线，同阴阳内按形态优先级，再按（下影-上影）从小到大，最后按K线实体大小">
+            <span className={styles.klineShapeHeader} title="最新交易日（含「当日形态」用分时补出的当日K线）的单根K线形态（复用技术形态识别）。点漏斗可勾选形态过滤（Excel 式，影响列表显示，并缩小「交易模式 / 当日形态」的候选板块）；排序：先阳线后阴线，同阴阳内按形态优先级，再按（下影-上影）从小到大，最后按K线实体大小">
               <span className={styles.klineShapeHeaderText}>K线形态</span>
               <Dropdown
                 trigger={['click']}
@@ -1232,7 +1239,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                   className={classNames(styles.filterbtn, { [styles.filterbtnActive]: scoreKlineShapes.length > 0 })}
                   title={
                     scoreKlineShapes.length
-                      ? `已按 ${scoreKlineShapes.length} 种K线形态过滤（点击修改）；同时缩小「短线评分 / 当日评分」的候选板块`
+                      ? `已按 ${scoreKlineShapes.length} 种K线形态过滤（点击修改）；同时缩小「交易模式 / 当日形态」的候选板块`
                       : '按K线形态勾选过滤（Excel 式多选，不区分阳线/阴线）；勾选后评分只处理可见的板块'
                   }
                 />
@@ -1254,7 +1261,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               />
             </span>
           </Col>
-          <Col span={1} title="最新交易日（含当日评分补出的当日K线）是否放量：当日成交量 / 前 5 日均量 ≥ 1.5 倍">
+          <Col span={1} title="最新交易日（含当日形态补出的当日K线）是否放量：当日成交量 / 前 5 日均量 ≥ 1.5 倍">
             放量
             <Button size="small" type="text" icon={sortTypes.volumeExpanded == 1 ? <CaretUpOutlined /> : sortTypes.volumeExpanded == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('volumeExpanded')} />
           </Col>
@@ -1279,7 +1286,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               span={1}
               key={d}
               style={{ fontSize: 11, textAlign: 'center', padding: 0 }}
-              title={`${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)} 板块短线评分`}
+              title={`${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)} 板块历史数据`}
             >
               {d.substring(4, 6)}-{d.substring(6, 8)}
             </Col>

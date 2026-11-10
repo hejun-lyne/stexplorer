@@ -6,11 +6,15 @@ import * as Helpers from '@/helpers';
 import * as Services from '@/services';
 import { Stock } from '@/types/stock';
 import type { WindVaneResult } from '@/helpers/stock';
+import type { BoardStageItem, StockRoleBinding, StrongWatchlistMeta } from '@/services/tushare';
+import * as TrainFilter from '@/utils/trainFilter';
 import moment from 'moment';
 import classNames from 'classnames';
-import { SlidersOutlined, UnorderedListOutlined } from '@ant-design/icons';
+import { SlidersOutlined, SyncOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import CheckableTag from 'antd/lib/tag/CheckableTag';
 import STMonitor from '../STMonitor';
+import BoardStageMark from '../BoardStageMark';
+import StockRoleTag from '../StockRoleTag';
 
 export interface QSListProps {
   industries: Stock.BanKuaiItem[];
@@ -18,11 +22,31 @@ export interface QSListProps {
   active: boolean;
 }
 
+/** 板块标签排序用：四态阶段越活跃越靠前，与启动复盘标签叠加生效 */
+const STAGE_RANK: Record<string, number> = { 冷: 0, 退潮: 1, 延续: 2, 启动: 3 };
+
+/** 观察名单状态标记：当日强势、最近入池或仍在半衰期权重内的成员 */
+const WatchlistTag: React.FC<{ meta?: StrongWatchlistMeta }> = ({ meta }) => {
+  if (!meta) return null;
+  const label = meta.status === '观察中' ? `观察 ${meta.days_since_seen}日` : meta.status;
+  return (
+    <Tooltip
+      title={`观察名单：${meta.status}；权重 ${meta.weight.toFixed(3)}；Δt=${meta.days_since_seen} 个交易日；最近入池 ${meta.last_seen_date}；首次入池 ${meta.first_seen_date}；半衰期 1.5 日，权重低于 0.05 移出`}
+    >
+      <Tag
+        color={meta.is_today ? 'red' : 'blue'}
+        style={{ marginRight: 4, transform: 'scale(0.85)' }}
+      >
+        {label}
+      </Tag>
+    </Tooltip>
+  );
+};
+
 const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [dates, setDates] = useState([moment(new Date()).format('YYYYMMDD')]);
   const [stocks, setStocks] = useState<Stock.QSItem[]>([]);
   const [filterIndustry, setFilterIndustry] = useState<string>('');
-  const [hybks, setHybks] = useState<Record<string, number>>({});
   const [sBks, setSBks] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [noMore, setNoMore] = useState(false);
@@ -42,6 +66,18 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   const [trailingStopLossPct, setTrailingStopLossPct] = useState(5);
   const [autoBackup, setAutoBackup] = useState(() => Utils.GetStorage('QSList_AUTO_BACKUP', false));
   const [kview, setKView] = useState(false);
+  /**
+   * 板块效应启动判定：与 STList 走同一个只读 sector_engine、同一份 industry_by_code。
+   * 渲染层只消费输出 JSON，不传股票池、不重算阶段或阈值。
+   */
+  const [boardStageMap, setBoardStageMap] = useState<Record<string, BoardStageItem>>({});
+  const [industryByCode, setIndustryByCode] = useState<Record<string, string>>({});
+  /** 个股 6 位代码 -> 当日板块内角色，与 STList 消费同一份后端反查表 */
+  const [roleByCode, setRoleByCode] = useState<Record<string, StockRoleBinding>>({});
+  const [boardStageLoading, setBoardStageLoading] = useState(false);
+  const [boardStageInfo, setBoardStageInfo] = useState('');
+  const [boardStageNonce, setBoardStageNonce] = useState(0);
+  const boardStageRequestedRef = useRef('');
 
   const isPausedRef = useRef(false);
   const currentIndexRef = useRef(0);
@@ -50,6 +86,61 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   useEffect(() => {
     Utils.SetStorage('QSList_AUTO_BACKUP', autoBackup);
   }, [autoBackup]);
+
+  /** 判定基准日：查询区间末日；训练模式下收敛到当前训练日，避免请求未来数据 */
+  const boardStageDay = useMemo(() => {
+    const last = [...dates].sort().pop() || '';
+    const trainTo = (TrainFilter.GetTrainToDate() || '').replace(/-/g, '');
+    return trainTo && last > trainTo ? trainTo : last;
+  }, [dates]);
+
+  /** 取 T 日全部 110 行业的启动复盘标签与四态阶段（只读引擎，与 STList 同源） */
+  useEffect(() => {
+    if (!active || !boardStageDay) {
+      return;
+    }
+    const key = `${boardStageDay}|${boardStageNonce}`;
+    if (boardStageRequestedRef.current === key) {
+      return;
+    }
+    boardStageRequestedRef.current = key;
+    let canceled = false;
+    setBoardStageLoading(true);
+    Services.Tushare.GetBoardStageFromTushare(boardStageDay)
+      .then((res) => {
+        if (canceled) {
+          return;
+        }
+        const map: Record<string, BoardStageItem> = {};
+        (res.records || []).forEach((b) => {
+          if (b?.industry) {
+            map[b.industry] = b;
+          }
+        });
+        setBoardStageMap(map);
+        setIndustryByCode(res.industry_by_code || {});
+        // 角色标签只消费后端按 6 位代码生成的反查表，渲染层不重算角色
+        setRoleByCode(res.role_by_code || {});
+        const stages = res.summary?.stage_counts || {};
+        setBoardStageInfo(
+          res.error
+            ? `板块判定失败：${res.error}`
+            : `${res.trade_date} · ${res.coverage?.industries || 0} 行业 · 板块效应候选 ${res.summary?.n_effect ?? 0} · 启动 ${res.summary?.n_start ?? 0} · 阶段 启动${stages['启动'] ?? 0}/延续${stages['延续'] ?? 0}/退潮${stages['退潮'] ?? 0}` +
+                ` · 角色 ${res.role_summary?.n_industries ?? 0} 行业/${res.role_summary?.n_stocks ?? 0} 股` +
+                (res.coverage?.warnings?.length
+                  ? ` · 提示 ${res.coverage.warnings.length} 项：${res.coverage.warnings[0]}`
+                  : '')
+        );
+      })
+      .finally(() => {
+        if (!canceled) {
+          setBoardStageLoading(false);
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [active, boardStageDay, boardStageNonce]);
 
   // 计算入选天数
   const getTradingDays = useCallback((start: string, end: string) => {
@@ -87,6 +178,53 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     return keys.length ? windVaneMap[keys[keys.length - 1]] : null;
   }, [windVaneMap]);
 
+  /** 判定给出「个股 6 位代码 -> 行业」后，板块标签与勾选统一切到 110 行业口径 */
+  const industryBoardScope = useMemo(() => Object.keys(industryByCode).length > 0, [industryByCode]);
+
+  /** 统一取 6 位股票代码：与 sector_engine 的 ts_code[:6] 同源 */
+  const code6Of = useCallback(
+    (s: Stock.QSItem) =>
+      (String(s.secid || '').split('.')[1] || String(s.code || '')).replace(/\D/g, '').slice(-6),
+    []
+  );
+
+  /** 板块标签 / 勾选使用的键：优先 sector_engine 的 110 行业，未就绪时回退东财 hybk */
+  const boardKeyOf = useCallback(
+    (s: Stock.QSItem) => {
+      const code = code6Of(s);
+      if (industryBoardScope) {
+        return industryByCode[code] || '';
+      }
+      return String(s.hybk || '').trim();
+    },
+    [code6Of, industryByCode, industryBoardScope]
+  );
+
+  // 切到行业口径时清掉旧口径（东财活跃板块）的勾选，避免留下看不见但仍在生效的过滤条件
+  useEffect(() => {
+    if (industryBoardScope) {
+      setSBks([]);
+    }
+  }, [industryBoardScope]);
+
+  /** 板块标签：启动行业置顶，其次按成分数排序；每个标签附带四态阶段与启动复盘标签 */
+  const boardTags = useMemo(() => {
+    const counts: Record<string, number> = {};
+    stocks.forEach((s) => {
+      const key = boardKeyOf(s);
+      if (key) {
+        counts[key] = (counts[key] || 0) + 1;
+      }
+    });
+    const rankOf = (name: string) => {
+      const s = boardStageMap[name];
+      return (s?.start ? 10 : 0) + (STAGE_RANK[s?.stage || ''] || 0);
+    };
+    return Object.keys(counts)
+      .sort((a, b) => rankOf(b) - rankOf(a) || counts[b] - counts[a] || a.localeCompare(b))
+      .map((name) => ({ name, count: counts[name] }));
+  }, [stocks, boardKeyOf, boardStageMap]);
+
   // 核心查询：使用抽离的接口加载数据
   const startQuery = useCallback(async () => {
     if (!dates.length) return;
@@ -95,7 +233,6 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
     setLoading(true);
     setNoMore(false);
     setStocks([]);
-    setHybks({});
     setFirstAppearMap({});
     setTechProgress(0);
     currentIndexRef.current = 0;
@@ -116,8 +253,18 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           console.log(`[QSList] ${date} 加载完成，来源: ${source}, 数量: ${dateStocks.length}`);
         },
       });
+      // 观察名单在 QSList 备份写完之后读取，保证当日强势股也进入派生表。
+      const latestDay = [...dates].sort().pop() || '';
+      const watchRes = await Services.Tushare.GetStrongWatchlistFromTushare(dates);
+      const watchDay =
+        watchRes.results?.[latestDay] ||
+        Object.values(watchRes.results || {}).sort((a, b) => b.trade_date.localeCompare(a.trade_date))[0];
+      const mergedStocks = Helpers.Stock.MergeQSStocksWithWatchlist(
+        result.stocks['merged'] || [],
+        watchDay
+      );
 
-      const filteredStocks = result.stocks['merged']?.filter((s: any) => {
+      const filteredStocks = mergedStocks.filter((s: any) => {
           const code = s.secid?.split('.')[1] || '';
           // 排除科创板 (688/689 开头)
           if (code.startsWith('688') || code.startsWith('689')) return false;
@@ -136,8 +283,14 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
       );
       list.sort((a, b) => (vaneSecids.has(a.secid) ? 0 : 1) - (vaneSecids.has(b.secid) ? 0 : 1));
       setStocks(list);
-      setHybks(result.hybks);
-      setFirstAppearMap(result.firstAppearMap);
+      const nextFirstAppearMap: Record<string, string> = { ...(result.firstAppearMap || {}) };
+      list.forEach((s) => {
+        const watch = (s as Helpers.Stock.WatchlistQSItem).watchlist;
+        if (!nextFirstAppearMap[s.secid] && (watch?.first_seen_date || s.firstAppear)) {
+          nextFirstAppearMap[s.secid] = watch?.first_seen_date || s.firstAppear;
+        }
+      });
+      setFirstAppearMap(nextFirstAppearMap);
       setNoMore(true);
 
       if (result.fromCache.size === result.loadedDates.length) {
@@ -547,29 +700,48 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
           自动备份
         </Checkbox>
       </div>
-      {Object.keys(hybks).length > 1 && (
+      {(boardStageInfo || boardStageLoading) && (
+        <div style={{ padding: '4px 10px 0', fontSize: 11, color: 'var(--hint-color)' }}>
+          {boardStageLoading ? '板块阶段判定中…' : boardStageInfo}
+          <a onClick={() => setBoardStageNonce((n) => n + 1)} style={{ marginLeft: 8 }}>
+            <SyncOutlined spin={boardStageLoading} /> 重算
+          </a>
+          <span style={{ marginLeft: 8 }}>
+            {industryBoardScope
+              ? '板块标签按 110 行业口径聚合（与板块效应判定同源），启动行业置顶'
+              : '判定数据未就绪：暂按东财「活跃板块」聚合'}
+          </span>
+        </div>
+      )}
+      {boardTags.length > 1 && (
         <div className={styles.tagbar}>
-          {Object.keys(hybks)
-            .sort((a, b) => hybks[b] - hybks[a])
-            .map((b) => (
+          {boardTags.map(({ name, count }) => {
+            const stage = boardStageMap[name];
+            return (
               <CheckableTag
                 className="edit-tag"
-                key={b}
-                checked={sBks.indexOf(b) > -1}
-                onChange={(c) => toggleBK(c, b)}
+                key={name}
+                checked={sBks.indexOf(name) > -1}
+                onChange={(c) => toggleBK(c, name)}
                 style={{ marginTop: 5 }}
               >
                 <span>
-                  {b}({hybks[b]})
+                  {name}({count})
+                  {stage ? (
+                    <span onClick={(e) => e.stopPropagation()}>
+                      <BoardStageMark stage={stage} compact />
+                    </span>
+                  ) : null}
                 </span>
               </CheckableTag>
-            ))}
+            );
+          })}
         </div>
       )}
       {kview ? (
         <STMonitor
           details={
-            stocks.filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1)) as Stock.DetailItem[]
+            stocks.filter((s) => (sBks.length == 0 ? true : sBks.indexOf(boardKeyOf(s)) != -1)) as Stock.DetailItem[]
           }
           active={active}
           noMore={noMore}
@@ -585,6 +757,11 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
             <Col span={2}>流通市值</Col>
             <Col span={2}>入选天数</Col>
             <Col span={2}>
+              <Tooltip title="独立派生表按交易日计算 w = 0.5^(Δt/1.5)，权重低于 0.05 的成员不再展示；当日强势股权重为 1.000">
+                观察权重
+              </Tooltip>
+            </Col>
+            <Col span={2}>
               <Checkbox checked={filterMA} onChange={(e) => setFilterMA(e.target.checked)} style={{ color: '#fff' }}>
                 MA
               </Checkbox>
@@ -599,12 +776,12 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                 RSI
               </Checkbox>
             </Col>
-            <Col span={8}>理由</Col>
+            <Col span={6}>理由</Col>
           </Row>
           <div className={classNames(styles.table, styles.qsmoreheader)}>
             {stocks
               .filter((s) => (filterIndustry == '' ? true : filterIndustry.indexOf(s.hybk) != -1))
-              .filter((s) => (sBks.length == 0 ? true : sBks.indexOf(s.hybk) != -1))
+              .filter((s) => (sBks.length == 0 ? true : sBks.indexOf(boardKeyOf(s)) != -1))
               .filter((s) => {
                 if (!filterMA && !filterMACD && !filterRSI) return true;
                 if (filterMA && maResults[s.secid] && !maResults[s.secid].ma) return false;
@@ -616,7 +793,14 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                 <Row key={s.code} className={styles.row}>
                   <Col
                     span={2}
-                    style={{ cursor: 'pointer' }}
+                    style={{
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 2,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                    }}
                     onClick={() => onOpenStock(s.secid, s.name, firstAppearMap[s.secid])}
                   >
                     {vaneBySecid[s.secid] && (
@@ -632,9 +816,22 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                         </Tag>
                       </Tooltip>
                     )}
-                    {s.name}
+                    <WatchlistTag meta={(s as Helpers.Stock.WatchlistQSItem).watchlist} />
+                    <StockRoleTag role={roleByCode[code6Of(s)]} />
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</span>
                   </Col>
-                  <Col span={2}>{s.hybk}</Col>
+                  <Col span={2}>
+                    {(() => {
+                      const key = boardKeyOf(s);
+                      const stage = key ? boardStageMap[key] : undefined;
+                      return (
+                        <Tooltip title={industryBoardScope ? `东财活跃板块：${s.hybk || '--'}` : ''}>
+                          {industryBoardScope ? key || s.hybk : s.hybk}
+                          {stage ? <BoardStageMark stage={stage} compact /> : null}
+                        </Tooltip>
+                      );
+                    })()}
+                  </Col>
                   <Col span={2} className={Utils.GetValueColor(s.zdf).textClass}>
                     {/* 东财池：价格 ×1000、市值单位元；Tushare 重建（带 strongType）：原始价、市值亿元 */}
                     {((s as any).strongType ? s.zx : s.zx / 1000).toFixed(2)}
@@ -646,6 +843,12 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                     {firstAppearMap[s.secid]
                       ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天'
                       : '-'}
+                  </Col>
+                  <Col span={2}>
+                    {(() => {
+                      const watch = (s as Helpers.Stock.WatchlistQSItem).watchlist;
+                      return watch ? watch.weight.toFixed(3) : '--';
+                    })()}
                   </Col>
                   <Col span={2}>
                     {techPending[s.secid]
@@ -701,7 +904,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                         : '✗'
                       : ''}
                   </Col>
-                  <Col span={8}>
+                  <Col span={6}>
                     {(s.reason === 1 || s.strongType === 'new_high_60') ? '60日新高' : (s.reason === 2 || s.strongType === 'limit_up') ? '多次涨停' : '新高且多次涨停'}
                   </Col>
                 </Row>

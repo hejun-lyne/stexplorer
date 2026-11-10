@@ -75,6 +75,7 @@ const TRAIN_AS_OF_PARAM: Record<string, string> = {
   get_strong_stocks: 'date',
   get_strong_pool: 'date',
   get_board_stage: 'trade_date',
+  get_strong_watchlist: 'dates',
   // 板块 / 成分股（dc_index / dc_member / index_member_all 均支持按交易日查历史）
   get_boards_by_date: 'date',
   get_boards_by_date_batch: 'dates',
@@ -220,6 +221,13 @@ function cutTrainResult(method: string, result: any): any {
       }
       const dates = cutKeyedByDate(result.dates, trainDate, (key) => key);
       return dates === result.dates ? result : { ...result, dates };
+    }
+    case 'get_strong_watchlist': {
+      // 观察名单按请求日分桶，训练模式只保留训练日及之前的合并结果。
+      if (!result.results) {
+        return result;
+      }
+      return { ...result, results: cutKeyedByDate(result.results, trainDate, (key) => key) };
     }
     case 'get_money_flow': {
       const dates: string[] = result.detail_dates || [];
@@ -2005,6 +2013,94 @@ export async function GetStrongPoolFromTushare(
   }
 }
 
+/** 独立观察名单中单只股票的半衰期权重与复盘标记 */
+export interface StrongWatchlistMeta {
+  /** 最近一次入池日是否为本次展示的基准交易日 */
+  is_today: boolean;
+  /** w = 0.5 ^ (Δt / 1.5)，Δt 按交易日计算 */
+  weight: number;
+  days_since_seen: number;
+  last_seen_date: string;
+  first_seen_date: string;
+  snapshot_date: string;
+  status: '当日强势' | '最近入池' | '观察中';
+  source_table: string;
+}
+
+/** 观察名单合并行：保留强势股池 / 東财池原字段，另附 watchlist 元信息 */
+export interface StrongWatchlistRecord {
+  [key: string]: any;
+  code: string;
+  name: string;
+  secid: string;
+  watchlist: StrongWatchlistMeta;
+}
+
+export interface StrongWatchlistDayResult {
+  trade_date: string;
+  snapshot_date: string;
+  source_key: string;
+  summary: {
+    n_records: number;
+    n_today: number;
+    n_watch: number;
+    n_removed: number;
+  };
+  records: StrongWatchlistRecord[];
+  warnings: string[];
+}
+
+export interface StrongWatchlistResponse {
+  engine: string;
+  version: string;
+  half_life: number;
+  remove_threshold: number;
+  source_table: string;
+  derived_db: string;
+  min_limit_times: number;
+  as_of_date: string | null;
+  dates: string[];
+  results: Record<string, StrongWatchlistDayResult>;
+  warnings: string[];
+  error?: string;
+}
+
+function emptyStrongWatchlistResponse(days: string[]): StrongWatchlistResponse {
+  return {
+    engine: 'strong_watchlist',
+    version: '1.0',
+    half_life: 1.5,
+    remove_threshold: 0.05,
+    source_table: 'derived_strong_watchlist',
+    derived_db: '',
+    min_limit_times: 2,
+    as_of_date: null,
+    dates: days,
+    results: {},
+    warnings: [],
+  };
+}
+
+/**
+ * 获取指定交易日的合并观察名单。
+ * 后端维护独立派生表并按半衰期衰减，渲染层只消费结果，不把观察名单写回板块判定。
+ */
+export async function GetStrongWatchlistFromTushare(dates: string[]): Promise<StrongWatchlistResponse> {
+  const days = dates.map((d) => String(d || '').replace(/-/g, '')).filter(Boolean).sort();
+  const empty = emptyStrongWatchlistResponse(days);
+  try {
+    const result = await callTushare('get_strong_watchlist', { dates: days, min_limit_times: 2 });
+    if (result?.error) {
+      console.error('[观察名单] 派生表读取失败:', result.error);
+      return { ...empty, error: String(result.error), warnings: result.warnings || [] };
+    }
+    return { ...empty, ...result, results: result?.results || {} } as StrongWatchlistResponse;
+  } catch (error) {
+    logError(error, 'GetStrongWatchlistFromTushare', '读取观察名单失败');
+    return { ...empty, error: String(error) };
+  }
+}
+
 /**
  * 板块效应启动判定：sector_engine 的输出 JSON，前端只消费、不重算任何判定。
  *
@@ -2068,6 +2164,49 @@ export interface BoardStageRoles {
   laggard: BoardStageRole | null;
 }
 
+/** 板块内角色：《板块内角色绑定-实现规格》第 3 节，三个角色强制互斥 */
+export type StockRoleName = '龙头' | '中军' | '补涨';
+
+/** 个股 6 位代码 -> 当日角色；只标注「该关注哪三只股票」，不产出买点或收益预测 */
+export interface StockRoleBinding {
+  role: StockRoleName;
+  industry: string;
+  trade_date: string;
+  name: string;
+  reason: string;
+  /** 较上一交易日是否换人：角色平均连续 1.63 天，必须提示以免误认为是稳定标签 */
+  changed: boolean;
+  /** 中军 / 补涨任一候选为空时置 true */
+  degraded: boolean;
+  n_members: number;
+  n_strong: number;
+  /** 龙头：连板数 */
+  limit_times?: number | null;
+  /** 中军：总市值（万元） */
+  total_mv?: number | null;
+  /** 补涨：近 20 日前复权涨幅（%） */
+  gain20?: number | null;
+  zdf?: number | null;
+}
+
+/** 单个行业的角色产出元信息，对应规格第 2 节 flags */
+export interface BoardRoleFlags {
+  n_members: number;
+  n_strong: number;
+  degraded: boolean;
+  mv_source: string | null;
+  st_filtered: boolean;
+  changed_vs_prev: { leader?: boolean; middle?: boolean; laggard?: boolean };
+  /** 不满足门槛 / 日线不完整 / 互斥校验失败时不产出角色 */
+  skipped?: string;
+}
+
+export interface BoardRoleSummary {
+  n_industries: number;
+  n_stocks: number;
+  n_degraded: number;
+}
+
 /** 四态阶段（固定状态机，不随方案改变） */
 export type BoardStageName = '冷' | '启动' | '延续' | '退潮';
 
@@ -2095,6 +2234,8 @@ export interface BoardStageItem {
   first_divergence: boolean;
   first_divergence_experimental: boolean;
   roles: BoardStageRoles | null;
+  /** 角色产出的门槛 / 降级 / 换人元信息；未产出角色时为 null 或带 skipped */
+  role_flags: BoardRoleFlags | null;
 }
 
 export interface BoardStageResult {
@@ -2131,6 +2272,12 @@ export interface BoardStageResult {
    * 列表按它聚合「所属板块」列，才能保证启动行业一定能出现在列头与行里。
    */
   industry_by_code: Record<string, string>;
+  /**
+   * 个股 6 位代码 -> 当日板块内角色。
+   * 与 roles 完全同源，列表按 6 位代码直接查表给每只股票打标签，渲染层不重算角色。
+   */
+  role_by_code: Record<string, StockRoleBinding>;
+  role_summary: BoardRoleSummary;
   error?: string;
 }
 
@@ -2166,6 +2313,8 @@ export async function GetBoardStageFromTushare(tradeDate: string): Promise<Board
     },
     records: [],
     industry_by_code: {},
+    role_by_code: {},
+    role_summary: { n_industries: 0, n_stocks: 0, n_degraded: 0 },
   };
   try {
     // 判定全部在只读的 sector_engine 里完成，渲染层不传池子、不重算阈值

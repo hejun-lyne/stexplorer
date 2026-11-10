@@ -14,10 +14,13 @@ import {
   message,
   Dropdown,
   Tooltip,
+  Tag,
   DatePicker,
   Progress,
 } from 'antd';
 import styles from '../index.scss';
+import BoardStageMark from '../BoardStageMark';
+import StockRoleTag, { BoardRoleChips } from '../StockRoleTag';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
 import * as Utils from '@/utils';
@@ -33,8 +36,9 @@ import {
   RiskFilterStocksFromTushare,
   CheckBuySignalsFromTushare,
   MainInFilterStocksFromTushare,
-  BoardStageEffect,
   BoardStageItem,
+  StrongWatchlistMeta,
+  StockRoleBinding,
 } from '@/services/tushare';
 import { useWorkDayTimeToDo } from '@/utils/hooks';
 import { BKType, KFilterType, KFilterTypeNames, KLineType } from '@/utils/enums';
@@ -68,7 +72,6 @@ import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
 import {
   DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
   evaluateShortScoreSignal,
-  SHORT_SCORE_JUMP_BUY_MARK_COLOR,
   ShortScoreBacktestParams,
   ShortScoreSignal,
 } from '@/helpers/shortTermScoreBacktest';
@@ -85,6 +88,24 @@ import { saveTrainDayAction, setTrainTimeAction } from '@/actions/train';
 import { toggleStockFavoriteAction } from '@/actions/setting';
 import { fillPendingBuyTradesAction } from '@/actions/stock';
 import ScoreStockPanel from './ScoreStockPanel';
+
+/** 观察名单状态标记：当日强势、最近入池或仍在半衰期权重内的成员 */
+const WatchlistTag: React.FC<{ meta?: StrongWatchlistMeta }> = ({ meta }) => {
+  if (!meta) return null;
+  const label = meta.status === '观察中' ? `观察 ${meta.days_since_seen}日` : meta.status;
+  return (
+    <Tooltip
+      title={`观察名单：${meta.status}；权重 ${meta.weight.toFixed(3)}；Δt=${meta.days_since_seen} 个交易日；最近入池 ${meta.last_seen_date}；首次入池 ${meta.first_seen_date}；半衰期 1.5 日，权重低于 0.05 移出`}
+    >
+      <Tag
+        color={meta.is_today ? 'red' : 'blue'}
+        style={{ marginRight: 4, transform: 'scale(0.85)' }}
+      >
+        {label}
+      </Tag>
+    </Tooltip>
+  );
+};
 
 /**
  * 评分序列至少加载的交易日数量
@@ -168,6 +189,8 @@ const isStrongPoolSecid = (secid: string): boolean => secid === STRONG_POOL_SECI
 const strongPoolToDetail = (s: Helpers.Stock.StrongPoolStock): Stock.DetailItem => {
   const zx = Number(s.zx) || 0;
   const zdf = Number(s.zdf) || 0;
+  // 观察名单是展示派生信息，保留到列表行，不回写板块效应判定。
+  const watchlist = (s as any).watchlist as StrongWatchlistMeta | undefined;
   // 涨跌额由涨跌幅反推（池子不直接给昨收）
   const preClose = zdf === -100 ? 0 : zx / (1 + zdf / 100);
   return {
@@ -187,6 +210,7 @@ const strongPoolToDetail = (s: Helpers.Stock.StrongPoolStock): Stock.DetailItem 
     cjl: 0,
     lb: 0,
     hybk: s.hybk ? { code: '', name: s.hybk } : undefined,
+    ...(watchlist ? { watchlist } : {}),
   } as unknown as Stock.DetailItem;
 };
 
@@ -276,113 +300,16 @@ const WindVaneTag: React.FC<{ vane: Helpers.Stock.WindVaneResult }> = ({ vane })
   </span>
 );
 
-/** 四态阶段的显示颜色：只用于标注状态，不含任何买点或收益预测 */
-const BOARD_STAGE_COLORS: Record<string, string> = {
-  冷: 'var(--hint-color)',
-  启动: '#cf1322',
-  延续: '#d46b08',
-  退潮: '#389e0d',
-};
-
-/**
- * 板块阶段标记：四态阶段 +「启动」复盘标签 + 封板质量分
- *
- * 全部字段直接来自 sector_engine 的输出 JSON，渲染层不重算任何判定。
- * 判定只覆盖 110 个行业（stock_basic.industry），概念 / 风格板块没有结果就不显示。
- * `start` 需要连续 3 日板块效应，天然滞后 2 日，属于复盘标签而不是买点；
- * 质量分只在当日板块效应候选池内部有区分度。
- */
-const BoardStageMark: React.FC<{ stage: BoardStageItem; compact?: boolean }> = ({ stage, compact }) => {
-  const e = (stage.effect || {}) as BoardStageEffect;
-  const score = Math.round((stage.quality || 0) * 100);
-  const threshold = stage.quality_threshold == null ? '—' : Math.round(stage.quality_threshold * 100);
-  const fmt = (v: number | undefined, digits = 0) => (Number(v) || 0).toFixed(digits);
-  const tip = (
-    <div style={{ fontSize: 12, lineHeight: 1.7 }}>
-      <div style={{ fontWeight: 600 }}>
-        {stage.industry} · {stage.trade_date} 板块效应启动判定（复盘标签，非买点）
-      </div>
-      <div>
-        阶段 <b style={{ color: BOARD_STAGE_COLORS[stage.stage] }}>{stage.stage}</b>
-        {stage.start ? ' · 结论：启动' : ` · 结论：未启动 · ${stage.reason}`}
-      </div>
-      <div>质量分 {score} / 当日候选池 60 分位阈值 {threshold}</div>
-      <div>
-        快照 N {fmt(e.N_raw)} → EMA N {fmt(e.N, 2)}（dN {fmt(e.dN, 2)}、数量分位{' '}
-        {fmt((e.qN || 0) * 100)}%、连续 {fmt(e.run_len)} 日）
-      </div>
-      <div>
-        事件分解 新进 {fmt(e.N_new)} / 留存 {fmt(e.N_stay)} / 退出 {fmt(e.N_exit)}（只供复盘，不进打分）
-      </div>
-      <div>
-        行业全体 20 日收益 {fmt(e.r20, 2)}%（位置分位 {fmt((e.q_r20 || 0) * 100)}%） · 篮子{' '}
-        {fmt(e.basket_ret, 2)}%
-      </div>
-      <div>
-        涨停 {fmt(e.zt_n)} 家 · 炸板率 {fmt((e.zbl || 0) * 100, 1)}% · 最高连板 {fmt(e.max_lb)} · 多次涨停{' '}
-        {fmt(e.multi_zt)} 家
-      </div>
-      <div>
-        封单中位数 {fmt((e.fd_med || 0) / 1e8, 2)} 亿 · 平均首封 {fmt(e.first_min)} 分钟（分位{' '}
-        {fmt((e.q_zbl_in || 0) * 100)}% / {fmt((e.q_fd_in || 0) * 100)}% / {fmt((e.q_fmin_in || 0) * 100)}%）
-      </div>
-      <div>
-        近 3 日主力净额 {fmt(e.mf3, 2)} 亿（分位 {fmt((e.q_mf3 || 0) * 100)}%，资金项反向计分）
-      </div>
-      {stage.roles ? (
-        <div>
-          角色 龙头 {stage.roles.leader?.name || '—'} / 中军 {stage.roles.middle?.name || '—'} / 补涨{' '}
-          {stage.roles.laggard?.name || '—'}
-        </div>
-      ) : null}
-      <div style={{ color: '#ffa39e' }}>
-        {stage.s2_candidate ? '当日进入板块效应候选池' : '非候选池'}；质量分只在候选池内部有区分度，不作全市场打分
-        {stage.first_divergence ? ' · 首次分歧（实验观察标记，不进主判定）' : ''}
-      </div>
-      {stage.warnings?.length ? <div style={{ color: '#faad14' }}>数据提示：{stage.warnings.join('、')}</div> : null}
-    </div>
-  );
-  return (
-    <Tooltip title={tip}>
-      <span
-        style={{
-          display: 'inline-block',
-          marginLeft: compact ? 2 : 4,
-          whiteSpace: 'nowrap',
-          verticalAlign: 'middle',
-          fontSize: compact ? 9 : 10,
-          lineHeight: '14px',
-          cursor: 'help',
-        }}
-      >
-        <span style={{ color: BOARD_STAGE_COLORS[stage.stage] || 'var(--hint-color)', marginRight: 2 }}>
-          {stage.stage}
-        </span>
-        {stage.start ? (
-          <span
-            style={{
-              padding: '0 3px',
-              marginRight: 2,
-              borderRadius: 3,
-              border: '1px solid #ffa39e',
-              background: '#fff1f0',
-              color: '#cf1322',
-              fontWeight: 600,
-            }}
-          >
-            {compact ? '启' : '启动'}
-          </span>
-        ) : null}
-        <span style={{ color: stage.start ? '#cf1322' : 'var(--hint-color)' }}>
-          {compact ? `质${score}` : `质量${score}`}
-        </span>
-      </span>
-    </Tooltip>
-  );
-};
-
 /** 每只股票「所属板块」只用前 3 个：列展示、表头统计、筛选统一这个口径（东财 slist 兜底时） */
 const BOARD_COLUMN_LIMIT = 3;
+
+/**
+ * 短线评分界面开关：评分本身已不再使用，界面上与之相关的控件先隐藏、实现全部保留，
+ * 后续要恢复只改这一个开关即可。保留的是「当日形态」（K线形态 + RSI 识别）与交易观察
+ * 所需的市值 / 板块阶段 / 板块内角色 / 观察权重。
+ * 显式标注 boolean，避免 TS 把字面量折叠后把后面的分支判为不可达。
+ */
+const SHOW_SHORT_SCORE_UI: boolean = false;
 
 /**
  * 表头板块筛选项的值前缀：行业口径用 `IND:行业名`，东财 slist 口径用 `BKxxxx`
@@ -622,6 +549,8 @@ const STList: React.FC<STListProps> = ({
    * 不再只统计东财 slist 返回的前 3 个板块，判定为启动的行业才能在列头 / 行里出现。
    */
   const [stockIndustryMap, setStockIndustryMap] = useState<Record<string, string>>({});
+  /** 个股 6 位代码 -> 当日板块内角色（龙头/中军/补涨），与后端角色判定完全同源 */
+  const [roleByCode, setRoleByCode] = useState<Record<string, StockRoleBinding>>({});
   const [boardStageLoading, setBoardStageLoading] = useState(false);
   const [boardStageInfo, setBoardStageInfo] = useState('');
   /** 手动重新计算时的计数（数据缺失补拉后可重试） */
@@ -649,7 +578,8 @@ const STList: React.FC<STListProps> = ({
   // RSI形态筛选：仅显示所选形态的股票（多选，空数组=不过滤；按归一化后的形态 key 过滤）
   const [shortScoreRsiShapes, setShortScoreRsiShapes] = useState<string[]>([]);
   // 买入信号阈值过滤：仅保留「跳升买入」达标的股票（评分单日跳升 ≥ Δ 分 且 评分 ≥ 下限）。
-  // 类似评分/RSI 阈值过滤；卖出信号不再出现在列表，改为右侧面板的 ATR 趋势信号（仅对持仓股计算）。
+  // 类似评分/RSI 阈值过滤；结果列表不再展示信号列，买入/卖出信号改在工具栏与右侧面板查看
+  // （卖出侧为持仓股的 ATR 趋势信号）。
   const [shortScoreBuyFilterEnabled, setShortScoreBuyFilterEnabled] = useState(false);
   const [shortScoreBuyFilterDelta, setShortScoreBuyFilterDelta] = useState(SHORT_SCORE_SIGNAL_PARAMS.buyDelta);
   const [shortScoreBuyFilterScore, setShortScoreBuyFilterScore] = useState(SHORT_SCORE_SIGNAL_PARAMS.riseMinScore);
@@ -706,7 +636,7 @@ const STList: React.FC<STListProps> = ({
       ),
     [shortScoreFilterBeforeDays, shortScoreFilterWindowDays]
   );
-  // 当日评分（用当日分时补全当日K线后重新评分）
+  // 当日形态（用当日分时补全当日K线后重新评分）
   const [todayScoreLoading, setTodayScoreLoading] = useState(false);
   const [todayScoreProgress, setTodayScoreProgress] = useState(0);
   const isTodayScorePausedRef = React.useRef(false);
@@ -848,7 +778,7 @@ const STList: React.FC<STListProps> = ({
   const shortScorePoolRef = React.useRef('');
   /** 当前 stocks 列表属于哪个板块（板块切换后立刻点评分时，stocks 可能还是上一板块的列表） */
   const stocksBoardRef = React.useRef('');
-  /** 评分结果列表的来源：'score'=短线评分，'today'=当日评分（切板块后按同样方式自动重算） */
+  /** 评分结果列表的来源：'score'=短线评分，'today'=当日形态（切板块后按同样方式自动重算） */
   const shortScoreSourceRef = React.useRef<'score' | 'today'>('score');
   /** displayMode 的最新值（切换板块的 effect 里要读「切换前」的模式，避免闭包过期） */
   const displayModeRef = React.useRef(displayMode);
@@ -1323,7 +1253,7 @@ const STList: React.FC<STListProps> = ({
   /**
    * 股票代码 -> 流通市值（亿元）：短线评分结果列表「流通市值」列的数据源
    *
-   * 评分结果行本身不带市值：`circMv` 只用于量能维度打分，不会写进评分缓存行，
+   * 评分结果行本身不带市值：`circMv` 只用于量能维度打分，不会写进结果行，
    * 所以这里从当前股票池快照（板块成分股 / 强势股池的 `lt`，单位亿元）按代码补齐，
    * 口径与工具栏「市值区间」筛选使用的 `marketCapYiOf` 完全一致。
    */
@@ -1339,6 +1269,19 @@ const STList: React.FC<STListProps> = ({
       if (yi !== undefined && yi > 0) {
         map[code] = yi;
       }
+    };
+    (poolStocks as any[]).forEach(put);
+    (stocks as any[]).forEach(put);
+    return map;
+  }, [stocks, poolStocks]);
+
+  /** 股票代码 -> 观察名单权重标记：短线评分结果行按当前股票池快照补齐 */
+  const watchlistMetaByCode = React.useMemo<Record<string, StrongWatchlistMeta>>(() => {
+    const map: Record<string, StrongWatchlistMeta> = {};
+    const put = (item: any) => {
+      const meta = item?.watchlist as StrongWatchlistMeta | undefined;
+      const code = codeOfListItem(item);
+      if (meta && code && !map[code]) map[code] = meta;
     };
     (poolStocks as any[]).forEach(put);
     (stocks as any[]).forEach(put);
@@ -2120,7 +2063,7 @@ const STList: React.FC<STListProps> = ({
   /**
    * 等「已选板块」的股票列表全部加载完成
    *
-   * 板块切换 / 增删板块后立刻点「短线评分 / 当日评分」时，部分板块的列表还在请求中，
+   * 板块切换 / 增删板块后立刻点「交易模式 / 当日形态」时，部分板块的列表还在请求中，
    * 直接用它就会漏评或评出上一组板块的股票；这里等到全部就绪再开跑。
    * @returns 是否已就绪（超时返回 false，调用方提示用户稍后再试）
    */
@@ -2138,10 +2081,10 @@ const STList: React.FC<STListProps> = ({
 
   // ========== 短线评分 ==========
   /**
-   * 表头勾选过滤生效时的评分候选池（股票代码集合）
+   * 表头勾选过滤生效时的形态识别候选池（股票代码集合）
    *
    * 在 displayList 计算完之后赋值（见下方），评分流程通过 ref 读取：
-   * 勾选K线形态 / RSI形态 / 买入信号 / 板块后，「短线评分 / 当日评分」只处理列表可见的股票。
+   * 勾选K线形态 / RSI形态 / 买入信号 / 板块后，「交易模式 / 当日形态」只处理列表可见的股票。
    * null = 没有勾选过滤，沿用原来的全量池口径。
    */
   const scorePoolCodesRef = React.useRef<Set<string> | null>(null);
@@ -2150,7 +2093,7 @@ const STList: React.FC<STListProps> = ({
    * 执行短线评分
    *
    * @param candidateItems 可选：指定候选股票池。训练日推进自动更新时传入「当前结果列表」，
-   *                       与「当日评分」的候选池保持一致；不传则取当前板块的全部股票。
+   *                       与「当日形态」的候选池保持一致；不传则取当前板块的全部股票。
    */
   const handleShortScore = useCallback(async (candidateItems?: ShortTermScoreItem[]) => {
     if (shortScoreLoading || scoreStartingRef.current) {
@@ -2203,7 +2146,7 @@ const STList: React.FC<STListProps> = ({
       return;
     }
     // 评分池：
-    // - 传入 candidateItems（训练日推进自动更新）时用它，与「当日评分」的候选池一致；
+    // - 传入 candidateItems（训练日推进自动更新）时用它，与「当日形态」的候选池一致；
     // - 全新一轮评分时按当前展示口径取池：
     //   · 股票列表 / 评分结果列表 → 用「刚重拉的板块成分股快照」（stocks state 还是旧列表，
     //     且已收藏但不在新列表里的股票要一并补进来重算）；
@@ -2363,7 +2306,7 @@ const STList: React.FC<STListProps> = ({
     favoriteCodes,
   ]);
 
-  // ========== 当日评分（只更新「只依赖K线」的 K线形态 + RSI） ==========
+  // ========== 当日形态（只更新「只依赖K线」的 K线形态 + RSI） ==========
   // 盘中（或收盘后数据源还没生成当日日K）时，短线评分拿不到基准日的日K，当日列只显示 --。
   // 只针对「当前过滤结果的全部股票」（不分页；含表头勾选过滤——勾选形态/买入信号/板块后候选池随之收缩）逐只取当日分时合成一根当日K线，
   // 算「K线形态 / 阴阳 / 是否放量」与「RSI」，不跑完整评分流程（不取指数分时 / 板块 / 资金 / 涨跌比）；
@@ -2393,14 +2336,14 @@ const STList: React.FC<STListProps> = ({
     const baseItems = collectCurrentItems({ ignoreReuse: true });
     const currentItems = collectVisibleItems();
     if (currentItems.length === 0) {
-      console.log('[当日评分] 当前列表没有可评分的股票');
+      console.log('[当日形态] 当前列表没有可评分的股票');
       if (displayModeRef.current === 'shortScore') {
         // 切板块后自动重算、而新板块没有可评分的股票：退回股票列表
         setDisplayMode('stocks');
       }
       return;
     }
-    console.log(`[当日评分] 处理当前过滤结果共 ${currentItems.length} 只（全部页）`);
+    console.log(`[当日形态] 处理当前过滤结果共 ${currentItems.length} 只（全部页）`);
 
     isTodayScorePausedRef.current = false;
     todayScoreRunningRef.current = true;
@@ -2416,7 +2359,7 @@ const STList: React.FC<STListProps> = ({
     shortScorePoolRef.current = boardsKeyRef.current;
     shortScoreSourceRef.current = 'today';
     setShortScoreSeries({});
-    // 当日评分同样属于「当前训练日」，避免刚算完就被判定为过期
+    // 当日形态同样属于「当前训练日」，避免刚算完就被判定为过期
     setShortScoreTrainDate(ontrain ? trainDate : '');
     setDisplayMode('shortScore');
     setCurrentPage(1);
@@ -2454,7 +2397,7 @@ const STList: React.FC<STListProps> = ({
       });
       // 板块已切换时，历史列/序列属于上一组板块，不再回写
       const sameBoard = shortScorePoolRef.current === boardsKeyRef.current;
-      // 记录「当日评分」的基准日（训练模式跟随训练日，非训练模式为真实今天）
+      // 记录「当日形态」的基准日（训练模式跟随训练日，非训练模式为真实今天）
       if (sameBoard && computed.scoreDayKey) {
         const k = computed.scoreDayKey;
         setShortScoreDate(`${k.substring(0, 4)}-${k.substring(4, 6)}-${k.substring(6, 8)}`);
@@ -2491,11 +2434,11 @@ const STList: React.FC<STListProps> = ({
       if (!isTodayScorePausedRef.current) {
         setTodayScoreProgress(100);
         console.log(
-          `[当日评分] 完成，共 ${currentItems.length} 只（更新K线形态/RSI ${computed.filled} 只、未取到 ${computed.skipped} 只）`
+          `[当日形态] 完成，共 ${currentItems.length} 只（更新K线形态/RSI ${computed.filled} 只、未取到 ${computed.skipped} 只）`
         );
       }
     } catch (e) {
-      console.error('当日评分失败:', e);
+      console.error('当日形态失败:', e);
     } finally {
       setTodayScoreLoading(false);
       todayScoreRunningRef.current = false;
@@ -2709,7 +2652,7 @@ const STList: React.FC<STListProps> = ({
 
   // 仅「数据源」变化时在这里清空旧结果：评分口径与缓存 key 都变了，继续展示旧数据源算的分会误导。
   // 训练日推进不在这里清空：训练日不等价于评分口径变化（当日是否收盘才决定用哪天日K），
-  // 是否重算交给用户点「短线评分 / 当日评分」，避免推进一天就把整份结果列表重建。
+  // 是否重算交给用户点「交易模式 / 当日形态」，避免推进一天就把整份结果列表重建。
   useEffect(() => {
     if (isShortScoreRunningRef.current || todayScoreRunningRef.current) {
       return;
@@ -2732,7 +2675,7 @@ const STList: React.FC<STListProps> = ({
     const targetKey = boardsKey;
     // 展开后的真实板块（「只看题材」= 所有题材板块）：取数/合并/就绪判断都以它为准
     const targetSecids = effectiveSecidsRef.current;
-    /** 变化前正在展示评分结果时，记录该列表是「短线评分」还是「当日评分」算出来的 */
+    /** 变化前正在展示评分结果时，记录该列表是「短线评分」还是「当日形态」算出来的 */
     const rescoreMode = displayModeRef.current === 'shortScore' ? shortScoreSourceRef.current : '';
     setCurrentPage(1);
     if (!rescoreMode) {
@@ -2816,7 +2759,7 @@ const STList: React.FC<STListProps> = ({
         }
         return;
       }
-      console.log(`[短线评分] 板块变化 → 自动按新板块组合重算（${rescoreMode === 'today' ? '当日评分' : '短线评分'}）`);
+      console.log(`[短线评分] 板块变化 → 自动按新板块组合重算（${rescoreMode === 'today' ? '当日形态' : '短线评分'}）`);
       if (rescoreMode === 'today') {
         handleTodayScoreRef.current();
       } else {
@@ -2840,7 +2783,7 @@ const STList: React.FC<STListProps> = ({
   }, [handleShortScore]);
 
   // 训练日推进后**不再**自动重算短线评分：
-  // 评分口径依赖「当日是否已收盘」，由用户自己决定何时点「短线评分 / 当日评分」；
+  // 评分口径依赖「当日是否已收盘」，由用户自己决定何时点「交易模式 / 当日形态」；
   // 自动重算会把整份结果列表按新训练日重建，容易在推进过程中被误触发（也浪费时间）。
   // 切板块后的自动重算仍保留（见上面的 boardsKey effect）。
 
@@ -3039,7 +2982,7 @@ const STList: React.FC<STListProps> = ({
    * 口径：基准日综合分 ≥ 达标分（newEntryScore），而上一交易日（shortScoreFilterDays 里基准日的前一个交易日）
    * 没有评分行、或综合分不足达标分 —— 即今天新达标 / 新进榜。
    * 上一交易日取不到（数据未加载、已是窗口第一天）时一律不标记，避免整表都标成「新」。
-   * 当日评分后基准日综合分为空（不计算综合分），此时也不会误标。
+   * 当日形态后基准日综合分为空（不计算综合分），此时也不会误标。
    */
   const newEntryCodes = React.useMemo(() => {
     const codes = new Set<string>();
@@ -3224,7 +3167,7 @@ const STList: React.FC<STListProps> = ({
         list = list.filter((s: any) => isFavorited(s) || (s.rsiScore != null && s.rsiScore > rsiThreshold));
       }
       // 注意：表头勾选过滤（K线形态 / RSI形态 / 买入信号 / 板块）不在这里做，统一放在 displayList 里：
-      // 排序要在全量结果上做，勾选只裁剪可见行；评分候选池也直接取 displayList（勾选后会随之收缩）。
+      // 排序要在全量结果上做，勾选只裁剪可见行；形态识别候选池也直接取 displayList（勾选后会随之收缩）。
       const keys = Object.keys(sortTypes);
       if (keys.length === 1) {
         if (keys[0] === KLINE_SHAPE_SORT_KEY) {
@@ -3282,7 +3225,8 @@ const STList: React.FC<STListProps> = ({
   /**
    * 单行是否命中「跳升买入」（按买入阈值过滤的当前阈值判定）
    *
-   * 与单元格展示共用 signalOfShortScoreRow，保证筛选口径和列里显示的完全一致。
+   * 结果列表已不再展示信号列，这里只服务工具栏的「买入信号」阈值过滤；
+   * 仍复用 signalOfShortScoreRow，保证过滤口径与评分历史判定一致。
    * 只在筛选生效时逐行计算（见 displayList），避免评分过程中每追加一行就重算全表。
    */
   const isJumpBuyRow = React.useCallback(
@@ -3299,8 +3243,8 @@ const STList: React.FC<STListProps> = ({
   /**
    * 「K线形态 / RSI形态 / 买入信号 / 板块」表头勾选过滤（仅短线评分列表）
    *
-   * 决定列表显示哪些行，**同时收缩评分候选池**：
-   * 「短线评分 / 当日评分」只处理过滤后可见的股票（见下方 collectVisibleItems / todayScoreCount / scorePoolCodesRef）。
+   * 决定列表显示哪些行，**同时收缩形态识别候选池**：
+   * 「交易模式 / 当日形态」只处理过滤后可见的股票（见下方 collectVisibleItems / todayScoreCount / scorePoolCodesRef）。
    * 多列同时勾选时按「与」关系叠加（与 Excel 多列筛选一致）。
    * 分页 total 也用它，保证页码与可见行数一致。
    */
@@ -3357,7 +3301,7 @@ const STList: React.FC<STListProps> = ({
     return (visibleShowList as any[]).filter((row: any) => !isHiddenByHeaderFilter(row));
   }, [visibleShowList, displayMode, headerFilterActive, isHiddenByHeaderFilter]);
 
-  /** 评分候选池（股票代码集合）：勾选过滤生效时只评列表可见的股票；null = 不过滤，沿用全量口径 */
+  /** 形态识别候选池（股票代码集合）：勾选过滤生效时只评列表可见的股票；null = 不过滤，沿用全量口径 */
   const scorePoolCodes = React.useMemo<Set<string> | null>(() => {
     if (displayMode !== 'shortScore' || !headerFilterActive) {
       return null;
@@ -3457,7 +3401,7 @@ const STList: React.FC<STListProps> = ({
   ]);
 
   /**
-   * 「当日评分」的股票池：当前列表的「过滤结果」全部股票（**不分页**）
+   * 「当日形态」的股票池：当前列表的「过滤结果」全部股票（**不分页**）
    *
    * 即用户在列表上筛出来的那批：排除科创板/北交所、名字过滤、K线过滤（ftypes）、
    * 各选股模式（龙头 / 排雷 / 择时 / 主力建仓）的结果集，以及「N 天前的近 M 日出现过 ≥ 阈值分」这类评分侧过滤，
@@ -3474,7 +3418,7 @@ const STList: React.FC<STListProps> = ({
     return base.filter((i) => codes.has(i.code));
   }, [collectCurrentItems, displayList]);
 
-  /** 当前可见的股票数：即「当日评分」实际会处理的数量（全部页，含表头勾选过滤），直接标在按钮上 */
+  /** 当前可见的股票数：即「当日形态」实际会处理的数量（全部页，含表头勾选过滤），直接标在按钮上 */
   const todayScoreCount = displayList.length;
 
   /** 板块阶段判定是否给出了「个股 -> 行业」映射：有则整个「所属板块」列切到 110 行业口径 */
@@ -3573,11 +3517,14 @@ const STList: React.FC<STListProps> = ({
         setBoardStageMap(map);
         // 同一份个股行业映射：列头聚合 / 行展示都改用它，与后端判定口径一致
         setStockIndustryMap(res.industry_by_code || {});
+        // 角色标签只消费后端按 6 位代码生成的反查表，渲染层不重算角色
+        setRoleByCode(res.role_by_code || {});
         const stages = res.summary?.stage_counts || {};
         setBoardStageInfo(
           res.error
             ? `判定失败：${res.error}`
             : `${res.trade_date} · ${res.coverage?.industries || 0} 行业 · 板块效应候选 ${res.summary?.n_effect ?? 0} · 启动 ${res.summary?.n_start ?? 0} · 阶段 启动${stages['启动'] ?? 0}/延续${stages['延续'] ?? 0}/退潮${stages['退潮'] ?? 0}` +
+                ` · 角色 ${res.role_summary?.n_industries ?? 0} 行业/${res.role_summary?.n_stocks ?? 0} 股` +
                 (res.coverage?.warnings?.length
                   ? ` · 提示 ${res.coverage.warnings.length} 项：${res.coverage.warnings[0]}`
                   : '')
@@ -3625,7 +3572,7 @@ const STList: React.FC<STListProps> = ({
   /**
    * 取「所属板块」的队列泵（东财 slist，与详情页 BanKuai 同一接口）
    *
-   * 队列放在 ref 里、泵本身不随列表刷新取消：列表每次重排 / 当日评分刷新都会让
+   * 队列放在 ref 里、泵本身不随列表刷新取消：列表每次重排 / 当日形态刷新都会让
    * `visibleShowList` 换新引用，之前把整轮循环写在 effect 里会被反复取消，
    * 被取消的股票又已经标记为「已请求」，结果就是大量股票一直显示 `--`。
    */
@@ -3818,7 +3765,7 @@ const STList: React.FC<STListProps> = ({
     if (!ontrain || !trainDate || displayMode !== 'shortScore') {
       return () => {};
     }
-    // 整轮评分 / 当日评分进行中先不抢接口，等它收尾（依赖里的 loading 变化会重新触发）
+    // 整轮评分 / 当日形态进行中先不抢接口，等它收尾（依赖里的 loading 变化会重新触发）
     if (shortScoreLoading || todayScoreLoading || !shortScoreData.length) {
       return () => {};
     }
@@ -4003,7 +3950,7 @@ const STList: React.FC<STListProps> = ({
           </Checkbox>
           <span
             style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}
-            title="按流通市值区间筛选（亿元）：同时作用于列表展示与评分池（短线评分 / 当日评分 / 训练预计算）"
+            title="按流通市值区间筛选（亿元）：同时作用于列表展示与候选池（交易模式 / 当日形态）"
           >
             <Checkbox
               checked={marketCapFilterEnabled}
@@ -4084,48 +4031,50 @@ const STList: React.FC<STListProps> = ({
             onClick={() => handleShortScore()}
             loading={shortScoreLoading}
             style={{ marginLeft: 4 }}
-            title={`${
+            title={`进入交易模式：按${
               !ontrain
-                ? '按行情最后一个交易日的日K计算评分'
+                ? '行情最后一个交易日'
                 : timeFinished
-                  ? '训练时间已到 15:00 收盘：按训练日当天的完整日K计算评分'
-                  : '训练时间还没走到 15:00 收盘：本次按上一交易日的日K计算评分（推进到收盘后再执行才用当天数据）'
-            }；表头勾选过滤生效时只评列表可见的股票`}
+                  ? '训练日当天的完整日K'
+                  : '上一交易日的日K（训练时间到 15:00 收盘后才用当天数据）'
+            }加载列表，用于观察K线形态、RSI、市值、板块阶段与板块内角色；表头勾选过滤生效时只处理列表可见的股票`}
           >
             {shortScoreLoading
               ? shortScoreBackfill
-                ? `补全历史 ${Math.round((shortScoreBackfill.done / Math.max(1, shortScoreBackfill.total)) * 100)}%`
-                : `评分中 ${shortScoreProgress}%`
-              : '短线评分'}
+                ? `历史数据补全 ${Math.round((shortScoreBackfill.done / Math.max(1, shortScoreBackfill.total)) * 100)}%`
+                : `加载中 ${shortScoreProgress}%`
+              : '交易模式'}
           </Button>
-          <Button
-            size="small"
-            onClick={openHistoryFill}
-            loading={historyFilling && historyFillTotal === 0}
-            style={{ marginLeft: 4 }}
-            title="按选择的时间区间，把当前股票列表的短线评分逐日补算进缓存（增量：已覆盖的交易日直接跳过，中断后再次点击可续算）"
-          >
-            {historyFilling
-              ? historyFillTotal
-                ? `补全 ${historyFillDone}/${historyFillTotal}`
-                : '补全准备中...'
-              : '短线评分（历史补全）'}
-          </Button>
+          {SHOW_SHORT_SCORE_UI && (
+            <Button
+              size="small"
+              onClick={openHistoryFill}
+              loading={historyFilling && historyFillTotal === 0}
+              style={{ marginLeft: 4 }}
+              title="按选择的时间区间，把当前股票列表的短线评分逐日补算进缓存（增量：已覆盖的交易日直接跳过，中断后再次点击可续算）"
+            >
+              {historyFilling
+                ? historyFillTotal
+                  ? `补全 ${historyFillDone}/${historyFillTotal}`
+                  : '补全准备中...'
+                : '短线评分（历史补全）'}
+            </Button>
+          )}
           <Button
             size="small"
             onClick={handleTodayScore}
             loading={todayScoreLoading}
             style={{ marginLeft: 4 }}
-            title="处理当前过滤结果的全部股票（不分页）：更新只依赖K线的当日K线形态与 RSI（当日K线未生成时用分时补全）。表头勾选（K线形态 / RSI形态 / 买入信号 / 板块）同样计入候选股票。当日不计算综合分，评分列显示 --"
+            title="当日形态识别：处理当前过滤结果的全部股票（不分页），更新只依赖K线的当日K线形态与 RSI（当日K线未生成时用分时补全）。表头勾选（K线形态 / RSI形态 / 板块）同样计入候选股票。这里不计算综合评分，也不产出买点"
           >
-            {todayScoreLoading ? `当日评分中 ${todayScoreProgress}%` : `当日评分(${todayScoreCount})`}
+            {todayScoreLoading ? `当日形态中 ${todayScoreProgress}%` : `当日形态(${todayScoreCount})`}
           </Button>
-          {displayMode === 'shortScore' && shortScoreDate && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'shortScore' && shortScoreDate && (
             <span
               style={{ marginLeft: 8, fontSize: 12, color: scoreStale ? '#faad14' : 'var(--secondary-text-color)' }}
-              title="当前结果列表对应的评分基准日；训练日推进不会自动重算，点「短线评分」才会按新训练日更新"
+              title="当前结果列表对应的数据基准日；训练日推进不会自动重算，点「交易模式」才会按新训练日更新"
             >
-              评分日期 {shortScoreDate}
+              基准日 {shortScoreDate}
               {scoreStale
                 ? '（已过期，仅显示收藏股票，点「短线评分」重算）'
                 : shortScorePrevBase
@@ -4135,7 +4084,7 @@ const STList: React.FC<STListProps> = ({
                   : ''}
             </span>
           )}
-          {displayMode === 'shortScore' && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'shortScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <Checkbox
                 checked={shortScoreFilterEnabled}
@@ -4185,7 +4134,7 @@ const STList: React.FC<STListProps> = ({
               <span>分</span>
             </span>
           )}
-          {displayMode === 'shortScore' && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'shortScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <Checkbox
                 checked={shortScoreRsiFilterEnabled}
@@ -4210,7 +4159,7 @@ const STList: React.FC<STListProps> = ({
               <span>分</span>
             </span>
           )}
-          {displayMode === 'shortScore' && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'shortScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <Checkbox
                 checked={shortScoreBuyFilterEnabled}
@@ -4218,7 +4167,7 @@ const STList: React.FC<STListProps> = ({
                   setShortScoreBuyFilterEnabled(e.target.checked);
                   setCurrentPage(1);
                 }}
-                title="买入信号阈值过滤：仅保留「跳升买入」达标的股票（评分单日跳升 ≥ Δ 分 且 评分 ≥ 下限）。同时决定评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票。卖出信号不在列表展示，改在右侧面板按 ATR 趋势信号提示（仅对持仓股计算）"
+                title="买入信号阈值过滤：仅保留「跳升买入」达标的股票（评分单日跳升 ≥ Δ 分 且 评分 ≥ 下限）。同时决定形态识别候选池：勾选后「交易模式 / 当日形态」只处理可见的股票。结果列表不再展示信号列：买入信号见右侧面板评分图，卖出侧为持仓股的 ATR 趋势信号提示"
               />
               <span>买入信号：单日跳升≥</span>
               <InputNumber
@@ -4251,7 +4200,7 @@ const STList: React.FC<STListProps> = ({
               <span>分</span>
             </span>
           )}
-          {displayMode === 'shortScore' && (
+          {SHOW_SHORT_SCORE_UI && displayMode === 'shortScore' && (
             <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <Checkbox
                 checked={shortScoreShowNotListed}
@@ -4331,7 +4280,7 @@ const STList: React.FC<STListProps> = ({
               {`当前持仓(${holdingRows.length})`}
             </Button>
           )}
-          {ontrain && (
+          {SHOW_SHORT_SCORE_UI && ontrain && (
             <Button
               size="small"
               onClick={(e) => handlePrecompute(e.shiftKey || e.altKey)}
@@ -4344,7 +4293,7 @@ const STList: React.FC<STListProps> = ({
                 : '预计算训练评分'}
             </Button>
           )}
-          {ontrain && precomputeMsg && (
+          {SHOW_SHORT_SCORE_UI && ontrain && precomputeMsg && (
             <span style={{ marginLeft: 6, fontSize: 12, color: 'var(--secondary-text-color)' }}>{precomputeMsg}</span>
           )}
           {displayMode !== 'stocks' && (
@@ -4372,7 +4321,7 @@ const STList: React.FC<STListProps> = ({
         >
       {displayMode === 'stocks' ? (
         <Row className={styles.header}>
-          <Col span={3}>名字</Col>
+          <Col span={4}>名字</Col>
           <Col span={3}>最新价</Col>
           <Col span={3}>涨跌额</Col>
           <Col span={3}>
@@ -4383,17 +4332,22 @@ const STList: React.FC<STListProps> = ({
             流通市值
             <Button size="small" type="text" icon={sortTypes.lt == 1 ? <CaretUpOutlined /> : sortTypes.lt == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('lt')} />
           </Col>
-          <Col span={3}>
+          <Col span={2}>
             换手率
             <Button size="small" type="text" icon={sortTypes.hsl == 1 ? <CaretUpOutlined /> : sortTypes.hsl == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('hsl')} />
           </Col>
-          <Col span={3}>
+          <Col span={2}>
             当日主力净流入
             <Button size="small" type="text" icon={sortTypes.main_in == 1 ? <CaretUpOutlined /> : sortTypes.main_in == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('main_in')} />
           </Col>
-          <Col span={3}>
+          <Col span={2}>
             5日主力净流入
             <Button size="small" type="text" icon={sortTypes.main_in_5d == 1 ? <CaretUpOutlined /> : sortTypes.main_in_5d == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('main_in_5d')} />
+          </Col>
+          <Col span={2}>
+            <Tooltip title="独立派生表按交易日计算 w = 0.5^(Δt/1.5)，权重低于 0.05 的成员不再展示；当日强势股权重为 1.000">
+              观察权重
+            </Tooltip>
           </Col>
         </Row>
       ) : displayMode === 'leaders' ? (
@@ -4460,30 +4414,22 @@ const STList: React.FC<STListProps> = ({
         </Row>
       ) : displayMode === 'shortScore' ? (
         <Row className={styles.header}>
-          <Col span={4}>股票名称</Col>
+          <Col span={7}>股票名称</Col>
           <Col
             span={2}
             style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-            title="流通市值（亿元）：取自当前板块股票池 / 强势股池快照，与工具栏「市值区间」筛选同一口径；评分缓存行本身不带市值"
+            title="流通市值（亿元）：取自当前板块股票池 / 强势股池快照，与工具栏「市值区间」筛选同一口径；结果行本身不带市值"
           >
             流通市值
           </Col>
-          <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span
-              className={styles.klineShapeHeader}
-              title="买入信号：仅展示「跳升买入」（评分单日跳升 ≥ Δ 分 且 评分 ≥ 下限、低位启动），用工具栏「买入信号」阈值过滤。卖出信号不在列表展示，改在右侧面板按 ATR 趋势信号提示（仅对持仓股计算）。悬停单元格可看判定依据。训练模式下只用到训练日为止的评分。"
-            >
-              <span className={styles.klineShapeHeaderText}>信号</span>
-            </span>
-          </Col>
-          <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（短线评分偏选股，不用于择时）">
+          <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（用于形态识别，不用于择时）">
             RSI
             <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
           </Col>
           <Col span={4} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="RSI 评分逻辑识别出的「当日」形态：超买回踩企稳/回踩中、超卖反转、金叉、死叉、金叉在即、修复中、多头/空头排列、超买钝化。点漏斗可勾选形态过滤（Excel 式，同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）"
+              title="RSI 评分逻辑识别出的「当日」形态：超买回踩企稳/回踩中、超卖反转、金叉、死叉、金叉在即、修复中、多头/空头排列、超买钝化。点漏斗可勾选形态过滤（Excel 式，同时决定列表显示与形态识别候选池：勾选后「交易模式 / 当日形态」只处理可见的股票）"
             >
               <span className={styles.klineShapeHeaderText}>RSI形态识别</span>
               <Dropdown
@@ -4538,15 +4484,15 @@ const STList: React.FC<STListProps> = ({
                   className={classNames(styles.filterbtn, { [styles.filterbtnActive]: shortScoreRsiShapes.length > 0 })}
                   title={
                     shortScoreRsiShapes.length
-                      ? `已按 ${shortScoreRsiShapes.length} 种RSI形态过滤（点击修改）；同时缩小「短线评分 / 当日评分」的候选股票`
-                      : '按RSI形态勾选过滤（Excel 式多选）；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票'
+                      ? `已按 ${shortScoreRsiShapes.length} 种RSI形态过滤（点击修改）；同时缩小「交易模式 / 当日形态」的候选股票`
+                      : '按RSI形态勾选过滤（Excel 式多选）；同时决定列表显示与形态识别候选池：勾选后「交易模式 / 当日形态」只处理可见的股票'
                   }
                 />
               </Dropdown>
             </span>
           </Col>
           <Col span={4} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/黄昏星/启明星/铁锤线/海绵宝宝…）。十字星=小实体且上下影线差不多长，上影线长于下影线=黄昏星，下影线长于上影线=启明星。点漏斗可勾选形态过滤（Excel 式，同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。">
+            <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/黄昏星/启明星/铁锤线/海绵宝宝…）。十字星=小实体且上下影线差不多长，上影线长于下影线=黄昏星，下影线长于上影线=启明星。点漏斗可勾选形态过滤（Excel 式，同时决定列表显示与形态识别候选池：勾选后「交易模式 / 当日形态」只处理可见的股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。">
               <span className={styles.klineShapeHeaderText}>K线形态</span>
               <Dropdown
                 trigger={['click']}
@@ -4600,8 +4546,8 @@ const STList: React.FC<STListProps> = ({
                   className={classNames(styles.filterbtn, { [styles.filterbtnActive]: shortScoreKlineShapes.length > 0 })}
                   title={
                     shortScoreKlineShapes.length
-                      ? `已按 ${shortScoreKlineShapes.length} 种K线形态过滤（点击修改）；同时缩小「短线评分 / 当日评分」的候选股票`
-                      : '按K线形态勾选过滤（Excel 式多选，不区分阳线/阴线）；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票'
+                      ? `已按 ${shortScoreKlineShapes.length} 种K线形态过滤（点击修改）；同时缩小「交易模式 / 当日形态」的候选股票`
+                      : '按K线形态勾选过滤（Excel 式多选，不区分阳线/阴线）；同时决定列表显示与形态识别候选池：勾选后「交易模式 / 当日形态」只处理可见的股票'
                   }
                 />
               </Dropdown>
@@ -4625,7 +4571,7 @@ const STList: React.FC<STListProps> = ({
           <Col span={5} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="股票所属行业 / 板块。有板块效应判定数据时，列头聚合、筛选与行内展示统一按判定同源的 110 行业口径（stock_basic.industry，每只股票一个行业），东财「所属板块」只作为次要参考显示前 3 个；判定未就绪时回退到东财 slist 前 3 个口径。行业名后的「冷/启动/延续/退潮」是四态阶段、「启动」是复盘标签、「质量xx」是封板质量分（只用 T 日及之前数据，滞后约 2 日，不是买点）。点漏斗可按行业勾选过滤（Excel 式多选；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）"
+              title="股票所属行业 / 板块。有板块效应判定数据时，列头聚合、筛选与行内展示统一按判定同源的 110 行业口径（stock_basic.industry，每只股票一个行业），东财「所属板块」只作为次要参考显示前 3 个；判定未就绪时回退到东财 slist 前 3 个口径。行业名后的「冷/启动/延续/退潮」是四态阶段、「启动」是复盘标签、「质量xx」是封板质量分（只用 T 日及之前数据，滞后约 2 日，不是买点）。点漏斗可按行业勾选过滤（Excel 式多选；同时决定列表显示与形态识别候选池：勾选后「交易模式 / 当日形态」只处理可见的股票）"
             >
               <span className={styles.klineShapeHeaderText}>所属板块</span>
               <Dropdown
@@ -4674,18 +4620,22 @@ const STList: React.FC<STListProps> = ({
                             marginBottom: 6,
                             border: '1px solid var(--border-color)',
                             borderRadius: 4,
-                            maxHeight: 96,
+                            maxHeight: 180,
                             overflowY: 'auto',
                           }}
                         >
                           <div style={{ fontSize: 10, color: 'var(--hint-color)', marginBottom: 2 }}>
-                            当日板块效应候选（110 行业口径，启动优先）
+                            当日板块效应候选（110 行业口径，启动优先）· 三角色只标注关注对象，不是买点
                           </div>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '2px 8px', fontSize: 11 }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11 }}>
                             {stages.map((s) => (
-                              <span key={s.industry} style={{ whiteSpace: 'nowrap' }}>
+                              <span
+                                key={s.industry}
+                                style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                              >
                                 {s.industry}
                                 <BoardStageMark stage={s} compact />
+                                <BoardRoleChips roles={s.roles} flags={s.role_flags} />
                               </span>
                             ))}
                           </div>
@@ -4740,8 +4690,8 @@ const STList: React.FC<STListProps> = ({
                   className={classNames(styles.filterbtn, { [styles.filterbtnActive]: shortScoreBoards.length > 0 })}
                   title={
                     shortScoreBoards.length
-                      ? `已按 ${shortScoreBoards.length} 个板块过滤（点击修改）；同时缩小「短线评分 / 当日评分」的候选股票`
-                      : '按所属板块勾选过滤（Excel 式多选，属于任一所选板块即显示）；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票'
+                      ? `已按 ${shortScoreBoards.length} 个板块过滤（点击修改）；同时缩小「交易模式 / 当日形态」的候选股票`
+                      : '按所属板块勾选过滤（Excel 式多选，属于任一所选板块即显示）；同时决定列表显示与形态识别候选池：勾选后「交易模式 / 当日形态」只处理可见的股票'
                   }
                 />
               </Dropdown>
@@ -4823,10 +4773,11 @@ const STList: React.FC<STListProps> = ({
         {displayMode === 'stocks' ? (
           displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s) => (
             <Row key={s.code} className={styles.row}>
-              <Col span={3} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
+              <Col span={4} style={{ cursor: 'pointer' }} onClick={() => onOpenStock(s.secid, s.name)}>
                 {activeWindVane && activeWindVane.code === codeOfListItem(s) && (
                   <WindVaneTag vane={activeWindVane} />
                 )}
+                <WatchlistTag meta={(s as any).watchlist || watchlistMetaByCode[codeOfListItem(s)]} />
                 {s.name}
               </Col>
               <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
@@ -4839,12 +4790,18 @@ const STList: React.FC<STListProps> = ({
                 {s.zdf.toFixed(2) + '%'}
               </Col>
               <Col span={3}>{(s.lt).toFixed(2) + '亿'}</Col>
-              <Col span={3}>{(s.hsl).toFixed(2) + '%'}</Col>
-              <Col span={3} className={Utils.GetValueColor((s as any).main_in).textClass}>
+              <Col span={2}>{(s.hsl).toFixed(2) + '%'}</Col>
+              <Col span={2} className={Utils.GetValueColor((s as any).main_in).textClass}>
                 {formatMoneyFlow((s as any).main_in)}
               </Col>
-              <Col span={3} className={Utils.GetValueColor((s as any).main_in_5d).textClass}>
+              <Col span={2} className={Utils.GetValueColor((s as any).main_in_5d).textClass}>
                 {formatMoneyFlow((s as any).main_in_5d)}
+              </Col>
+              <Col span={2}>
+                {(() => {
+                  const watch = (s as any).watchlist || watchlistMetaByCode[codeOfListItem(s)];
+                  return watch ? watch.weight.toFixed(3) : '--';
+                })()}
               </Col>
             </Row>
           ))
@@ -4971,11 +4928,6 @@ const STList: React.FC<STListProps> = ({
             const rowFavorited = favoriteSet.has(rowCode);
             // 流通市值（亿元）：评分行不带市值，回退到当前股票池快照
             const capYi = marketCapYiOf(s) ?? marketCapYiByCode[rowCode];
-            // 信号：仅买入信号（跳升买入），按当前买入阈值判定；卖出/抬升观察等噪音不再展示
-            const sig = signalOfShortScoreRow(s, {
-              buyDelta: Number(shortScoreBuyFilterDelta) || 0,
-              riseMinScore: Number(shortScoreBuyFilterScore) || 0,
-            });
             return (
               <Row
                 key={s.code}
@@ -4985,7 +4937,7 @@ const STList: React.FC<STListProps> = ({
                   boxShadow: isPanelActive ? 'inset 2px 0 0 #1890ff' : undefined,
                 }}
               >
-                <Col span={4} style={{ cursor: 'pointer' }} onClick={() => setPanelCode(s.code)}>
+                <Col span={7} style={{ cursor: 'pointer' }} onClick={() => setPanelCode(s.code)}>
                   <div
                     title={`${rowName}（点击在右侧面板查看公司简介与日K线）`}
                     style={{
@@ -5019,6 +4971,8 @@ const STList: React.FC<STListProps> = ({
                       {rowFavorited ? <StarFilled /> : <StarOutlined />}
                     </span>
                     {activeWindVane && activeWindVane.code === rowCode && <WindVaneTag vane={activeWindVane} />}
+                    <WatchlistTag meta={watchlistMetaByCode[rowCode]} />
+                    <StockRoleTag role={roleByCode[rowCode]} />
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{rowName}</span>
                     {newEntryCodes.has(s.code) && (
                       <span
@@ -5047,28 +5001,6 @@ const STList: React.FC<STListProps> = ({
                     `${(capYi / 10000).toFixed(2)}万亿`
                   ) : (
                     `${capYi >= 100 ? capYi.toFixed(0) : capYi.toFixed(1)}亿`
-                  )}
-                </Col>
-                <Col
-                  span={3}
-                  style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12 }}
-                >
-                  {sig?.kind === '跳升买入' ? (
-                    <Tooltip
-                      title={<div style={{ fontSize: 11, lineHeight: 1.6, whiteSpace: 'pre-line' }}>{sig.reason}</div>}
-                      placement="topLeft"
-                    >
-                      <span style={{ color: SHORT_SCORE_JUMP_BUY_MARK_COLOR, fontWeight: 'bold', cursor: 'help' }}>
-                        买入
-                      </span>
-                    </Tooltip>
-                  ) : (
-                    <span
-                      style={{ color: 'var(--reverse-text-color)' }}
-                      title="信号：评分历史不足或未达买入阈值，暂不判定"
-                    >
-                      --
-                    </span>
                   )}
                 </Col>
                 <Col
@@ -5287,7 +5219,7 @@ const STList: React.FC<STListProps> = ({
           })
         )}
       </div>
-        {/* 盘前分析：仅执行「短线评分」后出现（固定在左侧评分结果列表下方，不挤压右侧个股面板），保存后展示在「训练记录 · 盘前分析」 */}
+        {/* 盘前分析：进入交易模式后出现（固定在左侧结果列表下方，不挤压右侧个股面板），保存后展示在「训练记录 · 盘前分析」 */}
         {displayMode === 'shortScore' && (
           <div
             style={{
@@ -5473,7 +5405,7 @@ const STList: React.FC<STListProps> = ({
         </div>
       </Modal>
       <Modal
-        title="短线评分 · 历史补全"
+        title="交易模式 · 历史数据补全"
         visible={historyFillOpen}
         footer={null}
         width={600}

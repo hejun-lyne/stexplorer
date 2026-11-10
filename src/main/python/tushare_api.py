@@ -392,6 +392,12 @@ def set_cache_dir(storage_path: str):
         _CACHE_DIR = os.path.join(storage_path, "stock_db")
     _db_set_root(storage_path)
     _db_init()
+    # 观察名单只记录派生库的存储根，不在这里建表或写 stock_db。
+    try:
+        import strong_watchlist
+        strong_watchlist.set_cache_dir(storage_path)
+    except Exception as e:
+        print(f"[强势股观察名单] 记录存储路径失败：{e}")
 
 
 def _cache_key(func_name: str, **kwargs) -> str:
@@ -10080,9 +10086,31 @@ def register_limit_up_methods():
     TushareAPI.batch_score_limit_up = batch_score_limit_up
 
 
-# 注册涨停评分方法到 TushareAPI
+def register_strong_watchlist_method():
+    """注册观察名单接口；它只服务列表展示，不改变板块效应启动判定的只读输入。"""
+    @staticmethod
+    def get_strong_watchlist(
+        dates: Any = None,
+        date: Any = None,
+        min_limit_times: int = 2,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        import strong_watchlist
+        strong_watchlist.set_as_of_date(get_as_of_date())
+        return strong_watchlist.StrongWatchlistAPI.evaluate(
+            dates=dates,
+            date=date,
+            min_limit_times=min_limit_times,
+            force=force,
+        )
+
+    TushareAPI.get_strong_watchlist = get_strong_watchlist
+
+
+# 注册涨停评分方法与观察名单接口到 TushareAPI
 # 必须在 if __name__ == "__main__" 之前调用，否则 CLI 模式下 main() 找不到方法
 register_limit_up_methods()
+register_strong_watchlist_method()
 
 # ============ CLI 入口 ============
 # 注意：register_limit_up_methods() 必须在 main() 之前执行，因此 CLI 入口放在文件末尾
