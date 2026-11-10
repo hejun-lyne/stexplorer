@@ -7975,344 +7975,43 @@ class TushareAPI:
         date: Optional[str] = None,
         min_limit_times: int = 2,
         pool_codes: Optional[List[str]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        trade_date: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """板块效应启动判定（T 日盘后「复盘标签」+ 延续性观察分）
+        """板块效应启动判定：委托给只读的 sector_engine 模块。
 
-        口径见《板块效应启动判定-实现规格》：
+        新引擎按《最佳方案实现指令》产出「每个交易日、每个行业」的启动复盘标签与四态阶段：
+        成分池只用当日快照、只对计数做 EMA、阈值全部为当日横截面分位、资金项反向、
+        分时特征不进质量分、严格 point-in-time。前端只消费输出 JSON，不重算任何判定。
 
-        1. 只认 ``stock_basic.industry`` 的 110 个行业；所有外部数据按个股代码映射行业，不按行业名 join。
-        2. ``EFFECT = run_len >= 3 and N[T] >= 3 and q_r20 <= 0.60``
-           （N 为行业内强势股数、run_len 为截至 T 连续 N>=3 的天数、q_r20 为当日 110 行业
-           20 日累计收益的横截面分位，行业全体口径而非强势股篮子）。
-        3. ``quality = ((1-q_zbl_in) + q_fd_in + (1-q_fmin_in) + min(1, max_lb/3) + (1-q_mf3)) / 5``
-           封板质量分位只在当日有涨停的行业间计算，其余行业置 0.5 中性；资金项反向。
-        4. ``START = EFFECT and zt_n >= 2 and zbl <= 0.35 and quality >= 60分位(S2候选)``。
-        5. 只用 T 日及之前数据；标签天然滞后 2 日，属于复盘标签，不是买点。
-
-        数据优先读本地缓存（``strong_pool_`` / ``daily_all_`` / ``limit_list_d_all_``），
-        缺失时按需补拉一次上游并写回缓存。``pool_codes`` 由界面传入「刚选中的强势股池」
-        （QSList 备份不一定落 api_cache），用于覆盖 T 日的 N。
-
-        Returns:
-            ``{"trade_date", "industry_count", "s2_count", "quality_threshold",
-            "boards": [...], "degraded": [...]}``；boards 每项含
-            ``industry/start/quality/effect/reason/is_review_label``。
+        ``min_limit_times`` / ``pool_codes`` 是旧接口遗留参数：新引擎一律只读
+        ``strong_pool_YYYYMMDD_2`` 当日快照，不接受界面注入的池子，避免破坏
+        point-in-time 口径，保留参数只为兼容旧调用方。
         """
-        degraded: List[str] = []
         try:
-            import hashlib
+            import sector_engine
 
-            min_times = max(1, int(min_limit_times or 2))
-            requested = str(date or _now()).replace('-', '')[:8]
-            if len(requested) != 8 or not requested.isdigit():
-                return {"error": f"Invalid date: {date}", "boards": []}
-            # 训练 / 回测模式：任何晚于数据截止日的请求都截断，防止未来数据
+            # 训练模式：把数据截止日传给引擎，防止请求日期晚于训练日时读到未来数据
             as_of = get_as_of_date()
-            if as_of and requested > as_of:
-                requested = as_of
-            dt = datetime.strptime(requested, '%Y%m%d')
-
-            # 结果按「日期 + 池子」缓存：同一轮评分反复打开列头筛选时不重复算
-            pool_sig = hashlib.md5(','.join(sorted(str(c) for c in (pool_codes or []))).encode()).hexdigest()[:8]
-
-            # ---- 1. 行业基准（唯一口径）：code6 -> 行业 / 名称 ----
-            name_map, industry_map = _get_stock_basic_maps()
-            code2ind = {str(k).split('.')[0]: str(v or '') for k, v in (industry_map or {}).items()}
-            code2name = {str(k).split('.')[0]: str(v or '') for k, v in (name_map or {}).items()}
-            industries = sorted({v for v in code2ind.values() if v})
-            if not industries:
-                return {"error": "stock_basic 缺少行业分类", "boards": []}
-
-            # ---- 2. 交易日历：T 及之前最多 40 个交易日（r20 用 20 日、run_len 用 12 日）----
-            cal_start = (dt - timedelta(days=90)).strftime('%Y-%m-%d')
-            cal_end = dt.strftime('%Y-%m-%d')
-            try:
-                local_days = _db_load_trade_cal_range(cal_start, cal_end) or []
-            except Exception:
-                local_days = []
-            trade_days = sorted({str(x).replace('-', '')[:8] for x in local_days
-                                 if str(x).replace('-', '')[:8].isdigit()
-                                 and str(x).replace('-', '')[:8] <= requested})[-40:]
-            if len(trade_days) < 21:
-                try:
-                    cal_df = safe_api_call(get_pro().trade_cal, exchange='SSE',
-                                           start_date=cal_start.replace('-', ''),
-                                           end_date=cal_end.replace('-', ''), is_open='1')
-                    if isinstance(cal_df, pd.DataFrame) and not cal_df.empty:
-                        extra = [str(x).replace('-', '')[:8] for x in cal_df['cal_date'].astype(str).tolist()]
-                        trade_days = sorted({x for x in (trade_days + extra)
-                                             if x.isdigit() and x <= requested})[-40:]
-                except Exception as e:
-                    degraded.append(f"trade_cal 补拉失败: {e}")
-            if not trade_days:
-                return {"error": "无可用交易日历", "boards": []}
-            T = trade_days[-1]
-            result_cache_key = f"board_stage_{T}_{min_times}_{pool_sig}"
-            cached = read_cache(result_cache_key, max_age_hours=24)
-            if isinstance(cached, dict) and cached.get('boards') and not cached.get('degraded'):
-                # 旧缓存可能没有个股→行业映射，就地补齐，前端才能用同一口径聚合并展示启动行业
-                cached.setdefault('industry_by_code', {c: i for c, i in code2ind.items() if i})
-                return cached
-
-            # ---- 3. 强势股池 N[t] / run_len（含 ST 过滤）----
-            pool_days = trade_days[-12:]
-            n_by_day: Dict[str, Dict[str, int]] = {}
-            for td in pool_days:
-                payload = read_cache(f"strong_pool_{td}_{min_times}", max_age_hours=8760 * 10)
-                arr = payload.get('stocks') if isinstance(payload, dict) else None
-                if td == T and isinstance(pool_codes, list) and pool_codes:
-                    arr = [{'code': c} for c in pool_codes]
-                if not isinstance(arr, list):
-                    n_by_day[td] = {}
-                    degraded.append(f"强势股池 {td} 缺失，run_len 可能中断")
-                    continue
-                cnt: Dict[str, int] = {}
-                for s in arr:
-                    if not isinstance(s, dict):
-                        continue
-                    c = str(s.get('code') or '').split('.')[-1][:6]
-                    if not c:
-                        continue
-                    nm = str(s.get('name') or code2name.get(c, '') or '')
-                    if 'ST' in nm.upper():
-                        continue
-                    ind = str(s.get('hybk') or code2ind.get(c, '') or '')
-                    if ind:
-                        cnt[ind] = cnt.get(ind, 0) + 1
-                n_by_day[td] = cnt
-            n_today = n_by_day.get(T, {})
-            run_len: Dict[str, int] = {}
-            for ind in industries:
-                length = 0
-                for td in reversed(pool_days):
-                    if n_by_day.get(td, {}).get(ind, 0) >= 3:
-                        length += 1
-                    else:
-                        break
-                run_len[ind] = length
-
-            # ---- 4. r20：行业全体（非强势股篮子）20 日累计收益，等权 ----
-            ret_days = trade_days[-20:]
-            day_sum: Dict[str, Dict[str, float]] = {}
-            day_cnt: Dict[str, Dict[str, int]] = {}
-            for td in ret_days:
-                payload = read_cache(f"daily_all_{td}", max_age_hours=8760 * 10)
-                if isinstance(payload, pd.DataFrame):
-                    rows = df_to_records(payload)
-                elif isinstance(payload, list):
-                    rows = payload
-                else:
-                    rows = []
-                    degraded.append(f"全市场日线 {td} 缺失")
-                s: Dict[str, float] = {}
-                c: Dict[str, int] = {}
-                for r in rows:
-                    if not isinstance(r, dict):
-                        continue
-                    ind = code2ind.get(str(r.get('ts_code') or '').split('.')[0], '')
-                    if not ind:
-                        continue
-                    try:
-                        v = float(r.get('pct_chg') or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    s[ind] = s.get(ind, 0.0) + v
-                    c[ind] = c.get(ind, 0) + 1
-                day_sum[td], day_cnt[td] = s, c
-            r20: Dict[str, float] = {}
-            for ind in industries:
-                v, used = 1.0, 0
-                for td in ret_days:
-                    cnt = day_cnt[td].get(ind, 0)
-                    if cnt <= 0:
-                        continue
-                    v *= (1 + (day_sum[td][ind] / cnt) / 100.0)
-                    used += 1
-                r20[ind] = (v - 1) * 100 if used else 0.0
-
-            # ---- 5. T 日涨停 / 炸板明细：按 ts_code 映射行业 ----
-            zt_n = {i: 0 for i in industries}
-            zb_n = {i: 0 for i in industries}
-            fd_vals: Dict[str, List[float]] = {i: [] for i in industries}
-            first_vals: Dict[str, List[float]] = {i: [] for i in industries}
-            max_lb = {i: 0 for i in industries}
-            multi_zt = {i: 0 for i in industries}
-            ldf = _get_limit_list_d_df(T)
-            if isinstance(ldf, pd.DataFrame) and not ldf.empty:
-                for _, r in ldf.iterrows():
-                    limit = str(r.get('limit') or '')
-                    if limit not in ('U', 'Z'):
-                        continue
-                    c6 = str(r.get('ts_code') or '').split('.')[0]
-                    ind = code2ind.get(c6, '')
-                    if not ind:
-                        continue
-                    nm = str(r.get('name') or code2name.get(c6, '') or '')
-                    if 'ST' in nm.upper():
-                        continue
-                    if limit == 'Z':
-                        zb_n[ind] += 1
-                        continue
-                    zt_n[ind] += 1
-                    fd = _to_float(r.get('fd_amount'))
-                    if fd > 0:
-                        fd_vals[ind].append(fd)
-                    first_vals[ind].append(float(_hhmmss_to_minutes(r.get('first_time'))))
-                    max_lb[ind] = max(max_lb[ind], int(_to_float(r.get('limit_times')) or 0))
-                    up_stat = str(r.get('up_stat') or '')
-                    if '/' in up_stat:
-                        try:
-                            if int(float(up_stat.split('/')[0])) >= 2:
-                                multi_zt[ind] += 1
-                        except (TypeError, ValueError):
-                            pass
-            else:
-                degraded.append(f"涨跌停明细 {T} 缺失，封板质量置中性")
-
-            def _median(xs: List[float]) -> float:
-                if not xs:
-                    return 0.0
-                s = sorted(xs)
-                n = len(s)
-                return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
-
-            zbl = {i: zb_n[i] / max(1, zt_n[i] + zb_n[i]) for i in industries}
-            fd_med = {i: _median(fd_vals[i]) for i in industries}
-            first_min = {i: (sum(first_vals[i]) / len(first_vals[i])) if first_vals[i] else 240.0
-                         for i in industries}
-
-            # ---- 6. 主力资金 mf3（T-2..T）：moneyflow_dc 逐股聚合，单位亿元 ----
-            mf3 = {i: 0.0 for i in industries}
-            mf_ok = False
-            for td in trade_days[-3:]:
-                key = f"moneyflow_dc_all_{td}"
-                payload = read_cache(key, max_age_hours=8760 * 10)
-                if payload is None:
-                    try:
-                        mf_df = safe_api_call(get_pro().moneyflow_dc, trade_date=td)
-                        if isinstance(mf_df, pd.DataFrame) and not mf_df.empty:
-                            payload = df_to_records(mf_df)
-                            write_cache(key, payload)
-                    except Exception as e:
-                        degraded.append(f"moneyflow_dc {td} 补拉失败: {e}")
-                if isinstance(payload, pd.DataFrame):
-                    payload = df_to_records(payload)
-                if not isinstance(payload, list) or not payload:
-                    continue
-                mf_ok = True
-                for r in payload:
-                    if not isinstance(r, dict):
-                        continue
-                    ind = code2ind.get(str(r.get('ts_code') or '').split('.')[0], '')
-                    if ind:
-                        mf3[ind] += _to_float(r.get('net_amount')) / 10000.0  # 万元 -> 亿元
-
-            # ---- 7. 横截面分位（行业位置/强度用全部 110 行业；封板质量只用活跃行业）----
-            q_r20 = dict(zip(industries, _pct_ranks([r20[i] for i in industries])))
-            q_zt = dict(zip(industries, _pct_ranks([float(zt_n[i]) for i in industries])))
-            if mf_ok:
-                q_mf3 = dict(zip(industries, _pct_ranks([mf3[i] for i in industries])))
-            else:
-                q_mf3 = {i: 0.5 for i in industries}
-                degraded.append('主力资金不可用，资金项按中性 0.5 处理')
-            q_zbl_in = {i: 0.5 for i in industries}
-            q_fd_in = {i: 0.5 for i in industries}
-            q_fmin_in = {i: 0.5 for i in industries}
-            active = [i for i in industries if zt_n[i] >= 1]
-            if len(active) >= 5:
-                q_zbl_in.update(dict(zip(active, _pct_ranks([zbl[i] for i in active]))))
-                q_fd_in.update(dict(zip(active, _pct_ranks([fd_med[i] for i in active]))))
-                q_fmin_in.update(dict(zip(active, _pct_ranks([first_min[i] for i in active]))))
-            else:
-                degraded.append('当日有涨停的行业不足 5 个，封板质量分位置中性')
-
-            # ---- 8. 第一层 EFFECT + 第二层 quality / 60 分位软阈值 ----
-            rows: List[Dict[str, Any]] = []
-            qualities: List[float] = []
-            for ind in industries:
-                effect = run_len[ind] >= 3 and n_today.get(ind, 0) >= 3 and q_r20[ind] <= 0.60
-                base4 = (1 - q_zbl_in[ind]) + q_fd_in[ind] + (1 - q_fmin_in[ind]) + min(1.0, max_lb[ind] / 3.0)
-                quality = (base4 + (1 - q_mf3[ind])) / 5.0
-                rows.append({
-                    'industry': ind,
-                    'trade_date': T,
-                    'effect': effect,
-                    's2_candidate': effect,
-                    'quality': quality,
-                    'zt_n': zt_n[ind],
-                    'zbl': zbl[ind],
-                    'metrics': {
-                        'N': n_today.get(ind, 0),
-                        'run_len': run_len[ind],
-                        'r20': r20[ind],
-                        'q_r20': q_r20[ind],
-                        'q_zt': q_zt[ind],
-                        'zt_n': zt_n[ind],
-                        'zbl': zbl[ind],
-                        'max_lb': max_lb[ind],
-                        'multi_zt': multi_zt[ind],
-                        'fd_med': fd_med[ind],
-                        'first_min': first_min[ind],
-                        'mf3': mf3[ind],
-                        'q_mf3': q_mf3[ind],
-                    },
-                })
-                if effect:
-                    qualities.append(quality)
-
-            threshold: Optional[float] = None
-            if qualities:
-                s = sorted(qualities)
-                pos = 0.6 * (len(s) - 1)
-                lo, hi = int(math.floor(pos)), int(math.ceil(pos))
-                threshold = s[lo] + (s[hi] - s[lo]) * (pos - lo)
-
-            boards: List[Dict[str, Any]] = []
-            for row in rows:
-                m = row['metrics']
-                if not row['effect']:
-                    reason = '未满足板块效应（连续 3 日强势股 ≥3 且 20 日位置 ≤60 分位）'
-                elif row['zt_n'] < 2:
-                    reason = '涨停承接不足（zt_n < 2）'
-                elif row['zbl'] > 0.35:
-                    reason = '炸板率偏高（> 0.35）'
-                elif threshold is None or row['quality'] < threshold:
-                    reason = '观察分未达 S2 候选 60 分位'
-                else:
-                    reason = '板块效应+低位+封板质量达标'
-                start = bool(
-                    row['effect'] and row['zt_n'] >= 2 and row['zbl'] <= 0.35
-                    and threshold is not None and row['quality'] >= threshold
-                )
-                boards.append({
-                    'industry': row['industry'],
-                    'trade_date': T,
-                    'start': start,
-                    's2_candidate': bool(row['effect']),
-                    'quality': round(row['quality'], 4),
-                    'quality_threshold': round(threshold, 4) if threshold is not None else None,
-                    'effect': {k: (round(v, 4) if isinstance(v, float) else v) for k, v in m.items()},
-                    'reason': reason,
-                    'is_review_label': True,
-                })
-
-            result = {
-                'trade_date': T,
-                'industry_count': len(industries),
-                's2_count': len(qualities),
-                'start_count': sum(1 for b in boards if b['start']),
-                'quality_threshold': round(threshold, 4) if threshold is not None else None,
-                'boards': boards,
-                # 判定时用的就是这张 code6 -> 行业 映射，回传给列表按同一口径聚合，
-                # 避免「只取东财 slist 前 3 个板块」把判定为启动的行业漏掉
-                'industry_by_code': {c: i for c, i in code2ind.items() if i},
-                'degraded': degraded[:20],
-            }
-            if not degraded:
-                write_cache(result_cache_key, result)
+            sector_engine.set_as_of_date(as_of)
+            target = trade_date or date
+            if as_of and target and str(target).replace('-', '')[:8] > as_of:
+                target = as_of
+            result = sector_engine.SectorAPI.evaluate(trade_date=target, config=config or {})
+            if not isinstance(result, dict):
+                return {'error': '板块阶段引擎返回格式异常', 'records': []}
             return result
         except Exception as e:
-            return {'error': str(e), 'boards': [], 'degraded': degraded}
+            # 错误也用中文，并保留最小可渲染结构
+            return {
+                'engine': 'sector_engine',
+                'version': '1.0',
+                'trade_date': str(trade_date or date or ''),
+                'error': str(e),
+                'records': [],
+                'coverage': {'industries': 0, 'warnings': ['板块阶段引擎加载失败：%s' % e]},
+                'summary': {'n_records': 0, 'n_start': 0, 'start_industries': [], 'stage_counts': {}},
+            }
 
     # ------------------ 选股模块（整合 stock_selector.py）------------------
 

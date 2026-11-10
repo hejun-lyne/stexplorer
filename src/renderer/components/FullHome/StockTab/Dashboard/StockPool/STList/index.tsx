@@ -276,12 +276,21 @@ const WindVaneTag: React.FC<{ vane: Helpers.Stock.WindVaneResult }> = ({ vane })
   </span>
 );
 
+/** 四态阶段的显示颜色：只用于标注状态，不含任何买点或收益预测 */
+const BOARD_STAGE_COLORS: Record<string, string> = {
+  冷: 'var(--hint-color)',
+  启动: '#cf1322',
+  延续: '#d46b08',
+  退潮: '#389e0d',
+};
+
 /**
- * 板块阶段标记：「启动」复盘标签 + 延续性观察分
+ * 板块阶段标记：四态阶段 +「启动」复盘标签 + 封板质量分
  *
- * 判定只覆盖 110 个东财行业（stock_basic.industry），概念 / 风格板块没有结果就不显示。
+ * 全部字段直接来自 sector_engine 的输出 JSON，渲染层不重算任何判定。
+ * 判定只覆盖 110 个行业（stock_basic.industry），概念 / 风格板块没有结果就不显示。
  * `start` 需要连续 3 日板块效应，天然滞后 2 日，属于复盘标签而不是买点；
- * 观察分只在 S2 候选内部有区分度，悬停可看完整因子与当日 60 分位阈值。
+ * 质量分只在当日板块效应候选池内部有区分度。
  */
 const BoardStageMark: React.FC<{ stage: BoardStageItem; compact?: boolean }> = ({ stage, compact }) => {
   const e = (stage.effect || {}) as BoardStageEffect;
@@ -293,27 +302,44 @@ const BoardStageMark: React.FC<{ stage: BoardStageItem; compact?: boolean }> = (
       <div style={{ fontWeight: 600 }}>
         {stage.industry} · {stage.trade_date} 板块效应启动判定（复盘标签，非买点）
       </div>
-      <div>{stage.start ? '结论：启动' : `结论：未启动 · ${stage.reason}`}</div>
       <div>
-        观察分 {score} / S2 候选 60 分位阈值 {threshold}
+        阶段 <b style={{ color: BOARD_STAGE_COLORS[stage.stage] }}>{stage.stage}</b>
+        {stage.start ? ' · 结论：启动' : ` · 结论：未启动 · ${stage.reason}`}
+      </div>
+      <div>质量分 {score} / 当日候选池 60 分位阈值 {threshold}</div>
+      <div>
+        快照 N {fmt(e.N_raw)} → EMA N {fmt(e.N, 2)}（dN {fmt(e.dN, 2)}、数量分位{' '}
+        {fmt((e.qN || 0) * 100)}%、连续 {fmt(e.run_len)} 日）
       </div>
       <div>
-        强势股 N {fmt(e.N)} · 连续 N≥3 天数 {fmt(e.run_len)} · 20 日收益 {fmt(e.r20, 2)}%（位置分位{' '}
-        {fmt((e.q_r20 || 0) * 100)}%）
+        事件分解 新进 {fmt(e.N_new)} / 留存 {fmt(e.N_stay)} / 退出 {fmt(e.N_exit)}（只供复盘，不进打分）
+      </div>
+      <div>
+        行业全体 20 日收益 {fmt(e.r20, 2)}%（位置分位 {fmt((e.q_r20 || 0) * 100)}%） · 篮子{' '}
+        {fmt(e.basket_ret, 2)}%
       </div>
       <div>
         涨停 {fmt(e.zt_n)} 家 · 炸板率 {fmt((e.zbl || 0) * 100, 1)}% · 最高连板 {fmt(e.max_lb)} · 多次涨停{' '}
         {fmt(e.multi_zt)} 家
       </div>
       <div>
-        封单中位数 {fmt((e.fd_med || 0) / 1e8, 2)} 亿 · 平均首封 {fmt(e.first_min)} 分钟
+        封单中位数 {fmt((e.fd_med || 0) / 1e8, 2)} 亿 · 平均首封 {fmt(e.first_min)} 分钟（分位{' '}
+        {fmt((e.q_zbl_in || 0) * 100)}% / {fmt((e.q_fd_in || 0) * 100)}% / {fmt((e.q_fmin_in || 0) * 100)}%）
       </div>
       <div>
         近 3 日主力净额 {fmt(e.mf3, 2)} 亿（分位 {fmt((e.q_mf3 || 0) * 100)}%，资金项反向计分）
       </div>
+      {stage.roles ? (
+        <div>
+          角色 龙头 {stage.roles.leader?.name || '—'} / 中军 {stage.roles.middle?.name || '—'} / 补涨{' '}
+          {stage.roles.laggard?.name || '—'}
+        </div>
+      ) : null}
       <div style={{ color: '#ffa39e' }}>
-        {stage.s2_candidate ? '当日进入板块效应候选（S2）' : '非 S2 候选'}；观察分只在 S2 候选内部有区分度，不作全市场打分
+        {stage.s2_candidate ? '当日进入板块效应候选池' : '非候选池'}；质量分只在候选池内部有区分度，不作全市场打分
+        {stage.first_divergence ? ' · 首次分歧（实验观察标记，不进主判定）' : ''}
       </div>
+      {stage.warnings?.length ? <div style={{ color: '#faad14' }}>数据提示：{stage.warnings.join('、')}</div> : null}
     </div>
   );
   return (
@@ -329,6 +355,9 @@ const BoardStageMark: React.FC<{ stage: BoardStageItem; compact?: boolean }> = (
           cursor: 'help',
         }}
       >
+        <span style={{ color: BOARD_STAGE_COLORS[stage.stage] || 'var(--hint-color)', marginRight: 2 }}>
+          {stage.stage}
+        </span>
         {stage.start ? (
           <span
             style={{
@@ -345,7 +374,7 @@ const BoardStageMark: React.FC<{ stage: BoardStageItem; compact?: boolean }> = (
           </span>
         ) : null}
         <span style={{ color: stage.start ? '#cf1322' : 'var(--hint-color)' }}>
-          {compact ? `观${score}` : `观察${score}`}
+          {compact ? `质${score}` : `质量${score}`}
         </span>
       </span>
     </Tooltip>
@@ -581,7 +610,7 @@ const STList: React.FC<STListProps> = ({
    */
   const [shortScoreBaseDay, setShortScoreBaseDay] = useState('');
   /**
-   * 板块效应启动判定结果：行业名 -> 「启动标签 + 延续性观察分」
+   * 板块效应启动判定结果：行业名 -> 「启动复盘标签 + 四态阶段 + 封板质量分」
    *
    * 只覆盖 110 个东财行业；在「所属板块」列头筛选与每行的板块名后显示。
    */
@@ -1290,6 +1319,31 @@ const STList: React.FC<STListProps> = ({
     }
     return list;
   }, [stocks, excludeStarBse, marketCapFilterEnabled, marketCapRange]);
+
+  /**
+   * 股票代码 -> 流通市值（亿元）：短线评分结果列表「流通市值」列的数据源
+   *
+   * 评分结果行本身不带市值：`circMv` 只用于量能维度打分，不会写进评分缓存行，
+   * 所以这里从当前股票池快照（板块成分股 / 强势股池的 `lt`，单位亿元）按代码补齐，
+   * 口径与工具栏「市值区间」筛选使用的 `marketCapYiOf` 完全一致。
+   */
+  const marketCapYiByCode = React.useMemo<Record<string, number | undefined>>(() => {
+    const map: Record<string, number | undefined> = {};
+    const put = (item: any) => {
+      const code = codeOfListItem(item);
+      if (!code || map[code] !== undefined) {
+        return;
+      }
+      const yi = marketCapYiOf(item);
+      // 池子里没有市值时会补 0，0 亿不是有效值，宁可显示 --
+      if (yi !== undefined && yi > 0) {
+        map[code] = yi;
+      }
+    };
+    (poolStocks as any[]).forEach(put);
+    (stocks as any[]).forEach(put);
+    return map;
+  }, [stocks, poolStocks]);
 
   const { run: runGetIndustryStocks } = useRequest(GetIndustryStocksFromTushare, {
     throwOnError: true,
@@ -3488,35 +3542,30 @@ const STList: React.FC<STListProps> = ({
   }, [visibleShowList, stockBankuaisMap, stockIndustryMap, industryBoardScope, boardStageMap]);
 
   /**
-   * 板块效应启动判定：短线评分跑完后按「评分基准日」算一次
+   * 板块效应启动判定：短线评分跑完后按「评分基准日」取一次只读引擎的输出 JSON
    *
-   * 规格只认 110 个东财行业，与「所属板块」里的行业名直接对齐；选中「强势股池」时
-   * 把当前池子代码传给后端覆盖 T 日的 N（QSList 备份不一定写入 api_cache）。
-   * 判定是纯复盘（只用 T 日及之前数据），不影响评分结果与排序。
+   * 判定全部在 sector_engine 完成（严格 point-in-time 的复盘标签与四态阶段），
+   * 渲染层只消费结果：不传股票池、不重算任何阈值或阶段。
    */
   useEffect(() => {
     if (displayMode !== 'shortScore' || shortScoreLoading || todayScoreLoading || !shortScoreBaseDay || !shortScoreData.length) {
       return;
     }
     const day = String(shortScoreBaseDay).replace(/-/g, '');
-    const strongSelected = effectiveSecids.indexOf(STRONG_POOL_SECID) >= 0;
-    const codes = strongSelected
-      ? Array.from(new Set((shortScoreData as any[]).map((r) => codeOfListItem(r)).filter(Boolean)))
-      : [];
-    const key = `${day}|${boardsKey}|${strongSelected}|${codes.length}|${boardStageNonce}`;
+    const key = `${day}|${boardsKey}|${boardStageNonce}`;
     if (boardStageRequestedRef.current === key) {
       return;
     }
     boardStageRequestedRef.current = key;
     let canceled = false;
     setBoardStageLoading(true);
-    Services.Tushare.GetBoardStageFromTushare(day, codes)
+    Services.Tushare.GetBoardStageFromTushare(day)
       .then((res) => {
         if (canceled) {
           return;
         }
         const map: Record<string, BoardStageItem> = {};
-        (res.boards || []).forEach((b) => {
+        (res.records || []).forEach((b) => {
           if (b?.industry) {
             map[b.industry] = b;
           }
@@ -3524,11 +3573,14 @@ const STList: React.FC<STListProps> = ({
         setBoardStageMap(map);
         // 同一份个股行业映射：列头聚合 / 行展示都改用它，与后端判定口径一致
         setStockIndustryMap(res.industry_by_code || {});
+        const stages = res.summary?.stage_counts || {};
         setBoardStageInfo(
           res.error
             ? `判定失败：${res.error}`
-            : `${res.trade_date} · ${res.industry_count} 行业 · S2候选 ${res.s2_count} · 启动 ${res.start_count}` +
-                (res.degraded?.length ? ` · 降级 ${res.degraded.length} 项：${res.degraded[0]}` : '')
+            : `${res.trade_date} · ${res.coverage?.industries || 0} 行业 · 板块效应候选 ${res.summary?.n_effect ?? 0} · 启动 ${res.summary?.n_start ?? 0} · 阶段 启动${stages['启动'] ?? 0}/延续${stages['延续'] ?? 0}/退潮${stages['退潮'] ?? 0}` +
+                (res.coverage?.warnings?.length
+                  ? ` · 提示 ${res.coverage.warnings.length} 项：${res.coverage.warnings[0]}`
+                  : '')
         );
       })
       .finally(() => {
@@ -3545,7 +3597,6 @@ const STList: React.FC<STListProps> = ({
     todayScoreLoading,
     shortScoreBaseDay,
     shortScoreData.length,
-    effectiveSecids,
     boardsKey,
     boardStageNonce,
   ]);
@@ -4410,6 +4461,13 @@ const STList: React.FC<STListProps> = ({
       ) : displayMode === 'shortScore' ? (
         <Row className={styles.header}>
           <Col span={4}>股票名称</Col>
+          <Col
+            span={2}
+            style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+            title="流通市值（亿元）：取自当前板块股票池 / 强势股池快照，与工具栏「市值区间」筛选同一口径；评分缓存行本身不带市值"
+          >
+            流通市值
+          </Col>
           <Col span={3} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
@@ -4487,7 +4545,7 @@ const STList: React.FC<STListProps> = ({
               </Dropdown>
             </span>
           </Col>
-          <Col span={5} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Col span={4} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span className={styles.klineShapeHeader} title="最新交易日的单根K线形态（复用技术形态识别：宝剑线/十字星/黄昏星/启明星/铁锤线/海绵宝宝…）。十字星=小实体且上下影线差不多长，上影线长于下影线=黄昏星，下影线长于上影线=启明星。点漏斗可勾选形态过滤（Excel 式，同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）。排序：先阳线后阴线；阳线按 铁锤线 > 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 螺旋桨 > 纺锤线 > 地线宝宝 > 中海绵宝宝 > 大海绵宝宝 > 天线宝宝 > 倒铁锤线 > 宝剑线，阴线按 倒宝剑线 > 十字星 > 黄昏星 > 启明星 > 铁锤线 > 螺旋桨 > 纺锤线 > 宝剑线 > 倒铁锤线 > 地线宝宝 > 天线宝宝 > 中海绵宝宝 > 大海绵宝宝；同一形态内再按（下影-上影）从小到大，仍相同按K线实体大小。">
               <span className={styles.klineShapeHeaderText}>K线形态</span>
               <Dropdown
@@ -4564,10 +4622,10 @@ const STList: React.FC<STListProps> = ({
               />
             </span>
           </Col>
-          <Col span={6} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Col span={5} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
-              title="股票所属行业 / 板块。有板块效应判定数据时，列头聚合、筛选与行内展示统一按判定同源的 110 行业口径（stock_basic.industry，每只股票一个行业），东财「所属板块」只作为次要参考显示前 3 个；判定未就绪时回退到东财 slist 前 3 个口径。行业名后的「启动」是板块效应复盘标签、「观察xx」是延续性观察分（只用 T 日及之前数据）。点漏斗可按行业勾选过滤（Excel 式多选；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）"
+              title="股票所属行业 / 板块。有板块效应判定数据时，列头聚合、筛选与行内展示统一按判定同源的 110 行业口径（stock_basic.industry，每只股票一个行业），东财「所属板块」只作为次要参考显示前 3 个；判定未就绪时回退到东财 slist 前 3 个口径。行业名后的「冷/启动/延续/退潮」是四态阶段、「启动」是复盘标签、「质量xx」是封板质量分（只用 T 日及之前数据，滞后约 2 日，不是买点）。点漏斗可按行业勾选过滤（Excel 式多选；同时决定列表显示与评分候选池：勾选后「短线评分 / 当日评分」只处理可见的股票）"
             >
               <span className={styles.klineShapeHeaderText}>所属板块</span>
               <Dropdown
@@ -4586,7 +4644,7 @@ const STList: React.FC<STListProps> = ({
                         fontSize: 10,
                         color: 'var(--hint-color)',
                       }}
-                      title="板块效应启动判定：只用 110 个东财行业与 T 日及之前数据，先圈板块效应再按封板质量/反向资金算观察分。启动标签连续 3 日确认，天然滞后 2 日，属复盘标签而非买点"
+                      title="板块效应启动判定：成分池只用当日强势股快照、只对计数做 EMA、阈值全部为当日横截面分位、资金项反向、分时特征不进质量分。只用 110 个行业与 T 日及之前数据；启动标签连续 3 日确认，天然滞后 2 日，属复盘标签而非买点"
                     >
                       <span style={{ flex: '1 1 auto', minWidth: 0 }}>
                         {boardStageLoading
@@ -4911,6 +4969,8 @@ const STList: React.FC<STListProps> = ({
             // 收藏统一按 6 位代码存取（行数据的 code 可能是 ts_code 形态）
             const rowCode = codeOfListItem(s);
             const rowFavorited = favoriteSet.has(rowCode);
+            // 流通市值（亿元）：评分行不带市值，回退到当前股票池快照
+            const capYi = marketCapYiOf(s) ?? marketCapYiByCode[rowCode];
             // 信号：仅买入信号（跳升买入），按当前买入阈值判定；卖出/抬升观察等噪音不再展示
             const sig = signalOfShortScoreRow(s, {
               buyDelta: Number(shortScoreBuyFilterDelta) || 0,
@@ -4973,6 +5033,23 @@ const STList: React.FC<STListProps> = ({
                   </div>
                 </Col>
                 <Col
+                  span={2}
+                  style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  title={
+                    capYi === undefined
+                      ? '未取到流通市值'
+                      : `流通市值 ${capYi.toFixed(2)} 亿元（与工具栏「市值区间」同口径）`
+                  }
+                >
+                  {capYi === undefined ? (
+                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
+                  ) : capYi >= 10000 ? (
+                    `${(capYi / 10000).toFixed(2)}万亿`
+                  ) : (
+                    `${capYi >= 100 ? capYi.toFixed(0) : capYi.toFixed(1)}亿`
+                  )}
+                </Col>
+                <Col
                   span={3}
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 12 }}
                 >
@@ -5018,7 +5095,7 @@ const STList: React.FC<STListProps> = ({
                     <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
                   )}
                 </Col>
-                <Col span={5} style={{ fontSize: 12 }}>
+                <Col span={4} style={{ fontSize: 12 }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <span
                       style={{ flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -5044,11 +5121,11 @@ const STList: React.FC<STListProps> = ({
                   </span>
                 </Col>
                 <Col
-                  span={6}
+                  span={5}
                   style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
                   {(() => {
-                    // 有判定数据时按同一套 110 行业口径展示：行业名放最前并带「启动 / 观察分」标记，
+                    // 有判定数据时按同一套 110 行业口径展示：行业名放最前并带「阶段 / 启动 / 质量分」标记，
                     // 东财 slist 的前 3 个板块退为次要参考（不再决定列头聚合与过滤）。
                     const industry = industryBoardScope ? stockIndustryMap[rowCode] : '';
                     const industryStage = industry ? boardStageMap[industry] : undefined;
