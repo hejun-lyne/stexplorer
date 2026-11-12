@@ -4,6 +4,7 @@ import { batch } from 'react-redux';
 import ReactGridLayout from 'react-grid-layout';
 import moment from 'moment';
 import { LogLevel } from '@/utils/enums';
+import { FavoriteKeyOfMode } from '@/helpers/setting';
 
 export const SYNC_SYSTEM_SETTING = 'SYNC_SYSTEM_SETTING';
 export const SYNC_MONITOR_SETTING = 'SYNC_MONITOR_SETTING';
@@ -91,10 +92,11 @@ export function setMonitorSettingAction(setting: System.MonitorSetting): ThunkAc
 }
 
 /**
- * 收藏 / 取消收藏股票（短线评分结果列表用）
+ * 收藏 / 取消收藏股票（结果列表用）
  *
  * 收藏列表存在系统设置里（store/setting.json），重启后仍然有效；
  * 列表中被收藏的股票会忽略评分阈值、RSI、市值、K线形态等过滤条件，始终显示。
+ * 训练模式写入 trainFavorites、非训练模式写入 favorites，两份数据互不串台。
  */
 export function toggleStockFavoriteAction(code: string): ThunkAction {
   return (dispatch, getState) => {
@@ -106,9 +108,13 @@ export function toggleStockFavoriteAction(code: string): ThunkAction {
       if (!c) {
         return;
       }
-      const favorites = Array.isArray(systemSetting.favorites) ? systemSetting.favorites : [];
+      const key = FavoriteKeyOfMode(systemSetting);
+      const favorites = Array.isArray(systemSetting[key]) ? systemSetting[key]! : [];
       const next = favorites.includes(c) ? favorites.filter((f) => f !== c) : [...favorites, c];
-      dispatch(setSystemSettingAction({ ...systemSetting, favorites: next }));
+      // 只覆盖当前模式对应的字段，另一个模式的收藏原样保留
+      const patch: System.Setting = { ...systemSetting };
+      patch[key] = next;
+      dispatch(setSystemSettingAction(patch));
     } catch (error) {
       console.log('设置股票收藏出错', error);
     }

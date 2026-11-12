@@ -2160,7 +2160,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
           </div>
         </div>
         <div style={{ fontSize: 11, color: 'var(--hint-color)', marginTop: 2 }}>
-          列表模式 · 已收藏 {favorites.length} 只（按收藏顺序，点击名称看个股详情）
+          列表模式 · 本模式已收藏 {favorites.length} 只（按收藏顺序，训练与非训练模式互不串台，点击名称看个股详情）
         </div>
       </div>
 

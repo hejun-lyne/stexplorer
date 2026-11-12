@@ -86,6 +86,7 @@ import { MA_BAND_OPTIONS, MaBand, parseMaBand } from '@/helpers/maBand';
 import { filterThemeBoards } from '@/helpers/boardFilter';
 import { saveTrainDayAction, setTrainTimeAction } from '@/actions/train';
 import { toggleStockFavoriteAction } from '@/actions/setting';
+import { FavoriteKeyOfMode } from '@/helpers/setting';
 import { fillPendingBuyTradesAction } from '@/actions/stock';
 import ScoreStockPanel from './ScoreStockPanel';
 
@@ -804,8 +805,12 @@ const STList: React.FC<STListProps> = ({
     commissionRate,
   } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { stockConfigsMapping, tradings } = useSelector((state: StoreState) => state.stock);
-  // 收藏的股票代码：收藏后忽略评分/RSI/市值/形态等过滤条件，始终留在评分结果列表里
-  const favoriteCodes = useSelector((state: StoreState) => state.setting.systemSetting.favorites);
+  // 收藏的股票代码：训练 / 非训练模式各存一份，这里只取当前模式那份。
+  // 下游的过滤放行、置顶排序、候选池补入、面板「已收藏」列表都随之隔离。
+  const favoriteCodes = useSelector((state: StoreState) => {
+    const s = state.setting.systemSetting;
+    return s[FavoriteKeyOfMode(s)];
+  });
   const favoriteSet = React.useMemo(() => new Set<string>(favoriteCodes || []), [favoriteCodes]);
   const isFavorited = useCallback((item: any) => favoriteSet.has(codeOfListItem(item)), [favoriteSet]);
   // 训练工具栏维护的交易日列表 / 训练进度（训练模式下 STList 也要能按交易日推进）
@@ -3731,7 +3736,7 @@ const STList: React.FC<STListProps> = ({
   const panelStockSecid = panelStockCode ? `${panelStockCode.startsWith('6') ? '1' : '0'}.${panelStockCode}` : '';
 
   /**
-   * 面板「列表模式」要展示的已收藏股票（按收藏顺序）
+   * 面板「列表模式」要展示的已收藏股票（仅当前训练 / 非训练模式那份，按收藏顺序）
    *
    * 收藏只存 6 位代码，名称优先用名称缓存，其次当前板块列表/评分结果/自选股配置兜底，
    * 都取不到时先显示代码（面板内部仍能按代码取数）。
@@ -4957,8 +4962,8 @@ const STList: React.FC<STListProps> = ({
                       }}
                       title={
                         rowFavorited
-                          ? '已收藏：忽略过滤条件始终显示，点击取消收藏'
-                          : '收藏：收藏后忽略评分/RSI/市值/形态等过滤条件，始终显示在结果列表'
+                          ? `已收藏（${ontrain ? '训练模式' : '非训练模式'}专属）：忽略过滤条件始终显示，点击取消收藏`
+                          : `收藏到${ontrain ? '训练模式' : '非训练模式'}：收藏后忽略评分/RSI/市值/形态等过滤条件，始终显示在结果列表；两种模式的收藏互不影响`
                       }
                       style={{
                         display: 'inline-flex',

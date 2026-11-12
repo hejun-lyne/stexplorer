@@ -36,6 +36,7 @@ export const defaultSystemSetting: System.Setting = {
   initialCapital: 100000,
   commissionRate: 0.0003,
   favorites: [],
+  trainFavorites: [],
 };
 
 export const defaultMonitorSetting: System.MonitorSetting = {
@@ -84,7 +85,14 @@ const setting: Reducer<SettingState> = (
   switch (action.type) {
     case SYNC_SYSTEM_SETTING: {
       const [systemSetting, smodified] = action.payload;
-      const nextSetting = systemSetting || state.systemSetting;
+      // 远端同步 / 旧版本设置可能缺少训练收藏字段：整体替换时保留本地已有值，
+      // 避免训练模式下收藏的股票被一次设置同步清掉（显式传空数组仍可清空）
+      const nextSetting = systemSetting
+        ? {
+            ...systemSetting,
+            trainFavorites: systemSetting.trainFavorites ?? state.systemSetting.trainFavorites ?? [],
+          }
+        : state.systemSetting;
       // 训练模式：系统设置的任何变化（本地修改 / 远端同步 / 按天推进）都同步到数据层过滤器，
       // 保证所有时序数据出口都按当前训练日期截断
       TrainFilter.SetTrainToDate(nextSetting.ontrain ? nextSetting.trainDate : undefined);

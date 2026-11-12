@@ -28,7 +28,10 @@ declare namespace System {
     initialCapital: number; // 初始本金
     commissionRate: number; // 交易佣金比例
 
-    favorites?: string[]; // 收藏的股票代码（短线评分列表里忽略过滤条件始终显示）
+    /** 非训练模式下收藏的股票代码（结果列表里忽略过滤条件始终显示） */
+    favorites?: string[];
+    /** 训练模式下收藏的股票代码，与 favorites 相互隔离，互不影响 */
+    trainFavorites?: string[];
   }
 
   export interface GridSetting {

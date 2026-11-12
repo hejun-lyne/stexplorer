@@ -26,7 +26,18 @@ export const defaultSystemSetting: System.Setting = {
   trainTime: '',
   commissionRate: 0.0003,
   favorites: [],
+  trainFavorites: [],
 };
+
+/**
+ * 当前模式对应的收藏字段名：训练模式用 trainFavorites，非训练模式用 favorites。
+ *
+ * 两份数据分别存取，切换模式后只显示各自模式下收藏的股票；老版本设置文件
+ * 没有 trainFavorites 时由 GetSystemSetting 合并默认值补成空数组。
+ */
+export function FavoriteKeyOfMode(setting: System.Setting): 'favorites' | 'trainFavorites' {
+  return setting?.ontrain ? 'trainFavorites' : 'favorites';
+}
 
 export function GetSystemSetting() {
   const systemSetting: System.Setting = Utils.GetStorage(CONST.STORAGE.SYSTEM_SETTING, defaultSystemSetting);

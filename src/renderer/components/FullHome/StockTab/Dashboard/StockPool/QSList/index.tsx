@@ -751,16 +751,11 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
       ) : (
         <>
           <Row className={styles.rowheader}>
-            <Col span={2}>名字</Col>
-            <Col span={2}>板块</Col>
+            <Col span={3}>名字</Col>
+            <Col span={3}>板块</Col>
             <Col span={2}>最新价</Col>
             <Col span={2}>流通市值</Col>
             <Col span={2}>入选天数</Col>
-            <Col span={2}>
-              <Tooltip title="独立派生表按交易日计算 w = 0.5^(Δt/1.5)，权重低于 0.05 的成员不再展示；当日强势股权重为 1.000">
-                观察权重
-              </Tooltip>
-            </Col>
             <Col span={2}>
               <Checkbox checked={filterMA} onChange={(e) => setFilterMA(e.target.checked)} style={{ color: '#fff' }}>
                 MA
@@ -792,7 +787,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
               .map((s) => (
                 <Row key={s.code} className={styles.row}>
                   <Col
-                    span={2}
+                    span={3}
                     style={{
                       cursor: 'pointer',
                       display: 'flex',
@@ -820,7 +815,7 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                     <StockRoleTag role={roleByCode[code6Of(s)]} />
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</span>
                   </Col>
-                  <Col span={2}>
+                  <Col span={3}>
                     {(() => {
                       const key = boardKeyOf(s);
                       const stage = key ? boardStageMap[key] : undefined;
@@ -843,12 +838,6 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
                     {firstAppearMap[s.secid]
                       ? getTradingDays(firstAppearMap[s.secid], moment().format('YYYYMMDD')) + '天'
                       : '-'}
-                  </Col>
-                  <Col span={2}>
-                    {(() => {
-                      const watch = (s as Helpers.Stock.WatchlistQSItem).watchlist;
-                      return watch ? watch.weight.toFixed(3) : '--';
-                    })()}
                   </Col>
                   <Col span={2}>
                     {techPending[s.secid]
