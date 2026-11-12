@@ -119,6 +119,11 @@ export interface ScoreStockTradeProps {
    * 不渲染理由输入、金额输入、仓位下拉与操作记录，避免多只股票时占满屏幕。
    */
   compact?: boolean;
+  /**
+   * 行内模式（列表模式的信息行）：只保留买入 / 清仓按钮，
+   * 隐藏现价、持仓、待成交等辅助文字，让名字、买入与图表切换挤在同一行。
+   */
+  inline?: boolean;
 }
 
 /**
@@ -151,6 +156,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
   ratio: ratioProp,
   onRatioChange,
   compact = false,
+  inline = false,
 }) => {
   const dispatch = useDispatch();
   const { ontrain, trainDate, trainTime, trainStartDate, initialCapital, commissionRate, kLineApiSourceSetting } =
@@ -833,29 +839,35 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
         style={{
           display: 'flex',
           alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: 6,
+          flexWrap: inline ? 'nowrap' : 'wrap',
+          gap: inline ? 4 : 6,
           fontSize: 11,
+          whiteSpace: inline ? 'nowrap' : undefined,
           color: 'var(--secondary-text-color)',
         }}
       >
-        <span>
-          {trendPrice > 0 ? '现价' : '收盘'} <b>{tradePrice > 0 ? tradePrice.toFixed(2) : '--'}</b>
-        </span>
-        {sellSharesBase > 0 ? (
-          <span>
-            持仓 <b>{sellSharesBase}</b> 股
-          </span>
+        {!inline ? (
+          <>
+            <span>
+              {trendPrice > 0 ? '现价' : '收盘'} <b>{tradePrice > 0 ? tradePrice.toFixed(2) : '--'}</b>
+            </span>
+            {sellSharesBase > 0 ? (
+              <span>
+                持仓 <b>{sellSharesBase}</b> 股
+              </span>
+            ) : null}
+            {atrSellNode}
+          </>
         ) : null}
-        {atrSellNode}
         <Button
           size="small"
           type="primary"
           disabled={!canCompactBuy}
           onClick={() => handleCompactSubmit('buy')}
-          title={compactBuyHint || `按顶部仓位（${ratioLabel}）买入，金额随可用资金自动换算`}
+          title={compactBuyHint || `按顶部仓位（${ratioLabel}）买入 ${formatMoney(compactBuyAmount)}，金额随可用资金自动换算`}
         >
-          {limitUpToday ? '买入(次日开盘)' : '买入'} · {formatMoney(compactBuyAmount)}
+          {limitUpToday ? '买入(次日开盘)' : '买入'}
+          {inline ? '' : ` · ${formatMoney(compactBuyAmount)}`}
         </Button>
         {sellSharesBase > 0 ? (
           <Button
@@ -868,8 +880,8 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
             清仓
           </Button>
         ) : null}
-        {compactBuyHint ? <span style={{ color: '#faad14' }}>{compactBuyHint}</span> : null}
-        {pendingBuys.length ? (
+        {!inline && compactBuyHint ? <span style={{ color: '#faad14' }}>{compactBuyHint}</span> : null}
+        {!inline && pendingBuys.length ? (
           <span style={{ color: 'var(--hint-color)' }}>
             待成交 {formatMoney(Number(pendingBuys[0].pendingAmount) || 0)}
             <a style={{ marginLeft: 4 }} onClick={() => dispatch(removeTrade(pendingBuys[0].id))}>

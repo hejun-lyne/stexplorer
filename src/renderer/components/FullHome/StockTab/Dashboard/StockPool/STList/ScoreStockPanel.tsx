@@ -91,6 +91,8 @@ interface TrendOptionParams {
   prevBar?: Stock.KLineItem | null;
   /** 图表总高度（列表模式会压缩，便于同时观察多只股票） */
   height?: number;
+  /** 紧凑模式（列表模式）：隐藏时间 / 价格轴标签 */
+  compact?: boolean;
 }
 
 interface KlineOptionParams {
@@ -103,11 +105,13 @@ interface KlineOptionParams {
   shortScoreScores?: Record<string, number>;
   /** 图表总高度（列表模式会压缩，便于同时观察多只股票） */
   height?: number;
+  /** 紧凑模式（列表模式）：隐藏时间 / 价格轴标签 */
+  compact?: boolean;
 }
 
-/** 列表模式的图表高度：压缩后一屏能同时看多只股票的分时 */
-const LIST_TREND_HEIGHT = 230;
-const LIST_KLINE_HEIGHT = 300;
+/** 列表模式的图表高度：压缩为原来的 60%，一屏能同时看更多股票 */
+const LIST_TREND_HEIGHT = Math.round(230 * 0.6);
+const LIST_KLINE_HEIGHT = Math.round(300 * 0.6);
 
 /** 短线评分曲线的线色（与评分等级色区分，保持中性金色） */
 const SHORT_SCORE_LINE_COLOR = '#faad14';
@@ -420,7 +424,7 @@ function buildTechSeries(
  * 布局（价格 / 成交量 / 技术指标）按开关动态排布，高度用像素计算，
  * 保证在较矮的面板里各 grid 也能等分得比较均匀。
  */
-function buildKlineOption({ klines, range, showVolume, techType, shortScoreScores, height }: KlineOptionParams) {
+function buildKlineOption({ klines, range, showVolume, techType, shortScoreScores, height, compact = false }: KlineOptionParams) {
   const colors = Utils.getVariablesColor(CONST.VARIABLES);
   const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
   const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
@@ -445,15 +449,18 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
   const vols = klines.map((k, i) => [i, k.cjl, i > 0 && k.sp < klines[i - 1].sp ? -1 : 1]);
 
   const chartHeight = Number(height) > 0 ? Number(height) : showTech ? 480 : 400;
-  const compact = chartHeight < 360;
+  // 紧凑布局既可由列表模式强制开启，也可由较矮的图表自动开启（原先按高度判断）
+  const compactLayout = compact || chartHeight < 360;
   const TOP = 6;
-  const BOTTOM = 20;
-  const GAP = 6;
-  const VOL_H = compact ? 40 : 54;
-  const TECH_H = compact ? 64 : 96;
+  const BOTTOM = compact ? 8 : 20;
+  const GAP = compact ? 4 : 6;
+  // 列表模式总高只有 180px：成交量 / 指标区同比压缩，避免主图被挤成一条线
+  const VOL_H = compact ? 28 : compactLayout ? 40 : 54;
+  const TECH_H = compact ? 48 : compactLayout ? 64 : 96;
   const priceH =
     chartHeight - TOP - BOTTOM - (showVolume ? VOL_H + GAP : 0) - (showTech ? TECH_H + GAP : 0);
-  const gridWidth = { left: 6, right: 46 };
+  // 紧凑模式隐藏了价格轴刻度，右侧不必再留 46px 给刻度文字
+  const gridWidth = { left: 6, right: compact ? 8 : 46 };
 
   const grids: any[] = [{ ...gridWidth, top: TOP, height: priceH }];
   let volGridIndex = -1;
@@ -480,7 +487,7 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
     axisTick: { show: false },
     axisLine: { lineStyle: { color: splitColor } },
     // 只有最下面一个 grid 显示日期，避免多条坐标轴叠在一起
-    axisLabel: { show: i === lastGridIndex, fontSize: 9, color: secondaryColor, hideOverlap: true },
+    axisLabel: { show: !compact && i === lastGridIndex, fontSize: 9, color: secondaryColor, hideOverlap: true },
     splitLine: { show: false },
   }));
 
@@ -491,7 +498,7 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
       position: 'right',
       axisLine: { show: false },
       axisTick: { show: false },
-      axisLabel: { fontSize: 9, color: secondaryColor, formatter: (v: number) => Number(v).toFixed(2) },
+      axisLabel: { show: !compact, fontSize: 9, color: secondaryColor, formatter: (v: number) => Number(v).toFixed(2) },
       splitLine: { lineStyle: { color: splitColor, type: 'dashed' } },
     },
   ];
@@ -514,7 +521,7 @@ function buildKlineOption({ klines, range, showVolume, techType, shortScoreScore
       position: 'right',
       axisLine: { show: false },
       axisTick: { show: false },
-      axisLabel: { fontSize: 9, color: secondaryColor, formatter: (v: number) => Number(v).toFixed(2) },
+      axisLabel: { show: !compact, fontSize: 9, color: secondaryColor, formatter: (v: number) => Number(v).toFixed(2) },
       splitLine: { show: false },
       // 短线评分是 0~100 的固定量纲：固定坐标轴范围，曲线高低不会随区间缩放而失真
       ...(techType === TechIndicatorType.SHORT_SCORE ? { min: 0, max: 100 } : {}),
@@ -771,7 +778,7 @@ function early30FeatureText(f: Early30Features) {
  *
  * 参考线：昨收（虚横线）+ 昨日K线的最低价 / 开盘价，方便对照今天有没有跌破昨低、高开还是低开。
  */
-function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar, height }: TrendOptionParams) {
+function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar, height, compact = false }: TrendOptionParams) {
   const colors = Utils.getVariablesColor(CONST.VARIABLES);
   const upColor = colors['--increase-color'] || UP_COLOR_FALLBACK;
   const downColor = colors['--reduce-color'] || DOWN_COLOR_FALLBACK;
@@ -793,11 +800,12 @@ function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar, heigh
 
   const chartHeight = Number(height) > 0 ? Number(height) : 400;
   const TOP = 6;
-  const BOTTOM = 20;
-  const GAP = 6;
-  const VOL_H = chartHeight < 300 ? 40 : 54;
+  const BOTTOM = compact ? 8 : 20;
+  const GAP = compact ? 4 : 6;
+  const VOL_H = compact ? 28 : chartHeight < 300 ? 40 : 54;
   const priceH = chartHeight - TOP - BOTTOM - (showVolume ? VOL_H + GAP : 0);
-  const gridWidth = { left: 6, right: 46 };
+  // 紧凑模式隐藏了时间 / 价格轴标签，把留白还给曲线
+  const gridWidth = { left: 6, right: compact ? 8 : 46 };
 
   const grids: any[] = [{ ...gridWidth, top: TOP, height: priceH }];
   if (showVolume) {
@@ -812,7 +820,7 @@ function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar, heigh
     boundaryGap: false,
     axisTick: { show: false },
     axisLine: { lineStyle: { color: splitColor } },
-    axisLabel: { show: i === lastGridIndex, fontSize: 9, color: secondaryColor, hideOverlap: true },
+    axisLabel: { show: !compact && i === lastGridIndex, fontSize: 9, color: secondaryColor, hideOverlap: true },
     splitLine: { show: false },
   }));
 
@@ -841,7 +849,7 @@ function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar, heigh
       max: maxVal * 1.001,
       axisLine: { show: false },
       axisTick: { show: false },
-      axisLabel: { fontSize: 9, color: secondaryColor, formatter: (v: number) => Number(v).toFixed(2) },
+      axisLabel: { show: !compact, fontSize: 9, color: secondaryColor, formatter: (v: number) => Number(v).toFixed(2) },
       splitLine: { lineStyle: { color: splitColor, type: 'dashed' } },
     },
   ];
@@ -867,13 +875,13 @@ function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar, heigh
   if (zs > 0) {
     markLines.push({ yAxis: zs, lineStyle: { color: secondaryColor, type: 'dashed', width: 1 } });
   }
-  // 昨日K线的最低价 / 开盘价：带文字标签，方便一眼看出今天是否跌破昨低、高开还是低开
+  // 昨日K线的最低价 / 开盘价：参考线常驻，文字标签仅在非紧凑模式显示
   if (prevLow > 0) {
     markLines.push({
       name: '昨低',
       yAxis: prevLow,
       label: {
-        show: true,
+        show: !compact,
         position: 'insideStartTop',
         formatter: `昨低 ${prevLow.toFixed(2)}`,
         color: PREV_LOW_COLOR,
@@ -887,7 +895,7 @@ function buildTrendOption({ trends, visibleCount, showVolume, zs, prevBar, heigh
       name: '昨开',
       yAxis: prevOpen,
       label: {
-        show: true,
+        show: !compact,
         position: 'insideStartBottom',
         formatter: `昨开 ${prevOpen.toFixed(2)}`,
         color: PREV_OPEN_COLOR,
@@ -1556,7 +1564,7 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
     const klineHeight = isList ? LIST_KLINE_HEIGHT : techType === TECH_NONE ? 400 : 480;
     if (chartMode === 'trend') {
       return trends.length
-        ? buildTrendOption({ trends, visibleCount, showVolume, zs: trendZs, prevBar: prevDayBar, height: trendHeight })
+        ? buildTrendOption({ trends, visibleCount, showVolume, zs: trendZs, prevBar: prevDayBar, height: trendHeight, compact: isList })
         : { option: null, chartHeight: trendHeight };
     }
     return displayKlines.length
@@ -1567,6 +1575,7 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
           techType,
           shortScoreScores,
           height: klineHeight,
+          compact: isList,
         })
       : { option: null, chartHeight: klineHeight };
   }, [
@@ -1634,21 +1643,59 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
               }
       }
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, lineHeight: 2 }}>
+      {/* 列表模式：名字+代码、分时/日K切换、买入按钮挤在同一行；单股模式保持原布局 */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: isList ? 6 : 8,
+          lineHeight: isList ? 1.8 : 2,
+          minWidth: 0,
+          flexWrap: isList ? 'nowrap' : undefined,
+          overflow: isList ? 'hidden' : undefined,
+          // 给右上角绝对定位的「仓位 + 单股」浮层留出空位，滚动时也不会压住内容
+          paddingRight: isList ? 150 : undefined,
+        }}
+      >
         <div
           style={{
             display: 'flex',
             alignItems: 'baseline',
-            gap: 8,
+            gap: isList ? 6 : 8,
             minWidth: 0,
+            flex: '0 0 auto',
             cursor: 'pointer',
           }}
           title="点击打开股票详情"
           onClick={() => onOpenStock(secid, name)}
         >
-          <span style={{ fontSize: isList ? 14 : 16, fontWeight: 'bold', color: '#1890ff' }}>{name || code}</span>
-          <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{code}</span>
+          <span style={{ fontSize: isList ? 13 : 16, fontWeight: 'bold', color: '#1890ff' }}>{name || code}</span>
+          <span style={{ fontSize: isList ? 11 : 12, color: 'var(--secondary-text-color)' }}>{code}</span>
         </div>
+        {isList ? (
+          <>
+            <Radio.Group
+              size="small"
+              value={chartMode}
+              onChange={(e) => setChartMode(e.target.value as PanelChartMode)}
+            >
+              <Radio.Button value="trend">分时</Radio.Button>
+              <Radio.Button value="kline">日K</Radio.Button>
+            </Radio.Group>
+            <ScoreStockTrade
+              secid={secid}
+              code={code}
+              name={name}
+              klines={klines}
+              currentPrice={trendPrice}
+              intradayReady={!trendLoading}
+              ratio={ratio}
+              onRatioChange={onRatioChange}
+              compact
+              inline
+            />
+          </>
+        ) : null}
         {!isList && onSwitchToList ? (
           <Tooltip title="列表模式：同时查看多只已收藏股票的分时走势">
             <Button
@@ -1682,7 +1729,8 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
         </div>
       ) : null}
 
-      {/* C5a 全天分时形态 + C5b 开盘 30 分钟预测（规格 M7a / M7b），图表上方一行展示 */}
+      {/* C5a 全天分时形态 + C5b 开盘 30 分钟预测：单股详情展示，列表模式为紧凑省略 */}
+      {!isList && (
       <div
         style={{
           marginTop: 12,
@@ -1767,31 +1815,37 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
         )}
         <span style={{ marginLeft: 'auto', color: 'var(--hint-color)' }}>C5a 随分时动态 · C5b 每分钟更新</span>
       </div>
+      )}
 
-      <div style={{ marginTop: 12 }}>
-        {/* 图表工具栏：分时/日K切换；日K下为技术指标 / 成交量 / 缩放；训练模式分时另带回放操作 */}
+      <div style={{ marginTop: isList ? 4 : 12 }}>
+        {/* 图表工具栏：列表模式的分时/日K切换已移到上方信息行，这里只保留必要控件 */}
         <div
           style={{
             display: 'flex',
             alignItems: 'center',
             flexWrap: 'wrap',
             gap: 6,
-            marginBottom: 4,
+            marginBottom: isList ? 2 : 4,
           }}
         >
-          <Radio.Group
-            size="small"
-            value={chartMode}
-            onChange={(e) => setChartMode(e.target.value as PanelChartMode)}
-          >
-            <Radio.Button value="trend">分时</Radio.Button>
-            <Radio.Button value="kline">日K线</Radio.Button>
-          </Radio.Group>
+          {/* 列表模式的切换已在上方信息行，这里不再重复 */}
+          {!isList ? (
+            <Radio.Group
+              size="small"
+              value={chartMode}
+              onChange={(e) => setChartMode(e.target.value as PanelChartMode)}
+            >
+              <Radio.Button value="trend">分时</Radio.Button>
+              <Radio.Button value="kline">日K线</Radio.Button>
+            </Radio.Group>
+          ) : null}
           {chartMode === 'kline' ? (
             <>
-              <span style={{ fontSize: 12, fontWeight: 600 }}>
-                日K线{displayKlines.length ? `（${displayKlines.length}个交易日）` : ''}
-              </span>
+              {!isList ? (
+                <span style={{ fontSize: 12, fontWeight: 600 }}>
+                  日K线{displayKlines.length ? `（${displayKlines.length}个交易日）` : ''}
+                </span>
+              ) : null}
               <Select size="small" style={{ width: 100 }} value={techType} onChange={(v) => setTechType(Number(v))}>
                 <Select.Option value={TECH_NONE}>无指标</Select.Option>
                 {DefaultTechIndicatorTypes.map((v) => (
@@ -1800,7 +1854,7 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
                   </Select.Option>
                 ))}
               </Select>
-              {techType === TechIndicatorType.SHORT_SCORE && !shortScoreCurveLoading ? (
+              {!isList && techType === TechIndicatorType.SHORT_SCORE && !shortScoreCurveLoading ? (
                 <span
                   style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}
                   title={`柱高=评分单日变化幅度：红柱=跳升、绿柱=跳降；变化 ≥${SCORE_JUMP_CONFIG.minDelta} 分的柱子加重显示（突变），其余为淡色日常波动。橙柱=抬升观察、粉柱=跳升买入、亮绿柱=卖出（与列表「信号」列同一套规则，悬停曲线上可看判定依据）。蓝色虚线=自近${SHORT_SCORE_RISE_DAYS}根低点的累计抬升（买入阈值 ${SHORT_SCORE_RISE_THRESHOLD} 分；单日跳升 ≥20 分也算启动）`}
@@ -1819,24 +1873,30 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
               <Tooltip title="成交量">
                 <Switch size="small" checked={showVolume} onChange={setShowVolume} />
               </Tooltip>
-              <Slider
-                range
-                min={0}
-                max={100}
-                style={{ width: 110, margin: '0 2px' }}
-                value={[range.start, range.end]}
-                onChange={updateRange}
-                tipFormatter={null}
-              />
-              <Button size="small" type="text" icon={<ZoomInOutlined />} onClick={zoomIn} title="放大" />
-              <Button size="small" type="text" icon={<ZoomOutOutlined />} onClick={zoomOut} title="缩小" />
+              {!isList ? (
+                <>
+                  <Slider
+                    range
+                    min={0}
+                    max={100}
+                    style={{ width: 110, margin: '0 2px' }}
+                    value={[range.start, range.end]}
+                    onChange={updateRange}
+                    tipFormatter={null}
+                  />
+                  <Button size="small" type="text" icon={<ZoomInOutlined />} onClick={zoomIn} title="放大" />
+                  <Button size="small" type="text" icon={<ZoomOutOutlined />} onClick={zoomOut} title="缩小" />
+                </>
+              ) : null}
             </>
           ) : (
             <>
               <Tooltip title="成交量">
                 <Switch size="small" checked={showVolume} onChange={setShowVolume} />
               </Tooltip>
-              <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{trendStatus}</span>
+              {!isList ? (
+                <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{trendStatus}</span>
+              ) : null}
             </>
           )}
         </div>
@@ -1879,25 +1939,24 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
         )}
       </div>
 
-      {/* 买入卖出区域：训练模式与详情页共用同一个训练账户 */}
-      <div style={{ marginTop: isList ? 8 : 12 }}>
-        {!isList ? (
+      {/* 买入卖出区域：列表模式的买入按钮已合并到上方信息行，单股模式保留完整下单区 */}
+      {!isList ? (
+        <div style={{ marginTop: 12 }}>
           <p>
             <span>人不渡我，唯有自渡</span>
           </p>
-        ) : null}
-        <ScoreStockTrade
-          secid={secid}
-          code={code}
-          name={name}
-          klines={klines}
-          currentPrice={trendPrice}
-          intradayReady={!trendLoading}
-          ratio={ratio}
-          onRatioChange={onRatioChange}
-          compact={isList}
-        />
-      </div>
+          <ScoreStockTrade
+            secid={secid}
+            code={code}
+            name={name}
+            klines={klines}
+            currentPrice={trendPrice}
+            intradayReady={!trendLoading}
+            ratio={ratio}
+            onRatioChange={onRatioChange}
+          />
+        </div>
+      ) : null}
     </aside>
   );
 };
@@ -2129,41 +2188,6 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
           padding: '0 12px 12px',
         }}
       >
-      {/* 顶部固定：资金情况 + 仓位选择 + 模式切换（不跟随下方图表滚动） */}
-      <div
-        style={{
-          position: 'sticky',
-          top: 0,
-          zIndex: 10,
-          background: 'var(--background-color)',
-          padding: '6px 0',
-          marginBottom: 4,
-          borderBottom: '1px solid var(--border-color)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <PanelFundsSummary />
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Tooltip title="买入仓位：对所有收藏股票的买入区生效">
-              <span style={{ fontSize: 11, color: 'var(--hint-color)' }}>仓位</span>
-            </Tooltip>
-            <Select size="small" style={{ width: 82 }} value={ratio} onChange={(v) => changeRatio(Number(v))}>
-              {POSITION_RATIOS.map((r) => (
-                <Select.Option key={r.value} value={r.value}>
-                  {r.label}
-                </Select.Option>
-              ))}
-            </Select>
-            <Button size="small" onClick={() => switchMode('single')}>
-              单股详情
-            </Button>
-          </div>
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--hint-color)', marginTop: 2 }}>
-          列表模式 · 本模式已收藏 {favorites.length} 只（按收藏顺序，训练与非训练模式互不串台，点击名称看个股详情）
-        </div>
-      </div>
-
       {favorites.length ? (
         favorites.map((s) => (
           <ScoreStockDetail
@@ -2246,6 +2270,40 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
           {collapsed ? <LeftOutlined /> : <RightOutlined />}
         </div>
       </div>
+
+      {/* 列表模式头部：只保留仓位选择与模式切换，绝对定位在右上角，不占用内容高度 */}
+      {!collapsed && mode === 'list' ? (
+        <div
+          style={{
+            position: 'absolute',
+            top: 4,
+            right: 8,
+            zIndex: 30,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: '2px 4px',
+            borderRadius: 4,
+            background: 'var(--background-color)',
+            boxShadow: '0 1px 4px rgba(0, 0, 0, 0.12)',
+          }}
+        >
+          <Tooltip
+            title={`买入仓位：对所有收藏股票的买入区生效；本模式已收藏 ${favorites.length} 只，训练与非训练模式互不串台`}
+          >
+            <Select size="small" style={{ width: 76 }} value={ratio} onChange={(v) => changeRatio(Number(v))}>
+              {POSITION_RATIOS.map((r) => (
+                <Select.Option key={r.value} value={r.value}>
+                  {r.label}
+                </Select.Option>
+              ))}
+            </Select>
+          </Tooltip>
+          <Button size="small" onClick={() => switchMode('single')} title="切回单股详情">
+            单股
+          </Button>
+        </div>
+      ) : null}
 
       <div
         style={{
