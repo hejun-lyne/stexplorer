@@ -39,8 +39,10 @@ function metricOf(role: StockRoleName, item: { limit_times?: number | null; tota
   return item.gain20 == null ? '--' : `${Number(item.gain20).toFixed(1)}%`;
 }
 
-function chipStyle(role: StockRoleName) {
-  const c = ROLE_STYLE[role];
+type ChipColor = { color: string; background: string; border: string };
+
+/** 股票行标签的统一紧凑样式：角色 chip 与「强势」chip 共用，保证视觉一致 */
+function baseChipStyle(c: ChipColor) {
   return {
     display: 'inline-flex',
     alignItems: 'center',
@@ -56,6 +58,10 @@ function chipStyle(role: StockRoleName) {
     lineHeight: '14px',
     cursor: 'help' as const,
   };
+}
+
+function chipStyle(role: StockRoleName) {
+  return baseChipStyle(ROLE_STYLE[role]);
 }
 
 /** 「换」角标：角色平均连续 1.63 天，不提示会被误当成稳定标签 */
@@ -94,6 +100,39 @@ const StockRoleTag: React.FC<{ role?: StockRoleBinding }> = ({ role }) => {
       <span style={chipStyle(role.role)} onClick={(e) => e.stopPropagation()}>
         {role.role} {metricOf(role.role, role)}
         {role.changed ? <ChangedMark /> : null}
+      </span>
+    </Tooltip>
+  );
+};
+
+/** 「强势」配色：与三角色同款紧凑 chip，用橙色系区分 */
+const STRONG_STYLE: ChipColor = { color: '#d4380d', background: '#fff2e8', border: '#ffbb96' };
+
+const STRONG_REASON: Record<string, string> = {
+  new_high_60: '60 日新高',
+  multi_limit: '近期多次涨停',
+};
+
+/**
+ * 股票行「强势」标签：当日属于强势股池（60 日新高 或 近期多次涨停）时显示。
+ *
+ * 与板块内角色一致，只标注个股当日所属状态，不产出买点、目标价或收益预测。
+ * reason 为 undefined 表示该股票不在池子里；空字符串表示在池子里但原因未知。
+ */
+export const StrongStockTag: React.FC<{ reason?: string }> = ({ reason }) => {
+  if (reason === undefined) return null;
+  return (
+    <Tooltip
+      title={
+        <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+          <div style={{ fontWeight: 600 }}>当日强势股池成员</div>
+          <div>入池原因：{STRONG_REASON[reason] || '当日入池'}（与「强势股」虚拟板块同一份池子）</div>
+          <div style={{ color: '#ffa39e' }}>只标注所属状态，不是买点、目标价或收益预测</div>
+        </div>
+      }
+    >
+      <span style={baseChipStyle(STRONG_STYLE)} onClick={(e) => e.stopPropagation()}>
+        强势
       </span>
     </Tooltip>
   );

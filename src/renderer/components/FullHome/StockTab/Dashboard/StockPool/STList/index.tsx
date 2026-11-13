@@ -20,7 +20,7 @@ import {
 } from 'antd';
 import styles from '../index.scss';
 import BoardStageMark from '../BoardStageMark';
-import StockRoleTag, { BoardRoleChips } from '../StockRoleTag';
+import StockRoleTag, { BoardRoleChips, StrongStockTag } from '../StockRoleTag';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
 import * as Utils from '@/utils';
@@ -701,6 +701,8 @@ const STList: React.FC<STListProps> = ({
   }, [selectedSecids, themeBoardSecids, conceptBoardSecids, styleBoardSecids]);
   const effectiveSecidsRef = React.useRef<string[]>([]);
   effectiveSecidsRef.current = effectiveSecids;
+  /** 只选中「强势股」虚拟板块时为 true：整池都是强势股，不需要再逐只打标签；与真实板块混选时仍要打 */
+  const isStrongPoolBoard = effectiveSecids.length > 0 && effectiveSecids.every(isStrongPoolSecid);
   /** 只有当前在看「强势股」虚拟板块时才标记风向标（其它板块的成分股不适用） */
   const activeWindVane = React.useMemo(
     () => (effectiveSecids.indexOf(STRONG_POOL_SECID) >= 0 ? windVane : null),
@@ -1196,6 +1198,47 @@ const STList: React.FC<STListProps> = ({
       }
     },
   });
+
+  /**
+   * 当日强势股池（6 位代码 -> 入池原因）：给「非强势股板块」的成分股打「强势」标签
+   *
+   * 直接用 LoadStrongPoolStocks 的当日池子（与「强势股」虚拟板块同源），不合并观察名单：
+   * 观察名单里的「观察中」并不是当日强势，只有真正在池子里的股票才应该被标注。
+   * 独立于板块成分股取数，不写板块缓存、不弹空池警告、不动情绪风向标。
+   */
+  const [strongTagByCode, setStrongTagByCode] = useState<Record<string, string>>({});
+  const strongTagDateRef = React.useRef('');
+  const strongTagLoadedDateRef = React.useRef<string | null>(null);
+  const { run: runLoadStrongTags } = useRequest(Helpers.Stock.LoadStrongPoolStocks, {
+    throwOnError: true,
+    manual: true,
+    onSuccess: (list, params) => {
+      // 训练日/日期已经切走：这一份属于上一日，丢弃
+      if (String((params as any)?.[0] || '') !== strongTagDateRef.current) {
+        return;
+      }
+      const byCode: Record<string, string> = {};
+      ((list || []) as Helpers.Stock.StrongPoolStock[]).forEach((item) => {
+        const code = codeOfListItem(item);
+        if (code && byCode[code] === undefined) {
+          byCode[code] = String(item?.reason || '');
+        }
+      });
+      setStrongTagByCode(byCode);
+    },
+    onError: () => setStrongTagByCode({}),
+  });
+  /** 同一交易日只加载一次；先看强势股板块再切到普通板块、或训练日变化时重新加载 */
+  const strongTagDate = trainDay || '';
+  useEffect(() => {
+    if (isStrongPoolBoard || strongTagLoadedDateRef.current === strongTagDate) {
+      return;
+    }
+    strongTagLoadedDateRef.current = strongTagDate;
+    strongTagDateRef.current = strongTagDate;
+    setStrongTagByCode({});
+    runLoadStrongTags(strongTagDate);
+  }, [isStrongPoolBoard, strongTagDate, runLoadStrongTags]);
 
   /**
    * 虚拟板块「强势股」的取数
@@ -3306,6 +3349,10 @@ const STList: React.FC<STListProps> = ({
     return (visibleShowList as any[]).filter((row: any) => !isHiddenByHeaderFilter(row));
   }, [visibleShowList, displayMode, headerFilterActive, isHiddenByHeaderFilter]);
 
+  /** 非强势股板块时，给属于当日强势股池的股票行补一枚「强势」标签（不在池子里则组件自行返回 null） */
+  const strongTagOf = (item: any) =>
+    isStrongPoolBoard ? null : <StrongStockTag reason={strongTagByCode[codeOfListItem(item)]} />;
+
   /** 形态识别候选池（股票代码集合）：勾选过滤生效时只评列表可见的股票；null = 不过滤，沿用全量口径 */
   const scorePoolCodes = React.useMemo<Set<string> | null>(() => {
     if (displayMode !== 'shortScore' || !headerFilterActive) {
@@ -4783,6 +4830,7 @@ const STList: React.FC<STListProps> = ({
                   <WindVaneTag vane={activeWindVane} />
                 )}
                 <WatchlistTag meta={(s as any).watchlist || watchlistMetaByCode[codeOfListItem(s)]} />
+                {strongTagOf(s)}
                 {s.name}
               </Col>
               <Col span={3} className={Utils.GetValueColor(s.zdd).textClass}>
@@ -4814,6 +4862,7 @@ const STList: React.FC<STListProps> = ({
           displayList.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((s: any) => (
             <Row key={s.ts_code} className={styles.row}>
               <Col span={4}>
+                {strongTagOf(s)}
                 <span>{s.ts_code}</span>
               </Col>
               <Col span={3} className={s.leader_score >= 70 ? 'text-up' : s.leader_score >= 50 ? '' : 'text-down'}>
@@ -4851,6 +4900,7 @@ const STList: React.FC<STListProps> = ({
                 }}
               >
                 <Col span={5}>
+                  {strongTagOf(s)}
                   <span>{s.ts_code}</span>
                 </Col>
                 <Col span={3}>
@@ -4887,6 +4937,7 @@ const STList: React.FC<STListProps> = ({
                 }}
               >
                 <Col span={5}>
+                  {strongTagOf(s)}
                   <span>{s.ts_code}</span>
                 </Col>
                 <Col span={3}>
@@ -4978,6 +5029,7 @@ const STList: React.FC<STListProps> = ({
                     {activeWindVane && activeWindVane.code === rowCode && <WindVaneTag vane={activeWindVane} />}
                     <WatchlistTag meta={watchlistMetaByCode[rowCode]} />
                     <StockRoleTag role={roleByCode[rowCode]} />
+                    {strongTagOf(s)}
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{rowName}</span>
                     {newEntryCodes.has(s.code) && (
                       <span
@@ -5142,6 +5194,7 @@ const STList: React.FC<STListProps> = ({
                   const secid = code.startsWith('6') ? `1.${code}` : `0.${code}`;
                   onOpenStock(secid, s.name || s.ts_code);
                 }}>
+                  {strongTagOf(s)}
                   <span style={{ color: '#1890ff' }}>{s.name || s.ts_code}</span>
                 </Col>
                 <Col span={2} className={Utils.GetValueColor(s.score - 50).textClass}>
