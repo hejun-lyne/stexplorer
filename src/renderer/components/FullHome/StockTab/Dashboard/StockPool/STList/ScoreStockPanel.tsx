@@ -1196,7 +1196,8 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
 
   // ===== 图表控制（与详情页 PriceTrend 对齐）=====
   const [range, setRange] = useState<RangeArea>(DEFAULT_RANGE);
-  const [showVolume, setShowVolume] = useState(true);
+  // 列表模式默认不显示成交量（也不提供开关），单股模式保留原来的开关与默认值
+  const [showVolume, setShowVolume] = useState(!isList);
   // 与详情页 PriceTrend 一致：技术指标默认显示 RSI
   const [techType, setTechType] = useState<number>(TechIndicatorType.RSI);
 
@@ -1470,34 +1471,66 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
     return `${trendTimeLabel(bar?.datetime)} 现价 ${price.toFixed(2)}（${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%）${progress}`;
   }, [trends, visibleCount, trendZs, inTraining, trendTotal, trainTime]);
 
+  /** 列表模式信息行的现价 / 涨跌幅：与交易区、分时图同一份价格口径 */
+  const listQuote = useMemo(() => {
+    const price = Number(trendPrice) || 0;
+    const chg = price > 0 && trendZs > 0 ? (price / trendZs) * 100 - 100 : null;
+    return {
+      price: price > 0 ? price.toFixed(2) : '--',
+      chg: chg == null ? '--' : `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`,
+      color:
+        chg == null
+          ? 'var(--secondary-text-color)'
+          : chg >= 0
+            ? 'var(--increase-color)'
+            : 'var(--reduce-color)',
+    };
+  }, [trendPrice, trendZs]);
+
   /**
-   * 训练模式下日K的「当日那根」按分时重建
+   * 日K的「当日那根」始终由分时重建，让日K图随行情更新
    *
-   * 训练日的官方日K是收盘口径（对盘中时点属于未来数据）；时间推进时用分时合成一根
-   * 「截至当前时刻」的K线替换掉它，还没开盘（无分时）时当日的K直接不显示。
+   * - 训练模式：训练日的官方日K是收盘口径（对盘中时点属于未来数据），用「已推进到」的
+   *   分时合成一根截至当前时刻的K线；还没开盘（无分时）时当日K直接不显示。
+   * - 实时模式：数据源的当日日K是静态快照，盘中往往根本没有当日柱，且 klines 只在挂载时
+   *   取一次；这里用最新分时合成/替换当日柱，分时每 60 秒刷新，日K的当日柱就跟着更新。
    *
-   * 开盘价取当日日K的 kp（09:25 集合竞价已定，不属于未来数据）：分时首根是 09:30 的成交价，
+   * 开盘价优先取当日日K的 kp（09:25 集合竞价已定，不属于未来数据）：分时首根是 09:30 的成交价，
    * 秒板/跳空时会明显偏离真实开盘价（曾出现 34.61 vs 真实开盘 33.96 的偏差）。
    */
   const displayKlines = useMemo(() => {
-    if (!inTraining || !trainTime || !trainDate || !trends.length) {
+    if (!trends.length || (inTraining && !trainTime)) {
       return klines;
     }
-    const day = String(trainDate).substring(0, 10);
-    const base = klines.filter((k) => String(k?.date || '').substring(0, 10) !== day);
-    if (!visibleTrends.length) {
-      return base;
+    const day = inTraining
+      ? String(trainDate || '').substring(0, 10)
+      : trendDayKey.length === 8
+        ? `${trendDayKey.substring(0, 4)}-${trendDayKey.substring(4, 6)}-${trendDayKey.substring(6, 8)}`
+        : dayjs().format('YYYY-MM-DD');
+    if (!inTraining) {
+      // 非交易日 / 盘前：实时分时接口给的仍是上一交易日数据，拿「今天」当日期会凭空多一根K
+      const now = dayjs();
+      if (now.day() === 0 || now.day() === 6 || now.hour() * 60 + now.minute() < 9 * 60 + 20) {
+        return klines;
+      }
     }
-    const dayBar = klines.find((k) => String(k?.date || '').substring(0, 10) === day);
+    const key = dateKey(day);
+    const base = klines.filter((k) => dateKey(k?.date) !== key);
+    const dayBar = klines.find((k) => dateKey(k?.date) === key);
+    const src = inTraining ? visibleTrends : trends;
+    if (!src.length) {
+      // 训练模式未开盘：隐藏当日K；实时模式暂无分时：保留数据源原样
+      return inTraining ? base : klines;
+    }
     const bar = BuildDailyKFromTrends({
       secid,
-      trends: visibleTrends,
+      trends: src,
       date: day,
       prevClose: trendZs,
       openPrice: Number(dayBar?.kp) || 0,
     });
-    return bar ? [...base, bar] : base;
-  }, [inTraining, trainTime, trainDate, trends, visibleTrends, klines, trendZs, secid]);
+    return bar ? [...base, bar] : inTraining ? base : klines;
+  }, [inTraining, trainTime, trainDate, trendDayKey, trends, visibleTrends, klines, trendZs, secid]);
 
   /**
    * 昨日K线：分时所属交易日之前（含训练日口径）的最后一根日K
@@ -1663,15 +1696,43 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
             alignItems: 'baseline',
             gap: isList ? 6 : 8,
             minWidth: 0,
-            flex: '0 0 auto',
+            flex: isList ? '0 1 auto' : '0 0 auto',
+            overflow: isList ? 'hidden' : undefined,
             cursor: 'pointer',
           }}
           title="点击打开股票详情"
           onClick={() => onOpenStock(secid, name)}
         >
-          <span style={{ fontSize: isList ? 13 : 16, fontWeight: 'bold', color: '#1890ff' }}>{name || code}</span>
-          <span style={{ fontSize: isList ? 11 : 12, color: 'var(--secondary-text-color)' }}>{code}</span>
+          <span
+            style={{
+              fontSize: isList ? 13 : 16,
+              fontWeight: 'bold',
+              color: '#1890ff',
+              whiteSpace: 'nowrap',
+              overflow: isList ? 'hidden' : undefined,
+              textOverflow: isList ? 'ellipsis' : undefined,
+            }}
+          >
+            {name || code}
+          </span>
+          <span style={{ fontSize: isList ? 11 : 12, color: 'var(--secondary-text-color)', flexShrink: 0 }}>{code}</span>
         </div>
+        {isList ? (
+          <span
+            style={{
+              display: 'inline-flex',
+              alignItems: 'baseline',
+              gap: 4,
+              flex: '0 0 auto',
+              whiteSpace: 'nowrap',
+              color: listQuote.color,
+            }}
+            title="当前价与涨跌幅（与分时图、买入价格同一口径）"
+          >
+            <b style={{ fontSize: 12 }}>{listQuote.price}</b>
+            <span style={{ fontSize: 11 }}>{listQuote.chg}</span>
+          </span>
+        ) : null}
         {isList ? (
           <>
             <Radio.Group
@@ -1821,7 +1882,8 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
         {/* 图表工具栏：列表模式的分时/日K切换已移到上方信息行，这里只保留必要控件 */}
         <div
           style={{
-            display: 'flex',
+            // 列表模式的分时图已无工具栏控件（切换在信息行、成交量开关不显示），不再留空行
+            display: isList && chartMode === 'trend' ? 'none' : 'flex',
             alignItems: 'center',
             flexWrap: 'wrap',
             gap: 6,
@@ -1870,9 +1932,11 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
                   <span style={{ marginLeft: 4 }}>蓝虚线=自近{SHORT_SCORE_RISE_DAYS}根低点抬升</span>
                 </span>
               ) : null}
-              <Tooltip title="成交量">
-                <Switch size="small" checked={showVolume} onChange={setShowVolume} />
-              </Tooltip>
+              {!isList ? (
+                <Tooltip title="成交量">
+                  <Switch size="small" checked={showVolume} onChange={setShowVolume} />
+                </Tooltip>
+              ) : null}
               {!isList ? (
                 <>
                   <Slider
@@ -1891,9 +1955,11 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
             </>
           ) : (
             <>
-              <Tooltip title="成交量">
-                <Switch size="small" checked={showVolume} onChange={setShowVolume} />
-              </Tooltip>
+              {!isList ? (
+                <Tooltip title="成交量">
+                  <Switch size="small" checked={showVolume} onChange={setShowVolume} />
+                </Tooltip>
+              ) : null}
               {!isList ? (
                 <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{trendStatus}</span>
               ) : null}
