@@ -70,6 +70,11 @@ import {
 } from '@/helpers/shortTermScoreList';
 import { precomputeShortTermScores } from '@/helpers/shortTermScorePrecompute';
 import {
+  computeBoardStrengthScores,
+  BoardStrengthScore,
+  BoardStrengthSummary,
+} from '@/helpers/boardStrengthScore';
+import {
   DEFAULT_SHORT_SCORE_SIGNAL_PARAMS,
   evaluateShortScoreSignal,
   ShortScoreBacktestParams,
@@ -303,6 +308,35 @@ const WindVaneTag: React.FC<{ vane: Helpers.Stock.WindVaneResult }> = ({ vane })
 
 /** 每只股票「所属板块」只用前 3 个：列展示、表头统计、筛选统一这个口径（东财 slist 兜底时） */
 const BOARD_COLUMN_LIMIT = 3;
+
+/** 结果列表「强势度」列的排序键（与 generic 数值排序分开处理：空值始终沉底） */
+const STRENGTH_SORT_KEY = 'strength';
+
+/** 强势度等级配色（作用于绝对分等级，不作用于相对分） */
+const STRENGTH_GRADE_COLOR: Record<string, string> = {
+  A: '#52c41a', B: '#1890ff', C: '#faad14', D: '#8c8c8c', E: '#8c8c8c',
+};
+
+/** 「强势度」列悬停详情：分项、修正项、窗口、排除原因 */
+function strengthTooltip(
+  detail: BoardStrengthScore | null,
+  summary: BoardStrengthSummary | null,
+  loading: boolean
+): string {
+  if (!detail) return loading ? '板块成份股强势度计算中…' : '未计算：点「交易模式」按当前 fdays 窗口重算';
+  const f = (v: number | null | undefined) => (v == null ? '--' : v.toFixed(1));
+  const lines = [
+    `相对分 ${f(detail.scoreRel)}（板块内横截面，排序用）｜绝对分 ${f(detail.scoreAbs)}｜等级 ${detail.grade}`,
+    `窗口 ${detail.window} 个交易日（n=fdays，截至 ${summary?.asOf || '--'}），有效交易日 ${detail.validDays}/${detail.window}`,
+    `分项：阳线主动性 ${f(detail.s1)}｜攻击持续性 ${f(detail.s2)}｜跳空缺口 ${f(detail.s3)}｜趋势斜率 ${f(detail.s4)}`,
+    `突破加分 +${detail.bonus.toFixed(1)}｜位置/形态惩罚 -${detail.penalty.toFixed(1)}`,
+    `区间涨幅 ${((detail.cumRet ?? 0) * 100).toFixed(1)}%｜趋势斜率收益 ${(detail.trendRet * 100).toFixed(1)}%｜R² ${detail.r2.toFixed(2)}`,
+  ];
+  if (detail.rank) lines.push(`板块内排名 ${detail.rank}/${summary?.n || 0}`);
+  if (detail.excludedReason) lines.push(`未参与评分：${detail.excludedReason}`);
+  if (detail.flags.length) lines.push(`标记：${detail.flags.join('、')}`);
+  return lines.join('\n');
+}
 
 /**
  * 短线评分界面开关：评分本身已不再使用，界面上与之相关的控件先隐藏、实现全部保留，
@@ -560,6 +594,18 @@ const STList: React.FC<STListProps> = ({
   const boardStageRequestedRef = React.useRef('');
   /** 历史缺口补算进度：执行短线评分时顺带补齐近 N 个交易日缺的评分 */
   const [shortScoreBackfill, setShortScoreBackfill] = useState<{ done: number; total: number } | null>(null);
+  /**
+   * 板块成份股强势度（实现说明 v1.0）
+   *
+   * 点「交易模式」→ 重拉板块成份股 → 按「当前日期往前 fdays 个交易日」的窗口评分。
+   * 结果按 6 位代码存，showList 里合并进结果行（不改动逐行推送的 shortScoreData），
+   * 因此评分晚于结果行到达时也能补上「强势度」列，排序同样基于合并后的行。
+   */
+  const [strengthScores, setStrengthScores] = useState<Record<string, BoardStrengthScore>>({});
+  const [strengthSummary, setStrengthSummary] = useState<BoardStrengthSummary | null>(null);
+  const [strengthLoading, setStrengthLoading] = useState(false);
+  /** 板块切换 / 重算时作废上一轮的异步结果 */
+  const strengthRoundRef = React.useRef(0);
   // 过滤：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的股票
   // （阈值分、天数都可填写，默认：3 天前 / 近 15 日 / ≥ 60 分）
   const [shortScoreFilterEnabled, setShortScoreFilterEnabled] = useState(false);
@@ -2193,6 +2239,31 @@ const STList: React.FC<STListProps> = ({
       message.warning('板块的股票列表还在加载，请稍后再点评分');
       return;
     }
+    // 板块成份股强势度：成份股列表就绪后，按「当前日期（训练模式为训练日）往前 fdays 个交易日」
+    // 的窗口对整份成份股名单做横截面评分。与短线评分并行跑，结果回来后合并进结果行（见 showList），
+    // 不阻塞主评分流程；暂停续跑不重算，板块切换/重算会作废上一轮的异步结果。
+    if (startNewRound) {
+      const strengthItems = collectItemsFromBoardSnapshot().map((i) => ({ code: i.code, name: i.name || '' }));
+      const boardKey = boardsKeyRef.current;
+      const round = ++strengthRoundRef.current;
+      setStrengthScores({});
+      setStrengthSummary(null);
+      setStrengthLoading(true);
+      void computeBoardStrengthScores(strengthItems, fdays, {
+        shouldStop: () => round !== strengthRoundRef.current || boardKey !== boardsKeyRef.current,
+        // 训练时钟未到 15:00：训练日当天的完整日K属于未来数据，基准日回退到上一交易日
+        skipLastDay: ontrain && !timeFinished,
+      })
+        .then(({ scores, summary }) => {
+          if (round !== strengthRoundRef.current || boardKey !== boardsKeyRef.current) return;
+          setStrengthScores(scores);
+          setStrengthSummary(summary);
+        })
+        .catch((e) => console.error('[强势度] 计算失败', e))
+        .finally(() => {
+          if (round === strengthRoundRef.current) setStrengthLoading(false);
+        });
+    }
     // 评分池：
     // - 传入 candidateItems（训练日推进自动更新）时用它，与「当日形态」的候选池一致；
     // - 全新一轮评分时按当前展示口径取池：
@@ -2344,6 +2415,7 @@ const STList: React.FC<STListProps> = ({
     ensureFavoriteNames,
     shortScoreDays,
     shortScoreHistoryDays,
+    fdays,
     refreshBoardsStocks,
     waitBoardStocks,
     boardsReady,
@@ -2966,9 +3038,9 @@ const STList: React.FC<STListProps> = ({
   const updateSortType = useCallback((key: string) => {
     setSortTypes((prev) => {
       const currentType = prev[key] || 0;
-      // K线形态列：常用顺序是「形态优先级高的在前」，所以第一次点击直接给降序（2），
+      // K线形态 / 强势度列：常用顺序是「优先级/分数高的在前」，第一次点击直接给降序（2），
       // 再点一次给升序（1），第三次取消；其余列沿用「升序 → 降序 → 取消」
-      const preferDescFirst = key === KLINE_SHAPE_SORT_KEY;
+      const preferDescFirst = key === KLINE_SHAPE_SORT_KEY || key === STRENGTH_SORT_KEY;
       const nextType = preferDescFirst
         ? currentType === 0
           ? 2
@@ -3176,7 +3248,18 @@ const STList: React.FC<STListProps> = ({
     }
 
     if (displayMode === 'shortScore') {
-      let list = [...shortScoreData];
+      // 强势度是点击「交易模式」后按板块成份股算出来的，可能晚于逐行推送的结果到达：
+      // 在这里按代码合并，既能补齐后到的分数，又能让排序直接作用在合并后的行上
+      let list: any[] = shortScoreData.map((row: any) => {
+        const score = strengthScores[codeOfListItem(row)] || strengthScores[String(row?.code || '').trim()];
+        return {
+          ...row,
+          strength: score?.scoreRel ?? null,
+          strengthAbs: score?.scoreAbs ?? null,
+          strengthGrade: score?.grade || '',
+          strengthDetail: score || null,
+        };
+      });
       // 训练日推进后评分已过期：只保留收藏股票，点了「短线评分」按新训练日重算后才恢复完整列表
       if (scoreStale) {
         list = list.filter((s: any) => isFavorited(s));
@@ -3223,6 +3306,18 @@ const STList: React.FC<STListProps> = ({
           // 与板块评分列表共用同一套比较逻辑（helpers/klineShape）。降序=阳线在前、形态优先级高的在前。
           const t = sortTypes[KLINE_SHAPE_SORT_KEY];
           list.sort((a: any, b: any) => compareKlineShape(a, b, t));
+        } else if (keys[0] === STRENGTH_SORT_KEY) {
+          // 强势度排序：无分（未参与评分 / 被排除）始终沉底，不按 0 分混入有分的行
+          const t = sortTypes[STRENGTH_SORT_KEY];
+          list.sort((a: any, b: any) => {
+            const left = a.strength;
+            const right = b.strength;
+            if (left == null && right == null) return 0;
+            if (left == null) return 1;
+            if (right == null) return -1;
+            if (left === right) return 0;
+            return t === 1 ? (left > right ? 1 : -1) : (left < right ? 1 : -1);
+          });
         } else {
           list.sort((a: any, b: any) => {
             const left = Number(a[keys[0]]) || 0;
@@ -3245,7 +3340,7 @@ const STList: React.FC<STListProps> = ({
       list = sortItems(list, keys[0], sortTypes[keys[0]]);
     }
     return list;
-  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, scoreStale, isFavorited, signalOfShortScoreRow]);
+  }, [filterStocks, sortTypes, nameFilter, sortItems, displayMode, leaderData, leaderDisplayCount, riskData, riskDisplayCount, signalData, signalDisplayCount, mainInData, mainInDisplayCount, shortScoreData, shortScoreFilterEnabled, shortScoreFilterScore, shortScoreFilterBeforeDays, shortScoreFilterWindowDayList, shortScoreRsiFilterEnabled, shortScoreRsiFilterScore, shortScoreShowNotListed, shortScoreSeries, scoreStale, isFavorited, signalOfShortScoreRow, strengthScores]);
 
   /**
    * 实际渲染的列表：按「排除科创板+北交所」「市值区间」和「名字过滤」过滤（对所有展示模式生效）
@@ -4466,13 +4561,21 @@ const STList: React.FC<STListProps> = ({
         </Row>
       ) : displayMode === 'shortScore' ? (
         <Row className={styles.header}>
-          <Col span={7}>股票名称</Col>
+          <Col span={6}>股票名称</Col>
           <Col
             span={2}
             style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
             title="流通市值（亿元）：取自当前板块股票池 / 强势股池快照，与工具栏「市值区间」筛选同一口径；结果行本身不带市值"
           >
             流通市值
+          </Col>
+          <Col
+            span={2}
+            style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+            title={`板块成份股强势度：以 ${strengthSummary?.asOf || '当前日期'} 为基准、往前 ${strengthSummary?.window || fdays} 个交易日为窗口（n=fdays），按阳线主动性/攻击持续性/跳空缺口/趋势斜率四类指标在板块成份股内做横截面百分位合成，再做位置透支、形态惩罚与突破加分；0~100，越高越强。${strengthLoading ? '正在计算…' : strengthSummary ? `本轮参与 ${strengthSummary.n} 只，绝对分中位数 ${strengthSummary.sectorMedian?.toFixed(1)}，强势占比 ${((strengthSummary.strongRatio ?? 0) * 100).toFixed(0)}%。` : ''}点击表头排序，悬停分数看分项`}
+          >
+            强势度
+            <Button size="small" type="text" icon={sortTypes[STRENGTH_SORT_KEY] == 1 ? <CaretUpOutlined /> : sortTypes[STRENGTH_SORT_KEY] == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType(STRENGTH_SORT_KEY)} />
           </Col>
           <Col span={2} title="RSI 仅计算与展示，不计入个股综合分（用于形态识别，不用于择时）">
             RSI
@@ -4620,7 +4723,7 @@ const STList: React.FC<STListProps> = ({
               />
             </span>
           </Col>
-          <Col span={5} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          <Col span={4} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             <span
               className={styles.klineShapeHeader}
               title="股票所属行业 / 板块。有板块效应判定数据时，列头聚合、筛选与行内展示统一按判定同源的 110 行业口径（stock_basic.industry，每只股票一个行业），东财「所属板块」只作为次要参考显示前 3 个；判定未就绪时回退到东财 slist 前 3 个口径。行业名后的「冷/启动/延续/退潮」是四态阶段、「启动」是复盘标签、「质量xx」是封板质量分（只用 T 日及之前数据，滞后约 2 日，不是买点）。点漏斗可按行业勾选过滤（Excel 式多选；同时决定列表显示与形态识别候选池：勾选后「交易模式 / 当日形态」只处理可见的股票）"
@@ -4993,7 +5096,7 @@ const STList: React.FC<STListProps> = ({
                   boxShadow: isPanelActive ? 'inset 2px 0 0 #1890ff' : undefined,
                 }}
               >
-                <Col span={7} style={{ cursor: 'pointer' }} onClick={() => setPanelCode(s.code)}>
+                <Col span={6} style={{ cursor: 'pointer' }} onClick={() => setPanelCode(s.code)}>
                   <div
                     title={`${rowName}（点击在右侧面板查看公司简介与日K线）`}
                     style={{
@@ -5062,6 +5165,22 @@ const STList: React.FC<STListProps> = ({
                 </Col>
                 <Col
                   span={2}
+                  style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  title={strengthTooltip(s.strengthDetail, strengthSummary, strengthLoading)}
+                >
+                  {s.strength == null ? (
+                    <span style={{ color: 'var(--reverse-text-color)' }}>{strengthLoading ? '…' : '--'}</span>
+                  ) : (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                      <span style={{ color: STRENGTH_GRADE_COLOR[s.strengthGrade], fontWeight: 600 }}>
+                        {s.strength.toFixed(1)}
+                      </span>
+                      <span style={{ fontSize: 10, color: 'var(--hint-color)' }}>{s.strengthGrade}</span>
+                    </span>
+                  )}
+                </Col>
+                <Col
+                  span={2}
                   title={s.error || undefined}
                   style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
@@ -5110,7 +5229,7 @@ const STList: React.FC<STListProps> = ({
                   </span>
                 </Col>
                 <Col
-                  span={5}
+                  span={4}
                   style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                 >
                   {(() => {
