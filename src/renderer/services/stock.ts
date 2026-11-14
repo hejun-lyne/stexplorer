@@ -3666,6 +3666,7 @@ export async function GetBanKuais(type: BKType, pageSize = 20) {
             f62: 2120360320;
             f104: 6; // 上涨数
             f105: 0; // 下跌数
+            f106: 0; // 平盘数
             f107: 5;
             f115: '-';
             f124: 1642664402;
@@ -3692,7 +3693,7 @@ export async function GetBanKuais(type: BKType, pageSize = 20) {
         fid: 'f3',
         fs: type === BKType.Industry ? 'm:90 t:2 f:!50' : 'm:90 t:3 f:!50',
         fields:
-          'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f26,f22,f33,f11,f62,f128,f136,f115,f152,f124,f107,f104,f105,f140,f141,f207,f208,f209,f222',
+          'f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21,f23,f24,f25,f26,f22,f33,f11,f62,f128,f136,f115,f152,f124,f107,f104,f105,f106,f140,f141,f207,f208,f209,f222',
         ut: Utils.MakeHash(),
         _: new Date().getTime(),
       },
@@ -3716,6 +3717,8 @@ export async function GetBanKuais(type: BKType, pageSize = 20) {
           zsz: d.f20,
           szs: d.f104,
           xds: d.f105,
+          // 成份股数量 = 上涨 + 下跌 + 平盘家数（东财 clist 的 f104/f105/f106）
+          stockCount: (Number(d.f104) || 0) + (Number(d.f105) || 0) + (Number(d.f106) || 0),
           mainIn: 0,
           mainIn5d: 0,
         } as Stock.BanKuaiItem;

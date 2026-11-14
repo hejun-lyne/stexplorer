@@ -8,7 +8,8 @@
  * 口径与个股详情页训练工具栏（TrainBar 的 sharedAccount）完全一致：
  * - 买入按记录里的成交价成交：成交价是 ScoreStockTrade 下单那一刻的盘中分时价（trendPrice，
  *   集合竞价 / 无分时退回训练日收盘价），**不是**当日收盘价；预算取「指定金额」与「共享可用资金」的较小值；
- * - 卖出为一次清仓，扣除佣金后回款，计入已实现盈亏；
+ * - 卖出：带 shares 的点是按仓位部分减仓（按比例结转成本、只回款对应股数），
+ *   不带 shares 的旧口径点是一次清仓；两种都扣佣金后回款，按卖出部分计入已实现盈亏；
  * - 同日多笔按「先卖后买」排序（A股卖出回款当日即可用于买入），这一排序同时隐式实现了 T+1：
  *   当日买入的股数排在同日卖出之后，卖出时点只有前一日及更早的可卖持仓，「当日买、当日卖」天然不成立，
  *   与 ScoreStockTrade 界面上的 boughtToday（当日买入不可卖）约束同构。
@@ -41,6 +42,8 @@ export interface TrainAccountTrade {
   isBuy: boolean;
   /** 买入金额上限（不传=全部可用资金） */
   amount?: number;
+  /** 卖出股数（仅部分减仓点有；不传=一次清仓） */
+  shares?: number;
 }
 
 /** 训练账户中的一只持仓 */
@@ -104,6 +107,7 @@ export function CollectTrainTrades(
           date: String(t.x).substring(0, 10),
           price: Number(t.y) || 0,
           isBuy: false,
+          shares: Number(t.shares) > 0 ? Number(t.shares) : undefined,
         })
       );
   });
@@ -163,11 +167,20 @@ export function ComputeTrainAccount(params: {
         lastBuyDate: t.date,
       };
     } else if (h.shares > 0) {
-      const amount = price * h.shares;
+      // 带 shares 的点按仓位减仓：只回款对应股数、按比例结转成本；
+      // 不带的旧口径点仍是一次清仓，保持历史记录与详情页训练工具栏的行为不变。
+      const sold = t.shares && t.shares > 0 ? Math.min(h.shares, t.shares) : h.shares;
+      const amount = price * sold;
       const fee = amount * commission;
+      const costPart = h.costAmount * (sold / h.shares);
+      const left = h.shares - sold;
       cash += amount - fee;
-      realized += amount - fee - h.costAmount;
-      holdings[t.secid] = { ...h, shares: 0, costAmount: 0 };
+      realized += amount - fee - costPart;
+      holdings[t.secid] = {
+        ...h,
+        shares: left,
+        costAmount: left > 0 ? h.costAmount - costPart : 0,
+      };
     }
   });
 
@@ -181,11 +194,12 @@ export function ComputeTrainAccount(params: {
  * 构建「一轮交易」的归档记录（清仓时调用）
  *
  * 与整体结算不同：这里只归档单只股票本轮（上次清仓之后 → 本次清仓）的完整交易，
- * 包含本轮全部买入明细，卖出即一次清仓。
+ * 包含本轮全部买入明细。本轮途中的按仓位减仓（sellPoints 带 shares）也会并入本轮：
+ * 股数、卖出回款与结转成本一起计入，避免清仓记录少算已落袋的收益。
  *
- * @param params.shares 本轮清仓股数（训练账户回放的持仓）
- * @param params.costAmount 本轮持仓成本（含买入佣金）
- * @param params.buyPoints / sellPoints 该股全部训练买卖点，用于还原本轮起点与买入明细
+ * @param params.shares 本次清仓股数（训练账户回放的剩余持仓）
+ * @param params.costAmount 剩余持仓成本（含买入佣金）
+ * @param params.buyPoints / sellPoints 该股全部训练买卖点，用于还原本轮起点、减仓明细与买入明细
  * @param params.tradingDays 可选：训练窗口交易日列表，用于把持有天数换算成交易日数
  */
 export function BuildStockTradeRecord(params: {
@@ -218,9 +232,9 @@ export function BuildStockTradeRecord(params: {
   const trainStartDate = String(params.trainStartDate || '').substring(0, 10);
   const dayOf = (p: any) => String(p?.x ?? p?.date ?? '').substring(0, 10);
 
-  // 本轮起点：上一次清仓日之后（同一天重复清仓时，卖出点会被覆盖，这里按「早于本次清仓日」找上一轮）
+  // 本轮起点：上一次「清仓」日之后；带 shares 的卖点是部分减仓，不构成一轮结束
   const prevSellDate = (params.sellPoints || [])
-    .filter((p) => IsTrainMark(p?.t))
+    .filter((p) => IsTrainMark(p?.t) && !(Number(p?.shares) > 0))
     .map(dayOf)
     .filter((d) => d && d < sellDate)
     .sort()
@@ -249,10 +263,26 @@ export function BuildStockTradeRecord(params: {
   const sellTime = params.sellTime ? String(params.sellTime) : '';
   const rawRate = Number(params.commissionRate);
   const rate = Number.isFinite(rawRate) && rawRate >= 0 ? rawRate : TRAIN_DEFAULT_COMMISSION;
-  const amount = sellPrice * shares;
+  // 本轮此前的部分减仓并入这一轮往返：否则清仓记录会丢掉已落袋的那部分股数与收益
+  const partials = (params.sellPoints || []).filter(
+    (p) =>
+      IsTrainMark(p?.t) &&
+      Number(p?.shares) > 0 &&
+      dayOf(p) <= sellDate &&
+      (!prevSellDate || dayOf(p) > prevSellDate)
+  );
+  const partialShares = partials.reduce((s, p) => s + (Number(p.shares) || 0), 0);
+  const partialCost = partials.reduce((s, p) => s + (Number(p.cost) || 0), 0);
+  const partialGross = partials.reduce(
+    (s, p) => s + (Number(p.y) || 0) * (Number(p.shares) || 0),
+    0
+  );
+  const totalShares = shares + partialShares;
+  const totalCost = costAmount + partialCost;
+  const amount = sellPrice * shares + partialGross;
   const fee = amount * rate;
-  const profit = amount - fee - costAmount;
-  const profitRatio = (profit / costAmount) * 100;
+  const profit = amount - fee - totalCost;
+  const profitRatio = totalCost > 0 ? (profit / totalCost) * 100 : 0;
 
   let holdDays = 0;
   const tradingDays = params.tradingDays || [];
@@ -270,11 +300,11 @@ export function BuildStockTradeRecord(params: {
     name: params.name || secid,
     buyDate,
     buyTime,
-    buyPrice: costAmount / shares,
+    buyPrice: totalCost / totalShares,
     sellDate,
     sellTime,
     sellPrice,
-    count: shares,
+    count: totalShares,
     amount,
     commission: fee,
     profit,

@@ -47,7 +47,8 @@ declare namespace Stock {
     };
     markLines?: number[]; // 标记线
     buyPoints?: { x: string; y: number; t: string; a?: number; reason?: string; time?: string }[]; // 买入标记（a：模拟训练的买入金额，缺省为全部可用资金；time：成交时间 HH:mm[:ss]）
-    sellPoints?: { x: string; y: number; t: string; reason?: string; time?: string }[]; // 卖出标记（time：成交时间 HH:mm[:ss]）
+    // 卖出标记（shares/cost：按仓位部分减仓时的股数与结转成本，不传表示一次清仓；time：成交时间 HH:mm[:ss]）
+    sellPoints?: { x: string; y: number; t: string; shares?: number; cost?: number; reason?: string; time?: string }[];
     similars?: SimilarItem[];
     periodMarks: PeriodMarkItem[];
   }
@@ -420,6 +421,8 @@ declare namespace Stock {
     hsl: number;
     szs: number; // 上涨数
     xds: number; // 下跌数
+    /** 成份股数量（东财=上涨+下跌+平盘家数；同花顺=company_num；取不到时为 0） */
+    stockCount?: number;
     mainIn: number; // 今日主力净流入（元）
     mainIn5d: number; // 5日主力净流入（元）
   }

@@ -115,7 +115,7 @@ export interface ScoreStockTradeProps {
   /**
    * 紧凑模式（右侧面板列表模式）
    *
-   * 只保留「买入（按顶部选择的仓位金额）」与「清仓（有持仓时）」两个按钮，
+   * 只保留「买入（按顶部选择的仓位金额）」与「卖出（按顶部仓位减仓/清仓）」两个按钮，
    * 不渲染理由输入、金额输入、仓位下拉与操作记录，避免多只股票时占满屏幕。
    */
   compact?: boolean;
@@ -133,8 +133,8 @@ export interface ScoreStockTradeProps {
  *   取不到分时数据时退回日K收盘价（训练模式为训练日收盘，非训练模式为最新收盘）；
  *   分时还在加载（`intradayReady === false`）时禁止下单，避免用收盘价成交；
  * - 训练模式：与详情页 TrainBar 完全共用一套数据 —— 买卖点写进 `buyPoints/sellPoints`（t='train'），
- *   买入按可用金额下委托，卖出为一次清仓，资金/持仓/成本取共享训练账户
- *   （`ComputeTrainAccount`），并遵循 T+1、停牌不可交易、需在自选股中；
+ *   买入按可用金额下委托，卖出可按仓位（全仓/1/2/1/3/1/4）减仓，选全仓时清仓并归档一轮交易，
+ *   资金/持仓/成本取共享训练账户（`ComputeTrainAccount`），并遵循 T+1、停牌不可交易、需在自选股中；
  * - 非训练模式：写入手工交易记录（`tradings`），资金口径为「初始本金 - 持仓成本」。
  *
  * 涨停：买入当天涨停买不进，挂为待成交委托，等下一交易日开盘价成交
@@ -346,10 +346,6 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
     if (tradePrice <= 0) {
       return 0;
     }
-    // 训练模式卖出 = 一次清仓（与详情页一致）
-    if (tradeType === 'sell' && ontrain) {
-      return sellSharesBase;
-    }
     if (tradeAmount <= 0) {
       return 0;
     }
@@ -358,7 +354,16 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
       const budget = ontrain ? tradeAmount / (1 + commission) : tradeAmount;
       return Math.floor(budget / tradePrice / MIN_LOT) * MIN_LOT;
     }
-    return Math.min(sellSharesBase, Math.floor(tradeAmount / tradePrice));
+    const wanted = Math.min(sellSharesBase, Math.floor(tradeAmount / tradePrice));
+    if (!ontrain) {
+      return wanted;
+    }
+    // 训练模式按仓位减仓：整手卖出；剩余不足一手（或本来就是碎股）时一次卖完
+    const lots = Math.floor(wanted / MIN_LOT) * MIN_LOT;
+    if (lots <= 0) {
+      return wanted > 0 ? sellSharesBase : 0;
+    }
+    return sellSharesBase - lots < MIN_LOT ? sellSharesBase : lots;
   }, [tradeType, ontrain, sellSharesBase, tradeAmount, tradePrice, commission]);
 
   const orderAmount = shares * tradePrice;
@@ -408,7 +413,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
       if (tradeType === 'buy') {
         return shares >= MIN_LOT && tradeAmount > 0 && tradeAmount <= trainCash + 1e-6;
       }
-      return sellSharesBase > 0 && !boughtToday;
+      return shares > 0 && shares <= sellSharesBase && !boughtToday;
     }
     if (tradeType === 'buy') {
       return shares >= MIN_LOT && tradeAmount > 0 && tradeAmount <= availableCash + 1e-6;
@@ -526,30 +531,52 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           );
         }
       } else {
-        // 清仓即归档：把本轮（上一次清仓 → 本次清仓）的完整交易写入「训练记录」
-        const tradeRecord = BuildStockTradeRecord({
-          secid,
-          name: name || code,
-          sellDate: tradeDate,
-          sellTime: tradeClock,
-          sellPrice: tradePrice,
-          shares: Number(trainPosition?.shares) || 0,
-          costAmount: Number(trainPosition?.costAmount) || 0,
-          commissionRate: commission,
-          reason: reasonText,
-          trainStartDate,
-          buyPoints: config?.buyPoints,
-          sellPoints: config?.sellPoints,
-          tradingDays: trainDays,
-        });
+        // 全仓 = 清仓（沿用旧卖点口径）；否则记为部分减仓，训练账户按比例扣持仓与成本
+        const isPartialSell = submitShares > 0 && submitShares < sellSharesBase;
+        const sellCost =
+          sellSharesBase > 0
+            ? (Number(trainPosition?.costAmount) || 0) * (submitShares / sellSharesBase)
+            : 0;
+        // 只有清仓才归档一轮交易；部分减仓的股数与回款会在剩余仓位清仓时并入归档记录
+        let tradeRecord: ReturnType<typeof BuildStockTradeRecord> = null;
+        if (!isPartialSell) {
+          tradeRecord = BuildStockTradeRecord({
+            secid,
+            name: name || code,
+            sellDate: tradeDate,
+            sellTime: tradeClock,
+            sellPrice: tradePrice,
+            shares: Number(trainPosition?.shares) || 0,
+            costAmount: Number(trainPosition?.costAmount) || 0,
+            commissionRate: commission,
+            reason: reasonText,
+            trainStartDate,
+            buyPoints: config?.buyPoints,
+            sellPoints: config?.sellPoints,
+            tradingDays: trainDays,
+          });
+        }
         dispatch(
-          addStockTradePointAction(secid, tradeDate, tradePrice, false, TRAIN_MARK, undefined, reasonText, tradeClock)
+          addStockTradePointAction(
+            secid,
+            tradeDate,
+            tradePrice,
+            false,
+            TRAIN_MARK,
+            undefined,
+            reasonText,
+            tradeClock,
+            isPartialSell ? submitShares : undefined,
+            isPartialSell ? sellCost : undefined
+          )
         );
         if (tradeRecord) {
           dispatch(addTrainTradeRecordAction(tradeRecord));
         }
         message.success(
-          `已清仓 ${name}：${tradePrice.toFixed(2)} × ${submitShares} 股（${formatMoney(submitOrderAmount)}）`
+          `${isPartialSell ? '已减仓' : '已清仓'} ${name}：${tradePrice.toFixed(2)} × ${submitShares} 股（${formatMoney(
+            submitOrderAmount
+          )}）`
         );
       }
     } else {
@@ -668,7 +695,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           time: p.time ? String(p.time) : '',
           type: 'sell',
           price,
-          detail: '一次清仓',
+          detail: Number(p.shares) > 0 ? `${Number(p.shares)} 股 · 减仓` : '清仓',
           reason: String(p.reason || ''),
         });
       });
@@ -703,7 +730,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
   }, [ontrain, config, tradings, secid, trainDate, reviewRecords]);
 
   /**
-   * 「确认买入/清仓」按钮不可点的原因（就绪时为空串）
+   * 「确认买入/卖出」按钮不可点的原因（就绪时为空串）
    *
    * 直接显示在按钮下方：之前只有「未加入自选」「停牌」两个提示，
    * 委托金额超可用资金、当天没有行情、T+1 这些情况点了没反应又看不出原因。
@@ -729,6 +756,9 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
       if (sellSharesBase <= 0) {
         return '当前无持仓，无法卖出';
       }
+      if (shares <= 0) {
+        return '委托金额不足一手，请调大金额或选择更大仓位';
+      }
       if (boughtToday) {
         return 'T+1：当日买入，下一交易日才能卖出';
       }
@@ -752,7 +782,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
     return '';
   })();
 
-  // ===== 紧凑模式（列表模式）：只保留「按顶部仓位买入」与「清仓」 =====
+  // ===== 紧凑模式（列表模式）：只保留「按顶部仓位买入」与「按仓位卖出」 =====
   /** 买入金额：可用资金 ÷ 顶部选择的仓位比例 */
   const compactBuyBudget = Math.floor(cashBase / ratio);
   const compactBuyShares = (() => {
@@ -770,8 +800,20 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
     (!ontrain || !!trainBar) &&
     compactBuyShares >= MIN_LOT &&
     compactBuyBudget <= cashBase + 1e-6;
+  /** 卖出股数：持仓 ÷ 顶部仓位比例（整手；剩余不足一手或碎股时一次清完） */
+  const compactSellShares = (() => {
+    const wanted = Math.floor(sellSharesBase / ratio);
+    const lots = Math.floor(wanted / MIN_LOT) * MIN_LOT;
+    if (lots <= 0) {
+      return wanted > 0 ? sellSharesBase : 0;
+    }
+    return sellSharesBase - lots < MIN_LOT ? sellSharesBase : lots;
+  })();
   const canCompactSell =
-    intradayReady !== false && tradePrice > 0 && sellSharesBase > 0 && (!ontrain || (!!trainBar && !boughtToday));
+    intradayReady !== false &&
+    tradePrice > 0 &&
+    compactSellShares > 0 &&
+    (!ontrain || (!!trainBar && !boughtToday));
   const ratioLabel = POSITION_RATIOS.find((r) => r.value === ratio)?.label || `${ratio}`;
   /** 买入按钮不可点的原因（列表模式没有输入框，需要一句话说明） */
   const compactBuyHint =
@@ -787,7 +829,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
             ? '可用资金不足一手'
             : '';
 
-  /** 列表模式直接下单：买入按顶部仓位金额，卖出一次清仓 */
+  /** 列表模式直接下单：买入按顶部仓位金额，卖出按顶部仓位股数 */
   const handleCompactSubmit = async (type: 'buy' | 'sell') => {
     if (submittingRef.current) {
       return;
@@ -800,7 +842,7 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
       if (type === 'buy') {
         await doSubmit({ type: 'buy', shares: compactBuyShares, amount: compactBuyBudget });
       } else {
-        await doSubmit({ type: 'sell', shares: sellSharesBase, amount: sellSharesBase * tradePrice });
+        await doSubmit({ type: 'sell', shares: compactSellShares, amount: compactSellShares * tradePrice });
       }
     } finally {
       submittingRef.current = false;
@@ -875,9 +917,13 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
             danger
             disabled={!canCompactSell}
             onClick={() => handleCompactSubmit('sell')}
-            title={boughtToday ? 'T+1：当日买入，下一交易日才能卖出' : `按现价清仓 ${sellSharesBase} 股`}
+            title={
+              boughtToday
+                ? 'T+1：当日买入，下一交易日才能卖出'
+                : `按顶部仓位（${ratioLabel}）以现价卖出 ${compactSellShares} 股（共持仓 ${sellSharesBase} 股）`
+            }
           >
-            清仓
+            {compactSellShares >= sellSharesBase ? '清仓' : '减仓'}
           </Button>
         ) : null}
         {!inline && compactBuyHint ? <span style={{ color: '#faad14' }}>{compactBuyHint}</span> : null}
@@ -938,29 +984,23 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
         >
           {trendPrice > 0 ? '现价' : '收盘'} {tradePrice > 0 ? tradePrice.toFixed(2) : '--'}
         </span>
-        {tradeType === 'buy' || !ontrain ? (
-          <>
-            <Select size="small" style={{ width: 82 }} value={ratio} onChange={(v) => setRatio(Number(v))}>
-              {POSITION_RATIOS.map((r) => (
-                <Select.Option key={r.value} value={r.value}>
-                  {r.label}
-                </Select.Option>
-              ))}
-            </Select>
-            <InputNumber
-              size="small"
-              style={{ width: 108 }}
-              placeholder={tradeType === 'buy' ? '买入金额' : '卖出金额'}
-              step={1000}
-              min={0}
-              value={amount}
-              onChange={setAmount}
-              title="委托金额（元），按仓位自动换算，可手动修改"
-            />
-          </>
-        ) : (
-          <span style={{ fontSize: 11, color: 'var(--secondary-text-color)' }}>一次清仓</span>
-        )}
+        <Select size="small" style={{ width: 82 }} value={ratio} onChange={(v) => setRatio(Number(v))}>
+          {POSITION_RATIOS.map((r) => (
+            <Select.Option key={r.value} value={r.value}>
+              {r.label}
+            </Select.Option>
+          ))}
+        </Select>
+        <InputNumber
+          size="small"
+          style={{ width: 108 }}
+          placeholder={tradeType === 'buy' ? '买入金额' : '卖出金额'}
+          step={1000}
+          min={0}
+          value={amount}
+          onChange={setAmount}
+          title="委托金额（元），按仓位自动换算，可手动修改；卖出时按金额换算卖出股数"
+        />
         <Button
           size="small"
           type="primary"
@@ -968,7 +1008,14 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           disabled={!canSubmit}
           danger={tradeType === 'sell'}
         >
-          确认{tradeType === 'buy' ? (limitUpToday ? '买入(次日开盘)' : '买入') : ontrain ? '清仓' : '卖出'}
+          确认
+          {tradeType === 'buy'
+            ? limitUpToday
+              ? '买入(次日开盘)'
+              : '买入'
+            : shares >= sellSharesBase && sellSharesBase > 0
+              ? '清仓'
+              : '卖出'}
         </Button>
         <Button
           size="small"
@@ -989,6 +1036,12 @@ const ScoreStockTrade: React.FC<ScoreStockTradeProps> = ({
           : `${hold ? `持仓 ${holdShares} 股 · 成本 ${Number(hold.price).toFixed(2)}` : '当前无持仓'} ｜ 可用资金 ${formatMoney(
               availableCash
             )}`}
+        {tradeType === 'sell' ? (
+          <span style={{ marginLeft: 8, color: 'var(--hint-color)' }}>
+            卖出仓位 {POSITION_RATIOS.find((r) => r.value === ratio)?.label || `${ratio}`}
+            ：按持仓比例减仓，选「全仓」即清仓
+          </span>
+        ) : null}
       </div>
       <div style={{ fontSize: 11, color: 'var(--main-text-color)', marginTop: 2 }}>
         {pendingBuys.length ? '本次新委托预计成交' : '预计成交'} <b>{shares}</b> 股 ｜ 金额{' '}

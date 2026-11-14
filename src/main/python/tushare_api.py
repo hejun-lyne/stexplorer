@@ -2771,6 +2771,8 @@ class TushareAPI:
                         "cjl": 0,
                         "szs": 0,
                         "xds": 0,
+                        # 同花顺 moneyflow_*_ths 的 company_num 即板块成份股数量
+                        "stock_count": _to_int(row.get("company_num", 0)),
                         "main_in": net_amount,
                         "main_in_5d": 0,
                         "source": "ths",
@@ -2843,6 +2845,12 @@ class TushareAPI:
                     "cjl": _to_int(row.get("volume", 0)),         # 成交量
                     "szs": _to_int(row.get("up_num", 0)),         # 上涨家数
                     "xds": _to_int(row.get("down_num", 0)),        # 下跌家数
+                    # 成份股数量 = 上涨 + 下跌 + 平盘家数（dc_index 的三个家数字段）
+                    "stock_count": (
+                        _to_int(row.get("up_num", 0))
+                        + _to_int(row.get("down_num", 0))
+                        + _to_int(row.get("flat_num", 0))
+                    ),
                     "main_in": today_flow_map.get(ts_code, 0),     # 今日主力净流入（元）
                     "main_in_5d": flow_5d_map.get(ts_code, 0),     # 5日主力净流入（元）
                     "source": "dc",
@@ -2954,6 +2962,11 @@ class TushareAPI:
                     "hsl": _to_float(row.get("turnover_rate", 0)),
                     "szs": _to_int(row.get("up_num", 0)),
                     "xds": _to_int(row.get("down_num", 0)),
+                    "stock_count": (
+                        _to_int(row.get("up_num", 0))
+                        + _to_int(row.get("down_num", 0))
+                        + _to_int(row.get("flat_num", 0))
+                    ),
                     "cje": _to_float(row.get("amount", 0)),
                     "cjl": _to_int(row.get("volume", 0)),
                     "lt": _to_float(row.get("float_mv", 0)),

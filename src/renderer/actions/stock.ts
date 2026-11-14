@@ -1079,7 +1079,8 @@ export function deleteStockMarkLineAction(value: number, sid: string): ThunkActi
  * 训练账户回放时按点逐笔扣款（见 helpers/trainAccount 的 ComputeTrainAccount）。
  * 唯一会复用旧点的情况是「待补成交价的占位点」（旧版本遗留的 y<=0 委托）：
  * 用成交价补掉占位本身，否则占位会残留、补单逻辑还会反复触发。
- * 卖出仍保持「一天一个点」：卖出一律清仓，同一天再卖没有意义。
+ * 卖出点：传 sellShares 表示按仓位部分减仓（同日可追加多笔）；不传表示一次清仓
+ * （同日只保留一个清仓点，清仓时保留同日此前的部分减仓点，回放顺序为「先减仓再清剩余」）。
  */
 export function addStockTradePointAction(
   secid: string,
@@ -1090,7 +1091,11 @@ export function addStockTradePointAction(
   amount?: number,
   reason?: string,
   /** 成交时间 HH:mm[:ss]（训练模式为训练时钟；不传则旧记录无时间） */
-  time?: string
+  time?: string,
+  /** 部分减仓股数；不传 = 一次清仓 */
+  sellShares?: number,
+  /** 部分减仓结转的持仓成本（含买入佣金），归档训练记录用 */
+  sellCost?: number
 ): ThunkAction {
   return (dispatch, getState) => {
     try {
@@ -1121,11 +1126,26 @@ export function addStockTradePointAction(
           }
           ss.buyPoints = points;
         } else {
-          const point = { x: date, y: value, t: type, reason: reason || undefined, time: time || undefined };
-          if (ss.sellPoints) {
-            ss.sellPoints = ss.sellPoints.filter((p) => p.x != date);
-            ss.sellPoints.push(point);
-          } else ss.sellPoints = [point];
+          const partial = Number(sellShares) > 0;
+          const point = {
+            x: date,
+            y: value,
+            t: type,
+            reason: reason || undefined,
+            time: time || undefined,
+            shares: partial ? Number(sellShares) : undefined,
+            cost: partial ? Number(sellCost) || 0 : undefined,
+          };
+          const points = ss.sellPoints ? [...ss.sellPoints] : [];
+          if (partial) {
+            // 部分减仓：同日可多笔，追加即可；先移除同日残留的清仓点（清仓后不可能再减仓）
+            ss.sellPoints = points
+              .filter((p) => !(p.x == date && !(Number(p.shares) > 0)))
+              .concat(point);
+          } else {
+            // 清仓：保留同日此前的部分减仓点（回放时先减仓、再清剩余），只替换旧的清仓点
+            ss.sellPoints = points.filter((p) => p.x != date || Number(p.shares) > 0).concat(point);
+          }
         }
         dispatch(setStockConfigAction(Utils.DeepCopy(stockConfigs)));
       }

@@ -36,6 +36,7 @@ import {
   normalizeKlineShape,
 } from '@/helpers/klineShape';
 import { isThemeBoard } from '@/helpers/boardFilter';
+import BoardChartPanel from './BoardChartPanel';
 
 /**
  * 短线评分界面开关：与 STList 保持一致，评分专用控件先隐藏、实现全部保留，
@@ -73,6 +74,13 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [nameFilter, setNameFilter] = useState('');
   /** 概念板块「只看题材」：只保留行业/产业/技术题材，剔除风格/指数/持仓/事件/地域等伪概念（规则见 helpers/boardFilter） */
   const [onlyTheme, setOnlyTheme] = useState(false);
+  /** 成份股数量阈值过滤：板块太大/太杂时用它收敛观察范围 */
+  const [stockCountFilterEnabled, setStockCountFilterEnabled] = useState(false);
+  const [stockCountOperator, setStockCountOperator] = useState<'gte' | 'lte'>('gte');
+  const [stockCountThreshold, setStockCountThreshold] = useState(30);
+  /** 交易模式右侧图表面板：选中的板块 secid（空 = 自动取结果列表第一行） */
+  const [panelSecid, setPanelSecid] = useState('');
+  const [panelClosed, setPanelClosed] = useState(false);
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
   const [currentPage, setCurrentPage] = useState(1);
   /** 当前展示的数据（板块列表 / 行业筛选结果 / 板块短线评分结果 共用，按 displayMode 区分行结构） */
@@ -133,6 +141,28 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const { ontrain, trainDate, trainStartDate, trainEndDate } = useSelector(
     (state: StoreState) => state.setting.systemSetting
   );
+
+  /** 当前板块列表里有多少个板块带了成份股数字（数据源不支持时全部为 0） */
+  const stockCountAvailable = useMemo(
+    () => bankuais.filter((b) => (Number(b.stockCount) || 0) > 0).length,
+    [bankuais]
+  );
+  /**
+   * 成份股数量阈值过滤
+   *
+   * 数据源没给出成份股数字时（如 Akshare 源 / 旧缓存）整个过滤自动失效，避免把列表清空；
+   * 单个板块缺数字时按「不满足阈值」处理，只在过滤开启时生效。
+   */
+  const passStockCount = useCallback(
+    (b: Stock.BanKuaiItem) => {
+      if (!stockCountFilterEnabled || !stockCountAvailable) return true;
+      const n = Number(b.stockCount) || 0;
+      if (n <= 0) return false;
+      return stockCountOperator === 'gte' ? n >= stockCountThreshold : n <= stockCountThreshold;
+    },
+    [stockCountFilterEnabled, stockCountAvailable, stockCountOperator, stockCountThreshold]
+  );
+
   /**
    * 板块评分需要加载的交易日数量
    *
@@ -314,6 +344,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       if (nameFilter && !b.name.includes(nameFilter)) return false;
       // 只看题材（仅概念板块 Tab 生效，切到行业 Tab 时不参与过滤）
       if (onlyTheme && type === BKType.Gainian && !isThemeBoard(b.name)) return false;
+      if (!passStockCount(b)) return false;
       if (!filterMA20 && !filterMA40 && !filterMA60 && !filterRSI) return true;
       if (filterMA20 && maResults[b.secid] && !maResults[b.secid].ma20) return false;
       if (filterMA40 && maResults[b.secid] && !maResults[b.secid].ma40) return false;
@@ -347,7 +378,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       }
     }
     setShowList(list);
-  }, [bankuais, sortTypes, nameFilter, onlyTheme, type, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, industryAllData, industryDisplayCount, scoreData, scoreMinScore, scoreFilterEnabled, scoreFilterScore, scoreFilterBeforeDays, scoreFilterWindowDayList, scoreRsiFilterEnabled, scoreRsiFilterScore, scoreSeries]);
+  }, [bankuais, sortTypes, nameFilter, onlyTheme, type, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, industryAllData, industryDisplayCount, scoreData, scoreMinScore, scoreFilterEnabled, scoreFilterScore, scoreFilterBeforeDays, scoreFilterWindowDayList, scoreRsiFilterEnabled, scoreRsiFilterScore, scoreSeries, passStockCount]);
 
   /**
    * 「K线形态」表头勾选过滤（仅板块短线评分列表）
@@ -362,6 +393,29 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     const set = new Set(scoreKlineShapes);
     return (showList as any[]).filter((row: any) => set.has(normalizeKlineShape(row.klineShape)));
   }, [showList, displayMode, scoreKlineShapes]);
+
+  /**
+   * 交易模式右侧图表面板的板块：点行切换，未点过时默认取结果列表第一行（进入交易模式即出图）。
+   * 板块不可执行交易，面板里只有分时与K线，不含下单/持仓/自选等控件。
+   */
+  const panelRow = useMemo(() => {
+    if (displayMode !== 'boardScore' || panelClosed) return null;
+    const list = displayList as any[];
+    if (!list.length) return null;
+    return (list.find((row: any) => String(row.secid || '') === panelSecid) || list[0]) as BoardScoreRow | null;
+  }, [displayMode, displayList, panelSecid, panelClosed]);
+
+  /**
+   * 首次进入交易模式时锁定第一行作为图表对象
+   *
+   * 评分结果是逐行推送的，列表默认按分数排序，第一行会不断变化；
+   * 只自动选一次可避免右侧面板跟着反复切换板块、反复拉分时/K线。
+   */
+  useEffect(() => {
+    if (displayMode !== 'boardScore' || panelSecid) return;
+    const first = (displayList as any[])[0];
+    if (first?.secid) setPanelSecid(String(first.secid));
+  }, [displayMode, displayList, panelSecid]);
 
   /**
    * 评分候选池（板块）
@@ -593,7 +647,10 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       return;
     }
     // 候选池：K线形态表头勾选生效时只评列表当前可见的板块（池子为空时直接返回，避免把结果清空）
-    const pool = bankuais.filter((b) => !scorePoolCodes || scorePoolCodes.has(b.code));
+    // 候选池跟随顶部过滤（成份股数量阈值）与表头 K线形态勾选，和当前可见列表保持一致
+    const pool = bankuais.filter(
+      (b) => (!scorePoolCodes || scorePoolCodes.has(b.code)) && passStockCount(b)
+    );
     if (!pool.length) {
       return;
     }
@@ -611,6 +668,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     setScoreLoading(true);
     setHistoryProgress(null);
     setDisplayMode('boardScore');
+    // 进入交易模式即显示右侧图表面板（默认选中结果列表第一行）
+    setPanelClosed(false);
     // 先把历史列的交易日定下来（交易日历有缓存），免得评分过程中表头是空的
     if (!scoreDays.length) {
       try {
@@ -699,7 +758,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     } finally {
       setScoreLoading(false);
     }
-  }, [scoreLoading, bankuais, kLineApiSourceSetting, scoreDays, boardScoreHistoryDays, scorePoolCodes]);
+  }, [scoreLoading, bankuais, kLineApiSourceSetting, scoreDays, boardScoreHistoryDays, scorePoolCodes, passStockCount]);
 
   /**
    * 板块「当日形态」
@@ -717,7 +776,10 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       return;
     }
     // 候选池同「短线评分」：K线形态表头勾选生效时只处理列表可见的板块
-    const pool = bankuais.filter((b) => !scorePoolCodes || scorePoolCodes.has(b.code));
+    // 候选池跟随顶部过滤（成份股数量阈值）与表头 K线形态勾选，和当前可见列表保持一致
+    const pool = bankuais.filter(
+      (b) => (!scorePoolCodes || scorePoolCodes.has(b.code)) && passStockCount(b)
+    );
     if (!pool.length) {
       return;
     }
@@ -792,7 +854,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     } finally {
       setTodayScoreLoading(false);
     }
-  }, [todayScoreLoading, bankuais, kLineApiSourceSetting, boardScoreHistoryDays, scoreDays, scorePoolCodes]);
+  }, [todayScoreLoading, bankuais, kLineApiSourceSetting, boardScoreHistoryDays, scoreDays, scorePoolCodes, passStockCount]);
 
   /**
    * 训练周期预计算（板块）
@@ -867,9 +929,9 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   }, [trainDate]);
 
   return (
-    <>
-      <div className={styles.header} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      <div className={styles.header} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', flex: 'none' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center' }}>
           <Input
             size="small"
             placeholder="名字过滤"
@@ -890,6 +952,50 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               只看题材
             </Checkbox>
           )}
+          <span
+            title="成份股数量阈值：只保留成份股数 ≥ / ≤ 阈值的板块。东财数据源取「上涨+下跌+平盘家数」，同花顺取 company_num；数据源未提供该字段时过滤自动失效。过滤同时作用于「交易模式 / 当日形态」的候选池"
+            style={{ marginRight: 8, display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
+          >
+            <Checkbox
+              checked={stockCountFilterEnabled}
+              disabled={!stockCountAvailable}
+              onChange={(e) => {
+                setStockCountFilterEnabled(e.target.checked);
+                setCurrentPage(1);
+              }}
+            />
+            <span>成份股数</span>
+            <Select
+              size="small"
+              value={stockCountOperator}
+              onChange={(v) => {
+                setStockCountOperator(v as 'gte' | 'lte');
+                setCurrentPage(1);
+              }}
+              style={{ width: 52 }}
+            >
+              <Select.Option value="gte">≥</Select.Option>
+              <Select.Option value="lte">≤</Select.Option>
+            </Select>
+            <InputNumber
+              size="small"
+              min={1}
+              max={5000}
+              value={stockCountThreshold}
+              onChange={(v) => {
+                setStockCountThreshold(typeof v === 'number' ? v : 30);
+                setCurrentPage(1);
+              }}
+              style={{ width: 62 }}
+            />
+            <span>只</span>
+            {!stockCountAvailable && <span style={{ fontSize: 10, color: '#faad14' }}>数据源未提供</span>}
+            {stockCountFilterEnabled && !!stockCountAvailable && (
+              <span style={{ fontSize: 10, color: 'var(--hint-color)' }}>
+                {displayList.length}/{bankuais.length}
+              </span>
+            )}
+          </span>
           <Select
             size="small"
             value={dataSource}
@@ -1093,6 +1199,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                 // 评分/行业结果的排序键不适用于板块列表，返回时清空
                 setSortTypes({});
                 setCurrentPage(1);
+                setPanelClosed(false);
+                setPanelSecid('');
               }}
               style={{ marginLeft: 4 }}
             >
@@ -1109,6 +1217,18 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           )}
         </div>
       </div>
+      {/* 列表与板块图表面板左右平分（类似 STList 的交易模式）；没有面板时列表占满 */}
+      <div style={{ display: 'flex', flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}>
+        <div
+          style={{
+            flex: panelRow ? '1 1 50%' : '1 1 100%',
+            minWidth: 0,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
       {displayMode === 'boards' ? (
         <Row className={styles.header}>
           <Col span={4}>名字</Col>
@@ -1293,13 +1413,24 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           ))}
         </Row>
       )}
-      <div className={styles.table}>
-        <div className={styles.table}>
+      <div
+        className={styles.table}
+        style={panelRow ? { height: 'auto', flex: '1 1 0%', minHeight: 0 } : undefined}
+      >
+        <div className={styles.table} style={panelRow ? { height: '100%' } : undefined}>
         {displayMode === 'boards' ? (
           pageData.map((b, index) => (
             <Row key={`${b.code}-${index}`} className={styles.row}>
-              <Col span={4} style={{ cursor: 'pointer' }} onClick={() => onOpenBKStocks(type, b.secid)}>
+              <Col
+                span={4}
+                style={{ cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                title={`${b.name}｜成份股 ${b.stockCount || '--'} 只`}
+                onClick={() => onOpenBKStocks(type, b.secid)}
+              >
                 {b.name}
+                {!!b.stockCount && (
+                  <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--hint-color)' }}>{b.stockCount}</span>
+                )}
               </Col>
               <Col span={2} style={{ cursor: 'pointer' }} className={Utils.GetValueColor(b.zdf).textClass} onClick={() => onOpenBK(b.secid, b.name)}>
                 {!isNaN(b.zdf) ? b.zdf.toFixed(2) + '%' : '--'}
@@ -1399,9 +1530,15 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               <Row key={`${s.code}-${index}`} className={styles.row} style={{ backgroundColor: rowBg }}>
                 <Col
                   span={2}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => onOpenBK(s.secid, s.name)}
-                  title={detail || s.name}
+                  style={{
+                    cursor: 'pointer',
+                    backgroundColor: panelRow?.secid === s.secid ? 'rgba(24, 144, 255, 0.12)' : undefined,
+                  }}
+                  onClick={() => {
+                    setPanelSecid(s.secid);
+                    setPanelClosed(false);
+                  }}
+                  title={`${detail || s.name}\n点击在右侧查看该板块的分时与K线`}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0 }}>
                     <span
@@ -1415,6 +1552,24 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                       }}
                     >
                       {s.name}
+                    </span>
+                    {/* 板块详情（原单击名称的行为）：独立的 ↗ 入口，不与右侧图表选择冲突 */}
+                    <span
+                      title="打开板块详情"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenBK(s.secid, s.name);
+                      }}
+                      style={{
+                        flex: 'none',
+                        color: '#1890ff',
+                        fontSize: 11,
+                        lineHeight: 1,
+                        padding: '0 1px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ↗
                     </span>
                     {/* 箭头：不进入板块详情，直接跳到「板块股票」(STList) 看该板块的成分股 */}
                     <span
@@ -1567,7 +1722,16 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         {/* ...分页按钮... */}
         </div>
       </div>
-    </>
+        </div>
+        {panelRow && (
+          <BoardChartPanel
+            secid={panelRow.secid}
+            name={panelRow.name}
+            onClose={() => setPanelClosed(true)}
+          />
+        )}
+      </div>
+    </div>
   );
 };
 

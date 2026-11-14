@@ -5471,6 +5471,7 @@ const STList: React.FC<STListProps> = ({
             name={nameOfListItem(panelRow)}
             trainDate={ontrain ? trainDate : ''}
             trainTime={ontrain ? trainTime : ''}
+            prevTradeDate={ontrain ? prevTrainDay : ''}
             onOpenStock={onOpenStock}
             favoriteStocks={panelFavoriteStocks}
           />

@@ -1022,6 +1022,13 @@ export interface ScoreStockPanelProps {
    * 保证面板看到的和当时的盘面一致（不会提前看到收盘后的数据）。
    */
   trainTime?: string;
+  /**
+   * 上一交易日（YYYY-MM-DD）；训练模式由外层按训练日历传入，非训练模式为空
+   *
+   * 进入交易模式时右侧图表默认看这一天的历史分时（前一天已收盘，不含训练日盘中数据）；
+   * 为空时面板退回用日K自行推断上一交易日。
+   */
+  prevTradeDate?: string;
   /** 点击名字/代码打开股票详情 */
   onOpenStock: (secid: string, name: string) => void;
   /**
@@ -1168,6 +1175,7 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   name,
   trainDate,
   trainTime,
+  prevTradeDate,
   onOpenStock,
   layout = 'single',
   showIntro = true,
@@ -1187,12 +1195,23 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   const inTraining = !!trainDate;
 
   // ===== 分时走势 =====
+  /** 交易基准分时：训练日 / 实时当日。成交价、当日K重建、形态计算都只用这一份，不随图表切换变化 */
   const [trends, setTrends] = useState<Stock.TrendItem[]>([]);
   const [trendLoading, setTrendLoading] = useState(false);
   const [trendError, setTrendError] = useState('');
-  // 图表默认看日K线（分时需要时手动切换；训练模式下日K的当日那根仍按「训练时间」用分时重建）；
-  // 列表模式默认看分时：多只股票对照时，分时走势比日K更直观
-  const [chartMode, setChartMode] = useState<PanelChartMode>(defaultChartMode || 'kline');
+  /** 前一天（上一交易日）历史分时：只用于图表展示 */
+  const [prevTrends, setPrevTrends] = useState<Stock.TrendItem[]>([]);
+  const [prevTrendLoading, setPrevTrendLoading] = useState(false);
+  const [prevTrendError, setPrevTrendError] = useState('');
+  /**
+   * 分时日期：prev = 上一交易日（已收盘的完整分时），current = 交易基准日（训练日 / 实时当日）
+   *
+   * 单股模式进入交易模式默认看前一天分时：先复盘昨天的走势，再切到当日看盘；
+   * 列表模式是多只股票对照，仍默认看当日分时（也避免同时拉 N 份历史分时）。
+   */
+  const [trendView, setTrendView] = useState<'prev' | 'current'>(isList ? 'current' : 'prev');
+  // 进入交易模式默认看分时（前一天）；需要日K时手动切换
+  const [chartMode, setChartMode] = useState<PanelChartMode>(defaultChartMode || 'trend');
 
   // ===== 图表控制（与详情页 PriceTrend 对齐）=====
   const [range, setRange] = useState<RangeArea>(DEFAULT_RANGE);
@@ -1326,14 +1345,20 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
     };
   }, [techType, code, name, shortScoreCurveDays, klines.length]);
 
-  // 默认看日K线：只在「进入/退出训练」时回到默认图表，训练日推进不打断用户当前选择
+  // 只在「进入/退出训练」时回到默认视图，训练日推进不打断用户当前选择
   const wasTrainingRef = useRef(inTraining);
   useEffect(() => {
     if (wasTrainingRef.current !== inTraining) {
       wasTrainingRef.current = inTraining;
-      setChartMode(defaultChartMode || 'kline');
+      setChartMode(defaultChartMode || 'trend');
+      setTrendView(isList ? 'current' : 'prev');
     }
-  }, [inTraining, defaultChartMode]);
+  }, [inTraining, defaultChartMode, isList]);
+
+  // 切换标的：回到「前一天分时」，与刚进入交易模式时的默认视图一致
+  useEffect(() => {
+    setTrendView(isList ? 'current' : 'prev');
+  }, [secid, isList]);
 
   // 分时取数：训练模式取训练日的历史分时（Tushare 1 分钟线），非训练模式取实时分时。
   // 训练模式下即使当前看的是日K也要取：当日那根K线要按分时重建（见 displayKlines）；
@@ -1431,6 +1456,57 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
     return day.length === 8 ? day : dateKey(dayjs().format('YYYY-MM-DD'));
   }, [trainDate]);
 
+  /**
+   * 「前一天分时」所属交易日（YYYYMMDD）
+   *
+   * 训练模式直接用外层传的训练日历上一交易日（训练首日为空时再退回日K）；
+   * 非训练模式从日K里取早于实时分时基准日的最后一根，避免周末/节假日算错自然日。
+   */
+  const prevTrendDay = useMemo(() => {
+    if (prevTradeDate) {
+      return dateKey(prevTradeDate);
+    }
+    if (trendDayKey.length !== 8 || !klines.length) {
+      return '';
+    }
+    return [...new Set(klines.map((k) => dateKey(k?.date)).filter((d) => d.length === 8 && d < trendDayKey))]
+      .sort()
+      .pop() || '';
+  }, [prevTradeDate, trendDayKey, klines]);
+
+  /** 当前图表是否显示前一天分时；列表模式固定看当日，不额外拉 N 份历史分时 */
+  const isPrevTrendView = !isList && trendView === 'prev' && prevTrendDay.length === 8;
+
+  // 前一天分时按需取数：只在单股模式、看「前一天」且图表切到分时时才请求
+  useEffect(() => {
+    if (!isPrevTrendView || chartMode !== 'trend') {
+      return () => {};
+    }
+    let canceled = false;
+    setPrevTrends([]);
+    setPrevTrendError('');
+    setPrevTrendLoading(true);
+    Services.Stock.requestHistTrends(secid, prevTrendDay)
+      .then((list) => {
+        if (!canceled) {
+          setPrevTrends((list || []) as Stock.TrendItem[]);
+        }
+      })
+      .catch((e: any) => {
+        if (!canceled) {
+          setPrevTrendError(e?.message || '历史分时取数失败');
+        }
+      })
+      .finally(() => {
+        if (!canceled) {
+          setPrevTrendLoading(false);
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [secid, prevTrendDay, isPrevTrendView, chartMode]);
+
   /** 分时昨收：训练模式取历史分时首根的 last（该交易日 pre_close，后端已换算成与日K一致的前复权口径） */
   const trendZs = useMemo(() => {
     if (!trends.length) {
@@ -1454,22 +1530,6 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
     }
     return firstLast && firstLast !== Number(first.current) ? firstLast : 0;
   }, [trends, klines, inTraining, trendDayKey]);
-
-  /** 分时状态文字：当前训练时刻 / 现价 / 涨跌幅 */
-  const trendStatus = useMemo(() => {
-    if (!trends.length) {
-      return '';
-    }
-    if (inTraining && visibleCount <= 0) {
-      // 集合竞价阶段（09:30 之前）还没有分钟数据
-      return `${trainTime || ''} 未开盘`;
-    }
-    const bar = trends[Math.max(0, visibleCount - 1)];
-    const price = Number(bar?.current) || 0;
-    const chg = trendZs > 0 ? (price / trendZs) * 100 - 100 : 0;
-    const progress = inTraining && visibleCount < trendTotal ? ` · ${visibleCount}/${trendTotal}分钟` : '';
-    return `${trendTimeLabel(bar?.datetime)} 现价 ${price.toFixed(2)}（${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%）${progress}`;
-  }, [trends, visibleCount, trendZs, inTraining, trendTotal, trainTime]);
 
   /** 列表模式信息行的现价 / 涨跌幅：与交易区、分时图同一份价格口径 */
   const listQuote = useMemo(() => {
@@ -1549,6 +1609,81 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
     return before.length ? before[before.length - 1] : null;
   }, [klines, trendDayKey]);
 
+  // ===== 图表展示用的分时（与成交价 / 当日K重建 / 形态计算所用的基准分时分离）=====
+  /** 分时图数据：前一天历史分时 / 交易基准日分时 */
+  const chartTrends = isPrevTrendView ? prevTrends : trends;
+  /** 分时图所属交易日（YYYYMMDD） */
+  const chartDayKey = isPrevTrendView ? prevTrendDay : trendDayKey;
+  /** 前一天已收盘，全部分钟都可见；当日仍按训练时钟截断 */
+  const chartVisibleCount = isPrevTrendView ? chartTrends.length : visibleCount;
+  /** 分时图的涨跌基准：前一天分时用其首根 last（pre_close），退化用日K推 */
+  const chartZs = useMemo(() => {
+    if (!chartTrends.length) {
+      return 0;
+    }
+    if (!isPrevTrendView) {
+      return trendZs;
+    }
+    const firstLast = Number(chartTrends[0].last) || 0;
+    if (firstLast > 0) {
+      return firstLast;
+    }
+    const before = klines.filter((k) => dateKey(k?.date) < chartDayKey);
+    return Number(before[before.length - 1]?.sp) || 0;
+  }, [chartTrends, isPrevTrendView, trendZs, klines, chartDayKey]);
+  /** 分时图上的「昨日开盘/最低」参考线，按分时所属日往前取一根日K */
+  const chartPrevBar = useMemo(() => {
+    if (!isPrevTrendView) {
+      return prevDayBar;
+    }
+    if (chartDayKey.length !== 8 || !klines.length) {
+      return null;
+    }
+    const before = klines.filter((k) => {
+      const key = dateKey(k?.date);
+      return key.length === 8 && key < chartDayKey;
+    });
+    return before.length ? before[before.length - 1] : null;
+  }, [isPrevTrendView, prevDayBar, chartDayKey, klines]);
+  /** 分时状态文字：日期 / 训练时刻 / 现价 / 涨跌幅 */
+  const chartStatus = useMemo(() => {
+    const dayLabel = chartDayKey.length === 8 ? `${chartDayKey.substring(4, 6)}-${chartDayKey.substring(6, 8)}` : '';
+    const viewLabel = isPrevTrendView
+      ? `${dayLabel} 昨日分时`
+      : inTraining
+        ? `${dayLabel} ${trainTime || ''} 当日分时`
+        : `${dayLabel} 当日分时`;
+    if (!chartTrends.length) {
+      return viewLabel;
+    }
+    if (!isPrevTrendView && inTraining && visibleCount <= 0) {
+      // 集合竞价阶段（09:30 之前）还没有分钟数据
+      return `${viewLabel} · 未开盘`;
+    }
+    const bar = chartTrends[Math.max(0, chartVisibleCount - 1)];
+    const price = Number(bar?.current) || 0;
+    const chg = chartZs > 0 ? (price / chartZs) * 100 - 100 : 0;
+    const progress =
+      !isPrevTrendView && inTraining && chartVisibleCount < trendTotal
+        ? ` · ${chartVisibleCount}/${trendTotal}分钟`
+        : '';
+    return `${viewLabel} · ${trendTimeLabel(bar?.datetime)} 现价 ${price.toFixed(2)}（${
+      chg >= 0 ? '+' : ''
+    }${chg.toFixed(2)}%）${progress}`;
+  }, [
+    chartDayKey,
+    isPrevTrendView,
+    inTraining,
+    trainTime,
+    chartTrends,
+    chartVisibleCount,
+    visibleCount,
+    chartZs,
+    trendTotal,
+  ]);
+  const chartLoading = isPrevTrendView ? prevTrendLoading : trendLoading;
+  const chartError = isPrevTrendView ? prevTrendError : trendError;
+
   /** C5a/C5b 的输入分时：训练回放取「已走到」的分时，实时取全部分时 */
   const patternTrends = inTraining ? visibleTrends : trends;
   /** 昨日全天成交量（手，C5b 的 f2 分母） */
@@ -1596,8 +1731,16 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
     const trendHeight = isList ? LIST_TREND_HEIGHT : 400;
     const klineHeight = isList ? LIST_KLINE_HEIGHT : techType === TECH_NONE ? 400 : 480;
     if (chartMode === 'trend') {
-      return trends.length
-        ? buildTrendOption({ trends, visibleCount, showVolume, zs: trendZs, prevBar: prevDayBar, height: trendHeight, compact: isList })
+      return chartTrends.length
+        ? buildTrendOption({
+            trends: chartTrends,
+            visibleCount: chartVisibleCount,
+            showVolume,
+            zs: chartZs,
+            prevBar: chartPrevBar,
+            height: trendHeight,
+            compact: isList,
+          })
         : { option: null, chartHeight: trendHeight };
     }
     return displayKlines.length
@@ -1613,10 +1756,10 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
       : { option: null, chartHeight: klineHeight };
   }, [
     chartMode,
-    trends,
-    visibleCount,
-    trendZs,
-    prevDayBar,
+    chartTrends,
+    chartVisibleCount,
+    chartZs,
+    chartPrevBar,
     showVolume,
     displayKlines,
     range,
@@ -1956,12 +2099,24 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
           ) : (
             <>
               {!isList ? (
+                <Radio.Group
+                  size="small"
+                  value={isPrevTrendView ? 'prev' : 'current'}
+                  onChange={(e) => setTrendView(e.target.value as 'prev' | 'current')}
+                >
+                  <Radio.Button value="prev" disabled={prevTrendDay.length !== 8}>
+                    前一天分时
+                  </Radio.Button>
+                  <Radio.Button value="current">{inTraining ? '训练日分时' : '当日分时'}</Radio.Button>
+                </Radio.Group>
+              ) : null}
+              {!isList ? (
                 <Tooltip title="成交量">
                   <Switch size="small" checked={showVolume} onChange={setShowVolume} />
                 </Tooltip>
               ) : null}
               {!isList ? (
-                <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{trendStatus}</span>
+                <span style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>{chartStatus}</span>
               ) : null}
             </>
           )}
@@ -1969,16 +2124,18 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
         <div ref={chartRef} style={{ width: '100%', height: chartHeight }} />
         {chartMode === 'trend' ? (
           <>
-            {trendLoading ? (
+            {chartLoading ? (
               <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
-                <Spin size="small" /> 分时加载中...
+                <Spin size="small" /> {isPrevTrendView ? '前一天' : '当日'}分时加载中...
               </div>
             ) : null}
-            {!trendLoading && trendError ? (
-              <div style={{ fontSize: 12, color: '#ff4d4f' }}>{trendError}</div>
+            {!chartLoading && chartError ? (
+              <div style={{ fontSize: 12, color: '#ff4d4f' }}>{chartError}</div>
             ) : null}
-            {!trendLoading && !trendError && !trends.length ? (
-              <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>暂无分时数据</div>
+            {!chartLoading && !chartError && !chartTrends.length ? (
+              <div style={{ fontSize: 12, color: 'var(--secondary-text-color)' }}>
+                {isPrevTrendView ? '该交易日' : ''}暂无分时数据
+              </div>
             ) : null}
           </>
         ) : (
@@ -2043,6 +2200,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
   name,
   trainDate,
   trainTime,
+  prevTradeDate,
   onOpenStock,
   favoriteStocks,
 }) => {
@@ -2234,10 +2392,12 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
         name={name}
         trainDate={trainDate}
         trainTime={trainTime}
+        prevTradeDate={prevTradeDate}
         onOpenStock={onOpenStock}
         layout="single"
         showIntro
         fill
+        defaultChartMode="trend"
         ratio={ratio}
         onRatioChange={changeRatio}
         onSwitchToList={() => switchMode('list')}
