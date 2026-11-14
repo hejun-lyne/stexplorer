@@ -3016,3 +3016,34 @@ export async function GetIndustryStocksFromTushare(secid: string, date?: string)
     return { total: 0, stocks: [] };
   }
 }
+
+export interface BoardStrengthQueryItem {
+  secid: string;
+  code: string;
+  name: string;
+}
+
+/**
+ * 板块日K强势度评分 v1.1（BKList「交易模式」结果列表）
+ *
+ * 一次 IPC 完成：本地 qfq 成份股日线读取 + dc_member 成份股映射 + 全A等权基准中性化 + 双轨打分。
+ * as_of 传训练日（不传时 python 侧用 --as-of-date 兜底），保证训练模式不读未来数据。
+ */
+export async function ScoreBoardStrengthFromTushare(
+  boards: BoardStrengthQueryItem[],
+  asOf?: string,
+  window = 20
+): Promise<{
+  rows: any[];
+  as_of: string;
+  window: number;
+  scored: number;
+  skipped?: { secid: string; name: string; reason: string }[];
+  error?: string;
+}> {
+  const params: Record<string, any> = { boards, window };
+  if (asOf) {
+    params.as_of = asOf;
+  }
+  return callTushare('score_board_strength', params);
+}

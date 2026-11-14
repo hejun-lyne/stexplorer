@@ -4805,6 +4805,16 @@ export async function GetDetailFromDataSource(source: Enums.FundApiType, secid: 
 export async function GetTrendFromDataSource(source: Enums.FundApiType, secid: string) {
   // 详情页「忽略训练」：该股票取真实最新分时，不做训练日截断
   const ignoreTrain = TrainFilter.IsIgnoreTrain(secid);
+  /**
+   * 板块（90.BKxxxx）：全部统一走 Tushare 链。
+   * 腾讯 / 163 的个股分笔接口不认识板块代码，Akshare 链拿不到分时；
+   * tushare_api.py::get_stock_trend 已对板块走东财 trends2，且历史批量分时也是同一条链。
+   * 不按数据源分发，保证 BKList 图表面板、板块详情页等所有调用方口径一致。
+   */
+  if (IsBoardSecid(secid)) {
+    const r = await TushareAPI.GetTrendFromTushare(secid);
+    return { ...r, trends: ignoreTrain ? r.trends : TrainFilter.CutTrends(r.trends) };
+  }
   // 港股（含港股指数）通过 akshare 后端获取
   const stockType = Helpers.Stock.GetStockType(secid) as Enums.StockMarketType;
   if (stockType === Enums.StockMarketType.HK) {

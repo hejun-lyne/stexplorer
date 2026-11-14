@@ -8032,6 +8032,150 @@ class TushareAPI:
                 'summary': {'n_records': 0, 'n_start': 0, 'start_industries': [], 'stage_counts': {}},
             }
 
+    @staticmethod
+    def score_board_strength(
+        boards: Optional[List[Dict[str, Any]]] = None,
+        as_of: Optional[str] = None,
+        window: int = 20,
+    ) -> Dict[str, Any]:
+        """板块日K强势度评分 v1.1（BKList「交易模式」结果列表的数据源）。
+
+        严格按《板块日K强势度评分_调整说明 v1.1》：
+          - 成份股日线取本地 daily.db/daily_kline 的 qfq 数据，一次 SQL 读满 window+base_days 个交易日；
+          - 成份股名单取 api_cache 的 dc_member_BKxxxx.DC（缺失时回退 board_stocks_90.BKxxxx 快照），
+            只取不晚于 as_of 的最近一份，避免前视；
+          - 全 A 等权基准由成份股并集按日聚合，模型内部完成市场中性化与双轨输出；
+          - as_of 默认取训练日（--as-of-date），训练模式下不会读到未来数据。
+
+        返回 {rows: [每个板块的 40 余列明细], as_of, window, scored, skipped}。
+        """
+        try:
+            import re
+            import board_strength_model as BSM
+            import stock_db
+
+            day = str(as_of or get_as_of_date() or datetime.now().strftime('%Y%m%d')).replace('-', '')[:8]
+            day_fmt = f'{day[:4]}-{day[4:6]}-{day[6:8]}'
+            cfg = dict(BSM.CFG_SECTOR)
+            cfg['window'] = max(5, min(60, int(window or 20)))
+            needed = cfg['window'] + cfg['base_days'] + 5
+
+            conn = stock_db._conn(stock_db._DAILY_DB)
+            dates = [
+                str(r[0]) for r in conn.execute(
+                    "SELECT DISTINCT trade_date FROM daily_kline "
+                    "WHERE kind='stock' AND period='daily' AND adjust='qfq' "
+                    "AND trade_date <= ? ORDER BY trade_date DESC LIMIT ?",
+                    (day_fmt, needed),
+                ).fetchall()
+            ]
+            if len(dates) < cfg['window'] + 10:
+                return {'error': '本地 qfq 日线不足，无法计算板块强势度', 'rows': [],
+                        'as_of': day, 'window': cfg['window'], 'scored': 0, 'skipped': []}
+            start = dates[-1]
+            raw = conn.execute(
+                "SELECT ts_code, trade_date, kp, sp, zg, zd, cjl, cje FROM daily_kline "
+                "WHERE kind='stock' AND period='daily' AND adjust='qfq' "
+                "AND trade_date BETWEEN ? AND ?",
+                (start, day_fmt),
+            ).fetchall()
+            if not raw:
+                return {'error': '本地 qfq 日线为空', 'rows': [],
+                        'as_of': day, 'window': cfg['window'], 'scored': 0, 'skipped': []}
+
+            daily = pd.DataFrame(
+                [dict(ts_code=r[0], trade_date=str(r[1]), open=r[2], close=r[3],
+                      high=r[4], low=r[5], vol=r[6], amount=r[7]) for r in raw]
+            )
+            for c in ('open', 'close', 'high', 'low', 'vol', 'amount'):
+                daily[c] = pd.to_numeric(daily[c], errors='coerce')
+            daily = daily.dropna(subset=['close'])
+
+            def _limit_pct(code: str) -> float:
+                c = str(code)[:6]
+                if c.startswith(('300', '301', '688', '689')):
+                    return 0.20
+                if c.startswith(('8', '4', '920')):
+                    return 0.30
+                return 0.10
+
+            daily['limit_pct'] = daily['ts_code'].map(_limit_pct)
+
+            def _recent(cache, cutoff):
+                if not isinstance(cache, dict):
+                    return None
+                keys = sorted(
+                    [k for k in cache if str(k).replace('-', '')[:8] <= cutoff], reverse=True
+                )
+                return cache[keys[0]] if keys else None
+
+            def _ts_code(x: Dict[str, Any]) -> str:
+                c = str(x.get('code') or '').strip()
+                if not c:
+                    return ''
+                if c.startswith(('6', '9')):
+                    return c + '.SH'
+                if c.startswith(('8', '4', '920')):
+                    return c + '.BJ'
+                return c + '.SZ'
+
+            sector_map: Dict[str, List[str]] = {}
+            skipped: List[Dict[str, str]] = []
+            board_names: Dict[str, str] = {}
+            for b in boards or []:
+                secid = str(b.get('secid') or '')
+                raw_code = str(b.get('code') or secid)
+                m = re.search(r'BK\d+', raw_code)
+                pure = m.group(0) if m else ''
+                if not secid or not pure:
+                    continue
+                board_names[secid] = str(b.get('name') or '')
+
+                # 成份股是按交易日归档的历史快照，写入时间不影响其有效性：
+                # 由 _recent 取不晚于 as_of 的最近一份来避免前视，不能再用 30 天时效把旧快照误杀。
+                recs = _recent(read_cache(f'dc_member_{pure}.DC', max_age_hours=None), day)
+                codes = (
+                    [str(r.get('con_code') or '') for r in recs if isinstance(r, dict)]
+                    if isinstance(recs, list) else []
+                )
+                if not codes:
+                    snap = _recent(read_cache(f'board_stocks_{secid}', max_age_hours=None), day)
+                    if isinstance(snap, dict):
+                        codes = [_ts_code(x) for x in (snap.get('stocks') or []) if isinstance(x, dict)]
+                codes = sorted({c for c in codes if c})
+                if len(codes) < cfg['min_members']:
+                    reason = (
+                        '缺少成份股名单：请先打开该板块的成份股列表以建立缓存'
+                        if not codes else
+                        f'成份股仅 {len(codes)} 只，少于评分下限 {cfg["min_members"]} 只'
+                    )
+                    skipped.append({'secid': secid, 'name': str(b.get('name') or ''), 'reason': reason})
+                    continue
+                sector_map[secid] = codes
+
+            if not sector_map:
+                return {'error': '没有可用的板块成份股映射（请先点开一次板块成份股列表以建立缓存）',
+                        'rows': [], 'as_of': day, 'window': cfg['window'],
+                        'scored': 0, 'skipped': skipped}
+
+            scores = BSM.score_boards(daily, sector_map, as_of=day, cfg=cfg)
+            rows = []
+            for secid, m in scores.items():
+                r = dict(m)
+                r['secid'] = secid
+                rows.append(r)
+            # 模型内部因本地日线不足跳过的板块也给出原因，避免「有成份股却没分数」时只有笼统提示
+            for secid in sector_map:
+                if secid not in scores:
+                    skipped.append({'secid': secid, 'name': board_names.get(secid, ''),
+                                    'reason': '本地成份股日线不足，模型未出分'})
+            rows.sort(key=lambda r: -(r.get('score_alpha') or 0))
+            return {'rows': rows, 'as_of': day, 'window': cfg['window'],
+                    'scored': len(rows), 'skipped': skipped, 'members': len(sector_map)}
+        except Exception as e:
+            return {'error': str(e), 'rows': [], 'as_of': str(as_of or ''),
+                    'window': int(window or 20), 'scored': 0, 'skipped': []}
+
     # ------------------ 选股模块（整合 stock_selector.py）------------------
 
     @staticmethod

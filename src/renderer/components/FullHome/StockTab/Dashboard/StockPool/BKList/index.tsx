@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo } from 'react';
-import { Button, List, Row, Col, Tooltip, Select, InputNumber, Checkbox, Input, Dropdown } from 'antd';
+import { Button, Row, Col, Tooltip, Select, InputNumber, Checkbox, Input } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -16,34 +16,15 @@ import { StoreState } from '@/reducers/types';
 import { CaretDownOutlined, CaretRightOutlined, CaretUpOutlined, FilterOutlined } from '@ant-design/icons';
 import classNames from 'classnames';
 import dayjs from 'dayjs';
-import {
-  BOARD_SCORE_HISTORY_DAYS,
-  BoardScoreItem,
-  BoardScoreRow,
-  BoardScoreSeries,
-  computeBoardShortTermScoreRows,
-  computeTodayBoardScoreRows,
-  formatBoardMoney,
-  loadBoardScoreSeries,
-  precomputeBoardScores,
-} from '@/helpers/boardShortTermScore';
-import { scoreColor } from '@/helpers/shortTermScore';
-import { resolveRecentTradingDays } from '@/helpers/shortTermScoreList';
-import {
-  compareKlineShape,
-  KLINE_SHAPE_FILTER_OPTIONS,
-  KLINE_SHAPE_SORT_KEY,
-  normalizeKlineShape,
-} from '@/helpers/klineShape';
 import { isThemeBoard } from '@/helpers/boardFilter';
 import BoardChartPanel from './BoardChartPanel';
-
-/**
- * 短线评分界面开关：与 STList 保持一致，评分专用控件先隐藏、实现全部保留，
- * 后续要恢复只改这一个开关即可。保留「当日形态」与板块结果列表本身。
- * 显式标注 boolean，避免 TS 把字面量折叠后把后面的分支判为不可达。
- */
-const SHOW_SHORT_SCORE_UI: boolean = false;
+import { ResizableSidePanel } from '../ResizablePanel';
+import {
+  BoardStrengthRow,
+  computeBoardDailyStrength,
+  strengthColor,
+  strengthTooltip,
+} from '@/helpers/boardDailyStrength';
 
 export interface BKListProps {
   type: BKType;
@@ -81,9 +62,11 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   /** 交易模式右侧图表面板：选中的板块 secid（空 = 自动取结果列表第一行） */
   const [panelSecid, setPanelSecid] = useState('');
   const [panelClosed, setPanelClosed] = useState(false);
+  /** 展开信号：面板已挂载时，重复进入交易模式 / 点结果行会自动展开收起的面板 */
+  const [panelExpandSeq, setPanelExpandSeq] = useState(0);
   const [sortTypes, setSortTypes] = useState<Record<string, number>>({});
   const [currentPage, setCurrentPage] = useState(1);
-  /** 当前展示的数据（板块列表 / 行业筛选结果 / 板块短线评分结果 共用，按 displayMode 区分行结构） */
+  /** 当前展示的数据（板块列表 / 行业筛选结果 / 板块日K强势度评分结果 共用，按 displayMode 区分行结构） */
   const [showList, setShowList] = useState<any[]>([]);
   const [dataSource, setDataSource] = useState<'dc' | 'ths'>('dc');
   const [industryFilterLoading, setIndustryFilterLoading] = useState(false);
@@ -93,54 +76,17 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const [displayMode, setDisplayMode] = useState<'boards' | 'industries' | 'boardScore'>('boards');
   const isIndustryPausedRef = React.useRef(false);
   const industryIndexRef = React.useRef(0);
-  // ========== 板块短线评分 ==========
+  // ========== 板块日K强势度评分 ==========
   const [scoreLoading, setScoreLoading] = useState(false);
-  const [scoreProgress, setScoreProgress] = useState(0);
-  const [scoreData, setScoreData] = useState<BoardScoreRow[]>([]);
-  /** 最小评分过滤（0 = 不过滤） */
-  const [scoreMinScore, setScoreMinScore] = useState(0);
-  // 过滤（与 STList 短线评分列表一致）：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的板块
-  const [scoreFilterEnabled, setScoreFilterEnabled] = useState(false);
-  const [scoreFilterScore, setScoreFilterScore] = useState(60);
-  /** 过滤窗口的回溯起点：从「N 天前」开始往前数（即窗口不含最近 N 个交易日） */
-  const [scoreFilterBeforeDays, setScoreFilterBeforeDays] = useState(5);
-  /** 过滤窗口的长度：近 M 个交易日 */
-  const [scoreFilterWindowDays, setScoreFilterWindowDays] = useState(15);
-  // RSI 评分阈值过滤（与 STList 一致）：仅显示 RSI 评分「大于」阈值的板块（RSI 满分 40）
-  const [scoreRsiFilterEnabled, setScoreRsiFilterEnabled] = useState(false);
-  const [scoreRsiFilterScore, setScoreRsiFilterScore] = useState(30);
-  const isScorePausedRef = React.useRef(false);
-  /** 本轮待评分的板块（暂停后恢复时继续处理剩余项） */
-  const scoreRemainingRef = React.useRef<BoardScoreItem[]>([]);
-  const scoreTotalRef = React.useRef(0);
-  /** 评分批次号：切换板块类型/数据源时递增，旧批次的回调结果直接丢弃 */
+  const [strengthData, setStrengthData] = useState<BoardStrengthRow[]>([]);
+  /** 评分批次号：切换板块类型/数据源时递增，旧批次的结果直接丢弃 */
   const scoreRunRef = React.useRef(0);
-  /** 「近 N 日评分」列对应的交易日（升序，最后一个为评分基准日） */
-  const [scoreDays, setScoreDays] = useState<string[]>([]);
-  /** 评分序列：{ 板块代码: { 交易日: 评分行 } }，历史列从这里取值 */
-  const [scoreSeries, setScoreSeries] = useState<BoardScoreSeries>({});
-  /** 历史列补算进度（null = 无补算） */
-  const [historyProgress, setHistoryProgress] = useState<{ done: number; total: number } | null>(null);
-  // ========== 当日形态（只补当日K线形态 + RSI，与 STList 一致） ==========
-  const [todayScoreLoading, setTodayScoreLoading] = useState(false);
-  const [todayScoreProgress, setTodayScoreProgress] = useState(0);
-  const isTodayScorePausedRef = React.useRef(false);
-  const todayScoreDoneRef = React.useRef(0);
-  // K线形态筛选：仅显示所选形态的板块（多选，空数组=不过滤；同一形态名不区分阴阳）
-  const [scoreKlineShapes, setScoreKlineShapes] = useState<string[]>([]);
-  // ========== 训练周期预计算 ==========
-  const [precomputing, setPrecomputing] = useState(false);
-  const [precomputeProgress, setPrecomputeProgress] = useState(0);
-  const [precomputeMessage, setPrecomputeMessage] = useState('');
-  const isPrecomputePausedRef = React.useRef(false);
-  /** 最近一次的板块评分函数（训练日切换 / 预计算完成后自动刷新用） */
+  /** 最近一次的板块评分函数（训练日切换时自动刷新用） */
   const boardScoreRefreshRef = React.useRef<() => void>();
   const scoreLoadingRef = React.useRef(false);
   const PAGE_SIZE = 50;
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
-  const { ontrain, trainDate, trainStartDate, trainEndDate } = useSelector(
-    (state: StoreState) => state.setting.systemSetting
-  );
+  const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
 
   /** 当前板块列表里有多少个板块带了成份股数字（数据源不支持时全部为 0） */
   const stockCountAvailable = useMemo(
@@ -162,63 +108,6 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     },
     [stockCountFilterEnabled, stockCountAvailable, stockCountOperator, stockCountThreshold]
   );
-
-  /**
-   * 板块评分需要加载的交易日数量
-   *
-   * 「近 N 日评分」历史列固定展示 BOARD_SCORE_HISTORY_DAYS 日；而过滤窗口是「N 天前的近 M 日」，
-   * 最远要追溯到「N 天前」再往前 M 日，因此取两者较大值，保证过滤窗口用到的评分都已经读进来。
-   */
-  const boardScoreHistoryDays = useMemo(
-    () =>
-      Math.max(
-        BOARD_SCORE_HISTORY_DAYS,
-        Math.max(0, Number(scoreFilterBeforeDays) || 0) + Math.max(1, Number(scoreFilterWindowDays) || 0)
-      ),
-    [scoreFilterBeforeDays, scoreFilterWindowDays]
-  );
-
-  /**
-   * 评分序列里可用的交易日（升序）
-   *
-   * 优先用评分流程返回的交易日；若为空则退回评分序列里已存在的交易日
-   * （训练模式下以训练日为上限，避免读到预计算写入的未来交易日）。
-   * 这些天既用于渲染历史列，也用于计算「N 天前的近 M 日」过滤窗口。
-   */
-  const scoreFilterDays = useMemo(() => {
-    if (scoreDays.length) {
-      return scoreDays;
-    }
-    const cap = ontrain && trainDate ? String(trainDate).replace(/-/g, '') : '';
-    const set = new Set<string>();
-    Object.values(scoreSeries || {}).forEach((m) => {
-      Object.keys(m || {}).forEach((k) => {
-        const d = String(k).replace(/-/g, '');
-        if (d && (!cap || d <= cap)) {
-          set.add(d);
-        }
-      });
-    });
-    return [...set].sort().slice(-boardScoreHistoryDays);
-  }, [scoreDays, scoreSeries, ontrain, trainDate, boardScoreHistoryDays]);
-
-  /** 「近 N 日评分」列实际展示的交易日：固定取最近的 BOARD_SCORE_HISTORY_DAYS 个交易日 */
-  const scoreDisplayDays = useMemo(
-    () => scoreFilterDays.slice(-BOARD_SCORE_HISTORY_DAYS),
-    [scoreFilterDays]
-  );
-
-  /**
-   * 「N 天前的近 M 日」过滤窗口内的交易日
-   *
-   * 语义：从「N 天前」这个交易日开始往前数 M 个交易日（即窗口不含最近 N 个交易日）。
-   * 交易日列表按升序排列，所以先切掉末尾的 N 天，再取剩余的末尾 M 天。
-   */
-  const scoreFilterWindowDayList = useMemo(() => {
-    const beforeDays = Math.max(0, Math.floor(Number(scoreFilterBeforeDays) || 0));
-    const windowDays = Math.max(1, Math.floor(Number(scoreFilterWindowDays) || 0));
-    return scoreFilterDays.slice(0, Math.max(0, scoreFilterDays.length - beforeDays)).slice(-windowDays);
-  }, [scoreFilterDays, scoreFilterBeforeDays, scoreFilterWindowDays]);
 
   const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
     throwOnError: true,
@@ -256,6 +145,19 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     setCurrentPage(1);
   }, []);
 
+  /** 结果列表表头的排序按钮（三态：升序 / 降序 / 取消） */
+  const renderSortBtn = (key: string) => (
+    <Button
+      size="small"
+      type="text"
+      icon={
+        sortTypes[key] == 1 ? <CaretUpOutlined /> : sortTypes[key] == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />
+      }
+      className={styles.sortbtn}
+      onClick={() => updateSortType(key)}
+    />
+  );
+
   useEffect(() => {
     if (displayMode === 'industries') {
       // 只显示已计算的行业（分批显示效果）
@@ -278,57 +180,22 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     }
 
     if (displayMode === 'boardScore') {
-      // 板块短线评分结果：名称 / 最低分 / 分数窗口 / RSI评分 / 只看题材 过滤 + 排序
-      // 过滤口径与 STList 短线评分列表一致（见 STList/index.tsx 的 shortScore 分支）
-      let list = scoreData.filter((s) => {
+      // 板块日K强势度评分：只保留名称 / 只看题材过滤；默认按超额强度倒序，无分数行沉底
+      let list = strengthData.filter((s) => {
         if (nameFilter && !String(s.name || '').includes(nameFilter)) return false;
         if (onlyTheme && type === BKType.Gainian && !isThemeBoard(s.name)) return false;
-        if (scoreMinScore > 0 && s.total != null && s.total < scoreMinScore) return false;
         return true;
       });
-      // 过滤：N 天前的近 M 个交易日出现过 ≥ 阈值分
-      // 窗口只落在「N 天前」及其之前（不含最近 N 个交易日）；窗口内无可用交易日时不过滤，避免误清空列表
-      if (scoreFilterEnabled && scoreFilterWindowDayList.length) {
-        const threshold = Number(scoreFilterScore);
-        // 回溯 0 天时窗口含基准日当天，额外认「当日综合分」，避免序列里缺当日行时漏掉
-        const includeTodayScore = Math.max(0, Math.floor(Number(scoreFilterBeforeDays) || 0)) === 0;
-        list = list.filter((s) => {
-          if (includeTodayScore && s.total != null && s.total >= threshold) {
-            return true;
-          }
-          const series = scoreSeries?.[s.code];
-          if (!series) {
-            return false;
-          }
-          return scoreFilterWindowDayList.some((d) => {
-            const v = series[d]?.total;
-            return v != null && v >= threshold;
-          });
-        });
-      }
-      // RSI 评分阈值过滤：仅保留 RSI 评分「大于」阈值的板块（RSI 满分 40）
-      if (scoreRsiFilterEnabled) {
-        const rsiThreshold = Number(scoreRsiFilterScore);
-        list = list.filter((s) => s.rsiScore != null && s.rsiScore > rsiThreshold);
-      }
       const keys = Object.keys(sortTypes);
       const key = keys.length === 1 ? keys[0] : '';
       const t = key ? sortTypes[key] : 2;
       if (t !== 0) {
-        if (key === KLINE_SHAPE_SORT_KEY) {
-          // K线形态排序：与个股短线评分列表共用同一套比较逻辑（helpers/klineShape）
-          list = [...list].sort((a: any, b: any) => compareKlineShape(a, b, t));
-          setShowList(list);
-          return;
-        }
         list = [...list].sort((a: any, b: any) => {
-          const rawKey = key || 'total';
-          // 未算出分的行（数据不足/待评分）始终排在最后；布尔列（放量）按 是=1 / 否=0 排
-          const toNum = (v: any) => (typeof v === 'boolean' ? (v ? 1 : 0) : Number(v));
-          const av = toNum(a[rawKey]);
-          const bv = toNum(b[rawKey]);
-          const aOk = Number.isFinite(av) && a[rawKey] != null;
-          const bOk = Number.isFinite(bv) && b[rawKey] != null;
+          const rawKey = key || 'scoreAlpha';
+          const av = Number(a[rawKey]);
+          const bv = Number(b[rawKey]);
+          const aOk = !a.error && Number.isFinite(av);
+          const bOk = !b.error && Number.isFinite(bv);
           if (!aOk && !bOk) return 0;
           if (!aOk) return 1;
           if (!bOk) return -1;
@@ -378,79 +245,28 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       }
     }
     setShowList(list);
-  }, [bankuais, sortTypes, nameFilter, onlyTheme, type, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, industryAllData, industryDisplayCount, scoreData, scoreMinScore, scoreFilterEnabled, scoreFilterScore, scoreFilterBeforeDays, scoreFilterWindowDayList, scoreRsiFilterEnabled, scoreRsiFilterScore, scoreSeries, passStockCount]);
-
-  /**
-   * 「K线形态」表头勾选过滤（仅板块短线评分列表）
-   *
-   * 决定列表显示哪些行，分页也用它，保证页码与可见行数一致。
-   * 勾选生效时评分候选池同样收缩（见 scorePoolCodes）：「交易模式 / 当日形态」只处理可见的板块。
-   */
-  const displayList = useMemo(() => {
-    if (displayMode !== 'boardScore' || !scoreKlineShapes.length) {
-      return showList as any[];
-    }
-    const set = new Set(scoreKlineShapes);
-    return (showList as any[]).filter((row: any) => set.has(normalizeKlineShape(row.klineShape)));
-  }, [showList, displayMode, scoreKlineShapes]);
+  }, [bankuais, sortTypes, nameFilter, onlyTheme, type, filterMA20, filterMA40, filterMA60, filterRSI, maResults, rsiResults, displayMode, industryAllData, industryDisplayCount, strengthData, passStockCount]);
 
   /**
    * 交易模式右侧图表面板的板块：点行切换，未点过时默认取结果列表第一行（进入交易模式即出图）。
    * 板块不可执行交易，面板里只有分时与K线，不含下单/持仓/自选等控件。
    */
-  const panelRow = useMemo(() => {
+  const panelRow = useMemo<BoardStrengthRow | null>(() => {
     if (displayMode !== 'boardScore' || panelClosed) return null;
-    const list = displayList as any[];
-    if (!list.length) return null;
-    return (list.find((row: any) => String(row.secid || '') === panelSecid) || list[0]) as BoardScoreRow | null;
-  }, [displayMode, displayList, panelSecid, panelClosed]);
+    if (!showList.length) return null;
+    return (showList.find((row: any) => String(row.secid || '') === panelSecid) || showList[0]) as BoardStrengthRow;
+  }, [displayMode, showList, panelSecid, panelClosed]);
 
-  /**
-   * 首次进入交易模式时锁定第一行作为图表对象
-   *
-   * 评分结果是逐行推送的，列表默认按分数排序，第一行会不断变化；
-   * 只自动选一次可避免右侧面板跟着反复切换板块、反复拉分时/K线。
-   */
+  /** 首次进入交易模式时锁定第一行，避免结果刷新时右侧面板反复切换板块 */
   useEffect(() => {
     if (displayMode !== 'boardScore' || panelSecid) return;
-    const first = (displayList as any[])[0];
+    const first = showList[0] as BoardStrengthRow | undefined;
     if (first?.secid) setPanelSecid(String(first.secid));
-  }, [displayMode, displayList, panelSecid]);
+  }, [displayMode, showList, panelSecid]);
 
-  /**
-   * 评分候选池（板块）
-   *
-   * 表头勾选的K线形态过滤生效时，评分池跟着列表收缩：「交易模式 / 当日形态」只对当前可见的板块计算。
-   * 过滤未生效时返回 null，表示沿用原来的全量板块池。
-   */
-  const scorePoolCodes = useMemo<Set<string> | null>(() => {
-    if (displayMode !== 'boardScore' || !scoreKlineShapes.length) {
-      return null;
-    }
-    return new Set(
-      (displayList as any[]).map((row: any) => String(row.code || '')).filter(Boolean)
-    );
-  }, [displayMode, scoreKlineShapes, displayList]);
-
-  /** 表头 K线形态筛选项（带当前列表的板块数）：统计基于 showList，勾选后各项数量不会互相影响 */
-  const scoreKlineShapeItems = useMemo(() => {
-    const counts: Record<string, number> = {};
-    (showList as any[]).forEach((row: any) => {
-      const key = normalizeKlineShape(row.klineShape);
-      counts[key] = (counts[key] || 0) + 1;
-    });
-    return KLINE_SHAPE_FILTER_OPTIONS.map((o) => ({ ...o, count: counts[o.value] || 0 }));
-  }, [showList]);
-
-  /** 表头勾选后统一回到第 1 页 */
-  const handleScoreKlineShapeChange = useCallback((next: string[]) => {
-    setScoreKlineShapes(next);
-    setCurrentPage(1);
-  }, []);
-
-  const totalPage = Math.max(1, Math.ceil(displayList.length / PAGE_SIZE));
+  const totalPage = Math.max(1, Math.ceil(showList.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPage);
-  const pageData = displayList.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pageData = showList.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   useEffect(() => {
     if (currentPage > totalPage) {
@@ -464,18 +280,9 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     currentIndexRef.current = 0;
     setTechProgress(0);
     setDisplayMode('boards');
-    // 板块类型/数据源变化：上一轮评分结果已经不属于当前列表，直接丢弃
-    isScorePausedRef.current = true;
+    // 板块类型/数据源变化：上一轮评分结果已不属于当前列表，直接丢弃
     scoreRunRef.current += 1;
-    scoreRemainingRef.current = [];
-    scoreTotalRef.current = 0;
-    setScoreData([]);
-    setScoreProgress(0);
-    setScoreDays([]);
-    setScoreSeries({});
-    setHistoryProgress(null);
-    setPrecomputeMessage('');
-    setPrecomputeProgress(0);
+    setStrengthData([]);
     runGetBankuais(kLineApiSourceSetting, type, pageSize, dataSource);
   }, [kLineApiSourceSetting, type, dataSource]);
   const loadMore = useCallback(() => {
@@ -631,290 +438,53 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   }, [bankuais, maThreshold, techFilterLoading]);
 
   /**
-   * 板块短线评分
+   * 板块日K强势度评分（v1.1）
    *
-   * 对当前列表的全部板块逐只评分（趋势位置 + 主力资金 + 量能 + RSI，见 helpers/boardShortTermScore），
-   * 同时补算「近 N 日评分」历史列并落库：当天命中缓存 + 历史列已齐的板块零取数，
-   * 所以预计算过的训练日切过来基本是瞬时的。
-   * 再次点击视为暂停：当前板块算完后停止，已出分的结果保留；继续点击从剩余板块接着评。
+   * 一次 IPC 在 Python 侧完成：成份股 qfq 日线 → 等权板块指数 + 广度聚合 → 全A等权基准中性化
+   * → S1~S5 与修正项 → 双轨输出 score_alpha / score_abs。
+   * 候选池跟随顶部「成份股数量阈值」过滤；训练模式以训练日为 as_of，避免读到训练日之后的行情。
    */
   const handleBoardScore = useCallback(async () => {
-    if (scoreLoading) {
-      isScorePausedRef.current = true;
+    if (scoreLoading || !bankuais.length) {
       return;
     }
-    if (!bankuais.length) {
+    const items = bankuais
+      .filter(passStockCount)
+      .map((b) => ({ secid: b.secid, code: b.code, name: b.name }));
+    if (!items.length) {
       return;
     }
-    // 候选池：K线形态表头勾选生效时只评列表当前可见的板块（池子为空时直接返回，避免把结果清空）
-    // 候选池跟随顶部过滤（成份股数量阈值）与表头 K线形态勾选，和当前可见列表保持一致
-    const pool = bankuais.filter(
-      (b) => (!scorePoolCodes || scorePoolCodes.has(b.code)) && passStockCount(b)
-    );
-    if (!pool.length) {
-      return;
-    }
-    const items: BoardScoreItem[] = pool.map((b) => ({ secid: b.secid, code: b.code, name: b.name }));
-    // 新的一轮（队列已空 / 上一轮已跑完）：重置结果与进度
-    if (!scoreRemainingRef.current.length) {
-      setScoreData([]);
-      setScoreProgress(0);
-      scoreTotalRef.current = items.length;
-      scoreRemainingRef.current = [...items];
-    }
-
     const run = scoreRunRef.current;
-    isScorePausedRef.current = false;
     setScoreLoading(true);
-    setHistoryProgress(null);
     setDisplayMode('boardScore');
     // 进入交易模式即显示右侧图表面板（默认选中结果列表第一行）
     setPanelClosed(false);
-    // 先把历史列的交易日定下来（交易日历有缓存），免得评分过程中表头是空的
-    if (!scoreDays.length) {
-      try {
-        const days = await resolveRecentTradingDays(kLineApiSourceSetting, boardScoreHistoryDays);
-        if (days.length && scoreRunRef.current === run) {
-          setScoreDays(days);
-        }
-      } catch {
-        // 交易日历取不到时，历史列表头先留空，评分结束后会由结果补上
-      }
-    }
-    // 评分列表的排序键与板块列表不同，进入时清空，默认按评分倒序
+    setPanelExpandSeq((n) => n + 1);
+    // 评分列表的排序键与板块列表不同，进入时清空，默认按超额强度倒序
     setSortTypes({});
     setCurrentPage(1);
 
     try {
-      const res = await computeBoardShortTermScoreRows(scoreRemainingRef.current, {
-        source: kLineApiSourceSetting,
-        concurrency: 3,
-        historyDays: boardScoreHistoryDays,
-        shouldStop: () => isScorePausedRef.current || scoreRunRef.current !== run,
-        onRow: (row, item) => {
-          // 从剩余队列中移除已完成项（暂停后恢复时接着评剩余的）
-          const idx = scoreRemainingRef.current.findIndex((x) => x.secid === item.secid);
-          if (idx >= 0) {
-            scoreRemainingRef.current.splice(idx, 1);
-          }
-          if (scoreRunRef.current !== run) {
-            // 板块类型/数据源已切换：这一轮属于上一批板块，不再写入列表
-            return;
-          }
-          setScoreData((prev) => [...prev, row]);
-          setScoreProgress(
-            Math.round(
-              ((scoreTotalRef.current - scoreRemainingRef.current.length) / Math.max(1, scoreTotalRef.current)) * 100
-            )
-          );
-        },
-        onHistoryProgress: (info) => {
-          if (scoreRunRef.current === run) {
-            setHistoryProgress(info.done >= info.total ? null : info);
-          }
-        },
-        onSeries: (partial) => {
-          if (scoreRunRef.current !== run) {
-            return;
-          }
-          setScoreSeries((prev) => {
-            const next: BoardScoreSeries = { ...prev };
-            Object.keys(partial).forEach((code) => {
-              next[code] = { ...(prev[code] || {}), ...partial[code] };
-            });
-            return next;
-          });
-        },
-      });
+      const asOf = ontrain && trainDate ? trainDate : dayjs().format('YYYY-MM-DD');
+      const res = await computeBoardDailyStrength(items, { asOf });
       if (scoreRunRef.current !== run) {
         return;
       }
-      // 历史列的交易日与序列：以本轮结果为准（本轮没算的日子已在 helper 里用缓存补齐）
-      setScoreDays(res.recentDays);
-      if (res.recentDays.length) {
-        const series: BoardScoreSeries = { ...res.series };
-        // 缓存里没参与本轮评分的板块也一并读出来，避免「只评了部分板块」时历史列空着
-        const unloaded = bankuais.map((b) => b.code).filter((code) => !Object.keys(series[code] || {}).length);
-        if (unloaded.length) {
-          const fromCache = await loadBoardScoreSeries(unloaded, kLineApiSourceSetting, {
-            dates: res.recentDays,
-          });
-          Object.keys(fromCache).forEach((code) => {
-            series[code] = { ...(fromCache[code] || {}), ...(series[code] || {}) };
-          });
-        }
-        if (scoreRunRef.current === run) {
-          setScoreSeries(series);
-        }
+      setStrengthData(res.rows);
+        if (res.error) {
+        console.warn('[板块日K强势度]', res.error);
       }
-      if (!isScorePausedRef.current) {
-        scoreRemainingRef.current = [];
-        setScoreProgress(100);
-        setHistoryProgress(null);
-        console.log(`[板块短线评分] 完成（基准日 ${res.scoreDayKey || '-'}，历史 ${res.recentDays.length} 日）`);
-      }
+      console.log(
+        `[板块日K强势度] 完成（基准日 ${res.asOf || '-'}，窗口 ${res.window} 日，出分 ${res.scored}/${items.length}）`
+      );
     } catch (e) {
-      console.error('板块短线评分失败:', e);
+      console.error('板块日K强势度评分失败:', e);
     } finally {
       setScoreLoading(false);
     }
-  }, [scoreLoading, bankuais, kLineApiSourceSetting, scoreDays, boardScoreHistoryDays, scorePoolCodes, passStockCount]);
+  }, [scoreLoading, bankuais, ontrain, trainDate, passStockCount]);
 
-  /**
-   * 板块「当日形态」
-   *
-   * 与 STList 的「当日形态」一致：只更新「只依赖K线」的部分 —— 当日K线形态（含阴阳 / 放量）与 RSI。
-   * 板块日K盘中还没有当日那根时，用当日分时合成一根日K再算；当日不给综合分（列表评分列显示「待评分」），
-   * 也不写评分序列缓存。再次点击视为暂停：当前板块算完后停止，已更新的结果保留。
-   */
-  const handleTodayBoardScore = useCallback(async () => {
-    if (todayScoreLoading) {
-      isTodayScorePausedRef.current = true;
-      return;
-    }
-    if (!bankuais.length) {
-      return;
-    }
-    // 候选池同「短线评分」：K线形态表头勾选生效时只处理列表可见的板块
-    // 候选池跟随顶部过滤（成份股数量阈值）与表头 K线形态勾选，和当前可见列表保持一致
-    const pool = bankuais.filter(
-      (b) => (!scorePoolCodes || scorePoolCodes.has(b.code)) && passStockCount(b)
-    );
-    if (!pool.length) {
-      return;
-    }
-    const items: BoardScoreItem[] = pool.map((b) => ({ secid: b.secid, code: b.code, name: b.name }));
-    const run = scoreRunRef.current;
-    isTodayScorePausedRef.current = false;
-    todayScoreDoneRef.current = 0;
-    setTodayScoreLoading(true);
-    setTodayScoreProgress(0);
-    setDisplayMode('boardScore');
-    setCurrentPage(1);
-    // 先把历史列交易日（含当日）定下来，免得评分过程中表头是空的
-    if (!scoreDays.length) {
-      try {
-        const days = await resolveRecentTradingDays(kLineApiSourceSetting, boardScoreHistoryDays);
-        if (days.length && scoreRunRef.current === run) {
-          setScoreDays(days);
-        }
-      } catch {
-        // 交易日历取不到时交给评分流程返回值补上
-      }
-    }
-    try {
-      const res = await computeTodayBoardScoreRows(items, {
-        source: kLineApiSourceSetting,
-        concurrency: 4,
-        historyDays: boardScoreHistoryDays,
-        shouldStop: () => isTodayScorePausedRef.current || scoreRunRef.current !== run,
-        onRow: (row) => {
-          if (scoreRunRef.current !== run) {
-            return;
-          }
-          todayScoreDoneRef.current += 1;
-          // 按板块「覆盖更新」而不是整体替换：只改本次处理到的板块，被展示过滤挡住的板块保留原有行
-          setScoreData((prev) => {
-            const idx = prev.findIndex((r) => r.code === row.code);
-            const next = prev.slice();
-            if (idx === -1) {
-              next.push(row);
-            } else {
-              next[idx] = row;
-            }
-            return next;
-          });
-          setTodayScoreProgress(Math.round((todayScoreDoneRef.current / Math.max(1, items.length)) * 100));
-        },
-      });
-      if (scoreRunRef.current !== run) {
-        return;
-      }
-      if (res.recentDays.length) {
-        setScoreDays(res.recentDays);
-      }
-      // 当日不出综合分：把展示序列里「当日」的行摘掉，保证当日列显示 --
-      const k = res.scoreDayKey;
-      if (k && k.length === 8) {
-        const dashed = `${k.substring(0, 4)}-${k.substring(4, 6)}-${k.substring(6, 8)}`;
-        setScoreSeries((prev) => {
-          const next: BoardScoreSeries = { ...prev };
-          Object.keys(next).forEach((code) => {
-            const byDay = { ...(next[code] || {}) };
-            delete byDay[k];
-            delete byDay[dashed];
-            next[code] = byDay;
-          });
-          return next;
-        });
-      }
-      console.log(`[板块当日形态] 完成：更新 ${res.filled} 个板块，未取到 ${res.skipped} 个`);
-    } catch (e) {
-      console.error('板块当日形态失败:', e);
-    } finally {
-      setTodayScoreLoading(false);
-    }
-  }, [todayScoreLoading, bankuais, kLineApiSourceSetting, boardScoreHistoryDays, scoreDays, scorePoolCodes, passStockCount]);
-
-  /**
-   * 训练周期预计算（板块）
-   *
-   * 把训练窗口（含起始日之前 N 个交易日）每个交易日 × 每个板块的评分一次性算好并落库，
-   * 之后在任一训练日点「短线评分」都直接命中序列。再次点击视为暂停。
-   */
-  const handlePrecomputeBoardScores = useCallback(async () => {
-    if (precomputing) {
-      isPrecomputePausedRef.current = true;
-      return;
-    }
-    if (!ontrain || !trainStartDate || !trainEndDate) {
-      return;
-    }
-    if (!bankuais.length) {
-      return;
-    }
-    const items: BoardScoreItem[] = bankuais.map((b) => ({ secid: b.secid, code: b.code, name: b.name }));
-    isPrecomputePausedRef.current = false;
-    setPrecomputing(true);
-    setPrecomputeProgress(0);
-    setPrecomputeMessage('准备数据...');
-    try {
-      const res = await precomputeBoardScores({
-        items,
-        startDate: trainStartDate,
-        endDate: trainEndDate,
-        source: kLineApiSourceSetting,
-        historyDays: boardScoreHistoryDays,
-        ignoreCache: true,
-        shouldStop: () => isPrecomputePausedRef.current,
-        onProgress: (done, total, message) => {
-          setPrecomputeProgress(Math.round((done / Math.max(1, total)) * 100));
-          setPrecomputeMessage(`${done}/${total} ${message}`);
-        },
-      });
-      console.log(
-        `[板块预计算] ${res.dates.length} 个交易日、${res.rows} 行` +
-          `${res.reusedDays ? `（跳过已覆盖 ${res.reusedDays} 天）` : ''}` +
-          `${res.writeErrors ? `，写库失败 ${res.writeErrors} 次` : ''}`
-      );
-      if (!isPrecomputePausedRef.current) {
-        setPrecomputeMessage(
-          `完成：${res.dates.length} 个交易日、${res.rows} 行${res.writeErrors ? `（写库失败 ${res.writeErrors} 次）` : ''}`
-        );
-        // 预计算完把当前评分视图刷新一遍（此时整段窗口都已落库，基本零取数）
-        if (displayMode === 'boardScore') {
-          boardScoreRefreshRef.current?.();
-        }
-      }
-    } catch (e) {
-      console.error('板块评分预计算失败:', e);
-      setPrecomputeMessage('预计算失败，详见控制台');
-    } finally {
-      setPrecomputing(false);
-    }
-  }, [precomputing, bankuais, ontrain, trainStartDate, trainEndDate, kLineApiSourceSetting, displayMode, boardScoreHistoryDays]);
-
-  // 训练日切换：已经进入板块评分视图时自动刷新（预计算过的训练日会直接命中缓存）
+  // 训练日切换：已经进入评分视图时按新的 as_of 自动刷新
   boardScoreRefreshRef.current = handleBoardScore;
   scoreLoadingRef.current = scoreLoading;
   useEffect(() => {
@@ -953,7 +523,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             </Checkbox>
           )}
           <span
-            title="成份股数量阈值：只保留成份股数 ≥ / ≤ 阈值的板块。东财数据源取「上涨+下跌+平盘家数」，同花顺取 company_num；数据源未提供该字段时过滤自动失效。过滤同时作用于「交易模式 / 当日形态」的候选池"
+            title="成份股数量阈值：只保留成份股数 ≥ / ≤ 阈值的板块。东财数据源取「上涨+下跌+平盘家数」，同花顺取 company_num；数据源未提供该字段时过滤自动失效。过滤同时作用于交易模式的板块日K强势度评分候选池"
             style={{ marginRight: 8, display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
           >
             <Checkbox
@@ -992,7 +562,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             {!stockCountAvailable && <span style={{ fontSize: 10, color: '#faad14' }}>数据源未提供</span>}
             {stockCountFilterEnabled && !!stockCountAvailable && (
               <span style={{ fontSize: 10, color: 'var(--hint-color)' }}>
-                {displayList.length}/{bankuais.length}
+                {showList.length}/{bankuais.length}
               </span>
             )}
           </span>
@@ -1055,141 +625,18 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
               />
               <Button
                 size="small"
-                onClick={handleTodayBoardScore}
-                loading={todayScoreLoading}
-                style={{ marginLeft: 4 }}
-                title="当日形态识别：处理当前过滤结果的全部板块（不分页），只更新当日K线形态（含阴阳/放量）与 RSI —— 当日日K还没生成时用当日分时合成一根日K。不计算综合评分，也不产出买点；K线形态表头勾选同样参与候选板块"
-              >
-                {todayScoreLoading ? `当日形态中 ${todayScoreProgress}%` : `当日形态(${displayList.length})`}
-              </Button>
-              <Button
-                size="small"
                 onClick={handleBoardScore}
-                loading={scoreLoading && scoreProgress === 0}
+                loading={scoreLoading}
                 style={{ marginLeft: 4 }}
-                title="进入交易模式：按当前列表加载板块结果，用于观察K线形态、RSI、量能与资金（K线形态表头勾选生效时只处理可见的板块；再次点击可暂停，已加载的保留）"
+                title="进入交易模式：按当前板块列表计算日K强势度评分（成份股等权指数 + 全A等权中性化 + S1~S5 与修正项），输出超额分 score_alpha 用于板块间排序、绝对分 score_abs 用于判断板块自身冷热；点击结果行可在右侧查看该板块分时与K线"
               >
                 {scoreLoading
-                  ? `加载中 ${scoreProgress}%`
-                  : scoreRemainingRef.current.length
-                  ? '继续加载'
+                  ? "评分中…"
                   : displayMode === 'boardScore'
-                  ? '重新加载'
+                  ? '重新评分'
                   : '交易模式'}
               </Button>
-              {SHOW_SHORT_SCORE_UI && ontrain && (
-                <Button
-                  size="small"
-                  onClick={handlePrecomputeBoardScores}
-                  loading={precomputing && precomputeProgress === 0}
-                  style={{ marginLeft: 4 }}
-                  title={`把训练窗口（含起始日前 ${boardScoreHistoryDays} 个交易日）每个交易日 × 当前板块列表的评分一次性算好并落库，之后切训练日直接命中缓存（再次点击可暂停）`}
-                >
-                  {precomputing ? `预计算 ${precomputeProgress}%` : '预计算训练评分'}
-                </Button>
-              )}
             </>
-          )}
-          {SHOW_SHORT_SCORE_UI && displayMode === 'boardScore' && (
-            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <span>最低分</span>
-              <InputNumber
-                size="small"
-                min={0}
-                max={100}
-                step={5}
-                value={scoreMinScore}
-                onChange={(v) => {
-                  setScoreMinScore(typeof v === 'number' ? v : 0);
-                  setCurrentPage(1);
-                }}
-                style={{ width: 56 }}
-              />
-            </span>
-          )}
-          {SHOW_SHORT_SCORE_UI && displayMode === 'boardScore' && (
-            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <Checkbox
-                checked={scoreFilterEnabled}
-                onChange={(e) => {
-                  setScoreFilterEnabled(e.target.checked);
-                  setCurrentPage(1);
-                }}
-                title="按历史评分窗口过滤：仅保留「N 天前的近 M 个交易日出现过 ≥ 阈值分」的板块（与个股短线评分列表同一口径）"
-              />
-              <InputNumber
-                size="small"
-                min={0}
-                max={250}
-                value={scoreFilterBeforeDays}
-                onChange={(v) => {
-                  setScoreFilterBeforeDays(typeof v === 'number' ? v : 5);
-                  setCurrentPage(1);
-                }}
-                style={{ width: 52 }}
-                title="从多少个交易日前开始回溯（窗口不含最近这么多个交易日）"
-              />
-              <span>天前近</span>
-              <InputNumber
-                size="small"
-                min={1}
-                max={250}
-                value={scoreFilterWindowDays}
-                onChange={(v) => {
-                  setScoreFilterWindowDays(typeof v === 'number' ? v : 15);
-                  setCurrentPage(1);
-                }}
-                style={{ width: 52 }}
-                title="过滤窗口长度（交易日数量）"
-              />
-              <span>日出现过≥</span>
-              <InputNumber
-                size="small"
-                min={0}
-                max={100}
-                step={5}
-                value={scoreFilterScore}
-                onChange={(v) => {
-                  setScoreFilterScore(typeof v === 'number' ? v : 60);
-                  setCurrentPage(1);
-                }}
-                style={{ width: 56 }}
-              />
-              <span>分</span>
-            </span>
-          )}
-          {SHOW_SHORT_SCORE_UI && displayMode === 'boardScore' && (
-            <span style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <Checkbox
-                checked={scoreRsiFilterEnabled}
-                onChange={(e) => {
-                  setScoreRsiFilterEnabled(e.target.checked);
-                  setCurrentPage(1);
-                }}
-              />
-              <span>RSI评分&gt;</span>
-              <InputNumber
-                size="small"
-                min={0}
-                max={40}
-                step={5}
-                value={scoreRsiFilterScore}
-                onChange={(v) => {
-                  setScoreRsiFilterScore(typeof v === 'number' ? v : 30);
-                  setCurrentPage(1);
-                }}
-                style={{ width: 56 }}
-              />
-              <span>分</span>
-            </span>
-          )}
-          {SHOW_SHORT_SCORE_UI && displayMode === 'boardScore' && historyProgress && (
-            <span style={{ marginLeft: 8, fontSize: 12, color: '#faad14' }}>
-              历史补算 {historyProgress.done}/{historyProgress.total}
-            </span>
-          )}
-          {SHOW_SHORT_SCORE_UI && (precomputing || precomputeMessage) && (
-            <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--reverse-text-color)' }}>{precomputeMessage}</span>
           )}
           {displayMode !== 'boards' && (
             <Button
@@ -1217,7 +664,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           )}
         </div>
       </div>
-      {/* 列表与板块图表面板左右平分（类似 STList 的交易模式）；没有面板时列表占满 */}
+      {/* 列表与板块图表面板左右平分（可拖动分隔线调整宽度 / 收起，类似 STList 的交易模式）；没有面板时列表占满 */}
       <div style={{ display: 'flex', flex: '1 1 0%', minHeight: 0, overflow: 'hidden' }}>
         <div
           style={{
@@ -1293,124 +740,48 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         </Row>
       ) : (
         <Row className={styles.header}>
-          <Col span={2}>板块名称</Col>
-          <Col span={1} title="RSI 仅计算与展示，不计入板块综合分（用于形态识别，不用于择时）">
-            RSI
-            <Button size="small" type="text" icon={sortTypes.rsiScore == 1 ? <CaretUpOutlined /> : sortTypes.rsiScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('rsiScore')} />
+          <Col span={3}>板块名称</Col>
+          <Col span={2} title="超额强度 score_alpha：市场中性化后的板块相对强度，用于板块间排序（默认按此列倒序）">
+            超额分
+            {renderSortBtn('scoreAlpha')}
           </Col>
-          <Col
-            span={3}
-            title="RSI 评分逻辑识别出的「当日」形态：超买回踩企稳/回踩中、超卖反转、金叉、死叉、金叉在即、修复中、多头/空头排列、超买钝化"
-            style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-          >
-            RSI形态识别
+          <Col span={2} title="绝对冷热 score_abs：不看相对市场的板块自身冷热。超额分选进攻板块，绝对分高且离散度低选防守板块">
+            绝对分
+            {renderSortBtn('scoreAbs')}
           </Col>
-          <Col span={2} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            <span className={styles.klineShapeHeader} title="最新交易日（含「当日形态」用分时补出的当日K线）的单根K线形态（复用技术形态识别）。点漏斗可勾选形态过滤（Excel 式，影响列表显示，并缩小「交易模式 / 当日形态」的候选板块）；排序：先阳线后阴线，同阴阳内按形态优先级，再按（下影-上影）从小到大，最后按K线实体大小">
-              <span className={styles.klineShapeHeaderText}>K线形态</span>
-              <Dropdown
-                trigger={['click']}
-                placement="bottomLeft"
-                overlayClassName={styles.shapeFilterOverlay}
-                overlay={
-                  <div className={styles.shapeFilterPanel} onClick={(e) => e.stopPropagation()}>
-                    <div className={styles.shapeFilterActions}>
-                      <Checkbox
-                        checked={
-                          KLINE_SHAPE_FILTER_OPTIONS.length > 0 &&
-                          scoreKlineShapes.length === KLINE_SHAPE_FILTER_OPTIONS.length
-                        }
-                        indeterminate={
-                          scoreKlineShapes.length > 0 && scoreKlineShapes.length < KLINE_SHAPE_FILTER_OPTIONS.length
-                        }
-                        onChange={(e) =>
-                          handleScoreKlineShapeChange(
-                            e.target.checked ? KLINE_SHAPE_FILTER_OPTIONS.map((o) => o.value) : []
-                          )
-                        }
-                      >
-                        全选
-                      </Checkbox>
-                      <a onClick={() => handleScoreKlineShapeChange([])}>清空</a>
-                    </div>
-                    <Checkbox.Group
-                      value={scoreKlineShapes}
-                      onChange={(v) => handleScoreKlineShapeChange((v as string[]) || [])}
-                      className={styles.shapeFilterList}
-                    >
-                      {scoreKlineShapeItems.map((o) => (
-                        <Checkbox
-                          key={o.value || '__unrecognized__'}
-                          value={o.value}
-                          disabled={!o.count && scoreKlineShapes.indexOf(o.value) < 0}
-                        >
-                          {o.label}
-                          <span className={styles.shapeFilterCount}>({o.count})</span>
-                        </Checkbox>
-                      ))}
-                    </Checkbox.Group>
-                  </div>
-                }
-              >
-                <Button
-                  size="small"
-                  type="text"
-                  icon={<FilterOutlined />}
-                  className={classNames(styles.filterbtn, { [styles.filterbtnActive]: scoreKlineShapes.length > 0 })}
-                  title={
-                    scoreKlineShapes.length
-                      ? `已按 ${scoreKlineShapes.length} 种K线形态过滤（点击修改）；同时缩小「交易模式 / 当日形态」的候选板块`
-                      : '按K线形态勾选过滤（Excel 式多选，不区分阳线/阴线）；勾选后评分只处理可见的板块'
-                  }
-                />
-              </Dropdown>
-              <Button
-                size="small"
-                type="text"
-                icon={
-                  sortTypes[KLINE_SHAPE_SORT_KEY] == 1 ? (
-                    <CaretUpOutlined />
-                  ) : sortTypes[KLINE_SHAPE_SORT_KEY] == 2 ? (
-                    <CaretDownOutlined />
-                  ) : (
-                    <CaretRightOutlined />
-                  )
-                }
-                className={styles.sortbtn}
-                onClick={() => updateSortType(KLINE_SHAPE_SORT_KEY)}
-              />
-            </span>
+          <Col span={1} title="按绝对冷热分档：极强 / 强 / 中性偏强 / 中性偏弱 / 弱">评级</Col>
+          <Col span={2} title="S1 广度（权重 0.28）：上涨家数占比 / 末5日 / 扩散，全部减去全A等权基准">
+            S1 广度
+            {renderSortBtn('s1')}
           </Col>
-          <Col span={1} title="最新交易日（含当日形态补出的当日K线）是否放量：当日成交量 / 前 5 日均量 ≥ 1.5 倍">
-            放量
-            <Button size="small" type="text" icon={sortTypes.volumeExpanded == 1 ? <CaretUpOutlined /> : sortTypes.volumeExpanded == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('volumeExpanded')} />
+          <Col span={2} title="S2 爆发（权重 0.14）：涨停占比 / 大阳占比 / 3连阳家数，大阳阈值按板块自身 1.5σ 自适应">
+            S2 爆发
+            {renderSortBtn('s2')}
           </Col>
-          <Col span={2}>
-            评分/评级
-            <Button size="small" type="text" icon={sortTypes.total == 1 ? <CaretUpOutlined /> : sortTypes.total == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('total')} />
+          <Col span={2} title="S3 跳空（权重 0.10）：净高开广度 + 未补缺口占比">
+            S3 跳空
+            {renderSortBtn('s3')}
           </Col>
-          <Col span={1}>
-            趋势
-            <Button size="small" type="text" icon={sortTypes.trendScore == 1 ? <CaretUpOutlined /> : sortTypes.trendScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('trendScore')} />
+          <Col span={2} title="S4 趋势（权重 0.30）：超额趋势 × R² 调节 + 加速度 + 路径效率">
+            S4 趋势
+            {renderSortBtn('s4')}
           </Col>
-          <Col span={1}>
-            量能
-            <Button size="small" type="text" icon={sortTypes.volumeScore == 1 ? <CaretUpOutlined /> : sortTypes.volumeScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('volumeScore')} />
+          <Col span={2} title="S5 结构（权重 0.18）：一致性 / 离散度 / 集中度，区分普涨与少数龙头拉动">
+            S5 结构
+            {renderSortBtn('s5')}
           </Col>
-          <Col span={1}>
-            资金
-            <Button size="small" type="text" icon={sortTypes.moneyScore == 1 ? <CaretUpOutlined /> : sortTypes.moneyScore == 2 ? <CaretDownOutlined /> : <CaretRightOutlined />} className={styles.sortbtn} onClick={() => updateSortType('moneyScore')} />
+          <Col span={2} title="修正项：位置透支 / 末端拉升 / 路径低效 / 广度背离 / 波动放大 / 高位回落">
+            扣分·标记
+            {renderSortBtn('penalty')}
           </Col>
-          {scoreDisplayDays.map((d) => (
-            <Col
-              span={1}
-              key={d}
-              style={{ fontSize: 11, textAlign: 'center', padding: 0 }}
-              title={`${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)} 板块历史数据`}
-            >
-              {d.substring(4, 6)}-{d.substring(6, 8)}
-            </Col>
-          ))}
+          <Col span={2} title="窗口内板块指数累计涨幅 / 相对全A等权基准的超额收益">
+            涨幅·超额
+            {renderSortBtn('cumRet')}
+          </Col>
+          <Col span={2} title="参与评分的成份股数量（min_members=15）；# 为超额分排名 / 绝对分排名">
+            成份·排名
+            {renderSortBtn('members')}
+          </Col>
         </Row>
       )}
       <div
@@ -1503,218 +874,48 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
             );
           })
         ) : (
-          pageData.map((s: BoardScoreRow, index: number) => {
-            const rowBg =
-              s.grade === 'A'
-                ? 'rgba(82, 196, 26, 0.08)'
-                : s.grade === 'B'
-                ? 'rgba(24, 144, 255, 0.06)'
-                : undefined;
-            const detail = [
-              s.advice && `建议：${s.advice}`,
-              s.summary && `分项：${s.summary}`,
-              s.trendDesc && `趋势：${s.trendDesc}`,
-              s.positionDesc && `位置：${s.positionDesc}`,
-              s.moneyNote && `资金：${s.moneyNote}`,
-              `主力净流入 5日 ${formatBoardMoney(s.main5)}｜10日 ${formatBoardMoney(s.main10)}｜20日 ${formatBoardMoney(
-                s.main20
-              )}`,
-              s.volumeNote && `量能：${s.volumeNote}`,
-              s.rsiPattern && `RSI：${s.rsiPattern}`,
-              s.error && `未就绪：${s.error}`,
-            ]
-              .filter(Boolean)
-              .join('\n');
-            const hist = scoreSeries[s.code] || {};
+          pageData.map((s: BoardStrengthRow, index: number) => {
+            const detail = strengthTooltip(s);
+            const pctText = (v: number) => `${(v * 100).toFixed(2)}%`;
+            const dash = <span style={{ color: 'var(--reverse-text-color)' }}>--</span>;
+            const val = (v: number) => (s.error ? dash : v.toFixed(1));
             return (
-              <Row key={`${s.code}-${index}`} className={styles.row} style={{ backgroundColor: rowBg }}>
+              <Row key={`${s.code}-${index}`} className={styles.row}>
                 <Col
-                  span={2}
-                  style={{
-                    cursor: 'pointer',
-                    backgroundColor: panelRow?.secid === s.secid ? 'rgba(24, 144, 255, 0.12)' : undefined,
-                  }}
-                  onClick={() => {
-                    setPanelSecid(s.secid);
-                    setPanelClosed(false);
-                  }}
-                  title={`${detail || s.name}\n点击在右侧查看该板块的分时与K线`}
+                  span={3}
+                  style={{ cursor: 'pointer', backgroundColor: panelRow?.secid === s.secid ? 'rgba(24, 144, 255, 0.12)' : undefined }}
+                  onClick={() => { setPanelSecid(s.secid); setPanelClosed(false); setPanelExpandSeq((n) => n + 1); }}
+                  title={`${detail}
+点击在右侧查看该板块的分时与K线`}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0 }}>
-                    <span
-                      title={s.name}
-                      style={{
-                        color: '#1890ff',
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        minWidth: 0,
-                      }}
-                    >
-                      {s.name}
-                    </span>
-                    {/* 板块详情（原单击名称的行为）：独立的 ↗ 入口，不与右侧图表选择冲突 */}
-                    <span
-                      title="打开板块详情"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenBK(s.secid, s.name);
-                      }}
-                      style={{
-                        flex: 'none',
-                        color: '#1890ff',
-                        fontSize: 11,
-                        lineHeight: 1,
-                        padding: '0 1px',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      ↗
-                    </span>
-                    {/* 箭头：不进入板块详情，直接跳到「板块股票」(STList) 看该板块的成分股 */}
-                    <span
-                      title="查看该板块的股票列表"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenBKStocks(type, s.secid);
-                      }}
-                      style={{
-                        flex: 'none',
-                        color: '#1890ff',
-                        fontSize: 13,
-                        lineHeight: 1,
-                        padding: '0 2px',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      ›
-                    </span>
+                    <span title={s.name} style={{ color: '#1890ff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{s.name}</span>
+                    <span title="打开板块详情" onClick={(e) => { e.stopPropagation(); onOpenBK(s.secid, s.name); }} style={{ flex: 'none', color: '#1890ff', fontSize: 11, lineHeight: 1, padding: '0 1px', cursor: 'pointer' }}>↗</span>
+                    <span title="查看该板块的股票列表" onClick={(e) => { e.stopPropagation(); onOpenBKStocks(type, s.secid); }} style={{ flex: 'none', color: '#1890ff', fontSize: 13, lineHeight: 1, padding: '0 2px', cursor: 'pointer' }}>›</span>
                   </div>
-                  {!!(s.advice || s.error) && (
-                    <div
-                      title={s.advice || s.error}
-                      style={{
-                        fontSize: 10,
-                        lineHeight: 1.1,
-                        color: 'var(--secondary-text-color)',
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                      }}
-                    >
-                      {s.advice || s.error}
+                  {!!(s.error || s.flags) && (
+                    <div title={s.error || s.flags} style={{ fontSize: 10, lineHeight: 1.1, color: s.error ? '#faad14' : 'var(--secondary-text-color)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {s.error || s.flags}
                     </div>
                   )}
                 </Col>
-                <Col
-                  span={1}
-                  title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
-                  style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-                >
-                  {/* RSI 列只展示 RSI 分值（满分 40），明细放在悬停提示里 */}
-                  <span style={{ fontSize: 12, color: s.pending ? '#faad14' : undefined }}>
-                    {s.rsiScore == null ? '--' : `${s.rsiScore.toFixed(0)}/40`}
-                  </span>
+                <Col span={2} title={detail}>
+                  {s.error ? dash : <span style={{ color: strengthColor(s.scoreAlpha), fontWeight: 'bold' }}>{s.scoreAlpha.toFixed(1)}</span>}
                 </Col>
-                <Col
-                  span={3}
-                  title={[s.rsiPattern, s.error].filter(Boolean).join('｜') || undefined}
-                  style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-                >
-                  {/* RSI 形态：来自 RSI 评分逻辑的当日形态识别结果（超买回踩/金叉/死叉/多头排列…），空值显示占位 */}
-                  {s.rsiPattern ? (
-                    s.rsiPattern
-                  ) : s.pending ? (
-                    <span style={{ color: '#faad14' }}>待评分</span>
-                  ) : (
-                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
-                  )}
+                <Col span={2} title={detail}>{s.error ? dash : s.scoreAbs.toFixed(1)}</Col>
+                <Col span={1} title={detail}>{s.error ? dash : s.grade}</Col>
+                <Col span={2} title={`上涨广度 ${pctText(s.upShare)}｜超额 ${pctText(s.exUp)}｜末5日 ${pctText(s.upShare5)}｜扩散 ${pctText(s.diffusion)}`}>{val(s.s1)}</Col>
+                <Col span={2} title={`涨停占比 ${pctText(s.limitShare)}｜大阳占比 ${pctText(s.bigShare)}｜σ ${pctText(s.sigma)}`}>{val(s.s2)}</Col>
+                <Col span={2} title={`净高开 ${pctText(s.gapNet)}（超额 ${pctText(s.exGap)}）｜未补缺口 ${(s.gapUnfilled * 100).toFixed(1)}%`}>{val(s.s3)}</Col>
+                <Col span={2} title={`趋势收益 ${pctText(s.cumRet)}｜R² ${s.r2.toFixed(2)}｜路径效率 ${s.pathEr.toFixed(2)}`}>{val(s.s4)}</Col>
+                <Col span={2} title={`一致性 ${s.consistency.toFixed(4)}｜离散度 ${s.dispersion.toFixed(4)}｜集中度 ${s.concentration.toFixed(2)}`}>{val(s.s5)}</Col>
+                <Col span={2} title={s.flags || '无修正项'}>{s.error ? dash : s.penalty.toFixed(0)}</Col>
+                <Col span={2} title={`累计涨幅 ${pctText(s.cumRet)}｜超额 ${pctText(s.exTrend)}`}>
+                  {s.error ? dash : <span style={{ fontSize: 11 }}><span className={Utils.GetValueColor(s.cumRet).textClass}>{pctText(s.cumRet)}</span><span style={{ color: 'var(--secondary-text-color)' }}> / {pctText(s.exTrend)}</span></span>}
                 </Col>
-                <Col
-                  span={2}
-                  style={{ fontSize: 12 }}
-                  title={`最新交易日K线形态${s.klineShape ? `（${s.klineYin ? '阴线' : '阳线'}）` : ''}${
-                    s.klineSize != null ? `｜实体 ${s.klineSize.toFixed(2)}倍平均` : ''
-                  }${
-                    s.klineUpperShadow != null && s.klineLowerShadow != null
-                      ? `｜影线 上${s.klineUpperShadow.toFixed(2)}/下${s.klineLowerShadow.toFixed(2)}（差 ${(
-                          s.klineLowerShadow - s.klineUpperShadow
-                        ).toFixed(2)}）`
-                      : ''
-                  }${s.intraday ? '｜当日K线由分时补全' : ''}${s.error ? `｜${s.error}` : ''}`}
-                >
-                  {s.klineShape ? (
-                    <span className={Utils.GetValueColor(s.klineYin ? -1 : 1).textClass}>{s.klineShape}</span>
-                  ) : (
-                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
-                  )}
+                <Col span={2} title={`成份股 ${s.members} 只｜超额分第 ${s.rank}｜绝对分第 ${s.rankAbs}`}>
+                  {s.error ? dash : <span style={{ fontSize: 11 }}>{s.members} · #{s.rank}/#{s.rankAbs}</span>}
                 </Col>
-                <Col
-                  span={1}
-                  title={
-                    s.volumeExpanded == null
-                      ? '无数据'
-                      : s.volumeExpanded
-                      ? '最新交易日放量'
-                      : '最新交易日未放量'
-                  }
-                >
-                  {s.volumeExpanded == null ? (
-                    <span style={{ color: 'var(--reverse-text-color)' }}>--</span>
-                  ) : s.volumeExpanded ? (
-                    <span className="text-up">是</span>
-                  ) : (
-                    <span style={{ color: 'var(--reverse-text-color)' }}>否</span>
-                  )}
-                </Col>
-                <Col span={2} title={detail || undefined}>
-                  {s.total == null ? (
-                    // 数据不足/未就绪：不显示分数，悬停可看原因
-                    <span style={{ color: '#faad14' }}>待评分</span>
-                  ) : (
-                    <>
-                      <span style={{ color: scoreColor(s.total), fontWeight: 'bold' }}>{s.total.toFixed(1)}</span>
-                      <span style={{ color: scoreColor(s.total), marginLeft: 4, fontWeight: 'bold' }}>{s.grade}</span>
-                    </>
-                  )}
-                </Col>
-                <Col span={1} title={[s.trendDesc, s.positionDesc].filter(Boolean).join('｜') || undefined}>
-                  {s.trendScore == null ? '--' : s.trendScore.toFixed(0)}
-                </Col>
-                <Col span={1} title={s.volumeNote || undefined}>
-                  {s.volumeScore == null ? '--' : s.volumeScore.toFixed(0)}
-                </Col>
-                <Col span={1} title={s.moneyNote || undefined}>
-                  {s.moneyScore == null ? '--' : s.moneyScore.toFixed(0)}
-                </Col>
-                {scoreDisplayDays.map((d) => {
-                  const dayRow = hist[d];
-                  const v = dayRow ? dayRow.total : null;
-                  const dayText = `${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)}`;
-                  // 不用红色表示低分：未开启阈值过滤时用默认色；开启后按阈值分 up/down 两色（与 STList 一致）
-                  const cellClass =
-                    v == null || !scoreFilterEnabled
-                      ? ''
-                      : v >= Number(scoreFilterScore)
-                        ? 'text-up'
-                        : 'text-down';
-                  return (
-                    <Col
-                      span={1}
-                      key={d}
-                      className={cellClass}
-                      style={{
-                        fontSize: 11,
-                        textAlign: 'center',
-                        padding: 0,
-                        color: v == null ? 'var(--reverse-text-color)' : undefined,
-                      }}
-                      title={dayRow ? `${dayText}：${v == null ? '--' : v.toFixed(1)}${dayRow.grade ? ` ${dayRow.grade}` : ''}` : `${dayText}：无评分`}
-                    >
-                      {v == null ? '--' : v.toFixed(0)}
-                    </Col>
-                  );
-                })}
               </Row>
             );
           })
@@ -1724,11 +925,14 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       </div>
         </div>
         {panelRow && (
-          <BoardChartPanel
-            secid={panelRow.secid}
-            name={panelRow.name}
-            onClose={() => setPanelClosed(true)}
-          />
+          <ResizableSidePanel storageKey="bkBoardChartPanel" expandSignal={panelExpandSeq}>
+            <BoardChartPanel
+              secid={panelRow.secid}
+              name={panelRow.name}
+              onClose={() => setPanelClosed(true)}
+              fill
+            />
+          </ResizableSidePanel>
         )}
       </div>
     </div>
