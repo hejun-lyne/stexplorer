@@ -99,16 +99,23 @@ export function strengthColor(score: number): string {
 
 /** 名称列的明细 tooltip：双轨分 + 五个维度 + 原子指标 + 修正项 */
 export function strengthTooltip(r: BoardStrengthRow): string {
+  if (!r) return '';
   if (r.error) return `${r.name}（${r.secid}）\n${r.error}`;
+  // 视图切换瞬间可能混入上一视图的板块行，或某行字段缺失：统一兜底，避免 toFixed 抛错
+  if (typeof r.scoreAlpha !== 'number' || !Number.isFinite(r.scoreAlpha)) {
+    return `${r.name || '--'}（${r.secid || '--'}）\n暂无板块强势度评分`;
+  }
+  const n = (v: any) => num(v);
+  const f = (v: any, digits = 1) => n(v).toFixed(digits);
   const lines = [
-    `${r.name}（${r.secid}）  成份股 ${r.members} 只`,
-    `超额强度 ${r.scoreAlpha.toFixed(1)}（第 ${r.rank}）　绝对冷热 ${r.scoreAbs.toFixed(1)}（第 ${r.rankAbs}）　评级 ${r.grade}`,
-    `S1 广度 ${r.s1.toFixed(1)}　S2 爆发 ${r.s2.toFixed(1)}　S3 跳空 ${r.s3.toFixed(1)}　S4 趋势 ${r.s4.toFixed(1)}　S5 结构 ${r.s5.toFixed(1)}`,
-    `区间涨幅 ${pct(r.cumRet)}　超额 ${pct(r.exTrend)}　R² ${r.r2.toFixed(2)}　路径效率 ${r.pathEr.toFixed(2)}`,
-    `上涨广度 ${pct(r.upShare)}　超额广度 ${pct(r.exUp)}　末5日 ${pct(r.upShare5)}　扩散 ${pct(r.diffusion)}`,
-    `涨停占比 ${pct(r.limitShare)}　大阳占比 ${pct(r.bigShare)}　净高开 ${pct(r.gapNet)}（超额 ${pct(r.exGap)}）`,
-    `一致性 ${r.consistency.toFixed(4)}　离散度 ${r.dispersion.toFixed(4)}　集中度 ${r.concentration.toFixed(2)}`,
-    `波动率 σ ${pct(r.sigma)}（放大 ${r.volRatio.toFixed(2)}×）　扣分 ${r.penalty.toFixed(1)}${r.flags ? `：${r.flags}` : ''}`,
+    `${r.name}（${r.secid}）  成份股 ${n(r.members)} 只`,
+    `超额强度 ${f(r.scoreAlpha)}（第 ${n(r.rank)}）　绝对冷热 ${f(r.scoreAbs)}（第 ${n(r.rankAbs)}）　评级 ${r.grade || '—'}`,
+    `S1 广度 ${f(r.s1)}　S2 爆发 ${f(r.s2)}　S3 跳空 ${f(r.s3)}　S4 趋势 ${f(r.s4)}　S5 结构 ${f(r.s5)}`,
+    `区间涨幅 ${pct(n(r.cumRet))}　超额 ${pct(n(r.exTrend))}　R² ${f(r.r2, 2)}　路径效率 ${f(r.pathEr, 2)}`,
+    `上涨广度 ${pct(n(r.upShare))}　超额广度 ${pct(n(r.exUp))}　末5日 ${pct(n(r.upShare5))}　扩散 ${pct(n(r.diffusion))}`,
+    `涨停占比 ${pct(n(r.limitShare))}　大阳占比 ${pct(n(r.bigShare))}　净高开 ${pct(n(r.gapNet))}（超额 ${pct(n(r.exGap))}）`,
+    `一致性 ${f(r.consistency, 4)}　离散度 ${f(r.dispersion, 4)}　集中度 ${f(r.concentration, 2)}`,
+    `波动率 σ ${pct(n(r.sigma))}（放大 ${f(r.volRatio, 2)}×）　扣分 ${f(r.penalty)}${r.flags ? `：${r.flags}` : ''}`,
   ];
   return lines.join('\n');
 }

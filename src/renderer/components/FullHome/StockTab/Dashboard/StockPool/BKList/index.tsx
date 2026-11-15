@@ -457,6 +457,10 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     const run = scoreRunRef.current;
     setScoreLoading(true);
     setDisplayMode('boardScore');
+    // displayMode 立即生效，但 showList 由 effect 异步重算：同步清空，
+    // 否则这一帧会把上一视图的板块列表行当成评分行渲染（scoreAlpha.toFixed 抛错）
+    setStrengthData([]);
+    setShowList([]);
     // 进入交易模式即显示右侧图表面板（默认选中结果列表第一行）
     setPanelClosed(false);
     setPanelExpandSeq((n) => n + 1);
@@ -471,7 +475,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
         return;
       }
       setStrengthData(res.rows);
-        if (res.error) {
+      if (res.error) {
         console.warn('[板块日K强势度]', res.error);
       }
       console.log(
@@ -875,10 +879,13 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
           })
         ) : (
           pageData.map((s: BoardStrengthRow, index: number) => {
+            // 非评分行 / 字段缺失的行统一按「无分」渲染，任何数值列都不会 toFixed 抛错
+            const invalid = !!s.error || typeof s.scoreAlpha !== 'number' || !Number.isFinite(s.scoreAlpha);
+            const toNum = (v: any) => (Number.isFinite(Number(v)) ? Number(v) : 0);
             const detail = strengthTooltip(s);
-            const pctText = (v: number) => `${(v * 100).toFixed(2)}%`;
+            const pctText = (v: number) => `${(toNum(v) * 100).toFixed(2)}%`;
             const dash = <span style={{ color: 'var(--reverse-text-color)' }}>--</span>;
-            const val = (v: number) => (s.error ? dash : v.toFixed(1));
+            const val = (v: number) => (invalid ? dash : toNum(v).toFixed(1));
             return (
               <Row key={`${s.code}-${index}`} className={styles.row}>
                 <Col
@@ -900,21 +907,21 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                   )}
                 </Col>
                 <Col span={2} title={detail}>
-                  {s.error ? dash : <span style={{ color: strengthColor(s.scoreAlpha), fontWeight: 'bold' }}>{s.scoreAlpha.toFixed(1)}</span>}
+                  {invalid ? dash : <span style={{ color: strengthColor(s.scoreAlpha), fontWeight: 'bold' }}>{toNum(s.scoreAlpha).toFixed(1)}</span>}
                 </Col>
-                <Col span={2} title={detail}>{s.error ? dash : s.scoreAbs.toFixed(1)}</Col>
-                <Col span={1} title={detail}>{s.error ? dash : s.grade}</Col>
+                <Col span={2} title={detail}>{invalid ? dash : toNum(s.scoreAbs).toFixed(1)}</Col>
+                <Col span={1} title={detail}>{invalid ? dash : s.grade}</Col>
                 <Col span={2} title={`上涨广度 ${pctText(s.upShare)}｜超额 ${pctText(s.exUp)}｜末5日 ${pctText(s.upShare5)}｜扩散 ${pctText(s.diffusion)}`}>{val(s.s1)}</Col>
                 <Col span={2} title={`涨停占比 ${pctText(s.limitShare)}｜大阳占比 ${pctText(s.bigShare)}｜σ ${pctText(s.sigma)}`}>{val(s.s2)}</Col>
-                <Col span={2} title={`净高开 ${pctText(s.gapNet)}（超额 ${pctText(s.exGap)}）｜未补缺口 ${(s.gapUnfilled * 100).toFixed(1)}%`}>{val(s.s3)}</Col>
-                <Col span={2} title={`趋势收益 ${pctText(s.cumRet)}｜R² ${s.r2.toFixed(2)}｜路径效率 ${s.pathEr.toFixed(2)}`}>{val(s.s4)}</Col>
-                <Col span={2} title={`一致性 ${s.consistency.toFixed(4)}｜离散度 ${s.dispersion.toFixed(4)}｜集中度 ${s.concentration.toFixed(2)}`}>{val(s.s5)}</Col>
-                <Col span={2} title={s.flags || '无修正项'}>{s.error ? dash : s.penalty.toFixed(0)}</Col>
+                <Col span={2} title={`净高开 ${pctText(s.gapNet)}（超额 ${pctText(s.exGap)}）｜未补缺口 ${(toNum(s.gapUnfilled) * 100).toFixed(1)}%`}>{val(s.s3)}</Col>
+                <Col span={2} title={`趋势收益 ${pctText(s.cumRet)}｜R² ${toNum(s.r2).toFixed(2)}｜路径效率 ${toNum(s.pathEr).toFixed(2)}`}>{val(s.s4)}</Col>
+                <Col span={2} title={`一致性 ${toNum(s.consistency).toFixed(4)}｜离散度 ${toNum(s.dispersion).toFixed(4)}｜集中度 ${toNum(s.concentration).toFixed(2)}`}>{val(s.s5)}</Col>
+                <Col span={2} title={s.flags || '无修正项'}>{invalid ? dash : toNum(s.penalty).toFixed(0)}</Col>
                 <Col span={2} title={`累计涨幅 ${pctText(s.cumRet)}｜超额 ${pctText(s.exTrend)}`}>
-                  {s.error ? dash : <span style={{ fontSize: 11 }}><span className={Utils.GetValueColor(s.cumRet).textClass}>{pctText(s.cumRet)}</span><span style={{ color: 'var(--secondary-text-color)' }}> / {pctText(s.exTrend)}</span></span>}
+                  {invalid ? dash : <span style={{ fontSize: 11 }}><span className={Utils.GetValueColor(toNum(s.cumRet)).textClass}>{pctText(s.cumRet)}</span><span style={{ color: 'var(--secondary-text-color)' }}> / {pctText(s.exTrend)}</span></span>}
                 </Col>
                 <Col span={2} title={`成份股 ${s.members} 只｜超额分第 ${s.rank}｜绝对分第 ${s.rankAbs}`}>
-                  {s.error ? dash : <span style={{ fontSize: 11 }}>{s.members} · #{s.rank}/#{s.rankAbs}</span>}
+                  {invalid ? dash : <span style={{ fontSize: 11 }}>{s.members} · #{s.rank}/#{s.rankAbs}</span>}
                 </Col>
               </Row>
             );
