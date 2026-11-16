@@ -78,6 +78,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const industryIndexRef = React.useRef(0);
   // ========== 板块日K强势度评分 ==========
   const [scoreLoading, setScoreLoading] = useState(false);
+  /** 评分窗口：基准日往前 N 个交易日（与 Python 侧一致，限定 5~60，默认 20） */
+  const [scoreWindowDays, setScoreWindowDays] = useState(20);
   const [strengthData, setStrengthData] = useState<BoardStrengthRow[]>([]);
   /** 评分批次号：切换板块类型/数据源时递增，旧批次的结果直接丢弃 */
   const scoreRunRef = React.useRef(0);
@@ -442,7 +444,8 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
    *
    * 一次 IPC 在 Python 侧完成：成份股 qfq 日线 → 等权板块指数 + 广度聚合 → 全A等权基准中性化
    * → S1~S5 与修正项 → 双轨输出 score_alpha / score_abs。
-   * 候选池跟随顶部「成份股数量阈值」过滤；训练模式以训练日为 as_of，避免读到训练日之后的行情。
+   * 候选池跟随顶部「成份股数量阈值」过滤；窗口交易日数取界面「评分交易日」设置；
+   * 训练模式以训练日为 as_of，避免读到训练日之后的行情。
    */
   const handleBoardScore = useCallback(async () => {
     if (scoreLoading || !bankuais.length) {
@@ -470,7 +473,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
 
     try {
       const asOf = ontrain && trainDate ? trainDate : dayjs().format('YYYY-MM-DD');
-      const res = await computeBoardDailyStrength(items, { asOf });
+      const res = await computeBoardDailyStrength(items, { asOf, window: scoreWindowDays });
       if (scoreRunRef.current !== run) {
         return;
       }
@@ -486,7 +489,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     } finally {
       setScoreLoading(false);
     }
-  }, [scoreLoading, bankuais, ontrain, trainDate, passStockCount]);
+  }, [scoreLoading, bankuais, ontrain, trainDate, passStockCount, scoreWindowDays]);
 
   // 训练日切换：已经进入评分视图时按新的 as_of 自动刷新
   boardScoreRefreshRef.current = handleBoardScore;
@@ -627,12 +630,29 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                 parser={(value) => parseFloat(value?.replace('%', '') || '5')}
                 style={{ width: 60, marginLeft: 4 }}
               />
+              <span
+                title="板块日K强势度评分窗口：以基准日往前 N 个交易日计算（5~60 日，默认 20 日）；修改后点「交易模式 / 重新评分」生效"
+                style={{ marginLeft: 4, display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}
+              >
+                <span>评分交易日</span>
+                <InputNumber
+                  size="small"
+                  min={5}
+                  max={60}
+                  step={1}
+                  value={scoreWindowDays}
+                  onChange={(v) => setScoreWindowDays(typeof v === 'number' ? Math.min(60, Math.max(5, Math.round(v))) : 20)}
+                  disabled={scoreLoading}
+                  style={{ width: 62 }}
+                />
+                <span>天</span>
+              </span>
               <Button
                 size="small"
                 onClick={handleBoardScore}
                 loading={scoreLoading}
                 style={{ marginLeft: 4 }}
-                title="进入交易模式：按当前板块列表计算日K强势度评分（成份股等权指数 + 全A等权中性化 + S1~S5 与修正项），输出超额分 score_alpha 用于板块间排序、绝对分 score_abs 用于判断板块自身冷热；点击结果行可在右侧查看该板块分时与K线"
+                title={`进入交易模式：以 ${scoreWindowDays} 个交易日为窗口，按当前板块列表计算日K强势度评分（成份股等权指数 + 全A等权中性化 + S1~S5 与修正项），输出超额分 score_alpha 用于板块间排序、绝对分 score_abs 用于判断板块自身冷热；点击结果行可在右侧查看该板块分时与K线`}
               >
                 {scoreLoading
                   ? "评分中…"

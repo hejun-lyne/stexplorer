@@ -1517,7 +1517,11 @@ const STList: React.FC<STListProps> = ({
   /** 已选板块的成分股是否都已就绪（缓存里都有）；「只看题材」按展开后的板块逐个检查 */
   const boardsReady = useCallback(() => {
     const secids = effectiveSecidsRef.current;
-    return secids.length > 0 && secids.every((s) => boardStocksCacheRef.current[s] !== undefined);
+    // 没选板块：没有要等的板块数据（交易模式仍能用收藏的股票跑评分/当日形态）
+    if (!secids.length) {
+      return true;
+    }
+    return secids.every((s) => boardStocksCacheRef.current[s] !== undefined);
   }, []);
 
   /** 用各板块缓存的成分股重建「合并股票列表」与「股票→所属板块」映射 */
@@ -2031,15 +2035,25 @@ const STList: React.FC<STListProps> = ({
           };
         });
     }
-    return poolStocks.map((s) => ({
+    const list = poolStocks.map((s) => ({
       code: s.code,
       name: s.name,
       circMv: (s as any).lt ? (s as any).lt * 1e8 : undefined,
       hybk: lookupHybk(s.code),
     }));
+    // 未选板块（或板块列表尚未就绪）时股票池为空：交易模式仍要能对收藏的股票跑评分 / 当日形态。
+    // 收藏股与板块成分股同一口径：忽略「排除科创板+北交所」「市值区间」过滤。
+    if (!list.length) {
+      return (favoriteCodes || []).map((c) => {
+        const code = String(c || '').trim();
+        return { code, name: stockNameCacheRef.current[code] || '', hybk: lookupHybk(code) };
+      });
+    }
+    return list;
   }, [
     stocks,
     poolStocks,
+    favoriteCodes,
     lookupHybkOf,
     displayMode,
     mainInData,
@@ -2194,8 +2208,10 @@ const STList: React.FC<STListProps> = ({
       isShortScorePausedRef.current = true;
       return;
     }
-    if (!selectedSecidsRef.current.length) {
-      message.warning('请先选择板块');
+    // 没选板块也放行：交易模式始终显示收藏的股票（候选池=板块成分股+收藏股）；
+    // 完全没得评（无板块且无收藏）才提示
+    if (!selectedSecidsRef.current.length && !(favoriteCodes || []).length) {
+      message.warning('请先选择板块，或先收藏股票');
       return;
     }
     /**
@@ -2439,8 +2455,9 @@ const STList: React.FC<STListProps> = ({
       isTodayScorePausedRef.current = true;
       return;
     }
-    if (!selectedSecidsRef.current.length) {
-      message.warning('请先选择板块');
+    // 没选板块也放行：对收藏的股票（交易模式评分结果）跑当日形态
+    if (!selectedSecidsRef.current.length && !(favoriteCodes || []).length) {
+      message.warning('请先选择板块，或先收藏股票');
       return;
     }
     // 板块切换/增删后立刻点击：先等已选板块的股票列表到位，否则会处理上一组板块的股票

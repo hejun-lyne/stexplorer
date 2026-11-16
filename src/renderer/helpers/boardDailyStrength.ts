@@ -195,12 +195,14 @@ function mapRow(raw: any, item: BoardStrengthItem): BoardStrengthRow {
 /**
  * 取一次评分结果：一次 IPC 算完所有板块。
  * 没有成份股映射 / 数据不足的板块仍保留一行（error），这样右侧图表面板依然可点。
+ *
+ * window 为评分窗口的交易日天数，限定 5~60（与 Python 侧一致），默认 20。
  */
 export async function computeBoardDailyStrength(
   items: BoardStrengthItem[],
   options?: { window?: number; asOf?: string }
 ): Promise<BoardStrengthResult> {
-  const window = options?.window || 20;
+  const window = Math.min(60, Math.max(5, Math.round(Number(options?.window) || 20)));
   if (!items.length) {
     return { rows: [], asOf: '', window, scored: 0, skipped: [] };
   }
