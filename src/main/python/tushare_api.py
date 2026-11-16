@@ -8045,8 +8045,8 @@ class TushareAPI:
         严格按《板块日K强势度评分_调整说明 v1.1》：
           - 成份股日线取本地 daily.db/daily_kline 的 qfq 数据，一次 SQL 读满 window+base_days 个交易日；
           - 成份股名单取 api_cache 的 dc_member_BKxxxx.DC（缺失时回退 board_stocks_90.BKxxxx 快照），
-            只取不晚于 as_of 的最近一份，避免前视；
-          - 全 A 等权基准由成份股并集按日聚合，模型内部完成市场中性化与双轨输出；
+            只取不晚于 as_of 的最近一份，避免前视；科创板(688/689)与北交所(8/4/920/.BJ)不纳入；
+          - 全 A 等权基准由纳入评分的成份股并集按日聚合，模型内部完成市场中性化与双轨输出；
           - as_of 默认取训练日（--as-of-date），训练模式下不会读到未来数据。
 
         返回 {rows: [每个板块的 40 余列明细], as_of, window, scored, skipped}。
@@ -8089,8 +8089,14 @@ class TushareAPI:
                     return c + '.BJ'
                 return c + '.SZ'
 
+            def _is_excluded_stock(code: str) -> bool:
+                """评分口径排除科创板(688/689)与北交所(8/4/920, .BJ)。"""
+                c = str(code)
+                pure = c.split('.')[0]
+                return c.endswith('.BJ') or pure.startswith(('688', '689', '8', '4', '920'))
+
             def _collect_member_codes() -> List[str]:
-                """只取成份股代码并集，用于评分前补齐缺失日期的个股 qfq 日线。"""
+                """只取纳入评分的成份股代码并集，用于评分前补齐缺失日期的个股 qfq 日线。"""
                 codes = set()
                 for b in boards or []:
                     raw_code = str(b.get('code') or b.get('secid') or '')
@@ -8105,7 +8111,7 @@ class TushareAPI:
                         snap = _recent(read_cache(f'board_stocks_{b.get("secid") or pure}', max_age_hours=None), day)
                         if isinstance(snap, dict):
                             codes.update(_ts_code(x) for x in (snap.get('stocks') or []) if isinstance(x, dict))
-                return sorted(c for c in codes if c)
+                return sorted(c for c in codes if c and not _is_excluded_stock(c))
 
             def _backfill_missing_qfq(member_codes: List[str]):
                 """本地 qfq 日线落后于 as_of 时，用 Tushare 个股接口补齐后再算评分。
@@ -8230,7 +8236,7 @@ class TushareAPI:
                     snap = _recent(read_cache(f'board_stocks_{secid}', max_age_hours=None), day)
                     if isinstance(snap, dict):
                         codes = [_ts_code(x) for x in (snap.get('stocks') or []) if isinstance(x, dict)]
-                codes = sorted({c for c in codes if c})
+                codes = sorted({c for c in codes if c and not _is_excluded_stock(c)})
                 if len(codes) < cfg['min_members']:
                     reason = (
                         '缺少成份股名单：请先打开该板块的成份股列表以建立缓存'
