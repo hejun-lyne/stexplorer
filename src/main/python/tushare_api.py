@@ -8106,11 +8106,11 @@ class TushareAPI:
                 return sorted(c for c in codes if c)
 
             def _backfill_missing_qfq(member_codes: List[str]):
-                """本地 qfq 日线落后于 as_of 时，按交易日补齐后再算评分。
+                """本地 qfq 日线落后于 as_of 时，用 Tushare 个股接口补齐后再算评分。
 
-                用「前一日 qfq 收盘 / 前一日不复权收盘」作比例，把上游当日全市场不复权日线
-                折算成与前复权口径一致的 qfq 数据并写回 daily.db；这样不会改变等权口径，
-                只是把缺失的个股行情补上。
+                逐个成份股调用 TushareAPI.get_kline_data（pro_bar/daily + adj_factor 手动复权），
+                它自己会把增量写回 daily.db/daily_parquet。这样和个股 K 线页走的 Tushare 口径完全一致，
+                不会掺入其它数据源，也不改变评分的等权口径。
                 """
                 if not member_codes:
                     return
@@ -8135,80 +8135,31 @@ class TushareAPI:
                 cal = cal[-10:]
                 _diag(f'qfq backfill: latest={latest} expected={expected} dates={cal}')
 
-                code_set = set(member_codes)
-                prev_date = latest
-                prev_raw = None
-                prev_qfq = {}
+                q = ','.join('?' * len(member_codes))
                 for miss in cal:
                     try:
-                        raw_df = safe_api_call(get_pro().daily, trade_date=str(miss).replace('-', ''))
-                        if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
-                            _diag(f'backfill {miss}: 上游无数据')
+                        have = {
+                            str(r[0]) for r in conn.execute(
+                                "SELECT ts_code FROM daily_kline WHERE kind='stock' "
+                                "AND period='daily' AND adjust='qfq' AND trade_date=? "
+                                "AND ts_code IN (" + q + ")",
+                                [str(miss)] + member_codes,
+                            ).fetchall()
+                        }
+                        missing = [c for c in member_codes if c not in have]
+                        if not missing:
+                            continue
+                        secids = [
+                            ('1.' if c.endswith('.SH') else '0.') + c.split('.')[0]
+                            for c in missing
+                        ]
+                        fetched = TushareAPI.get_kline_data_batch(
+                            secids, 'daily', 'qfq', limit=needed, end_date=str(miss)
+                        )
+                        ok = sum(1 for v in fetched.values() if isinstance(v, list) and v)
+                        _diag(f'backfill {miss}: missing={len(missing)} fetched={ok}')
+                        if not ok:
                             break
-                        raw_df = raw_df[raw_df['ts_code'].isin(code_set)]
-                        if raw_df.empty:
-                            _diag(f'backfill {miss}: 成份股无成交')
-                            break
-                        if prev_raw is None:
-                            prev_raw = safe_api_call(get_pro().daily, trade_date=str(prev_date).replace('-', ''))
-                            if not isinstance(prev_raw, pd.DataFrame) or prev_raw.empty:
-                                _diag(f'backfill {miss}: 前一日 {prev_date} 不复权数据缺失')
-                                break
-                            prev_raw = prev_raw[prev_raw['ts_code'].isin(code_set)]
-                            q = ','.join('?' * len(member_codes))
-                            prev_qfq = {
-                                str(r[0]): float(r[1]) for r in conn.execute(
-                                    "SELECT ts_code, sp FROM daily_kline WHERE kind='stock' "
-                                    "AND period='daily' AND adjust='qfq' AND trade_date=? "
-                                    "AND ts_code IN (" + q + ")",
-                                    [prev_date] + member_codes,
-                                ).fetchall()
-                            }
-                        prev_close = dict(zip(prev_raw['ts_code'].astype(str), prev_raw['close']))
-                        rows = []
-                        new_qfq = {}
-                        for r in raw_df.to_dict('records'):
-                            code = str(r.get('ts_code') or '')
-                            base_close = prev_close.get(code)
-                            base_qfq = prev_qfq.get(code)
-                            if not code or not base_close or not base_qfq:
-                                continue
-                            try:
-                                ratio = float(base_qfq) / float(base_close)
-                                kp = float(r.get('open') or 0) * ratio
-                                sp = float(r.get('close') or 0) * ratio
-                                zg = float(r.get('high') or 0) * ratio
-                                zd = float(r.get('low') or 0) * ratio
-                                if sp <= 0:
-                                    continue
-                                rows.append((
-                                    code, str(miss), kp, sp, zg, zd,
-                                    float(r.get('vol') or 0),
-                                    float(r.get('amount') or 0) * 1000,
-                                    float(r.get('pct_chg') or 0),
-                                    float(r.get('change') or 0),
-                                    float(r.get('turnover_rate') or 0),
-                                    time.time(),
-                                ))
-                                new_qfq[code] = sp
-                            except Exception:
-                                continue
-                        if rows:
-                            conn.executemany(
-                                "INSERT INTO daily_kline(kind, ts_code, period, adjust, trade_date, "
-                                "kp, sp, zg, zd, cjl, cje, zdf, zde, hsl, updated_at) "
-                                "VALUES('stock', ?, 'daily', 'qfq', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                                "ON CONFLICT(kind, ts_code, period, adjust, trade_date) DO UPDATE SET "
-                                "kp=excluded.kp, sp=excluded.sp, zg=excluded.zg, zd=excluded.zd, "
-                                "cjl=excluded.cjl, cje=excluded.cje, zdf=excluded.zdf, "
-                                "zde=excluded.zde, hsl=excluded.hsl, updated_at=excluded.updated_at",
-                                rows,
-                            )
-                            conn.commit()
-                        _diag(f'backfill {miss}: wrote {len(rows)} stocks')
-                        if not rows:
-                            break
-                        prev_raw, prev_qfq, prev_date = raw_df, new_qfq, str(miss)
                     except Exception as e:
                         _diag(f'backfill {miss} failed: {e}')
                         break
