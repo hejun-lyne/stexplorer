@@ -3023,6 +3023,9 @@ export interface BoardStrengthQueryItem {
   name: string;
 }
 
+/** 板块强势度评分单次 IPC 的兜底超时（防止 python 常驻进程无响应时界面一直转圈） */
+const SCORE_BOARD_STRENGTH_TIMEOUT_MS = 120000;
+
 /**
  * 板块日K强势度评分 v1.1（BKList「交易模式」结果列表）
  *
@@ -3045,5 +3048,24 @@ export async function ScoreBoardStrengthFromTushare(
   if (asOf) {
     params.as_of = asOf;
   }
-  return callTushare('score_board_strength', params);
+  const startedAt = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`板块强势度评分超时（${SCORE_BOARD_STRENGTH_TIMEOUT_MS / 1000}s）`)),
+      SCORE_BOARD_STRENGTH_TIMEOUT_MS
+    );
+  });
+  try {
+    const result = await Promise.race([callTushare('score_board_strength', params), timeout]);
+    console.log(`[score_board_strength] IPC 完成，耗时 ${Date.now() - startedAt}ms`);
+    return result;
+  } catch (e) {
+    console.error(`[score_board_strength] IPC 失败，耗时 ${Date.now() - startedAt}ms`, e);
+    throw e;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }

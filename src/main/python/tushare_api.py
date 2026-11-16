@@ -8060,7 +8060,162 @@ class TushareAPI:
             cfg['window'] = max(5, min(60, int(window or 20)))
             needed = cfg['window'] + cfg['base_days'] + 5
 
+            def _diag(msg: str):
+                # 走 stderr，实时出现在主进程终端（stdout 被 py_service 缓冲到请求结束时）
+                sys.stderr.write(f'[score_board_strength] {msg}\n')
+                sys.stderr.flush()
+
+            _diag(f'start window={cfg["window"]} boards={len(boards or [])} needed={needed}')
+
             conn = stock_db._conn(stock_db._DAILY_DB)
+
+            def _recent(cache, cutoff):
+                if not isinstance(cache, dict):
+                    return None
+                keys = sorted(
+                    [k for k in cache if str(k).replace('-', '')[:8] <= cutoff], reverse=True
+                )
+                return cache[keys[0]] if keys else None
+
+            def _ts_code(x: Dict[str, Any]) -> str:
+                c = str(x.get('code') or '').strip()
+                if not c:
+                    return ''
+                if c.startswith(('6', '9')):
+                    return c + '.SH'
+                if c.startswith(('8', '4', '920')):
+                    return c + '.BJ'
+                return c + '.SZ'
+
+            def _collect_member_codes() -> List[str]:
+                """只取成份股代码并集，用于评分前补齐缺失日期的个股 qfq 日线。"""
+                codes = set()
+                for b in boards or []:
+                    raw_code = str(b.get('code') or b.get('secid') or '')
+                    m = re.search(r'BK\d+', raw_code)
+                    pure = m.group(0) if m else ''
+                    if not pure:
+                        continue
+                    recs = _recent(read_cache(f'dc_member_{pure}.DC', max_age_hours=None), day)
+                    if isinstance(recs, list):
+                        codes.update(str(r.get('con_code') or '') for r in recs if isinstance(r, dict))
+                    else:
+                        snap = _recent(read_cache(f'board_stocks_{b.get("secid") or pure}', max_age_hours=None), day)
+                        if isinstance(snap, dict):
+                            codes.update(_ts_code(x) for x in (snap.get('stocks') or []) if isinstance(x, dict))
+                return sorted(c for c in codes if c)
+
+            def _backfill_missing_qfq(member_codes: List[str]):
+                """本地 qfq 日线落后于 as_of 时，按交易日补齐后再算评分。
+
+                用「前一日 qfq 收盘 / 前一日不复权收盘」作比例，把上游当日全市场不复权日线
+                折算成与前复权口径一致的 qfq 数据并写回 daily.db；这样不会改变等权口径，
+                只是把缺失的个股行情补上。
+                """
+                if not member_codes:
+                    return
+                expected = _last_trade_date_on_or_before(day_fmt)
+                if not expected:
+                    return
+                row = conn.execute(
+                    "SELECT MAX(trade_date) FROM daily_kline WHERE kind='stock' "
+                    "AND period='daily' AND adjust='qfq' AND trade_date <= ?",
+                    (day_fmt,),
+                ).fetchone()
+                latest = str(row[0]) if row and row[0] else ''
+                if latest >= expected:
+                    return
+                cal = sorted(
+                    d for d in _db_load_trade_cal_range(latest, expected)
+                    if latest < str(d) <= expected
+                )
+                if not cal:
+                    return
+                # 限制单次补数范围，避免训练模式回看很早的日期时打爆上游额度
+                cal = cal[-10:]
+                _diag(f'qfq backfill: latest={latest} expected={expected} dates={cal}')
+
+                code_set = set(member_codes)
+                prev_date = latest
+                prev_raw = None
+                prev_qfq = {}
+                for miss in cal:
+                    try:
+                        raw_df = safe_api_call(get_pro().daily, trade_date=str(miss).replace('-', ''))
+                        if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
+                            _diag(f'backfill {miss}: 上游无数据')
+                            break
+                        raw_df = raw_df[raw_df['ts_code'].isin(code_set)]
+                        if raw_df.empty:
+                            _diag(f'backfill {miss}: 成份股无成交')
+                            break
+                        if prev_raw is None:
+                            prev_raw = safe_api_call(get_pro().daily, trade_date=str(prev_date).replace('-', ''))
+                            if not isinstance(prev_raw, pd.DataFrame) or prev_raw.empty:
+                                _diag(f'backfill {miss}: 前一日 {prev_date} 不复权数据缺失')
+                                break
+                            prev_raw = prev_raw[prev_raw['ts_code'].isin(code_set)]
+                            q = ','.join('?' * len(member_codes))
+                            prev_qfq = {
+                                str(r[0]): float(r[1]) for r in conn.execute(
+                                    "SELECT ts_code, sp FROM daily_kline WHERE kind='stock' "
+                                    "AND period='daily' AND adjust='qfq' AND trade_date=? "
+                                    "AND ts_code IN (" + q + ")",
+                                    [prev_date] + member_codes,
+                                ).fetchall()
+                            }
+                        prev_close = dict(zip(prev_raw['ts_code'].astype(str), prev_raw['close']))
+                        rows = []
+                        new_qfq = {}
+                        for r in raw_df.to_dict('records'):
+                            code = str(r.get('ts_code') or '')
+                            base_close = prev_close.get(code)
+                            base_qfq = prev_qfq.get(code)
+                            if not code or not base_close or not base_qfq:
+                                continue
+                            try:
+                                ratio = float(base_qfq) / float(base_close)
+                                kp = float(r.get('open') or 0) * ratio
+                                sp = float(r.get('close') or 0) * ratio
+                                zg = float(r.get('high') or 0) * ratio
+                                zd = float(r.get('low') or 0) * ratio
+                                if sp <= 0:
+                                    continue
+                                rows.append((
+                                    code, str(miss), kp, sp, zg, zd,
+                                    float(r.get('vol') or 0),
+                                    float(r.get('amount') or 0) * 1000,
+                                    float(r.get('pct_chg') or 0),
+                                    float(r.get('change') or 0),
+                                    float(r.get('turnover_rate') or 0),
+                                    time.time(),
+                                ))
+                                new_qfq[code] = sp
+                            except Exception:
+                                continue
+                        if rows:
+                            conn.executemany(
+                                "INSERT INTO daily_kline(kind, ts_code, period, adjust, trade_date, "
+                                "kp, sp, zg, zd, cjl, cje, zdf, zde, hsl, updated_at) "
+                                "VALUES('stock', ?, 'daily', 'qfq', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                "ON CONFLICT(kind, ts_code, period, adjust, trade_date) DO UPDATE SET "
+                                "kp=excluded.kp, sp=excluded.sp, zg=excluded.zg, zd=excluded.zd, "
+                                "cjl=excluded.cjl, cje=excluded.cje, zdf=excluded.zdf, "
+                                "zde=excluded.zde, hsl=excluded.hsl, updated_at=excluded.updated_at",
+                                rows,
+                            )
+                            conn.commit()
+                        _diag(f'backfill {miss}: wrote {len(rows)} stocks')
+                        if not rows:
+                            break
+                        prev_raw, prev_qfq, prev_date = raw_df, new_qfq, str(miss)
+                    except Exception as e:
+                        _diag(f'backfill {miss} failed: {e}')
+                        break
+
+            _diag('check qfq coverage')
+            _backfill_missing_qfq(_collect_member_codes())
+
             dates = [
                 str(r[0]) for r in conn.execute(
                     "SELECT DISTINCT trade_date FROM daily_kline "
@@ -8069,6 +8224,7 @@ class TushareAPI:
                     (day_fmt, needed),
                 ).fetchall()
             ]
+            _diag(f'trade_dates={len(dates)}')
             if len(dates) < cfg['window'] + 10:
                 return {'error': '本地 qfq 日线不足，无法计算板块强势度', 'rows': [],
                         'as_of': day, 'window': cfg['window'], 'scored': 0, 'skipped': []}
@@ -8079,6 +8235,7 @@ class TushareAPI:
                 "AND trade_date BETWEEN ? AND ?",
                 (start, day_fmt),
             ).fetchall()
+            _diag(f'raw klines={len(raw)} start={start}')
             if not raw:
                 return {'error': '本地 qfq 日线为空', 'rows': [],
                         'as_of': day, 'window': cfg['window'], 'scored': 0, 'skipped': []}
@@ -8100,24 +8257,6 @@ class TushareAPI:
                 return 0.10
 
             daily['limit_pct'] = daily['ts_code'].map(_limit_pct)
-
-            def _recent(cache, cutoff):
-                if not isinstance(cache, dict):
-                    return None
-                keys = sorted(
-                    [k for k in cache if str(k).replace('-', '')[:8] <= cutoff], reverse=True
-                )
-                return cache[keys[0]] if keys else None
-
-            def _ts_code(x: Dict[str, Any]) -> str:
-                c = str(x.get('code') or '').strip()
-                if not c:
-                    return ''
-                if c.startswith(('6', '9')):
-                    return c + '.SH'
-                if c.startswith(('8', '4', '920')):
-                    return c + '.BJ'
-                return c + '.SZ'
 
             sector_map: Dict[str, List[str]] = {}
             skipped: List[Dict[str, str]] = []
@@ -8153,12 +8292,15 @@ class TushareAPI:
                     continue
                 sector_map[secid] = codes
 
+            _diag(f'sector_map={len(sector_map)} skipped={len(skipped)}')
             if not sector_map:
                 return {'error': '没有可用的板块成份股映射（请先点开一次板块成份股列表以建立缓存）',
                         'rows': [], 'as_of': day, 'window': cfg['window'],
                         'scored': 0, 'skipped': skipped}
 
+            _diag('enter score_boards')
             scores = BSM.score_boards(daily, sector_map, as_of=day, cfg=cfg)
+            _diag(f'score_boards done scored={len(scores)}')
             rows = []
             for secid, m in scores.items():
                 r = dict(m)
@@ -8169,6 +8311,26 @@ class TushareAPI:
                 if secid not in scores:
                     skipped.append({'secid': secid, 'name': board_names.get(secid, ''),
                                     'reason': '本地成份股日线不足，模型未出分'})
+            # JSON 不能表示 NaN/Infinity：渲染层 JSON.parse 会直接抛错，表现为一直转圈。
+            # 这里把非有限数值清零，并在 stderr 打出字段名，便于定位真实数据里哪一个指标坏了。
+            def _clean_row_values():
+                for r in rows:
+                    for k, v in list(r.items()):
+                        if v is None or isinstance(v, bool):
+                            continue
+                        val = v
+                        if hasattr(val, 'item'):
+                            try:
+                                val = val.item()
+                            except Exception:
+                                continue
+                        if isinstance(val, (int, float)) and not math.isfinite(val):
+                            _diag(f'non-finite field {k}={val} sector={r.get("secid")}')
+                            r[k] = 0.0
+                        elif val is not v:
+                            r[k] = val
+
+            _clean_row_values()
             rows.sort(key=lambda r: -(r.get('score_alpha') or 0))
             return {'rows': rows, 'as_of': day, 'window': cfg['window'],
                     'scored': len(rows), 'skipped': skipped, 'members': len(sector_map)}

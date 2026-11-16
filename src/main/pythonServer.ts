@@ -93,18 +93,47 @@ class PythonService {
       }
       const id = child.seq + 1;
       child.seq = id;
-      child.pending.set(id, { resolve, reject });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const clearTimer = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+      };
+      child.pending.set(id, {
+        resolve: (value) => {
+          clearTimer();
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimer();
+          reject(error);
+        },
+      });
+      // score_board_strength 在某些窗口/数据下会卡在 python 侧；主进程侧单独加超时，
+      // 超时直接终止 worker，避免常驻进程池被永久占满（下次调用会自动拉起新进程）。
+      if (args[0] === 'score_board_strength') {
+        timer = setTimeout(() => {
+          child.pending.delete(id);
+          console.error(`[py:${fileName}] score_board_strength 请求超时（90s），终止 worker`);
+          this.removeChild(fileName, child);
+          child.proc.kill();
+          reject(new Error('score_board_strength 请求超时（90s），python worker 已重启'));
+        }, 90000);
+      }
       // stream 的写错误是异步 emit 的，try/catch 拦不住，必须用 write 回调捕获；
       // spawnChild 里另外挂了 stdin 的 error 监听，避免 EPIPE 变成 Uncaught Exception
       try {
         child.proc.stdin.write(`${JSON.stringify({ id, args })}\n`, (error) => {
           if (error) {
             child.pending.delete(id);
+            clearTimer();
             reject(error);
           }
         });
       } catch (error) {
         child.pending.delete(id);
+        clearTimer();
         reject(error);
       }
     });

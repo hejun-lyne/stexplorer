@@ -44,6 +44,11 @@ export interface BoardStrengthRow {
   members: number;
   sigma: number;
   cumRet: number;
+  /** 距窗口高点回撤（负数） */
+  ddFromHigh: number;
+  /** 末3 / 末5 个交易日收益（与窗口累计收益无关，用于识别末端急跌） */
+  last3Ret: number;
+  last5Ret: number;
   exTrend: number;
   r2: number;
   pathEr: number;
@@ -111,10 +116,11 @@ export function strengthTooltip(r: BoardStrengthRow): string {
     `${r.name}（${r.secid}）  成份股 ${n(r.members)} 只`,
     `超额强度 ${f(r.scoreAlpha)}（第 ${n(r.rank)}）　绝对冷热 ${f(r.scoreAbs)}（第 ${n(r.rankAbs)}）　评级 ${r.grade || '—'}`,
     `S1 广度 ${f(r.s1)}　S2 爆发 ${f(r.s2)}　S3 跳空 ${f(r.s3)}　S4 趋势 ${f(r.s4)}　S5 结构 ${f(r.s5)}`,
-    `区间涨幅 ${pct(n(r.cumRet))}　超额 ${pct(n(r.exTrend))}　R² ${f(r.r2, 2)}　路径效率 ${f(r.pathEr, 2)}`,
-    `上涨广度 ${pct(n(r.upShare))}　超额广度 ${pct(n(r.exUp))}　末5日 ${pct(n(r.upShare5))}　扩散 ${pct(n(r.diffusion))}`,
+    `区间涨幅 ${pct(n(r.cumRet))}　超额 ${pct(n(r.exTrend))}　末3日 ${pct(n(r.last3Ret))}　末5日 ${pct(n(r.last5Ret))}　距高点 ${pct(n(r.ddFromHigh))}`,
+    `R² ${f(r.r2, 2)}　路径效率 ${f(r.pathEr, 2)}`,
+    `上涨广度 ${pct(n(r.upShare))}　超额广度 ${pct(n(r.exUp))}　末5日上涨占比 ${pct(n(r.upShare5))}　扩散 ${pct(n(r.diffusion))}`,
     `涨停占比 ${pct(n(r.limitShare))}　大阳占比 ${pct(n(r.bigShare))}　净高开 ${pct(n(r.gapNet))}（超额 ${pct(n(r.exGap))}）`,
-    `一致性 ${f(r.consistency, 4)}　离散度 ${f(r.dispersion, 4)}　集中度 ${f(r.concentration, 2)}`,
+    `一致性偏离 ${f(r.consistency, 4)}（越接近0越好）　离散度 ${f(r.dispersion, 4)}　集中度 ${f(r.concentration, 2)}`,
     `波动率 σ ${pct(n(r.sigma))}（放大 ${f(r.volRatio, 2)}×）　扣分 ${f(r.penalty)}${r.flags ? `：${r.flags}` : ''}`,
   ];
   return lines.join('\n');
@@ -136,6 +142,9 @@ function emptyRow(item: BoardStrengthItem, reason: string): BoardStrengthRow {
     members: 0,
     sigma: 0,
     cumRet: 0,
+    ddFromHigh: 0,
+    last3Ret: 0,
+    last5Ret: 0,
     exTrend: 0,
     r2: 0,
     pathEr: 0,
@@ -173,6 +182,9 @@ function mapRow(raw: any, item: BoardStrengthItem): BoardStrengthRow {
     members: num(raw.members),
     sigma: num(raw.sigma),
     cumRet: num(raw.cum_ret),
+    ddFromHigh: num(raw.dd_from_high),
+    last3Ret: num(raw.last3_ret),
+    last5Ret: num(raw.last5_ret),
     exTrend: num(raw.ex_trend),
     r2: num(raw.r2),
     pathEr: num(raw.path_er),

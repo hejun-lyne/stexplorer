@@ -46,6 +46,10 @@ CFG_SECTOR = dict(
     pen_divergence=8.0, pen_divergence_ex=0.03,   # 超额涨幅 >3% 但超额广度 <0
     pen_vol_spike=5.0, pen_vol_ratio=1.60,
     pen_dd=5.0, pen_dd_z=-1.20,   # 距窗口高点回撤按 σ√N 标准化后的 z 值
+    # 末端急跌（与「末端拉升」对称）：先涨后急跌不能再靠全窗口涨幅拿高分
+    pen_tail3=8.0, pen_tail3_th=-0.06,
+    pen_tail5=4.0, pen_tail5_th=-0.09,
+    s2_tail_weight=0.40,   # S2 近3日占比，其余为全窗口均值
     bonus_cap=8.0,
 )
 
@@ -64,7 +68,9 @@ EX_CURVES = {
 
 # 非超额类（板块内部结构，天然横截面可比）
 STRUCT_CURVES = {
-    "consistency": [(-0.008, 0), (-0.003, 26), (0.000, 50), (0.003, 76), (0.008, 100)],
+    # 一致性：现在传 -(指数收益与成份股中位收益的绝对偏离)，越接近 0 越好；
+    # 不再因为「指数低于中位」而奖励少数大票砸盘。
+    "consistency": [(-0.010, 0), (-0.006, 30), (-0.003, 60), (-0.001, 82), (0.000, 92)],
     "dispersion":  [(0.008, 35), (0.015, 58), (0.022, 72), (0.030, 70), (0.040, 55), (0.060, 20)],
     "concentration": [(0.0, 95), (0.15, 85), (0.30, 70), (0.50, 45), (0.75, 12)],
     "limit_share": [(0.000, 35), (0.010, 50), (0.030, 65), (0.060, 82), (0.120, 95), (0.200, 100)],
@@ -187,6 +193,9 @@ def index_metrics(idx, cfg):
     m["path_er"] = float(abs(m["cum_ret"]) / tot) if tot > 1e-9 else 0.0
     m["last3_ratio"] = float((c.iloc[-1] / c.iloc[-4] - 1) / m["cum_ret"]) if len(c) >= 4 and m["cum_ret"] > 1e-6 else 0.0
     m["last5_ratio"] = float((c.iloc[-1] / c.iloc[-6] - 1) / m["cum_ret"]) if len(c) >= 6 and m["cum_ret"] > 1e-6 else 0.0
+    # 尾部绝对收益（不除以 cum_ret），用于「末端急跌」惩罚：只涨不跌的末段才配拿末端分
+    m["last3_ret"] = float(c.iloc[-1] / c.iloc[-4] - 1) if len(c) >= 4 else 0.0
+    m["last5_ret"] = float(c.iloc[-1] / c.iloc[-6] - 1) if len(c) >= 6 else 0.0
     m["dd_from_high"] = float(c.iloc[-1] / c.max() - 1)
     return m
 
@@ -211,16 +220,31 @@ def breadth_metrics(sub, cfg, sector_idx, sigma):
     ).reindex(dates)
 
     m = {}
+    # 指数收益（窗口对齐）：扩散需要看近5日指数是在涨还是在跌
+    sc = sector_idx.set_index("trade_date")["ret"].reindex(dates)
+    tail_ret = float((1 + sc.tail(5)).prod() - 1)
+
     # ---- S1 广度 ----
     m["up_share"] = float(daily["up_share"].mean())
     m["up_share5"] = float(daily["up_share"].tail(5).mean())
     early = daily["up_share"].iloc[:-5]
-    m["diffusion"] = float(daily["up_share"].tail(5).mean() - early.mean()) if len(early) >= 5 else 0.0
+    if len(early) >= 5:
+        raw_diff = float(daily["up_share"].tail(5).mean() - early.mean())
+        # 指数近5日下跌时，上涨家数占比扩大不能算「扩散」（常常是指数被少数大票砸下去）
+        m["diffusion"] = raw_diff if tail_ret > 0 else -abs(raw_diff)
+    else:
+        m["diffusion"] = 0.0
     m["ma20_share"] = float(daily["ma20_share"].iloc[-1]) if n_dates else 0.0
 
-    # ---- S2 爆发 ----
-    m["limit_share"] = float(daily["limit_share"].mean())
-    m["big_share"] = float(daily["big_share"].mean())
+    # ---- S2 爆发：全窗口均值 + 近3日，避免前段涨停掩盖末端大跌 ----
+    tail_daily = daily.tail(3)
+    tail_limit = float(tail_daily["limit_share"].mean())
+    tail_big = float(tail_daily["big_share"].mean())
+    tw = float(cfg.get("s2_tail_weight", 0.4))
+    m["limit_share"] = float((1 - tw) * daily["limit_share"].mean()
+                             + tw * (tail_limit if np.isfinite(tail_limit) else 0.0))
+    m["big_share"] = float((1 - tw) * daily["big_share"].mean()
+                           + tw * (tail_big if np.isfinite(tail_big) else 0.0))
     consec = []
     for _, g in w.groupby("ts_code"):
         runs = run_lengths(g["ret"].gt(0).values)
@@ -235,10 +259,10 @@ def breadth_metrics(sub, cfg, sector_idx, sigma):
 
     # ---- S5 结构 ----
     m["dispersion"] = float(daily["ret_std"].mean())
-    sc = sector_idx.set_index("trade_date")["ret"].reindex(dates)
     pull = (sc - daily["up_med"]).dropna()
-    # pull > 0：指数涨幅高于成份股中位 → 靠少数大票拉动 → 一致性差
-    m["consistency"] = float(-pull.mean()) if len(pull) else 0.0
+    # 一致性只看「指数与成份股中位的绝对偏离」，越接近 0 越好；
+    # 旧写法 -pull.mean() 会在指数被少数大票砸盘（pull<0）时给出高分，属于方向性误判。
+    m["consistency"] = float(-pull.abs().mean()) if len(pull) else 0.0
     m["concentration"] = _concentration(w)
     return m
 
@@ -356,6 +380,11 @@ def score_sectors(daily, universe, as_of, cfg=CFG_SECTOR):
             pen += cfg["pen_last3"]; flags.append("末端拉升3日")
         elif im["last5_ratio"] >= cfg["pen_last5_ratio"]:
             pen += cfg["pen_last5"]; flags.append("末端拉升5日")
+        # 末端急跌：与「末端拉升」对称，防止前段涨幅把最后3天大跌稀释掉
+        if im["last3_ret"] <= cfg["pen_tail3_th"]:
+            pen += cfg["pen_tail3"]; flags.append("末端急跌3日")
+        elif im["last5_ret"] <= cfg["pen_tail5_th"]:
+            pen += cfg["pen_tail5"]; flags.append("末端急跌5日")
         if im["path_er"] < cfg["pen_path_th"] and im["cum_ret"] > 0:
             pen += cfg["pen_path"]; flags.append("路径低效")
         # 广度背离：超额涨幅靠前但广度没跟上 = 少数大票拉动（相对口径）
@@ -385,6 +414,7 @@ def score_sectors(daily, universe, as_of, cfg=CFG_SECTOR):
             sigma=r["sigma"], cum_ret=im["cum_ret"], ex_trend=ex_trend,
             trend_ret=im["trend_ret"], r2=im["r2"], path_er=im["path_er"],
             vol_ratio=im["vol_ratio"], dd_from_high=im["dd_from_high"],
+            last3_ret=im["last3_ret"], last5_ret=im["last5_ret"],
             up_share=bm["up_share"], ex_up=ex_up, up_share5=bm["up_share5"],
             diffusion=bm["diffusion"], ma20_share=bm["ma20_share"],
             limit_share=bm["limit_share"], big_share=bm["big_share"],
@@ -449,6 +479,11 @@ def _score_one(sector, members, im, bm, mkt_trend, mkt_up, mkt_up5, mkt_gap, mkt
         pen += cfg["pen_last3"]; flags.append("末端拉升3日")
     elif im["last5_ratio"] >= cfg["pen_last5_ratio"]:
         pen += cfg["pen_last5"]; flags.append("末端拉升5日")
+    # 末端急跌：与「末端拉升」对称，防止前段涨幅把最后3天大跌稀释掉
+    if im["last3_ret"] <= cfg["pen_tail3_th"]:
+        pen += cfg["pen_tail3"]; flags.append("末端急跌3日")
+    elif im["last5_ret"] <= cfg["pen_tail5_th"]:
+        pen += cfg["pen_tail5"]; flags.append("末端急跌5日")
     if im["path_er"] < cfg["pen_path_th"] and im["cum_ret"] > 0:
         pen += cfg["pen_path"]; flags.append("路径低效")
     if ex_trend > cfg["pen_divergence_ex"] and ex_up < 0:
@@ -473,6 +508,7 @@ def _score_one(sector, members, im, bm, mkt_trend, mkt_up, mkt_up5, mkt_gap, mkt
         sigma=im["sigma"], cum_ret=im["cum_ret"], ex_trend=ex_trend,
         trend_ret=im["trend_ret"], r2=im["r2"], path_er=im["path_er"],
         vol_ratio=im["vol_ratio"], dd_from_high=im["dd_from_high"],
+        last3_ret=im["last3_ret"], last5_ret=im["last5_ret"],
         up_share=bm["up_share"], ex_up=ex_up, up_share5=bm["up_share5"],
         diffusion=bm["diffusion"], ma20_share=bm["ma20_share"],
         limit_share=bm["limit_share"], big_share=bm["big_share"],

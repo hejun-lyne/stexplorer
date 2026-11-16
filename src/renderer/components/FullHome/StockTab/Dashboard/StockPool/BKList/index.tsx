@@ -182,7 +182,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     }
 
     if (displayMode === 'boardScore') {
-      // 板块日K强势度评分：只保留名称 / 只看题材过滤；默认按超额强度倒序，无分数行沉底
+      // 板块日K强势度评分：只保留名称 / 只看题材过滤；默认按绝对冷热倒序，无分数行沉底
       let list = strengthData.filter((s) => {
         if (nameFilter && !String(s.name || '').includes(nameFilter)) return false;
         if (onlyTheme && type === BKType.Gainian && !isThemeBoard(s.name)) return false;
@@ -193,7 +193,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       const t = key ? sortTypes[key] : 2;
       if (t !== 0) {
         list = [...list].sort((a: any, b: any) => {
-          const rawKey = key || 'scoreAlpha';
+          const rawKey = key || 'scoreAbs';
           const av = Number(a[rawKey]);
           const bv = Number(b[rawKey]);
           const aOk = !a.error && Number.isFinite(av);
@@ -448,7 +448,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
    * 训练模式以训练日为 as_of，避免读到训练日之后的行情。
    */
   const handleBoardScore = useCallback(async () => {
-    if (scoreLoading || !bankuais.length) {
+    if (scoreLoadingRef.current || scoreLoading || !bankuais.length) {
       return;
     }
     const items = bankuais
@@ -458,6 +458,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       return;
     }
     const run = scoreRunRef.current;
+    scoreLoadingRef.current = true;
     setScoreLoading(true);
     setDisplayMode('boardScore');
     // displayMode 立即生效，但 showList 由 effect 异步重算：同步清空，
@@ -467,12 +468,15 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     // 进入交易模式即显示右侧图表面板（默认选中结果列表第一行）
     setPanelClosed(false);
     setPanelExpandSeq((n) => n + 1);
-    // 评分列表的排序键与板块列表不同，进入时清空，默认按超额强度倒序
+    // 评分列表的排序键与板块列表不同，进入时清空，默认按绝对冷热倒序
     setSortTypes({});
     setCurrentPage(1);
 
     try {
       const asOf = ontrain && trainDate ? trainDate : dayjs().format('YYYY-MM-DD');
+      console.log(
+        `[板块日K强势度] 开始评分：${items.length} 个板块，窗口 ${scoreWindowDays} 日，基准日 ${asOf}`
+      );
       const res = await computeBoardDailyStrength(items, { asOf, window: scoreWindowDays });
       if (scoreRunRef.current !== run) {
         return;
@@ -487,6 +491,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     } catch (e) {
       console.error('板块日K强势度评分失败:', e);
     } finally {
+      scoreLoadingRef.current = false;
       setScoreLoading(false);
     }
   }, [scoreLoading, bankuais, ontrain, trainDate, passStockCount, scoreWindowDays]);
@@ -652,7 +657,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                 onClick={handleBoardScore}
                 loading={scoreLoading}
                 style={{ marginLeft: 4 }}
-                title={`进入交易模式：以 ${scoreWindowDays} 个交易日为窗口，按当前板块列表计算日K强势度评分（成份股等权指数 + 全A等权中性化 + S1~S5 与修正项），输出超额分 score_alpha 用于板块间排序、绝对分 score_abs 用于判断板块自身冷热；点击结果行可在右侧查看该板块分时与K线`}
+                title={`进入交易模式：以 ${scoreWindowDays} 个交易日为窗口，按当前板块列表计算日K强势度评分（成份股等权指数 + 全A等权中性化 + S1~S5 与修正项），输出超额分 score_alpha（相对市场）与绝对分 score_abs（自身冷热，默认按此排序）；点击结果行可在右侧查看该板块分时与K线`}
               >
                 {scoreLoading
                   ? "评分中…"
@@ -765,11 +770,11 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
       ) : (
         <Row className={styles.header}>
           <Col span={3}>板块名称</Col>
-          <Col span={2} title="超额强度 score_alpha：市场中性化后的板块相对强度，用于板块间排序（默认按此列倒序）">
+          <Col span={2} title="超额强度 score_alpha：市场中性化后的板块相对强度，跌得比市场少也可能很高；点箭头可按此列排序">
             超额分
             {renderSortBtn('scoreAlpha')}
           </Col>
-          <Col span={2} title="绝对冷热 score_abs：不看相对市场的板块自身冷热。超额分选进攻板块，绝对分高且离散度低选防守板块">
+          <Col span={2} title="绝对冷热 score_abs：不看相对市场的板块自身冷热（默认按此列倒序）。超额分选相对强势，绝对分选自身真涨">
             绝对分
             {renderSortBtn('scoreAbs')}
           </Col>

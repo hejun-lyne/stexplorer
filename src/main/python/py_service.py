@@ -28,6 +28,7 @@ import sys
 import os
 import io
 import json
+import math
 import argparse
 import contextlib
 import importlib
@@ -101,9 +102,25 @@ def _tail_lines(text, max_lines=200, max_chars=8000):
     return joined.splitlines() if joined else []
 
 
+def _json_clean(value):
+    """JSON 不支持 NaN/Infinity；递归转成 null，避免渲染层 JSON.parse 抛错。"""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_clean(v) for v in value]
+    if hasattr(value, 'item'):
+        try:
+            return _json_clean(value.item())
+        except Exception:
+            pass
+    return value
+
+
 def _emit(real_stdout, payload):
     try:
-        text = json.dumps(payload, ensure_ascii=False, cls=_Encoder)
+        text = json.dumps(_json_clean(payload), ensure_ascii=False, cls=_Encoder, allow_nan=False)
     except Exception as e:
         text = json.dumps(
             {'id': payload.get('id'), 'ok': False, 'error': 'encode error: %s' % e, 'logs': []},
