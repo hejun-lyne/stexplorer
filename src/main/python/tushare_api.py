@@ -91,6 +91,8 @@ def convert_secid_to_ts_code(secid: str) -> str:
         # 因为 index_daily 接口更通用；东财概念板块(.DC) 在 _get_board_kline 中单独处理
         if mk == "2":
             return f"{code}.CSI"
+        if code.startswith(('8', '4', '920')):
+            return f"{code}.BJ"
         if mk == "1" or code.startswith("6"):
             return f"{code}.SH"
         else:
@@ -8117,23 +8119,19 @@ class TushareAPI:
                 expected = _last_trade_date_on_or_before(day_fmt)
                 if not expected:
                     return
-                row = conn.execute(
-                    "SELECT MAX(trade_date) FROM daily_kline WHERE kind='stock' "
-                    "AND period='daily' AND adjust='qfq' AND trade_date <= ?",
-                    (day_fmt,),
-                ).fetchone()
-                latest = str(row[0]) if row and row[0] else ''
-                if latest >= expected:
-                    return
+                # 不能用全库 MAX(trade_date) 判断是否需要补数：只要有任意一只股票补到了基准日，
+                # 其它大量没有本地历史的成份股就会被误判为“已覆盖”。这里按交易日历回看，
+                # 逐日检查本次评分的成份股是否真的有 qfq 数据。
+                start = (datetime.strptime(expected, '%Y-%m-%d') - timedelta(days=30)).strftime('%Y-%m-%d')
                 cal = sorted(
-                    d for d in _db_load_trade_cal_range(latest, expected)
-                    if latest < str(d) <= expected
+                    str(d) for d in _db_load_trade_cal_range(start, expected)
+                    if str(d) <= expected
                 )
                 if not cal:
                     return
                 # 限制单次补数范围，避免训练模式回看很早的日期时打爆上游额度
                 cal = cal[-10:]
-                _diag(f'qfq backfill: latest={latest} expected={expected} dates={cal}')
+                _diag(f'qfq backfill: expected={expected} dates={cal}')
 
                 q = ','.join('?' * len(member_codes))
                 for miss in cal:
