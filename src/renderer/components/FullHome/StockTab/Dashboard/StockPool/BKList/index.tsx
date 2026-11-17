@@ -26,6 +26,8 @@ import {
   strengthTooltip,
 } from '@/helpers/boardDailyStrength';
 
+const { ipcRenderer } = window.contextModules.electron;
+
 export interface BKListProps {
   type: BKType;
   onBankuaisUpdate: (t: BKType, bks: Stock.BanKuaiItem[]) => void;
@@ -78,6 +80,10 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const industryIndexRef = React.useRef(0);
   // ========== 板块日K强势度评分 ==========
   const [scoreLoading, setScoreLoading] = useState(false);
+  /** Python 侧实时上报的评分阶段进度 */
+  const [scoreProgress, setScoreProgress] = useState('');
+  /** 评分已耗时（秒） */
+  const [scoreElapsed, setScoreElapsed] = useState(0);
   /** 评分窗口：基准日往前 N 个交易日（与 Python 侧一致，限定 5~60，默认 20） */
   const [scoreWindowDays, setScoreWindowDays] = useState(20);
   const [strengthData, setStrengthData] = useState<BoardStrengthRow[]>([]);
@@ -86,6 +92,28 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   /** 最近一次的板块评分函数（训练日切换时自动刷新用） */
   const boardScoreRefreshRef = React.useRef<() => void>();
   const scoreLoadingRef = React.useRef(false);
+  useEffect(() => {
+    const handler = (_event: any, text: string) => {
+      if (typeof text === 'string' && text.startsWith('板块评分：')) {
+        setScoreProgress(text);
+      }
+    };
+    ipcRenderer.on('on-progress-log', handler);
+    return () => {
+      ipcRenderer.removeListener('on-progress-log', handler);
+    };
+  }, []);
+  useEffect(() => {
+    if (!scoreLoading) {
+      setScoreElapsed(0);
+      return;
+    }
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      setScoreElapsed(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [scoreLoading]);
   const PAGE_SIZE = 50;
   const { kLineApiSourceSetting } = useSelector((state: StoreState) => state.setting.systemSetting);
   const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
@@ -460,6 +488,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     const run = scoreRunRef.current;
     scoreLoadingRef.current = true;
     setScoreLoading(true);
+    setScoreProgress('板块评分：正在启动…');
     setDisplayMode('boardScore');
     // displayMode 立即生效，但 showList 由 effect 异步重算：同步清空，
     // 否则这一帧会把上一视图的板块列表行当成评分行渲染（scoreAlpha.toFixed 抛错）
@@ -493,6 +522,7 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
     } finally {
       scoreLoadingRef.current = false;
       setScoreLoading(false);
+      setScoreProgress('');
     }
   }, [scoreLoading, bankuais, ontrain, trainDate, passStockCount, scoreWindowDays]);
 
@@ -665,6 +695,14 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
                   ? '重新评分'
                   : '交易模式'}
               </Button>
+              {scoreLoading && (
+                <span
+                  style={{ marginLeft: 8, fontSize: 12, color: '#595959', whiteSpace: 'nowrap' }}
+                  title="Python 评分阶段进度 / 已耗时"
+                >
+                  {scoreProgress || '板块评分：正在启动…'} · {scoreElapsed}s
+                </span>
+              )}
             </>
           )}
           {displayMode !== 'boards' && (

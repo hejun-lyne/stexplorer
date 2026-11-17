@@ -13,7 +13,7 @@
  */
 
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
-import { app } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -115,11 +115,11 @@ class PythonService {
       if (args[0] === 'score_board_strength') {
         timer = setTimeout(() => {
           child.pending.delete(id);
-          console.error(`[py:${fileName}] score_board_strength 请求超时（90s），终止 worker`);
+          console.error(`[py:${fileName}] score_board_strength 请求超时（540s），终止 worker`);
           this.removeChild(fileName, child);
           child.proc.kill();
-          reject(new Error('score_board_strength 请求超时（90s），python worker 已重启'));
-        }, 90000);
+          reject(new Error('score_board_strength 请求超时（540s），python worker 已重启'));
+        }, 540000);
       }
       // stream 的写错误是异步 emit 的，try/catch 拦不住，必须用 write 回调捕获；
       // spawnChild 里另外挂了 stdin 的 error 监听，避免 EPIPE 变成 Uncaught Exception
@@ -239,6 +239,18 @@ class PythonService {
       // import 期的零散输出等非协议行，忽略即可
       return;
     }
+    // Python 长任务的阶段进度：转发给渲染层，不结算当前 pending 请求
+    if (msg.progress) {
+      const p = msg.progress;
+      const pct = typeof p.pct === 'number' ? ` ${p.pct}%` : '';
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('on-progress-log', `${p.message || '处理中'}${pct}`);
+        }
+      });
+      return;
+    }
+
     const task = child.pending.get(msg.id);
     if (!task) {
       return;

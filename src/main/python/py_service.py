@@ -193,6 +193,14 @@ def main():
             if fn is None:
                 raise RuntimeError('Method %s not found' % (ns.method,))
 
+            # 长任务可通过 mod._emit_progress 实时推送阶段进度；该消息不带最终 data，
+            # 主进程识别 progress 字段后转发给渲染层，不会误结算当前请求。
+            if hasattr(mod, '_PROGRESS_EMITTER'):
+                mod._PROGRESS_EMITTER = lambda message, pct=None: _emit(
+                    real_stdout,
+                    {'id': rid, 'ok': True, 'progress': {'message': message, 'pct': pct}, 'logs': []},
+                )
+
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 data = fn(**params)

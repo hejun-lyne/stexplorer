@@ -46,6 +46,19 @@ except ImportError:
 # ============ 全局 Pro API 实例 ============
 _pro_api = None
 
+# py_service 在每次调用前注入进度回调，用于把长任务的阶段进度实时推给渲染层
+_PROGRESS_EMITTER = None
+
+
+def _emit_progress(message: str, pct: Optional[int] = None):
+    if _PROGRESS_EMITTER is None:
+        return
+    try:
+        _PROGRESS_EMITTER(message, pct)
+    except Exception:
+        pass
+
+
 def init_pro(token: Optional[str] = None):
     """初始化 tushare pro api"""
     global _pro_api
@@ -8068,6 +8081,7 @@ class TushareAPI:
                 sys.stderr.flush()
 
             _diag(f'start window={cfg["window"]} boards={len(boards or [])} needed={needed}')
+            _emit_progress(f'板块评分：准备 {len(boards or [])} 个板块', 5)
 
             conn = stock_db._conn(stock_db._DAILY_DB)
 
@@ -8095,81 +8109,228 @@ class TushareAPI:
                 pure = c.split('.')[0]
                 return c.endswith('.BJ') or pure.startswith(('688', '689', '8', '4', '920'))
 
+            _loaded_members: Dict[str, List[str]] = {}
+
+            def _load_board_members(pure: str, secid: str = '') -> List[str]:
+                """取不晚于 as_of 的成份股；本地缓存没有历史快照时主动走 Tushare 补齐。"""
+                if pure in _loaded_members:
+                    return _loaded_members[pure]
+                cache_key = f'dc_member_{pure}.DC'
+                recs = _recent(read_cache(cache_key, max_age_hours=None), day)
+                codes = (
+                    [str(r.get('con_code') or '') for r in recs if isinstance(r, dict)]
+                    if isinstance(recs, list) else []
+                )
+                if not codes:
+                    try:
+                        fetched = _cached_dc_member(get_pro(), f'{pure}.DC', day)
+                        if isinstance(fetched, pd.DataFrame) and not fetched.empty:
+                            codes = [str(r.get('con_code') or '') for r in df_to_records(fetched)]
+                            _diag(f'members auto-fetched {pure} @ {day}: {len(codes)}')
+                    except Exception as e:
+                        _diag(f'members auto-fetch failed {pure}: {e}')
+                if not codes:
+                    try:
+                        end = _real_today_str()
+                        start = (datetime.strptime(day, '%Y%m%d') - timedelta(days=400)).strftime('%Y%m%d')
+                        hist = safe_api_call(
+                            get_pro().query, 'dc_member',
+                            ts_code=f'{pure}.DC', start_date=start, end_date=end,
+                        )
+                        if isinstance(hist, pd.DataFrame) and not hist.empty:
+                            hist = hist.copy()
+                            hist['_d'] = hist['trade_date'].astype(str)
+                            earlier = hist[hist['_d'] <= day]
+                            use = earlier if not earlier.empty else hist
+                            snap = str(use['_d'].max())
+                            codes = [
+                                str(r.get('con_code') or '')
+                                for r in df_to_records(use[use['_d'] == snap])
+                            ]
+                            _diag(f'members fallback snapshot {pure}: {snap} ({len(codes)}), as_of={day}')
+                    except Exception as e:
+                        _diag(f'members fallback failed {pure}: {e}')
+                if not codes and secid:
+                    snap = _recent(read_cache(f'board_stocks_{secid}', max_age_hours=None), day)
+                    if isinstance(snap, dict):
+                        codes = [_ts_code(x) for x in (snap.get('stocks') or []) if isinstance(x, dict)]
+                result = sorted({c for c in codes if c and not _is_excluded_stock(c)})
+                _loaded_members[pure] = result
+                return result
+
             def _collect_member_codes() -> List[str]:
-                """只取纳入评分的成份股代码并集，用于评分前补齐缺失日期的个股 qfq 日线。"""
-                codes = set()
+                """只取纳入评分的成份股代码并集，载入历史快照时并发拉取并上报进度。"""
+                pairs = []
                 for b in boards or []:
                     raw_code = str(b.get('code') or b.get('secid') or '')
                     m = re.search(r'BK\d+', raw_code)
                     pure = m.group(0) if m else ''
-                    if not pure:
-                        continue
-                    recs = _recent(read_cache(f'dc_member_{pure}.DC', max_age_hours=None), day)
-                    if isinstance(recs, list):
-                        codes.update(str(r.get('con_code') or '') for r in recs if isinstance(r, dict))
-                    else:
-                        snap = _recent(read_cache(f'board_stocks_{b.get("secid") or pure}', max_age_hours=None), day)
-                        if isinstance(snap, dict):
-                            codes.update(_ts_code(x) for x in (snap.get('stocks') or []) if isinstance(x, dict))
-                return sorted(c for c in codes if c and not _is_excluded_stock(c))
+                    if pure:
+                        pairs.append((pure, str(b.get('secid') or '')))
+                codes = set()
+                total = len(pairs)
+                if not total:
+                    return []
+                try:
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    with ThreadPoolExecutor(max_workers=6) as ex:
+                        futures = [ex.submit(_load_board_members, p, s) for p, s in pairs]
+                        done = 0
+                        for fut in as_completed(futures):
+                            try:
+                                codes.update(fut.result())
+                            except Exception as e:
+                                _diag(f'members load failed: {e}')
+                            done += 1
+                            if done % 10 == 0 or done == total:
+                                pct = 10 + int(20 * done / total)
+                                _emit_progress(f'板块评分：加载成份股快照 {done}/{total}', pct)
+                except Exception as e:
+                    _diag(f'members parallel load failed: {e}')
+                    for p, s in pairs:
+                        codes.update(_load_board_members(p, s))
+                return sorted(codes)
 
             def _backfill_missing_qfq(member_codes: List[str]):
-                """本地 qfq 日线落后于 as_of 时，用 Tushare 个股接口补齐后再算评分。
+                """本地 qfq 日线缺股票/缺日期时，用 Tushare 全市场日线 + 复权因子批量补齐。
 
-                逐个成份股调用 TushareAPI.get_kline_data（pro_bar/daily + adj_factor 手动复权），
-                它自己会把增量写回 daily.db/daily_parquet。这样和个股 K 线页走的 Tushare 口径完全一致，
-                不会掺入其它数据源，也不改变评分的等权口径。
+                仍然只用 Tushare 数据，但不再逐只调用个股接口：每个交易日只请求一次
+                pro.daily(trade_date=...) 和 pro.adj_factor(trade_date=...)，按
+                close * factor / base 手动算成前复权后批量写回。几千只股票也只需几十次 API。
                 """
                 if not member_codes:
                     return
                 expected = _last_trade_date_on_or_before(day_fmt)
                 if not expected:
                     return
-                # 不能用全库 MAX(trade_date) 判断是否需要补数：只要有任意一只股票补到了基准日，
-                # 其它大量没有本地历史的成份股就会被误判为“已覆盖”。这里按交易日历回看，
-                # 逐日检查本次评分的成份股是否真的有 qfq 数据。
-                start = (datetime.strptime(expected, '%Y-%m-%d') - timedelta(days=30)).strftime('%Y-%m-%d')
+                start = (datetime.strptime(expected, '%Y-%m-%d') - timedelta(days=needed * 2)).strftime('%Y-%m-%d')
                 cal = sorted(
                     str(d) for d in _db_load_trade_cal_range(start, expected)
                     if str(d) <= expected
-                )
+                )[-needed:]
                 if not cal:
                     return
-                # 限制单次补数范围，避免训练模式回看很早的日期时打爆上游额度
-                cal = cal[-10:]
-                _diag(f'qfq backfill: expected={expected} dates={cal}')
+                _diag(f'qfq backfill: expected={expected} dates={len(cal)}')
 
+                code_set = set(member_codes)
                 q = ','.join('?' * len(member_codes))
-                for miss in cal:
-                    try:
-                        have = {
-                            str(r[0]) for r in conn.execute(
-                                "SELECT ts_code FROM daily_kline WHERE kind='stock' "
-                                "AND period='daily' AND adjust='qfq' AND trade_date=? "
-                                "AND ts_code IN (" + q + ")",
-                                [str(miss)] + member_codes,
-                            ).fetchall()
-                        }
-                        missing = [c for c in member_codes if c not in have]
-                        if not missing:
+                existing = {
+                    (str(r[0]), str(r[1])) for r in conn.execute(
+                        "SELECT ts_code, trade_date FROM daily_kline WHERE kind='stock' "
+                        "AND period='daily' AND adjust='qfq' AND trade_date>=? "
+                        "AND ts_code IN (" + q + ")",
+                        [cal[0]] + member_codes,
+                    ).fetchall()
+                }
+                missing_pairs = {
+                    (c, d) for c in member_codes for d in cal if (c, d) not in existing
+                }
+                if not missing_pairs:
+                    return
+                stocks_to_write = {c for c, _ in missing_pairs}
+                _diag(f'qfq backfill: missing pairs={len(missing_pairs)} stocks={len(stocks_to_write)}')
+
+                raw_maps: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                factor_maps: Dict[str, Dict[str, float]] = {}
+                for i, d in enumerate(cal):
+                    compact = d.replace('-', '')
+                    raw = safe_api_call(get_pro().daily, trade_date=compact)
+                    fac = safe_api_call(get_pro().adj_factor, trade_date=compact)
+                    raw_maps[d] = {
+                        str(r.get('ts_code')): r for r in df_to_records(raw)
+                        if str(r.get('ts_code')) in stocks_to_write
+                    } if isinstance(raw, pd.DataFrame) and not raw.empty else {}
+                    factor_maps[d] = {
+                        str(r.get('ts_code')): float(r.get('adj_factor'))
+                        for r in df_to_records(fac)
+                        if str(r.get('ts_code')) in stocks_to_write
+                        and r.get('adj_factor') is not None
+                    } if isinstance(fac, pd.DataFrame) and not fac.empty else {}
+                    _emit_progress(
+                        f'板块评分：拉取 Tushare 日线/复权因子 {i + 1}/{len(cal)}',
+                        31 + int(12 * (i + 1) / len(cal)),
+                    )
+
+                # 某些 Tushare 权限下 adj_factor 不支持按 trade_date 批量取，退化为按股票取（仍是 Tushare）
+                if not any(factor_maps.values()):
+                    _diag('adj_factor by trade_date unavailable, fallback to per-stock factors')
+                    for code in stocks_to_write:
+                        try:
+                            full = get_adj_factors_full(code)
+                            if not isinstance(full, pd.DataFrame) or full.empty:
+                                continue
+                            fmap = {
+                                str(k).replace('-', ''): float(v)
+                                for k, v in zip(full['trade_date'].astype(str), full['adj_factor'])
+                            }
+                            for d in cal:
+                                v = fmap.get(d.replace('-', ''))
+                                if v is not None:
+                                    factor_maps[d][code] = v
+                        except Exception:
                             continue
-                        secids = [
-                            ('1.' if c.endswith('.SH') else '0.') + c.split('.')[0]
-                            for c in missing
-                        ]
-                        fetched = TushareAPI.get_kline_data_batch(
-                            secids, 'daily', 'qfq', limit=needed, end_date=str(miss)
-                        )
-                        ok = sum(1 for v in fetched.values() if isinstance(v, list) and v)
-                        _diag(f'backfill {miss}: missing={len(missing)} fetched={ok}')
-                        if not ok:
-                            break
-                    except Exception as e:
-                        _diag(f'backfill {miss} failed: {e}')
-                        break
+
+                # 每只股票用窗口内最近的有效因子作 base，整段统一缩放，避免新旧数据拼接处出现假跳空
+                eff_factor: Dict[tuple, float] = {}
+                base_by_code: Dict[str, float] = {}
+                for code in stocks_to_write:
+                    last = None
+                    for d in cal:
+                        f = factor_maps[d].get(code)
+                        if f is not None:
+                            last = f
+                        if last is not None:
+                            eff_factor[(code, d)] = last
+                    if last is not None:
+                        base_by_code[code] = last
+
+                rows = []
+                for code in sorted(stocks_to_write):
+                    base = base_by_code.get(code)
+                    if not base:
+                        continue
+                    for d in cal:
+                        r = raw_maps[d].get(code)
+                        f = eff_factor.get((code, d))
+                        if not r or not f:
+                            continue
+                        try:
+                            ratio = float(f) / float(base)
+                            sp = float(r.get('close') or 0) * ratio
+                            if sp <= 0:
+                                continue
+                            rows.append((
+                                code, d,
+                                float(r.get('open') or 0) * ratio, sp,
+                                float(r.get('high') or 0) * ratio, float(r.get('low') or 0) * ratio,
+                                float(r.get('vol') or 0),
+                                float(r.get('amount') or 0) * 1000,
+                                float(r.get('pct_chg') or 0),
+                                float(r.get('change') or 0),
+                                float(r.get('hsl') or 0),
+                                time.time(),
+                            ))
+                        except Exception:
+                            continue
+                if rows:
+                    conn.executemany(
+                        "INSERT INTO daily_kline(kind, ts_code, period, adjust, trade_date, "
+                        "kp, sp, zg, zd, cjl, cje, zdf, zde, hsl, updated_at) "
+                        "VALUES('stock', ?, 'daily', 'qfq', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(kind, ts_code, period, adjust, trade_date) DO UPDATE SET "
+                        "kp=excluded.kp, sp=excluded.sp, zg=excluded.zg, zd=excluded.zd, "
+                        "cjl=excluded.cjl, cje=excluded.cje, zdf=excluded.zdf, "
+                        "zde=excluded.zde, hsl=excluded.hsl, updated_at=excluded.updated_at",
+                        rows,
+                    )
+                    conn.commit()
+                _diag(f'qfq backfill: wrote {len(rows)} rows')
+                _emit_progress(f'板块评分：补齐完成（{len(rows)} 条日线）', 44)
 
             _diag('check qfq coverage')
+            _emit_progress('板块评分：检查并补齐成份股日线', 30)
             _backfill_missing_qfq(_collect_member_codes())
+            _emit_progress('板块评分：个股日线检查完成', 45)
 
             dates = [
                 str(r[0]) for r in conn.execute(
@@ -8225,21 +8386,12 @@ class TushareAPI:
                     continue
                 board_names[secid] = str(b.get('name') or '')
 
-                # 成份股是按交易日归档的历史快照，写入时间不影响其有效性：
-                # 由 _recent 取不晚于 as_of 的最近一份来避免前视，不能再用 30 天时效把旧快照误杀。
-                recs = _recent(read_cache(f'dc_member_{pure}.DC', max_age_hours=None), day)
-                codes = (
-                    [str(r.get('con_code') or '') for r in recs if isinstance(r, dict)]
-                    if isinstance(recs, list) else []
-                )
-                if not codes:
-                    snap = _recent(read_cache(f'board_stocks_{secid}', max_age_hours=None), day)
-                    if isinstance(snap, dict):
-                        codes = [_ts_code(x) for x in (snap.get('stocks') or []) if isinstance(x, dict)]
-                codes = sorted({c for c in codes if c and not _is_excluded_stock(c)})
+                # 成份股快照缺失时由 _load_board_members 自动走 Tushare dc_member 补齐，
+                # 历史日期也会取不晚于 as_of 的最近一份，避免前视。
+                codes = _load_board_members(pure, secid)
                 if len(codes) < cfg['min_members']:
                     reason = (
-                        '缺少成份股名单：请先打开该板块的成份股列表以建立缓存'
+                        '缺少成份股名单：Tushare dc_member 未返回可用快照'
                         if not codes else
                         f'成份股仅 {len(codes)} 只，少于评分下限 {cfg["min_members"]} 只'
                     )
@@ -8248,14 +8400,17 @@ class TushareAPI:
                 sector_map[secid] = codes
 
             _diag(f'sector_map={len(sector_map)} skipped={len(skipped)}')
+            _emit_progress(f'板块评分：成份股就绪（{len(sector_map)} 个板块）', 55)
             if not sector_map:
                 return {'error': '没有可用的板块成份股映射（请先点开一次板块成份股列表以建立缓存）',
                         'rows': [], 'as_of': day, 'window': cfg['window'],
                         'scored': 0, 'skipped': skipped}
 
             _diag('enter score_boards')
+            _emit_progress('板块评分：计算 S1~S5 与修正项', 70)
             scores = BSM.score_boards(daily, sector_map, as_of=day, cfg=cfg)
             _diag(f'score_boards done scored={len(scores)}')
+            _emit_progress('板块评分：汇总结果', 90)
             rows = []
             for secid, m in scores.items():
                 r = dict(m)
@@ -8287,6 +8442,7 @@ class TushareAPI:
 
             _clean_row_values()
             rows.sort(key=lambda r: -(r.get('score_alpha') or 0))
+            _emit_progress('板块评分：完成', 100)
             return {'rows': rows, 'as_of': day, 'window': cfg['window'],
                     'scored': len(rows), 'skipped': skipped, 'members': len(sector_map)}
         except Exception as e:

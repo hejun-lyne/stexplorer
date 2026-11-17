@@ -3024,7 +3024,7 @@ export interface BoardStrengthQueryItem {
 }
 
 /** 板块强势度评分单次 IPC 的兜底超时（防止 python 常驻进程无响应时界面一直转圈） */
-const SCORE_BOARD_STRENGTH_TIMEOUT_MS = 120000;
+const SCORE_BOARD_STRENGTH_TIMEOUT_MS = 600000;
 
 /**
  * 板块日K强势度评分 v1.1（BKList「交易模式」结果列表）
