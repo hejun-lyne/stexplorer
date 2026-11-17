@@ -8,6 +8,8 @@ import { Stock } from '@/types/stock';
 import type { WindVaneResult } from '@/helpers/stock';
 import type { BoardStageItem, StockRoleBinding, StrongWatchlistMeta } from '@/services/tushare';
 import * as TrainFilter from '@/utils/trainFilter';
+import { useSelector } from 'react-redux';
+import { StoreState } from '@/reducers/types';
 import moment from 'moment';
 import classNames from 'classnames';
 import { SlidersOutlined, SyncOutlined, UnorderedListOutlined } from '@ant-design/icons';
@@ -44,7 +46,10 @@ const WatchlistTag: React.FC<{ meta?: StrongWatchlistMeta }> = ({ meta }) => {
 };
 
 const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
-  const [dates, setDates] = useState([moment(new Date()).format('YYYYMMDD')]);
+  const { ontrain, trainDate } = useSelector((state: StoreState) => state.setting.systemSetting);
+  /** 训练模式下默认展示当前训练日（YYYYMMDD），非训练模式仍用今天 */
+  const defaultDate = ontrain && trainDate ? String(trainDate).replace(/-/g, '') : '';
+  const [dates, setDates] = useState(() => [defaultDate || moment(new Date()).format('YYYYMMDD')]);
   const [stocks, setStocks] = useState<Stock.QSItem[]>([]);
   const [filterIndustry, setFilterIndustry] = useState<string>('');
   const [sBks, setSBks] = useState<string[]>([]);
@@ -86,6 +91,13 @@ const QSList: React.FC<QSListProps> = ({ industries, onOpenStock, active }) => {
   useEffect(() => {
     Utils.SetStorage('QSList_AUTO_BACKUP', autoBackup);
   }, [autoBackup]);
+
+  // 训练日可能在页面挂载后由设置同步/推进写入，日期默认值同步跟随
+  useEffect(() => {
+    if (defaultDate) {
+      setDates([defaultDate]);
+    }
+  }, [defaultDate]);
 
   /** 判定基准日：查询区间末日；训练模式下收敛到当前训练日，避免请求未来数据 */
   const boardStageDay = useMemo(() => {

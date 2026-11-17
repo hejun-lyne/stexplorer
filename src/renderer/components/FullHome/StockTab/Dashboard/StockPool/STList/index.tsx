@@ -1017,21 +1017,26 @@ const STList: React.FC<STListProps> = ({
       const progressSecid = trainProgress?.secid || effectiveSecids[0] || secid || '';
       const progressName =
         trainProgress?.name || [...industries, ...gainians].find((i) => i.secid === progressSecid)?.name || '';
-      dispatch(
-        saveTrainDayAction({
-          date: targetDay,
-          secid: progressSecid,
-          name: progressName,
-          startDate: trainStartDate || trainProgress?.startDate || '',
-          endDate: trainEndDate || trainProgress?.endDate || '',
-          days: trainCalendarDays,
-          initialCapital: Number(initialCapital) || trainProgress?.initialCapital || 0,
-          commissionRate:
-            commissionRate != null && Number.isFinite(Number(commissionRate))
-              ? Number(commissionRate)
-              : trainProgress?.commissionRate,
-        })
-      );
+      // 训练日与训练时钟必须同帧更新：分两次 dispatch 会让面板先渲染到「新训练日 + 旧推进时刻」，
+      // 拿上一日的分时重建出一根错误的当日K（表现为日K先闪现当日K再消失）
+      batch(() => {
+        dispatch(setTrainTimeAction(TRAIN_TIME_LIST[TRAIN_TIME_DEFAULT_IDX]));
+        dispatch(
+          saveTrainDayAction({
+            date: targetDay,
+            secid: progressSecid,
+            name: progressName,
+            startDate: trainStartDate || trainProgress?.startDate || '',
+            endDate: trainEndDate || trainProgress?.endDate || '',
+            days: trainCalendarDays,
+            initialCapital: Number(initialCapital) || trainProgress?.initialCapital || 0,
+            commissionRate:
+              commissionRate != null && Number.isFinite(Number(commissionRate))
+                ? Number(commissionRate)
+                : trainProgress?.commissionRate,
+          })
+        );
+      });
       const idx = trainCalendarDays.indexOf(targetDay);
       message.success(
         `已保存训练进度：${targetDay}（${idx + 1}/${trainCalendarDays.length} 个交易日），下次启动从此日继续`
@@ -5488,6 +5493,7 @@ const STList: React.FC<STListProps> = ({
             name={nameOfListItem(panelRow)}
             trainDate={ontrain ? trainDate : ''}
             trainTime={ontrain ? trainTime : ''}
+            trainTimeStarted={ontrain ? timeStarted : false}
             prevTradeDate={ontrain ? prevTrainDay : ''}
             onOpenStock={onOpenStock}
             favoriteStocks={panelFavoriteStocks}

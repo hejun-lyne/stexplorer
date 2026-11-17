@@ -1023,6 +1023,14 @@ export interface ScoreStockPanelProps {
    */
   trainTime?: string;
   /**
+   * 训练模式：分时时间推进是否已经开始（点过播放 / 拖动过时间轴 / 已完成）
+   *
+   * 还没开始时「当日分时」不存在，日K不应出现当日那根——既不用分时重建，
+   * 也不显示官方日K里训练日收盘那根（对盘中时点它属于未来数据）。
+   * 未传时按「已开始」处理，保持原有行为。
+   */
+  trainTimeStarted?: boolean;
+  /**
    * 上一交易日（YYYY-MM-DD）；训练模式由外层按训练日历传入，非训练模式为空
    *
    * 进入交易模式时右侧图表默认看这一天的历史分时（前一天已收盘，不含训练日盘中数据）；
@@ -1175,6 +1183,7 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   name,
   trainDate,
   trainTime,
+  trainTimeStarted,
   prevTradeDate,
   onOpenStock,
   layout = 'single',
@@ -1363,8 +1372,12 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   // 分时取数：训练模式取训练日的历史分时（Tushare 1 分钟线），非训练模式取实时分时。
   // 训练模式下即使当前看的是日K也要取：当日那根K线要按分时重建（见 displayKlines）；
   // 非训练模式同样始终取一次：交易区按「当前分时价」成交，不能只看日K收盘价。
+  /** 分时数据实际所属的训练日（非训练模式为空）：分时的 datetime 只有 "HH:MM:SS" 取不到日期，
+   *  只能在加载成功时记录「这份分时是为哪个训练日取的」，避免训练日切换瞬间拿旧分时冒充新训练日 */
+  const trendsDayRef = useRef('');
   useEffect(() => {
     let canceled = false;
+    trendsDayRef.current = '';
     setTrends([]);
     setTrendError('');
     setTrendLoading(true);
@@ -1376,6 +1389,7 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
     Promise.resolve(loader)
       .then((list) => {
         if (!canceled) {
+          trendsDayRef.current = trainDate || '';
           setTrends(list || []);
         }
       })
@@ -1548,10 +1562,13 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   }, [trendPrice, trendZs]);
 
   /**
-   * 日K的「当日那根」始终由分时重建，让日K图随行情更新
+   * 日K的「当日那根」按分时重建，让日K图随行情更新
    *
-   * - 训练模式：训练日的官方日K是收盘口径（对盘中时点属于未来数据），用「已推进到」的
-   *   分时合成一根截至当前时刻的K线；还没开盘（无分时）时当日K直接不显示。
+   * - 训练模式：官方日K里「训练日那根」是收盘口径（对盘中时点属于未来数据），一律不显示；
+   *   当日K只由「已推进到的分时」合成。三个前置条件缺一不可，任一不满足就直接隐藏当日K：
+   *   ① 分时确实是当前训练日的（trendsDayRef 校验，切换训练日的过渡期旧分时不冒充新训练日）；
+   *   ② 时间推进已经开始（trainTimeStarted，开盘默认位 09:25 时当日分时还不存在）；
+   *   ③ 已推进的分时非空。
    * - 实时模式：数据源的当日日K是静态快照，盘中往往根本没有当日柱，且 klines 只在挂载时
    *   取一次；这里用最新分时合成/替换当日柱，分时每 60 秒刷新，日K的当日柱就跟着更新。
    *
@@ -1559,38 +1576,57 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
    * 秒板/跳空时会明显偏离真实开盘价（曾出现 34.61 vs 真实开盘 33.96 的偏差）。
    */
   const displayKlines = useMemo(() => {
-    if (!trends.length || (inTraining && !trainTime)) {
-      return klines;
-    }
-    const day = inTraining
-      ? String(trainDate || '').substring(0, 10)
-      : trendDayKey.length === 8
-        ? `${trendDayKey.substring(0, 4)}-${trendDayKey.substring(4, 6)}-${trendDayKey.substring(6, 8)}`
-        : dayjs().format('YYYY-MM-DD');
     if (!inTraining) {
+      // 实时模式
+      if (!trends.length) {
+        return klines;
+      }
+      const day =
+        trendDayKey.length === 8
+          ? `${trendDayKey.substring(0, 4)}-${trendDayKey.substring(4, 6)}-${trendDayKey.substring(6, 8)}`
+          : dayjs().format('YYYY-MM-DD');
       // 非交易日 / 盘前：实时分时接口给的仍是上一交易日数据，拿「今天」当日期会凭空多一根K
       const now = dayjs();
       if (now.day() === 0 || now.day() === 6 || now.hour() * 60 + now.minute() < 9 * 60 + 20) {
         return klines;
       }
+      const key = dateKey(day);
+      const base = klines.filter((k) => dateKey(k?.date) !== key);
+      const dayBar = klines.find((k) => dateKey(k?.date) === key);
+      const bar = BuildDailyKFromTrends({
+        secid,
+        trends,
+        date: day,
+        prevClose: trendZs,
+        openPrice: Number(dayBar?.kp) || 0,
+      });
+      return bar ? [...base, bar] : klines;
     }
+    // 训练模式：先滤掉官方日K里训练日那根，再决定要不要用分时补一根
+    const day = String(trainDate || '').substring(0, 10);
     const key = dateKey(day);
     const base = klines.filter((k) => dateKey(k?.date) !== key);
-    const dayBar = klines.find((k) => dateKey(k?.date) === key);
-    const src = inTraining ? visibleTrends : trends;
-    if (!src.length) {
-      // 训练模式未开盘：隐藏当日K；实时模式暂无分时：保留数据源原样
-      return inTraining ? base : klines;
+    // 分时还没加载出来 / 还属于上一训练日：不合成（分时加载失败时同样保持隐藏，宁缺勿错）
+    if (trendsDayRef.current !== trainDate) {
+      return base;
     }
+    // 时间推进还没开始：当日分时还不存在，不出现当日K
+    if (!trainTime || trainTimeStarted === false) {
+      return base;
+    }
+    if (!visibleTrends.length) {
+      return base;
+    }
+    const dayBar = klines.find((k) => dateKey(k?.date) === key);
     const bar = BuildDailyKFromTrends({
       secid,
-      trends: src,
+      trends: visibleTrends,
       date: day,
       prevClose: trendZs,
       openPrice: Number(dayBar?.kp) || 0,
     });
-    return bar ? [...base, bar] : inTraining ? base : klines;
-  }, [inTraining, trainTime, trainDate, trendDayKey, trends, visibleTrends, klines, trendZs, secid]);
+    return bar ? [...base, bar] : base;
+  }, [inTraining, trainTimeStarted, trainTime, trainDate, trendDayKey, trends, visibleTrends, klines, trendZs, secid]);
 
   /**
    * 昨日K线：分时所属交易日之前（含训练日口径）的最后一根日K
