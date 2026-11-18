@@ -1192,11 +1192,21 @@ const STList: React.FC<STListProps> = ({
   const { run: runGetStocks } = useRequest(Services.Stock.GetBankuaiStocksFromDataSource, {
     throwOnError: true,
     manual: true,
-    onError: (_e, params) => {
+    onError: (e, params) => {
       const requestedSecid = String((params as any)?.[1] || '');
       if (requestedSecid) {
         delete refreshingBoardsRef.current[requestedSecid];
       }
+      // 以前这里完全静默：切板块后整张表空、用户无从判断是没发请求还是取数失败
+      console.error(
+        `[板块成分股] 拉取失败：secid=${requestedSecid || '--'} source=${String((params as any)?.[0] || '--')} date=${String((params as any)?.[3] || '--')}`,
+        e
+      );
+      message.error({
+        content: `板块成分股拉取失败（${requestedSecid || '--'}）：${(e as any)?.message || String(e)}`,
+        key: `board-stock-error-${requestedSecid}`,
+        duration: 6,
+      });
     },
     onSuccess: (data, params) => {
       const requestedSecid = String((params as any)?.[1] || '');
@@ -1208,6 +1218,13 @@ const STList: React.FC<STListProps> = ({
       // 多板块：先把该板块的列表存入缓存（即便它已被取消勾选，也留作再次勾选时秒回）
       // 空结果不覆盖旧缓存：切训练日/接口偶发失败时，列表才不会突然变空、名称也才不会退化成代码
       const fetched = (data?.stocks || []) as Stock.DetailItem[];
+      console.log(
+        `[板块成分股] 返回：secid=${requestedSecid} date=${String((params as any)?.[3] || '--')} 共 ${fetched.length} 只` +
+          (fetched.length ? `，样例行情 ${fetched[0].code} zx=${fetched[0].zx} zdf=${fetched[0].zdf} lt=${(fetched[0] as any).lt}` : '') +
+          ` | py=${String((data as any)?.code_version || '--')} trade=${String((data as any)?.trade_date || '--')}` +
+          ` quote=${String((data as any)?.quote_date || '--')} fallback=${String((data as any)?.fallback_used ?? '--')}`,
+        (data as any)?.debug || ''
+      );
       if (fetched.length) {
         boardStocksCacheRef.current[requestedSecid] = fetched;
       } else if (!boardStocksCacheRef.current[requestedSecid]) {
@@ -1390,11 +1407,17 @@ const STList: React.FC<STListProps> = ({
   const { run: runGetIndustryStocks } = useRequest(GetIndustryStocksFromTushare, {
     throwOnError: true,
     manual: true,
-    onError: (_e, params) => {
+    onError: (e, params) => {
       const requestedSecid = String((params as any)?.[0] || '');
       if (requestedSecid) {
         delete refreshingBoardsRef.current[requestedSecid];
       }
+      console.error(`[板块成分股] 申万行业拉取失败：secid=${requestedSecid || '--'}`, e);
+      message.error({
+        content: `申万行业成分股拉取失败（${requestedSecid || '--'}）：${(e as any)?.message || String(e)}`,
+        key: `board-stock-error-${requestedSecid}`,
+        duration: 6,
+      });
     },
     onSuccess: (data, params) => {
       const requestedSecid = String((params as any)?.[0] || '');
@@ -1431,13 +1454,13 @@ const STList: React.FC<STListProps> = ({
       const source = ontrain ? SHORT_SCORE_SOURCE : kLineApiSourceSetting;
       const date = trainDay || undefined;
       /**
-       * 行业板块直接使用最新交易日的成分股名单
+       * 成分股名单查不到时允许退回最新快照（行业 + 概念都开）
        *
-       * 东财行业板块的历史成分（dc_member 快照）约从 2025-05-30 才开始，
-       * 训练日更早时按历史日期查必然是空表。这里按需求退回最新快照：
-       * 只换名单，行情仍按训练日取（python 侧保证），不会带出未来价格。
+       * 东财 dc_member 历史快照约从 2025-05-30 才开始；非训练模式按「今天」查时，
+       * 当天的成分快照也可能还没生成（日志里表现为返回 0 只、板块一直空表）。
+       * 退回只换名单，行情仍按目标交易日取（python 侧保证），不会带出未来价格。
        */
-      const latestMembers = bktype === BKType.Industry;
+      const latestMembers = true;
       secids.forEach((s) => {
         if (!s) {
           return;
@@ -2866,7 +2889,25 @@ const STList: React.FC<STListProps> = ({
       }
     });
     rebuildStocksFromBoards();
-    const missing = targetSecids.filter((s) => boardStocksCacheRef.current[s] === undefined);
+    /**
+     * 需重新拉取的板块：
+     * - 没有缓存（首次选中 / 上次取数失败）；
+     * - 缓存是空数组：上一轮返回了空结果，之前把它当成「已加载」导致再次勾选永远空表；
+     * - 缓存行情全 0：盘中 Tushare 无当日数据时落下的旧缓存，必须重拉才有最新行情。
+     *
+     * 空数组仍留在缓存里（让 boardsReady 不为死等），只是每次勾选都重试一次。
+     */
+    const needFetch = (s: string) => {
+      const cached = boardStocksCacheRef.current[s];
+      if (!cached || !cached.length) {
+        return true;
+      }
+      return cached.every((row: any) => !(Number(row?.zx) > 0));
+    };
+    const missing = targetSecids.filter(needFetch);
+    console.log(
+      `[板块] 切换：key=${targetKey || '--'} 目标板块=[${targetSecids.join('、')}] 需拉取=[${missing.join('、')}]`
+    );
     if (missing.length) {
       loadBoardsStocks(missing);
     }

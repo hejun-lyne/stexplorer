@@ -338,6 +338,27 @@ def _to_float(val) -> float:
         return 0
 
 
+def _stocks_quotes_missing(stocks) -> bool:
+    """成分股列表是否缺少行情（现价全 0）
+
+    Tushare daily/daily_basic 盘中不出当日数据，按当天 trade_date 查询会拿到空表，
+    组装出的成分股只有名字/代码、行情字段全是 0。这种数据不能写缓存（否则收盘后
+    缓存命中，列表永远显示 0），已写入的旧缓存命中时也要视为无效重新拉取。
+    """
+    if not isinstance(stocks, list) or not stocks:
+        return True
+    for s in stocks:
+        if not isinstance(s, dict):
+            continue
+        if _to_float(s.get("zx", 0)) > 0:
+            return False
+    return True
+
+
+# 打包后用于确认渲染进程实际跑到的 python 版本（排查「前端代码更新了、python 没更新」）
+BOARD_STOCKS_CODE_VERSION = "20261118-quote-fallback"
+
+
 def _to_int(val) -> int:
     try:
         if val is None:
@@ -3240,7 +3261,7 @@ class TushareAPI:
         if is_ths_board and target_date < _real_today_str():
             # 同花顺板块没有历史成分接口，历史日期下的缓存来自「当前快照」，不能复用
             cached_day = None
-        if isinstance(cached_day, dict) and cached_day.get("stocks"):
+        if isinstance(cached_day, dict) and cached_day.get("stocks") and not _stocks_quotes_missing(cached_day.get("stocks")):
             if date:
                 # 指定了历史日期，直接返回
                 print(f"[板块成分股缓存命中] {secid} date={target_date} (指定日期)")
@@ -3358,7 +3379,7 @@ class TushareAPI:
                             }
                         debug_info["fallback"] = "ths_web"
                     if not member_map:
-                        return {"total": 0, "stocks": [], "debug": debug_info}
+                        return {"total": 0, "stocks": [], "debug": debug_info, "code_version": BOARD_STOCKS_CODE_VERSION}
                 elif df is not None and isinstance(df, pd.DataFrame) and not df.empty:
                     debug_info["dc_member_rows"] = len(df)
                     for _, row in df.iterrows():
@@ -3377,33 +3398,122 @@ class TushareAPI:
                     debug_info["member_count"] = len(member_map)
 
             if not member_map:
-                return {"total": 0, "stocks": [], "debug": debug_info}
+                return {"total": 0, "stocks": [], "debug": debug_info, "code_version": BOARD_STOCKS_CODE_VERSION}
 
             # ========== 批量获取全市场当日行情 ==========
+            # Tushare daily/daily_basic 盘中不出当日数据：trade_date=今天会返回空表，
+            # 组装出的成分股行情字段（现价/涨跌/换手/市值）全是 0。这里沿交易日历往前回退，
+            # 取最近一个「有行情」的交易日（收盘口径）作为最新可用行情；发生回退时不写缓存，
+            # 收盘后真实当日数据出来会重新拉取。
             market_data: Dict[str, Dict[str, Any]] = {}
+            quote_date = trade_date
+            fallback_used = False
+            daily_df = None
             try:
-                daily_df = pro.daily(trade_date=trade_date)
-                if daily_df is not None and not daily_df.empty:
-                    for _, row in daily_df.iterrows():
-                        tc = str(row.get("ts_code", ""))
-                        if tc in member_map:
-                            market_data[tc] = {
-                                "zx": _to_float(row.get("close", 0)),
-                                "zdf": _to_float(row.get("pct_chg", 0)),
-                                "zdd": _to_float(row.get("change", 0)),
-                                "zg": _to_float(row.get("high", 0)),
-                                "zd": _to_float(row.get("low", 0)),
-                                "jk": _to_float(row.get("open", 0)),
-                                "zs": _to_float(row.get("pre_close", 0)),
-                                "cjl": _to_int(row.get("vol", 0)),
-                                "cje": round(_to_float(row.get("amount", 0)) * 1000, 2),
-                            }
+                candidate_days = [trade_date]
+                try:
+                    cal_df = pro.trade_cal(
+                        exchange='SSE',
+                        start_date=(datetime.strptime(trade_date, '%Y%m%d') - timedelta(days=15)).strftime('%Y%m%d'),
+                        end_date=trade_date,
+                        is_open='1',
+                    )
+                    if cal_df is not None and not cal_df.empty:
+                        # 降序：先试目标日，再逐个往前回退
+                        candidate_days = sorted(cal_df['cal_date'].astype(str).tolist())[-6:][::-1]
+                except Exception as e:
+                    print(f"[行情回退交易日查询失败] {e}")
+                for d in candidate_days:
+                    try:
+                        df = pro.daily(trade_date=d)
+                    except Exception as e:
+                        print(f"[daily {d} 查询失败] {e}")
+                        continue
+                    if df is not None and not df.empty:
+                        quote_date = d
+                        daily_df = df
+                        fallback_used = quote_date != trade_date
+                        break
+                if daily_df is None:
+                    # 目标日往前 6 个交易日都查不到（行情库整体落后于当前日期时）：
+                    # 用一只样本股问 Tushare 真实的数据截止日，再按该日取全市场行情
+                    try:
+                        probe = pro.daily(ts_code='000001.SZ', limit=1)
+                        if probe is not None and not probe.empty and 'trade_date' in probe.columns:
+                            latest = str(probe['trade_date'].iloc[0]).replace('-', '')
+                            if latest and latest not in candidate_days:
+                                df = pro.daily(trade_date=latest)
+                                if df is not None and not df.empty:
+                                    quote_date = latest
+                                    daily_df = df
+                                    fallback_used = True
+                                    debug_info["quote_from_probe"] = True
+                    except Exception as e:
+                        print(f"[行情截止日探测失败] {e}")
+                if fallback_used:
+                    print(f"[板块成分股] {secid} {trade_date} 无行情（盘中/未更新），行情回退到最近交易日 {quote_date}")
             except Exception as e:
                 print(f"[daily 批量查询失败] {e}")
+            debug_info["quote_date"] = quote_date
+            debug_info["fallback_used"] = fallback_used
+
+            if daily_df is not None and not daily_df.empty:
+                for _, row in daily_df.iterrows():
+                    tc = str(row.get("ts_code", ""))
+                    if tc in member_map:
+                        market_data[tc] = {
+                            "zx": _to_float(row.get("close", 0)),
+                            "zdf": _to_float(row.get("pct_chg", 0)),
+                            "zdd": _to_float(row.get("change", 0)),
+                            "zg": _to_float(row.get("high", 0)),
+                            "zd": _to_float(row.get("low", 0)),
+                            "jk": _to_float(row.get("open", 0)),
+                            "zs": _to_float(row.get("pre_close", 0)),
+                            "cjl": _to_int(row.get("vol", 0)),
+                            "cje": round(_to_float(row.get("amount", 0)) * 1000, 2),
+                        }
+            else:
+                # 网络 daily 拿不到目标日行情：与个股 K 线页同口径，改读本地 daily.db/daily_parquet。
+                # 应用里其它页面显示当日行情正是走这条本地链路；板块列表不能只依赖网络接口。
+                local_filled = 0
+                local_date = ''
+                for member_ts in member_map:
+                    try:
+                        ts_code = convert_secid_to_ts_code(member_map[member_ts]["secid"])
+                        rows = _db_read_kline('stock', ts_code, 'daily', '', end=quote_date) or []
+                        if not rows:
+                            continue
+                        row = rows[-1]  # 升序，最后一根即 <= quote_date 的最新交易日
+                        zx = _to_float(row.get('sp', 0))
+                        if zx <= 0:
+                            continue
+                        prev_zx = _to_float(rows[-2].get('sp', 0)) if len(rows) >= 2 else 0
+                        zdf = _to_float(row.get('zdf', 0))
+                        market_data[member_ts] = {
+                            "zx": zx,
+                            "zdf": zdf,
+                            "zdd": _to_float(row.get('zde', 0)) or (zx - prev_zx),
+                            "zg": _to_float(row.get('zg', 0)),
+                            "zd": _to_float(row.get('zd', 0)),
+                            "jk": _to_float(row.get('kp', 0)),
+                            "zs": prev_zx if prev_zx > 0 else round(zx / (1 + zdf / 100), 2),
+                            "hsl": _to_float(row.get('hsl', 0)),
+                            "cjl": _to_int(row.get('cjl', 0)),
+                            "cje": _to_float(row.get('cje', 0)),
+                        }
+                        local_filled += 1
+                        local_date = str(row.get('date', ''))
+                    except Exception as e:
+                        print(f"[板块成分股] 本地行情兜底失败 {member_ts}: {e}")
+                if local_filled:
+                    print(f"[板块成分股] {secid} 网络日线为空，本地K线兜底 {local_filled} 只（最新 {local_date}）")
+                debug_info["local_kline_filled"] = local_filled
+                debug_info["local_kline_date"] = local_date
 
             # ========== 批量获取全市场当日基础指标 ==========
+            # 与行情同一交易日，避免现价用 T1、换手/市值用 T2 的混搭口径
             try:
-                basic_df = pro.daily_basic(trade_date=trade_date)
+                basic_df = pro.daily_basic(trade_date=quote_date)
                 if basic_df is not None and not basic_df.empty:
                     for _, row in basic_df.iterrows():
                         tc = str(row.get("ts_code", ""))
@@ -3425,7 +3535,7 @@ class TushareAPI:
             if is_ths:
                 # 同花顺：使用 moneyflow_ths（含当日和5日）
                 try:
-                    ths_mf = safe_api_call(pro.moneyflow_ths, trade_date=trade_date)
+                    ths_mf = safe_api_call(pro.moneyflow_ths, trade_date=quote_date)
                     if ths_mf is not None and not (isinstance(ths_mf, dict) and ths_mf.get("error")) and not ths_mf.empty:
                         for _, row in ths_mf.iterrows():
                             tc = str(row.get("ts_code", ""))
@@ -3439,7 +3549,8 @@ class TushareAPI:
                 # 先获取最近5个交易日
                 trade_dates: List[str] = []
                 try:
-                    cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=trade_date, is_open='1')
+                    # 与行情同一交易日往前取 5 日：盘中当日资金接口也是空的，回退后才有值
+                    cal_df = pro.trade_cal(exchange='SSE', start_date=start_date_5d, end_date=quote_date, is_open='1')
                     if cal_df is not None and not cal_df.empty:
                         trade_dates = sorted(cal_df['cal_date'].astype(str).tolist())[-5:]
                 except Exception as e:
@@ -3498,12 +3609,28 @@ class TushareAPI:
                         "cs": 0,
                     })
 
-                result = {"total": len(stocks), "stocks": stocks, "date": target_date}
+                result = {
+                    "total": len(stocks),
+                    "stocks": stocks,
+                    "date": target_date,
+                    "code_version": BOARD_STOCKS_CODE_VERSION,
+                    "trade_date": trade_date,
+                    "quote_date": quote_date,
+                    "fallback_used": fallback_used,
+                    "debug": debug_info,
+                }
                 if is_ths and target_date < _real_today_str():
                     # 同花顺板块只有当前成分快照，不能把它落到历史日期缓存下
                     result["history_unsupported"] = True
-                if isinstance(result, dict) and result.get("stocks") and not result.get("history_unsupported"):
-                    # 合并到统一缓存（按日期更新）
+                if (
+                    isinstance(result, dict)
+                    and result.get("stocks")
+                    and not result.get("history_unsupported")
+                    and not fallback_used
+                    and not _stocks_quotes_missing(result.get("stocks"))
+                ):
+                    # 合并到统一缓存（按日期更新）；行情回退（盘中）或行情缺失的结果不入缓存，
+                    # 否则收盘后缓存命中，列表会一直显示 0 或上一日的行情
                     cached_all[target_date] = result
                     write_cache(cache_key, cached_all)
                     print(f"[板块成分股缓存更新] {secid} 已缓存 {len(cached_all)} 个日期")
