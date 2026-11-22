@@ -45,6 +45,8 @@ except ImportError:
 
 # ============ 全局 Pro API 实例 ============
 _pro_api = None
+# 当前 token（init_pro 时记录）：部分接口需要绕开 SDK 直连 REST，见 _tushare_http_df
+_TOKEN = ''
 
 # py_service 在每次调用前注入进度回调，用于把长任务的阶段进度实时推给渲染层
 _PROGRESS_EMITTER = None
@@ -61,11 +63,12 @@ def _emit_progress(message: str, pct: Optional[int] = None):
 
 def init_pro(token: Optional[str] = None):
     """初始化 tushare pro api"""
-    global _pro_api
+    global _pro_api, _TOKEN
     if token:
         try:
             ts.set_token(token)
             _pro_api = ts.pro_api(token)
+            _TOKEN = token
             return _pro_api
         except Exception as e:
             sys.stderr.write(f"[DEBUG] init_pro failed: {e}\n")
@@ -77,6 +80,7 @@ def init_pro(token: Optional[str] = None):
         try:
             ts.set_token(env_token)
             _pro_api = ts.pro_api(env_token)
+            _TOKEN = env_token
             return _pro_api
         except Exception as e:
             sys.stderr.write(f"[DEBUG] init_pro(env) failed: {e}\n")
@@ -661,6 +665,59 @@ def safe_api_call(func, *args, **kwargs):
         if "权限" in err_msg or "积分" in err_msg or "permission" in err_msg.lower():
             return {"error": f"权限不足，请检查 Tushare 积分: {err_msg}"}
         return {"error": err_msg}
+
+
+def _tushare_http_df(api_name: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    """绕开 SDK 直连 tushare REST（参数与 tushare.pro「数据工具」完全一致）
+
+    为什么需要它：SDK 的 DataApi.query 会往 params 里塞一个额外的 ts_type_name，
+    个别新接口（dc_index 等）会因此被服务端判为「参数不合法」，报
+    「指定数据不存在，请确认参数！」——即使网页数据工具用同样的参数能正常取到数据。
+    这里只发文档里声明的参数，走 https://api.tushare.pro。
+
+    返回：pd.DataFrame（成功）/ {"error": "..."}（失败）
+    """
+    if requests is None:
+        return {"error": "requests 未安装"}
+    token = _TOKEN or os.environ.get("TUSHARE_TOKEN", "")
+    if not token:
+        return {"error": "Tushare token 未设置"}
+    body = {
+        "api_name": api_name,
+        "token": token,
+        "params": {k: v for k, v in (params or {}).items() if v not in (None, "")},
+        "fields": "",
+    }
+    try:
+        resp = requests.post("https://api.tushare.pro", json=body, timeout=20)
+        result = resp.json()
+        if result.get("code") != 0:
+            return {"error": result.get("msg") or f"tushare code={result.get('code')}"}
+        data = result.get("data") or {}
+        items = data.get("items") or []
+        fields = data.get("fields") or []
+        if pd is None:
+            return {"error": "pandas 未安装"}
+        return pd.DataFrame(items, columns=fields)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def dc_index_df(**params) -> Any:
+    """dc_index 统一入口：先直连 REST（参数与网页数据工具一致），失败再退回 SDK
+
+    所有取「东财板块快照」的地方都应该走这里，避免 SDK 附加参数 / 请求路径差异
+    导致服务端回「指定数据不存在，请确认参数！」。
+    """
+    df = _tushare_http_df("dc_index", params)
+    if not (isinstance(df, dict) and df.get("error")):
+        return df
+    http_error = str(df.get("error"))
+    try:
+        return get_pro().dc_index(**params)
+    except Exception as e:
+        # 两条链都失败时保留两个原因，方便判断是「参数/日期」还是「token/网络」
+        return {"error": f"直连: {http_error} | SDK: {e}"}
 
 
 def _get_stock_basic_maps() -> tuple[Dict[str, str], Dict[str, str]]:
@@ -1444,9 +1501,9 @@ class TushareAPI:
             board_row = None
             for idx_type in ["行业板块", "概念板块"]:
                 if is_history:
-                    df = safe_api_call(pro.dc_index, idx_type=idx_type, trade_date=target_date)
+                    df = dc_index_df(idx_type=idx_type, trade_date=target_date)
                 else:
-                    df = safe_api_call(pro.dc_index, idx_type=idx_type)
+                    df = dc_index_df(idx_type=idx_type)
                 if isinstance(df, dict) and df.get("error"):
                     continue
                 if df is None or df.empty:
@@ -2768,18 +2825,47 @@ class TushareAPI:
             today = _now()
             as_of = get_as_of_date()
 
+            # 最近交易日（本地交易日历，命中即秒回）：上游「当日」数据还没生成时用它兜底
+            try:
+                expected_last = _get_expected_last_trade_date("daily")
+            except Exception:
+                expected_last = ""
+            prev_day = (_now_date() - timedelta(days=1)).strftime("%Y%m%d")
+
             if data_source == "ths":
                 # ========== 同花顺数据源 ==========
                 # 行业板块用 moneyflow_ind_ths，概念板块用 moneyflow_cnt_ths
-                if bk_type == "industry":
-                    df = safe_api_call(pro.moneyflow_ind_ths, trade_date=today)
-                else:
-                    df = safe_api_call(pro.moneyflow_cnt_ths, trade_date=today)
+                api = pro.moneyflow_ind_ths if bk_type == "industry" else pro.moneyflow_cnt_ths
 
-                if isinstance(df, dict) and df.get("error"):
-                    return df
-                if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-                    return {"error": "No data"}
+                # 当日数据还没发布（盘中/节假日/接口抖动）时 tushare 会直接报
+                # 「指定数据不存在，请确认参数！」，导致整个板块列表打不开。
+                # 这里按 [数据截止日 → 最近交易日 → 前一日] 逐级回退，尽量给出最近一版快照。
+                candidate_days: List[str] = []
+                for d in (today, expected_last, prev_day):
+                    d = str(d or "").replace("-", "")[:8]
+                    if d and d not in candidate_days:
+                        candidate_days.append(d)
+
+                df = None
+                last_error = ""
+                for d in candidate_days:
+                    df = safe_api_call(api, trade_date=d)
+                    if isinstance(df, dict) and df.get("error"):
+                        last_error = str(df.get("error"))
+                        print(f"[get_sector_boards] 同花顺 {d} 取数失败：{last_error}，尝试回退")
+                        df = None
+                        continue
+                    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                        print(f"[get_sector_boards] 同花顺 {d} 返回空，尝试回退")
+                        df = None
+                        continue
+                    if d != today:
+                        print(f"[get_sector_boards] 同花顺 {today} 无数据，已回退到 {d}")
+                    break
+
+                if df is None:
+                    # 必须带上 boards 字段：前端按 { to, arr } 消费，缺字段会直接抛错
+                    return {"error": last_error or "No data", "boards": []}
 
                 boards = []
                 for _, row in df.iterrows():
@@ -2821,21 +2907,112 @@ class TushareAPI:
             # ========== 东财数据源（默认） ==========
             idx_type = "行业板块" if bk_type == "industry" else "概念板块"
             snapshot_fallback = False
+
+            def _dc_empty(x) -> bool:
+                return (
+                    x is None
+                    or (isinstance(x, dict) and bool(x.get("error")))
+                    or (isinstance(x, pd.DataFrame) and x.empty)
+                )
+
+            def _fetch_dc(trade_date: Optional[str] = None):
+                """dc_index 取数：先直连 REST（与网页数据工具同参数），失败再退回 SDK
+
+                1) 直连 REST：只发文档里的参数，不带 SDK 附加的 ts_type_name
+                2) SDK：直连不可用（无 requests / 内网代理差异）时兜底；
+                   注意 cached_api_call 内部不 catch 异常，这里统一收口成 error dict
+                """
+                http_params: Dict[str, Any] = {"idx_type": idx_type}
+                if trade_date:
+                    http_params["trade_date"] = trade_date
+                try:
+                    df_http = cached_api_call(
+                        "dc_index_http",
+                        24 * 365 * 10 if trade_date else 24,
+                        lambda **kw: _tushare_http_df("dc_index", kw),
+                        **http_params,
+                    )
+                except Exception as e:
+                    df_http = {"error": str(e)}
+                if not _dc_empty(df_http):
+                    return df_http
+                if isinstance(df_http, dict) and df_http.get("error"):
+                    print(f"[get_sector_boards] dc_index 直连 REST 失败：{df_http.get('error')}，改走 SDK")
+
+                try:
+                    if trade_date:
+                        sdk_df = cached_api_call("dc_index", 24 * 365 * 10, pro.dc_index,
+                                                 idx_type=idx_type, trade_date=trade_date)
+                    else:
+                        sdk_df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
+                except Exception as e:
+                    sdk_df = {"error": str(e)}
+                if (
+                    isinstance(sdk_df, dict) and sdk_df.get("error")
+                    and isinstance(df_http, dict) and df_http.get("error")
+                ):
+                    # 两条链都失败时保留两个原因，方便判断是「参数/日期」还是「token/网络」
+                    return {"error": f"直连: {df_http.get('error')} | SDK: {sdk_df.get('error')}"}
+                return sdk_df
+
             if as_of and as_of < _real_today_str():
                 # 训练模式：按训练日期取板块列表（dc_index 支持 trade_date）
-                df = cached_api_call("dc_index", 24 * 365 * 10, pro.dc_index,
-                                     idx_type=idx_type, trade_date=as_of)
-                if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+                df = _fetch_dc(as_of)
+                if isinstance(df, dict) and df.get("error"):
+                    snapshot_fallback = True
+                    print(f"[get_sector_boards] {as_of} 取板块失败（{df.get('error')}），降级为最新快照")
+                    df = _fetch_dc()
+                elif df is None or (isinstance(df, pd.DataFrame) and df.empty):
                     # 该日期无数据时降级为最新快照，并显式标记，避免静默混入未来数据
                     snapshot_fallback = True
                     print(f"[get_sector_boards] {as_of} 无板块数据，降级为最新快照")
-                    df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
+                    df = _fetch_dc()
             else:
-                df = cached_api_call("dc_index", 24, pro.dc_index, idx_type=idx_type)
+                df = _fetch_dc()
+
+            # 快照默认按「今天」取，上游当日数据还没生成时会报「指定数据不存在，请确认参数！」，
+            # 这里显式回退到最近交易日 / 前一交易日再试一次
+            if _dc_empty(df):
+                for d in (expected_last, prev_day):
+                    d = str(d or "").replace("-", "")[:8]
+                    if not d:
+                        continue
+                    print(f"[get_sector_boards] 东财板块快照无数据，回退到 {d} 重试")
+                    df = _fetch_dc(d)
+                    if not _dc_empty(df):
+                        break
+
+            if _dc_empty(df):
+                # 兜底：不再猜具体日期，直接按区间查最近 30 天，取服务器实际有的最新一版。
+                # 场景：本机日期比上游数据新（非交易日/当日数据未生成）时，逐日猜日期永远猜不中。
+                window_start = (_now_date() - timedelta(days=30)).strftime("%Y%m%d")
+                print(f"[get_sector_boards] 逐日回退均无数据，改用区间查询 {window_start}~{today} 兜底")
+                range_params: Dict[str, Any] = {
+                    "idx_type": idx_type,
+                    "start_date": window_start,
+                    "end_date": today,
+                }
+                try:
+                    df = cached_api_call("dc_index_http", 6,
+                                         lambda **kw: _tushare_http_df("dc_index", kw),
+                                         **range_params)
+                except Exception as e:
+                    df = {"error": str(e)}
+                if _dc_empty(df):
+                    try:
+                        df = cached_api_call("dc_index", 6, pro.dc_index, **range_params)
+                    except Exception as e:
+                        df = {"error": str(e)}
+                if isinstance(df, pd.DataFrame) and not df.empty and "trade_date" in df.columns:
+                    latest_day = str(df["trade_date"].astype(str).max())
+                    df = df[df["trade_date"].astype(str) == latest_day]
+                    print(f"[get_sector_boards] 区间查询兜底成功，使用 {latest_day} 的板块快照")
+
             if isinstance(df, dict) and df.get("error"):
-                return df
+                # 带上 boards 字段：前端按 { to, arr } 消费，缺字段会直接崩
+                return {"error": str(df.get("error")), "boards": []}
             if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-                return {"error": "No data"}
+                return {"error": "No data", "boards": []}
 
             # 去重：同一板块可能在接口返回中重复出现
             df = df.drop_duplicates(subset=['ts_code'], keep='first')
@@ -2955,7 +3132,7 @@ class TushareAPI:
             idx_type = "行业板块" if bk_type == "industry" else "概念板块"
 
             # 1. 获取板块行情（dc_index 支持 trade_date 参数）
-            df = safe_api_call(pro.dc_index, idx_type=idx_type, trade_date=target_date)
+            df = dc_index_df(idx_type=idx_type, trade_date=target_date)
             if isinstance(df, dict) and df.get("error"):
                 return df
             if df is None or (isinstance(df, pd.DataFrame) and df.empty):
@@ -3966,7 +4143,7 @@ class TushareAPI:
             pro = get_pro()
             if concept_source == "dc":
                 # 东财概念板块列表：dc_index
-                df = safe_api_call(pro.dc_index, idx_type="概念板块")
+                df = dc_index_df(idx_type="概念板块")
                 if isinstance(df, dict) and df.get("error"):
                     return result
                 if df is None or df.empty:
@@ -9634,7 +9811,7 @@ class LimitUpScorer:
 
             # 方法2: 使用已有的 dc_member 反向查找
             # 先获取所有概念板块列表，然后逐个检查
-            concept_list = safe_api_call(self.pro.dc_index, idx_type="概念板块")
+            concept_list = dc_index_df(idx_type="概念板块")
             if isinstance(concept_list, pd.DataFrame) and not concept_list.empty:
                 # 去重
                 concept_list = concept_list.drop_duplicates(subset=['ts_code'], keep='first')
@@ -9682,7 +9859,7 @@ class LimitUpScorer:
 
         try:
             # 获取概念板块当日行情（dc_index）
-            concept_df = safe_api_call(self.pro.dc_index, idx_type="概念板块")
+            concept_df = dc_index_df(idx_type="概念板块")
             if isinstance(concept_df, pd.DataFrame) and not concept_df.empty:
                 concept_row = concept_df[concept_df['ts_code'] == f"{concept_code}.DC"]
                 if not concept_row.empty:
@@ -9777,7 +9954,7 @@ class LimitUpScorer:
             if not code and name:  # fallback industry
                 # 用 industry 名称匹配 dc_index
                 try:
-                    ind_df = safe_api_call(self.pro.dc_index, idx_type="行业板块")
+                    ind_df = dc_index_df(idx_type="行业板块")
                     if isinstance(ind_df, pd.DataFrame) and not ind_df.empty:
                         match = ind_df[ind_df['name'] == name]
                         if not match.empty:

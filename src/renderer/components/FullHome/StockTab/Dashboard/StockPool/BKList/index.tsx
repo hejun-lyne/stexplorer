@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo } from 'react';
-import { Button, Row, Col, Tooltip, Select, InputNumber, Checkbox, Input } from 'antd';
+import { Button, Row, Col, Tooltip, Select, InputNumber, Checkbox, Input, message } from 'antd';
 import styles from '../index.scss';
 import * as Services from '@/services';
 import * as CONST from '@/constants';
@@ -142,10 +142,34 @@ const BKList: React.FC<BKListProps> = ({ type, onBankuaisUpdate, onOpenBKStocks,
   const { run: runGetBankuais } = useRequest(Services.Stock.GetBanKuaisFromDataSource, {
     throwOnError: true,
     manual: true,
-    onSuccess: (d: { to: number; arr: Stock.BanKuaiItem[] }) => {
-      setNoMore(d.to === d.arr.length);
-      setBankuais(d.arr);
-      onBankuaisUpdate(type, d.arr);
+    onSuccess: (d: { to: number; arr: Stock.BanKuaiItem[]; error?: string; fallbackFrom?: string }) => {
+      // 取数失败时服务层会返回 { to: 0, arr: [], error }，这里别直接读 d.arr.length
+      const arr = d?.arr || [];
+      setNoMore((d?.to || 0) === arr.length);
+      setBankuais(arr);
+      onBankuaisUpdate(type, arr);
+      if (d?.error) {
+        message.error({
+          content: `${type === BKType.Gainian ? '概念' : '行业'}板块获取失败：${d.error}`,
+          key: 'board-list-error',
+          duration: 6,
+        });
+      } else if (d?.fallbackFrom) {
+        // 首选数据源不可用时服务层会自动换源，这里只提示一次，避免每次刷新都弹
+        message.warning({
+          content: `当前数据源不可用，板块列表已自动改用${d.fallbackFrom === 'Akshare' ? ' Akshare ' : '东财 REST '}数据`,
+          key: 'board-list-fallback',
+          duration: 6,
+        });
+      }
+    },
+    onError: (e: any) => {
+      console.error('[板块列表] 拉取失败:', e);
+      message.error({
+        content: `板块列表拉取失败：${e?.message || String(e)}`,
+        key: 'board-list-error',
+        duration: 6,
+      });
     },
   });
   const mayGetBankuais = useCallback((source: number, t: BKType, ps: number, ds: string) => {

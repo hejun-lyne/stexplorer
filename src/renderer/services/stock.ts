@@ -4877,18 +4877,54 @@ export async function GetBanKuaisFromDataSource(
   }
 
   // 2. 请求新数据
+  //    失败时逐级降级（Tushare → Akshare → 东财 REST）：板块列表只是「名字 + 涨跌」的快照，
+  //    三家口径基本一致，宁可换源也不要把整页留空。当前源恢复后（缓存不写降级结果）会自动切回。
   let result: any;
+  let fallbackFrom = '';
+  const tryEastmoney = async () => {
+    const em = await GetBanKuais(type, pageSize);
+    if (em?.arr?.length) {
+      result = em;
+      fallbackFrom = 'Eastmoney';
+    }
+    return !!em?.arr?.length;
+  };
+
   if (source === Enums.FundApiType.Akshare) {
     result = await AkshareAPI.GetBanKuaisFromAkshare(type, pageSize);
+    if (!result?.arr?.length) {
+      console.warn('[板块列表] Akshare 取数失败，降级东财 REST 重试：', result?.error || '空结果');
+      await tryEastmoney();
+    }
   } else if (source === Enums.FundApiType.Tushare) {
     result = await TushareAPI.GetBanKuaisFromTushare(type, dataSource);
+    if (!result?.arr?.length) {
+      console.warn('[板块列表] Tushare 取数失败，降级 Akshare 重试：', result?.error || '空结果');
+      const ak = await AkshareAPI.GetBanKuaisFromAkshare(type, pageSize);
+      if (ak?.arr?.length) {
+        result = ak;
+        fallbackFrom = 'Akshare';
+      } else {
+        console.warn('[板块列表] Akshare 也失败，降级东财 REST 重试：', ak?.error || '空结果');
+        await tryEastmoney();
+      }
+    }
   } else {
     // 默认使用 Eastmoney
     result = await GetBanKuais(type, pageSize);
   }
 
-  // 3. 只缓存非空结果，避免接口偶发返回空把缓存写坏
-  if (result?.arr?.length) {
+  // 3. 形状兜底：各数据源失败时可能返回 {} / undefined，
+  //    调用方（BKList、AllBankuais）直接读 d.arr.length，这里统一补成 { to, arr }
+  if (!result || !Array.isArray(result.arr)) {
+    result = { ...(result || {}), to: 0, arr: [] };
+  }
+  if (fallbackFrom) {
+    result = { ...result, fallbackFrom };
+  }
+
+  // 4. 只缓存「首选数据源」的非空结果；降级结果不写缓存，避免源恢复后还被旧缓存挡住
+  if (result.arr.length && !fallbackFrom) {
     boardListMemCache.set(cacheKey, { at: Date.now(), result });
   }
   return result;
@@ -4915,8 +4951,9 @@ export async function GetBanKuaisFromDataSourceAll(
     }
   }
 
-  const result = await TushareAPI.GetBanKuaisFromTushare(type, dataSource);
-  if (result?.arr?.length) {
+  const raw = await TushareAPI.GetBanKuaisFromTushare(type, dataSource);
+  const result = raw && Array.isArray(raw.arr) ? raw : { ...(raw || {}), to: 0, arr: [] };
+  if (result.arr.length) {
     boardListMemCache.set(cacheKey, { at: Date.now(), result });
   }
   return result;

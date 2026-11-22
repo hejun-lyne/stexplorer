@@ -1117,21 +1117,29 @@ export async function GetBoardStocksBatchFromTushare(
 }
 
 export async function GetBanKuaisFromTushare(type: number, dataSource = 'dc'): Promise<any> {
+  /**
+   * 失败/无数据时的统一返回形状。
+   *
+   * 调用方（BKList / AllBankuais）直接读 `d.arr.length`，之前这里在出错时返回 `{}`，
+   * 会抛 "Cannot read property 'length' of undefined"，把「取数失败」升级成整页崩溃。
+   */
+  const emptyResult = (error?: string) => ({ to: 0, arr: [] as any[], error });
   try {
     const bk_type = type === 0 ? 'industry' : 'concept';
     const result = await callTushare('get_sector_boards', { bk_type, data_source: dataSource });
-    
-    if (result.error) {
+
+    if (result?.error) {
       console.error('获取板块失败:', result.error);
-      return {};
+      return emptyResult(String(result.error));
     }
 
     // 打印 debug 信息到 Electron 控制台
-    if (result.debug) {
+    if (result?.debug) {
       console.log('[Tushare dc_index debug]', result.debug);
     }
-    
-    const arr = result.boards.map((item: any) => ({
+
+    const boards: any[] = Array.isArray(result?.boards) ? result.boards : [];
+    const arr = boards.map((item: any) => ({
       code: item.code,
       name: item.name,
       market: 90,
@@ -1151,10 +1159,10 @@ export async function GetBanKuaisFromTushare(type: number, dataSource = 'dc'): P
       mainIn5d: item.main_in_5d || 0,
     }));
     
-    return { to: result.boards.length, arr };
+    return { to: boards.length, arr };
   } catch (error) {
     logError(error, 'GetBanKuaisFromTushare', '获取板块数据失败');
-    return {};
+    return emptyResult((error as any)?.message || '获取板块数据失败');
   }
 }
 

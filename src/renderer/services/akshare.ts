@@ -650,16 +650,19 @@ export async function GetTrendFromAkshare(secid: string): Promise<{ secid: strin
 // ==================== 板块数据 ====================
 
 export async function GetBanKuaisFromAkshare(type: number, pageSize = 20): Promise<any> {
+  /** 失败/无数据时也返回 { to, arr }：调用方直接读 arr.length，缺字段会整页崩 */
+  const emptyResult = (error?: string) => ({ to: 0, arr: [] as any[], error });
   try {
     const bk_type = type === 0 ? 'industry' : 'concept';
     const result = await callAkshare('get_sector_boards', { bk_type });
     
-    if (result.error) {
+    if (result?.error) {
       console.error('获取板块失败:', result.error);
-      return {};
+      return emptyResult(String(result.error));
     }
     
-    const arr = result.slice(0, pageSize).map((item: any) => ({
+    const list: any[] = Array.isArray(result) ? result : [];
+    const arr = list.slice(0, pageSize).map((item: any) => ({
       code: item.code,
       name: item.name,
       market: 90,
@@ -675,10 +678,10 @@ export async function GetBanKuaisFromAkshare(type: number, pageSize = 20): Promi
       mainIn5d: 0,
     }));
     
-    return { to: result.length, arr };
+    return { to: list.length, arr };
   } catch (error) {
     logError(error, 'GetBanKuaisFromAkshare', '获取板块数据失败');
-    return {};
+    return emptyResult((error as any)?.message || '获取板块数据失败');
   }
 }
 

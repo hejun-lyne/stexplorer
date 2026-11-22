@@ -57,12 +57,14 @@ const AllBankuais: React.FC<AllBankuaisProps> = React.memo(({ active, bktype, op
     throwOnError: true,
     manual: true,
     onSuccess: (d: { to: number; arr: Stock.BanKuaiItem[] }) => {
-      setNoMore(d.to === d.arr.length);
-      setBankuais(d.arr);
+      // 取数失败时服务层返回 { to: 0, arr: [] }，别直接读 d.arr.length
+      const arr = d?.arr || [];
+      setNoMore((d?.to || 0) === arr.length);
+      setBankuais(arr);
       if (stype != KSortType.None) {
         setSorting(true);
         runSortStocks(
-          d.arr.map((s) => s.secid),
+          arr.map((s) => s.secid),
           stype,
           slimit
         );
