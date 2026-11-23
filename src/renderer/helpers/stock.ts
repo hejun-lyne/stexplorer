@@ -27,10 +27,18 @@ import moment from 'moment';
 import { EastmoneySingleStockPush, EastmoneySingleTrendsPush, EastmoneyStockDetailsPush, EastmoneyStockKlinesPush } from '@/services/push';
 const { saveString } = window.contextModules.electron;
 
-export async function GetStockDetail(source:Enums.FundApiType, secid: string) {
-  // const setting = Helpers.Setting.GetSystemSetting();
+export async function GetStockDetail(sourceOrSecid: Enums.FundApiType | string, secid?: string) {
+  // 兼容两种调用方式：GetStockDetail(secid) 和 GetStockDetail(source, secid)
+  const singleArg = typeof sourceOrSecid === 'string';
+  const source = singleArg
+    ? store.getState().setting?.systemSetting?.kLineApiSourceSetting || Enums.FundApiType.Eastmoney
+    : sourceOrSecid;
+  const stockSecid = singleArg ? sourceOrSecid : secid;
   const usePythonSource = source === Enums.FundApiType.Akshare || source === Enums.FundApiType.Tushare;
-  const detail = (await Services.Stock.GetDetailFromDataSource(usePythonSource ? source : Enums.FundApiType.Eastmoney, secid)) as unknown as Stock.DetailItem;
+  const detail = (await Services.Stock.GetDetailFromDataSource(
+    usePythonSource ? source : Enums.FundApiType.Eastmoney,
+    stockSecid as string
+  )) as unknown as Stock.DetailItem;
   return detail;
 }
 
@@ -1916,22 +1924,23 @@ export function GetStockCode(secid: string) {
 }
 
 export function GetStockType(secid: string) {
-  if (secid == '1.000001' || secid == '0.399006') {
+  const id = String(secid || '');
+  if (id == '1.000001' || id == '0.399006') {
     return Enums.StockMarketType.Zindex;
   }
-  if (secid.startsWith('0.') || secid.startsWith('1.')) {
+  if (id.startsWith('0.') || id.startsWith('1.')) {
     return Enums.StockMarketType.AB;
-  } else if (secid.startsWith('90.') || secid.startsWith('BK')) {
+  } else if (id.startsWith('90.') || id.startsWith('BK')) {
     return Enums.StockMarketType.Quotation;
-  } else if (secid.startsWith('100')) {
+  } else if (id.startsWith('100')) {
     return Enums.StockMarketType.USZindex;
-  } else if (secid.startsWith('105')) {
+  } else if (id.startsWith('105')) {
     return Enums.StockMarketType.US;
   }
   // 港股：东财 secid 中 MktNum 为 3 位数字且以 1 开头（如 116.00700、124.HSTECH）
-  const dotIndex = secid.indexOf('.');
+  const dotIndex = id.indexOf('.');
   if (dotIndex > 0) {
-    const mk = secid.substring(0, dotIndex);
+    const mk = id.substring(0, dotIndex);
     if (/^1\d{2}$/.test(mk)) {
       return Enums.StockMarketType.HK;
     }
