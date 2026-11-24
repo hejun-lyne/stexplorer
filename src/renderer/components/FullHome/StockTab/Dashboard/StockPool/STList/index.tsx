@@ -422,6 +422,8 @@ export interface STListProps {
   onOpenStock: (secid: string, name: string) => void;
   /** 打开股票并直接切换到详情页（持仓弹窗里点击股票时用；列表行仍用 onOpenStock 后台开标签页） */
   onOpenStockFocus?: (secid: string, name: string) => void;
+  /** 在 StockTab 内打开网页标签页（右侧面板的「交易」按钮用） */
+  onOpenUrl?: (url: string) => void;
   active: boolean;
 }
 
@@ -433,6 +435,7 @@ const STList: React.FC<STListProps> = ({
   onChangeBK,
   onOpenStock,
   onOpenStockFocus,
+  onOpenUrl,
   active,
 }) => {
   const [pageSize, setPageSize] = useState(20);
@@ -5179,8 +5182,8 @@ const STList: React.FC<STListProps> = ({
                       }}
                       title={
                         rowFavorited
-                          ? `已收藏（${ontrain ? '训练模式' : '非训练模式'}专属）：忽略过滤条件始终显示，点击取消收藏`
-                          : `收藏到${ontrain ? '训练模式' : '非训练模式'}：收藏后忽略评分/RSI/市值/形态等过滤条件，始终显示在结果列表；两种模式的收藏互不影响`
+                          ? `已收藏（${ontrain ? '训练模式' : '非训练模式'}专属）：忽略过滤条件始终显示；可在右侧单股面板代码后打标签，点击取消收藏`
+                          : `收藏到${ontrain ? '训练模式' : '非训练模式'}：收藏后忽略评分/RSI/市值/形态等过滤条件，始终显示在结果列表；可在右侧单股面板代码后打标签，两种模式的收藏互不影响`
                       }
                       style={{
                         display: 'inline-flex',
@@ -5537,6 +5540,7 @@ const STList: React.FC<STListProps> = ({
             trainTimeStarted={ontrain ? timeStarted : false}
             prevTradeDate={ontrain ? prevTrainDay : ''}
             onOpenStock={onOpenStock}
+            onOpenUrl={onOpenUrl}
             favoriteStocks={panelFavoriteStocks}
           />
         ) : null}

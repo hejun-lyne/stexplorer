@@ -4,7 +4,7 @@ import { batch } from 'react-redux';
 import ReactGridLayout from 'react-grid-layout';
 import moment from 'moment';
 import { LogLevel } from '@/utils/enums';
-import { FavoriteKeyOfMode } from '@/helpers/setting';
+import { FavoriteKeyOfMode, FavoriteTagsKeyOfMode } from '@/helpers/setting';
 
 export const SYNC_SYSTEM_SETTING = 'SYNC_SYSTEM_SETTING';
 export const SYNC_MONITOR_SETTING = 'SYNC_MONITOR_SETTING';
@@ -104,19 +104,58 @@ export function toggleStockFavoriteAction(code: string): ThunkAction {
       const {
         setting: { systemSetting },
       } = getState();
-      const c = String(code || '').trim();
+      const c = String(code || '').split('.')[0].trim();
       if (!c) {
         return;
       }
       const key = FavoriteKeyOfMode(systemSetting);
       const favorites = Array.isArray(systemSetting[key]) ? systemSetting[key]! : [];
-      const next = favorites.includes(c) ? favorites.filter((f) => f !== c) : [...favorites, c];
+      const wasFavorited = favorites.includes(c);
+      const next = wasFavorited ? favorites.filter((f) => f !== c) : [...favorites, c];
       // 只覆盖当前模式对应的字段，另一个模式的收藏原样保留
       const patch: System.Setting = { ...systemSetting };
       patch[key] = next;
+      // 取消收藏时清掉该股的标签，避免重新收藏后残留旧标签
+      if (wasFavorited) {
+        const tagsKey = FavoriteTagsKeyOfMode(systemSetting);
+        const tags = systemSetting[tagsKey] || {};
+        if (tags[c]) {
+          const nextTags = { ...tags };
+          delete nextTags[c];
+          patch[tagsKey] = nextTags;
+        }
+      }
       dispatch(setSystemSettingAction(patch));
     } catch (error) {
       console.log('设置股票收藏出错', error);
+    }
+  };
+}
+
+/**
+ * 更新当前模式下已收藏股票的标签（写入系统设置，重启 / 远端同步后仍然有效）。
+ *
+ * 标签去重并去掉空白；训练 / 非训练两份数据互不串台。
+ */
+export function setStockFavoriteTagsAction(code: string, tags: string[]): ThunkAction {
+  return (dispatch, getState) => {
+    try {
+      const {
+        setting: { systemSetting },
+      } = getState();
+      const c = String(code || '').split('.')[0].trim();
+      if (!c) {
+        return;
+      }
+      const key = FavoriteTagsKeyOfMode(systemSetting);
+      const next = Array.from(
+        new Set((tags || []).map((t) => String(t || '').trim()).filter(Boolean))
+      );
+      const patch: System.Setting = { ...systemSetting };
+      patch[key] = { ...(systemSetting[key] || {}), [c]: next };
+      dispatch(setSystemSettingAction(patch));
+    } catch (error) {
+      console.log('设置股票标签出错', error);
     }
   };
 }

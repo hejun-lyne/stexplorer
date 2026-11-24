@@ -19,9 +19,11 @@ import { StockMarketType } from '@/utils/enums';
 export interface DashboardProps {
   settings: System.MonitorSetting;
   onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType, activate?: boolean) => void;
+  /** 在 StockTab 内打开网页标签页 */
+  onOpenUrl?: (url: string) => void;
 }
 
-const Dashboard: React.FC<DashboardProps> = React.memo(({ settings, onOpenStock }) => {
+const Dashboard: React.FC<DashboardProps> = React.memo(({ settings, onOpenStock, onOpenUrl }) => {
   const parent = useRef<HTMLDivElement>(null);
   const dispatch = useDispatch();
   const [fullList, setFullList] = useState(false);
@@ -45,7 +47,7 @@ const Dashboard: React.FC<DashboardProps> = React.memo(({ settings, onOpenStock 
           onClick={() => setFullList(!fullList)}
           className={styles.toggleFull}
         />
-        <StockPool onOpenStock={onOpenStock} />
+        <StockPool onOpenStock={onOpenStock} onOpenUrl={onOpenUrl} />
       </div>
     </div>
   );

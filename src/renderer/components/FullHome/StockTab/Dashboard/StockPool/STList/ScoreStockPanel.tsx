@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Radio, Select, Slider, Spin, Switch, Tag, Tooltip } from 'antd';
+import { Button, message, Radio, Select, Slider, Spin, Switch, Tag, Tooltip } from 'antd';
 import {
   LeftOutlined,
   RightOutlined,
@@ -8,8 +8,10 @@ import {
   ZoomOutOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { useSelector } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { StoreState } from '@/reducers/types';
+import { setStockFavoriteTagsAction } from '@/actions/setting';
+import { FavoriteKeyOfMode, FavoriteTagsKeyOfMode } from '@/helpers/setting';
 import * as Services from '@/services';
 import * as Utils from '@/utils';
 import * as CONST from '@/constants';
@@ -1039,6 +1041,8 @@ export interface ScoreStockPanelProps {
   prevTradeDate?: string;
   /** 点击名字/代码打开股票详情 */
   onOpenStock: (secid: string, name: string) => void;
+  /** 在 StockTab 内打开网页标签页（「交易」按钮用） */
+  onOpenUrl?: (url: string) => void;
   /**
    * 列表模式要展示的已收藏股票（按收藏顺序）
    *
@@ -1053,6 +1057,12 @@ type PanelMode = 'single' | 'list';
 /** 模式与仓位的本地存储键（记住上次的选择） */
 const PANEL_MODE_KEY = 'scoreStockPanelMode';
 const PANEL_RATIO_KEY = 'scoreStockPanelPositionRatio';
+/** 列表模式的标签筛选（记住上次选中的标签） */
+const PANEL_TAG_FILTER_KEY = 'scoreStockPanelTagFilter';
+/** 筛选项：未打标签的收藏股 */
+const TAG_FILTER_NONE = '__untagged__';
+/** 东财交易网页：打开前先把当前股票代码复制到剪贴板 */
+const TRADE_LOGIN_URL = 'https://jywg.18.cn/Login?el=1&clear=&returl=%2fTrade%2fBuy';
 /** 面板宽度 / 是否收起的本地存储键（展开位置以最后停留的位置为准） */
 const PANEL_WIDTH_KEY = 'scoreStockPanelWidth';
 const PANEL_COLLAPSED_KEY = 'scoreStockPanelCollapsed';
@@ -1069,6 +1079,11 @@ const PANEL_MIN_LIST_WIDTH = 360;
 
 /** 6 位代码 -> secid（与列表里的面板股票口径一致） */
 const secidOfCode = (code: string) => `${String(code || '').startsWith('6') ? '1' : '0'}.${String(code || '')}`;
+/** 收藏只存 6 位代码，兼容旧数据里可能带的 .SZ/.SH 后缀 */
+const normalizeFavoriteCode = (code: string) => String(code || '').split('.')[0].trim();
+/** 标签数据兜底：旧设置里可能不是字符串数组 */
+const normalizeTags = (tags: unknown): string[] =>
+  Array.isArray(tags) ? tags.map((t) => String(t || '').trim()).filter(Boolean) : [];
 
 /** 金额展示（元 -> 带千分位） */
 function formatMoney(v: number) {
@@ -1162,6 +1177,12 @@ export interface ScoreStockDetailProps extends ScoreStockPanelProps {
   onRatioChange?: (ratio: number) => void;
   /** 单股模式下的「切换到列表模式」入口 */
   onSwitchToList?: () => void;
+  /** 当前股票已收藏的标签（单股模式可编辑，列表模式只读展示） */
+  favoriteTags?: string[];
+  /** 当前股票是否已收藏：只有已收藏的股票才能打标签 */
+  isFavorite?: boolean;
+  /** 修改当前股票的标签 */
+  onFavoriteTagsChange?: (tags: string[]) => void;
   /**
    * 由外层容器决定宽度（面板可拖动调整宽度 / 收起）
    *
@@ -1186,12 +1207,16 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   trainTimeStarted,
   prevTradeDate,
   onOpenStock,
+  onOpenUrl,
   layout = 'single',
   showIntro = true,
   defaultChartMode,
   ratio,
   onRatioChange,
   onSwitchToList,
+  favoriteTags,
+  isFavorite = false,
+  onFavoriteTagsChange,
   fill = false,
 }) => {
   const isList = layout === 'list';
@@ -1202,6 +1227,26 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
   const [klineError, setKlineError] = useState('');
 
   const inTraining = !!trainDate;
+
+  /** 复制当前代码并在 StockTab 内打开东财交易标签页 */
+  const openTradePage = useCallback(() => {
+    const c = String(code || '').trim();
+    if (!c) {
+      return;
+    }
+    try {
+      window.contextModules.electron.clipboard.writeText(c);
+    } catch (error) {
+      message.error('复制股票代码失败');
+      return;
+    }
+    if (!onOpenUrl) {
+      message.error(`已复制股票代码 ${c}，但当前环境无法打开交易标签页`);
+      return;
+    }
+    onOpenUrl(TRADE_LOGIN_URL);
+    message.success(`已复制股票代码 ${c}，已打开东财交易标签页`);
+  }, [code, onOpenUrl]);
 
   // ===== 分时走势 =====
   /** 交易基准分时：训练日 / 实时当日。成交价、当日K重建、形态计算都只用这一份，不随图表切换变化 */
@@ -1865,8 +1910,6 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
           minWidth: 0,
           flexWrap: isList ? 'nowrap' : undefined,
           overflow: isList ? 'hidden' : undefined,
-          // 给右上角绝对定位的「仓位 + 单股」浮层留出空位，滚动时也不会压住内容
-          paddingRight: isList ? 150 : undefined,
         }}
       >
         <div
@@ -1896,6 +1939,44 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
           </span>
           <span style={{ fontSize: isList ? 11 : 12, color: 'var(--secondary-text-color)', flexShrink: 0 }}>{code}</span>
         </div>
+        {/* 标签放在代码后面：单股模式可编辑（仅限已收藏股票），列表模式只读展示 */}
+        {!isList && isFavorite ? (
+          <Tooltip title="已收藏股票的标签：输入后回车新增，点 × 删除；列表模式可按标签筛选">
+            <Select
+              mode="tags"
+              size="small"
+              value={favoriteTags || []}
+              onChange={(v) => onFavoriteTagsChange?.(v as string[])}
+              placeholder="+ 标签"
+              bordered={false}
+              tokenSeparators={[',', '，', ' ']}
+              dropdownMatchSelectWidth={false}
+              style={{ flex: '0 1 auto', minWidth: 70, maxWidth: 180, fontSize: 11 }}
+            />
+          </Tooltip>
+        ) : null}
+        {isList && favoriteTags?.length ? (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, minWidth: 0, overflow: 'hidden' }}>
+            {favoriteTags.slice(0, 1).map((t) => (
+              <Tag key={t} style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>
+                {t}
+              </Tag>
+            ))}
+            {favoriteTags.length > 1 ? (
+              <span
+                title={favoriteTags.join('、')}
+                style={{ fontSize: 10, color: 'var(--secondary-text-color)' }}
+              >
+                +{favoriteTags.length - 1}
+              </span>
+            ) : null}
+          </span>
+        ) : null}
+        <Tooltip title={`复制股票代码 ${code || ''} 并在 StockTab 打开东财交易标签页`}>
+          <Button size="small" type="primary" onClick={openTradePage} style={{ flex: '0 0 auto' }}>
+            交易
+          </Button>
+        </Tooltip>
         {isList ? (
           <span
             style={{
@@ -2225,10 +2306,11 @@ const ScoreStockDetail: React.FC<ScoreStockDetailProps> = ({
  *
  * 两种模式互相切换：
  * - 单股详情：原来的一只股票完整信息（简介 / 图表 / 买卖）；
- * - 列表模式：顶部固定（sticky）资金情况 + 仓位选择 + 切换按钮，下方按收藏顺序
+ * - 列表模式：顶部固定（sticky）资金情况 + 仓位选择 + 标签筛选 + 切换按钮，下方按收藏顺序
  *   依次展示每只收藏股的分时形态 → 图表 → 买入卖出操作。
  *
- * 模式与仓位选择存在本地，重启后保持上次的选择。
+ * 模式、仓位与标签筛选存在本地，重启后保持上次的选择；标签本身存在系统设置里，
+ * 按训练 / 非训练模式隔离。
  */
 const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
   code,
@@ -2238,8 +2320,20 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
   trainTime,
   prevTradeDate,
   onOpenStock,
+  onOpenUrl,
   favoriteStocks,
 }) => {
+  const dispatch = useDispatch();
+  /** 当前模式的收藏代码 / 标签映射：与收藏列表一样按训练状态隔离 */
+  const favoriteCodes = useSelector((state: StoreState) => {
+    const s = state.setting.systemSetting;
+    return s[FavoriteKeyOfMode(s)] || [];
+  });
+  const favoriteTagsMap = useSelector((state: StoreState) => {
+    const s = state.setting.systemSetting;
+    return s[FavoriteTagsKeyOfMode(s)] || {};
+  });
+
   const [mode, setMode] = useState<PanelMode>(() =>
     Utils.GetStorage<string>(PANEL_MODE_KEY, 'single') === 'list' ? 'list' : 'single'
   );
@@ -2247,6 +2341,24 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
     const saved = Number(Utils.GetStorage(PANEL_RATIO_KEY, POSITION_RATIOS[0].value));
     return POSITION_RATIOS.some((r) => r.value === saved) ? saved : POSITION_RATIOS[0].value;
   });
+  const [tagFilter, setTagFilter] = useState<string[]>(() =>
+    normalizeTags(Utils.GetStorage(PANEL_TAG_FILTER_KEY, []))
+  );
+
+  const changeTagFilter = useCallback((tags: string[]) => {
+    const next = normalizeTags(tags);
+    setTagFilter(next);
+    Utils.SetStorage(PANEL_TAG_FILTER_KEY, next);
+  }, []);
+
+  /** 单股模式：给当前已收藏股票打标签 */
+  const currentCode = normalizeFavoriteCode(code);
+  const isCurrentFavorite = favoriteCodes.includes(currentCode);
+  const currentTags = useMemo(() => normalizeTags(favoriteTagsMap[currentCode]), [favoriteTagsMap, currentCode]);
+  const changeCurrentTags = useCallback(
+    (tags: string[]) => dispatch(setStockFavoriteTagsAction(currentCode, tags)),
+    [dispatch, currentCode]
+  );
 
   const switchMode = useCallback((next: PanelMode) => {
     setMode(next);
@@ -2406,11 +2518,14 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
     applyCollapsed(!collapsed);
   }, [collapsed, applyCollapsed]);
 
-  /** 收藏列表：按 6 位代码去重（名称由外部解析） */
+  /** 收藏列表：按 6 位代码去重（名称由外部解析，标签从系统设置按当前模式取） */
   const favorites = useMemo(() => {
     const seen = new Set<string>();
     return (favoriteStocks || [])
-      .map((s) => ({ code: String(s?.code || '').trim(), name: String(s?.name || '') }))
+      .map((s) => {
+        const code = normalizeFavoriteCode(s?.code);
+        return { code, name: String(s?.name || ''), tags: normalizeTags(favoriteTagsMap[code]) };
+      })
       .filter((s) => {
         if (!s.code || seen.has(s.code)) {
           return false;
@@ -2418,7 +2533,43 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
         seen.add(s.code);
         return true;
       });
-  }, [favoriteStocks]);
+  }, [favoriteStocks, favoriteTagsMap]);
+
+  /** 标签筛选项：收藏股用过的全部标签 + 「无标签」 */
+  const tagOptions = useMemo(() => {
+    const tags = new Set<string>();
+    let hasUntagged = false;
+    favorites.forEach((s) => {
+      if (!s.tags.length) {
+        hasUntagged = true;
+      }
+      s.tags.forEach((t) => tags.add(t));
+    });
+    const list = Array.from(tags).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    if (hasUntagged) {
+      list.push(TAG_FILTER_NONE);
+    }
+    return list;
+  }, [favorites]);
+
+  /** 标签被删掉或股票取消收藏后，清掉已经无效的筛选项，避免列表莫名为空 */
+  useEffect(() => {
+    const valid = new Set(tagOptions);
+    const next = tagFilter.filter((t) => valid.has(t));
+    if (next.length !== tagFilter.length) {
+      changeTagFilter(next);
+    }
+  }, [tagOptions, tagFilter, changeTagFilter]);
+
+  /** 选中多个标签时取并集；「无标签」匹配尚未打标签的收藏股 */
+  const visibleFavorites = useMemo(() => {
+    if (!tagFilter.length) {
+      return favorites;
+    }
+    return favorites.filter((s) =>
+      tagFilter.some((t) => (t === TAG_FILTER_NONE ? !s.tags.length : s.tags.includes(t)))
+    );
+  }, [favorites, tagFilter]);
 
   // 收起时不构建内容：列表模式有很多图表，没必要在看不见时还挂在那里
   const panelContent = collapsed ? null : mode === 'single' ? (
@@ -2430,6 +2581,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
         trainTime={trainTime}
         prevTradeDate={prevTradeDate}
         onOpenStock={onOpenStock}
+        onOpenUrl={onOpenUrl}
         layout="single"
         showIntro
         fill
@@ -2437,6 +2589,9 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
         ratio={ratio}
         onRatioChange={changeRatio}
         onSwitchToList={() => switchMode('list')}
+        favoriteTags={currentTags}
+        isFavorite={isCurrentFavorite}
+        onFavoriteTagsChange={changeCurrentTags}
       />
     ) : (
       <aside
@@ -2447,11 +2602,12 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
           height: '100%',
           overflowY: 'auto',
           boxSizing: 'border-box',
-          padding: '0 12px 12px',
+          // 顶部让出绝对定位的「仓位 + 标签筛选 + 单股」工具条
+          padding: '36px 12px 12px',
         }}
       >
-      {favorites.length ? (
-        favorites.map((s) => (
+      {visibleFavorites.length ? (
+        visibleFavorites.map((s) => (
           <ScoreStockDetail
             key={s.code}
             code={s.code}
@@ -2460,16 +2616,20 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
             trainDate={trainDate}
             trainTime={trainTime}
             onOpenStock={onOpenStock}
+            onOpenUrl={onOpenUrl}
             layout="list"
             showIntro={false}
             defaultChartMode="trend"
             ratio={ratio}
             onRatioChange={changeRatio}
+            favoriteTags={s.tags}
           />
         ))
       ) : (
         <div style={{ fontSize: 12, color: 'var(--hint-color)', padding: '12px 0' }}>
-          暂无收藏股票：在列表里点击星标收藏后，这里会按顺序显示它们的分时走势与买卖操作。
+          {favorites.length && tagFilter.length
+            ? '当前标签筛选下没有匹配的收藏股票，可在右上角清空标签筛选。'
+            : '暂无收藏股票：在列表里点击星标收藏后，这里会按顺序显示它们的分时走势与买卖操作。'}
         </div>
       )}
       </aside>
@@ -2533,7 +2693,7 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
         </div>
       </div>
 
-      {/* 列表模式头部：只保留仓位选择与模式切换，绝对定位在右上角，不占用内容高度 */}
+      {/* 列表模式头部：仓位、标签筛选与模式切换，绝对定位在右上角，不占用内容高度 */}
       {!collapsed && mode === 'list' ? (
         <div
           style={{
@@ -2551,12 +2711,31 @@ const ScoreStockPanel: React.FC<ScoreStockPanelProps> = ({
           }}
         >
           <Tooltip
-            title={`买入仓位：对所有收藏股票的买入区生效；本模式已收藏 ${favorites.length} 只，训练与非训练模式互不串台`}
+            title={`买入仓位：对所有收藏股票的买入区生效；本模式已收藏 ${favorites.length} 只，当前显示 ${visibleFavorites.length} 只，训练与非训练模式互不串台`}
           >
             <Select size="small" style={{ width: 76 }} value={ratio} onChange={(v) => changeRatio(Number(v))}>
               {POSITION_RATIOS.map((r) => (
                 <Select.Option key={r.value} value={r.value}>
                   {r.label}
+                </Select.Option>
+              ))}
+            </Select>
+          </Tooltip>
+          <Tooltip title="按标签筛选收藏股：可多选，命中任一标签即显示；「无标签」筛选尚未打标签的股票">
+            <Select
+              mode="multiple"
+              size="small"
+              style={{ width: 150 }}
+              value={tagFilter}
+              onChange={(v) => changeTagFilter(v as string[])}
+              placeholder="全部标签"
+              allowClear
+              maxTagCount={1}
+              dropdownMatchSelectWidth={false}
+            >
+              {tagOptions.map((tag) => (
+                <Select.Option key={tag} value={tag}>
+                  {tag === TAG_FILTER_NONE ? '无标签' : tag}
                 </Select.Option>
               ))}
             </Select>

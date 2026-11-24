@@ -200,7 +200,7 @@ const StockTab: React.FC<StockTabProps> = React.memo(
                 </>
               }
             >
-              <Dashboard settings={monitorSetting} onOpenStock={onNewStock} />
+              <Dashboard settings={monitorSetting} onOpenStock={onNewStock} onOpenUrl={onOpenUrl} />
             </Tabs.TabPane>
             {/* <Tabs.TabPane
               key="quanttest"

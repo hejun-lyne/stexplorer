@@ -32,6 +32,10 @@ declare namespace System {
     favorites?: string[];
     /** 训练模式下收藏的股票代码，与 favorites 相互隔离，互不影响 */
     trainFavorites?: string[];
+    /** 非训练模式下收藏股票的标签（6 位代码 -> 标签数组） */
+    favoriteTags?: Record<string, string[]>;
+    /** 训练模式下收藏股票的标签，与 favoriteTags 相互隔离 */
+    trainFavoriteTags?: Record<string, string[]>;
   }
 
   export interface GridSetting {

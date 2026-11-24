@@ -27,6 +27,8 @@ export const defaultSystemSetting: System.Setting = {
   commissionRate: 0.0003,
   favorites: [],
   trainFavorites: [],
+  favoriteTags: {},
+  trainFavoriteTags: {},
 };
 
 /**
@@ -37,6 +39,13 @@ export const defaultSystemSetting: System.Setting = {
  */
 export function FavoriteKeyOfMode(setting: System.Setting): 'favorites' | 'trainFavorites' {
   return setting?.ontrain ? 'trainFavorites' : 'favorites';
+}
+
+/**
+ * 当前模式对应的收藏标签字段名：与收藏列表一样，训练 / 非训练各存一份。
+ */
+export function FavoriteTagsKeyOfMode(setting: System.Setting): 'favoriteTags' | 'trainFavoriteTags' {
+  return setting?.ontrain ? 'trainFavoriteTags' : 'favoriteTags';
 }
 
 export function GetSystemSetting() {

@@ -37,6 +37,8 @@ export const defaultSystemSetting: System.Setting = {
   commissionRate: 0.0003,
   favorites: [],
   trainFavorites: [],
+  favoriteTags: {},
+  trainFavoriteTags: {},
 };
 
 export const defaultMonitorSetting: System.MonitorSetting = {
@@ -91,6 +93,8 @@ const setting: Reducer<SettingState> = (
         ? {
             ...systemSetting,
             trainFavorites: systemSetting.trainFavorites ?? state.systemSetting.trainFavorites ?? [],
+            favoriteTags: systemSetting.favoriteTags ?? state.systemSetting.favoriteTags ?? {},
+            trainFavoriteTags: systemSetting.trainFavoriteTags ?? state.systemSetting.trainFavoriteTags ?? {},
           }
         : state.systemSetting;
       // 训练模式：系统设置的任何变化（本地修改 / 远端同步 / 按天推进）都同步到数据层过滤器，

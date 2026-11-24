@@ -26,8 +26,10 @@ import * as Services from '@/services';
 
 export interface StockPoolProps {
   onOpenStock: (secid: string, name: string, firstQSAppear?: string, change?: number, backtestDate?: string, type?: StockMarketType, activate?: boolean) => void;
+  /** 在 StockTab 内打开网页标签页 */
+  onOpenUrl?: (url: string) => void;
 }
-const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
+const StockPool: React.FC<StockPoolProps> = ({ onOpenStock, onOpenUrl }) => {
   const [activeKey, setActiveKey] = useState('stocks');
   const openBK = useCallback((t: BKType, s: string) => {
     batch(() => {
@@ -204,6 +206,7 @@ const StockPool: React.FC<StockPoolProps> = ({ onOpenStock }) => {
             onOpenStock={(s, n) => onOpenStock(s, n, undefined, undefined, undefined, undefined, false)}
             // 持仓弹窗里的「打开股票」是明确动作：直接切到该标的详情页
             onOpenStockFocus={(s, n) => onOpenStock(s, n, undefined, undefined, undefined, undefined, true)}
+            onOpenUrl={onOpenUrl}
             active={activeKey === 'stocks'}
           />
         </Tabs.TabPane>
