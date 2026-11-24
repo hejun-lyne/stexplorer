@@ -190,7 +190,7 @@ const StockDetail: React.FC<StockDetailProps> = ({ secid, active, name, firstQSA
       setInitWidth(rightRef.current.offsetWidth);
     }
   }, [initWidth]);
-  const nDetails = stock?.detail || tDetail;
+  const nDetails = stock?.detail ? { ...stock.detail, secid: stock.detail.secid || secid } : tDetail;
   const [noteChanged, setNoteChanged] = useState<boolean|undefined>(false);
   const [activePeriod, setActivePeriond] = useState<Stock.PeriodMarkItem | null>(null);
   return (

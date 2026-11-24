@@ -871,16 +871,16 @@ export function syncStockDataAction(
       } = getState();
       const data = Helpers.Stock.UpdateStockData(
         stocksMapping[secid],
-        maMonitors,
-        chanMonitors,
-        gMonitors,
         secid,
         detail,
         trends,
         trendsPic,
         tflows,
         klines,
-        dflows
+        dflows,
+        maMonitors,
+        chanMonitors,
+        gMonitors
       );
       batch(() => {
         dispatch({ type: SYNC_STOCK_DATA, payload: data });
