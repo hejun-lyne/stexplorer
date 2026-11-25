@@ -394,6 +394,15 @@ export function useBootStrap() {
     dispatch(loadBaiduTokensAction());
     dispatch(loadSyncConfigAction());
 
+    // 用户数据从股票库/旧 JSON 文件迁移到独立用户库（幂等，失败不影响启动），
+    // 再把用户库里的 localStorage 镜像回填到同步读的本地缓存
+    Services.UserData.migrateUserData()
+      .catch((e) => console.error('[UserData] 自动迁移用户数据失败:', e))
+      .finally(() => {
+        Helpers.TrainReview.HydrateReviewRecords();
+        Helpers.TrainPreopen.HydratePreopenNotes();
+      });
+
     // Monaco
     defineMonacoThemes('krTheme');
     // defineMonacoThemes('light');

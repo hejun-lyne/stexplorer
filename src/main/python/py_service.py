@@ -77,7 +77,7 @@ def _build_api(mod, mod_name):
     # 约定：脚本通过 <Xxx>API 类暴露可调用方法
     #   tushare_api.py → TushareAPI、akshare_api.py → AkshareAPI、stock_db.py → CacheAPI
     api_cls = None
-    for name in ('TushareAPI', 'AkshareAPI', 'CacheAPI'):
+    for name in ('TushareAPI', 'AkshareAPI', 'CacheAPI', 'UserDataAPI'):
         api_cls = getattr(mod, name, None)
         if api_cls is not None:
             break

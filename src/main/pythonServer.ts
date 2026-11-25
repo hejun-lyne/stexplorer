@@ -25,6 +25,7 @@ export const PERSISTENT_SCRIPTS = new Set<string>([
   'tushare_api.py',
   'akshare_api.py',
   'stock_db.py',
+  'user_db.py',
 ]);
 
 interface PendingTask {

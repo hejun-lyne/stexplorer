@@ -10,3 +10,4 @@ export * as Tech from './tech';
 export * as TrainSettle from './trainSettle';
 export * as TrainAccount from './trainAccount';
 export * as TrainPreopen from './trainPreopen';
+export * as TrainReview from './trainReview';

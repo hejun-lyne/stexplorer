@@ -1280,27 +1280,31 @@ const STList: React.FC<STListProps> = ({
   const [strongTagByCode, setStrongTagByCode] = useState<Record<string, string>>({});
   const strongTagDateRef = React.useRef('');
   const strongTagLoadedDateRef = React.useRef<string | null>(null);
-  const { run: runLoadStrongTags } = useRequest(Helpers.Stock.LoadStrongPoolStocks, {
-    throwOnError: true,
-    manual: true,
-    onSuccess: (list, params) => {
-      // 训练日/日期已经切走：这一份属于上一日，丢弃
-      if (String((params as any)?.[0] || '') !== strongTagDateRef.current) {
-        return;
-      }
-      const byCode: Record<string, string> = {};
-      ((list || []) as Helpers.Stock.StrongPoolStock[]).forEach((item) => {
-        const code = codeOfListItem(item);
-        if (code && byCode[code] === undefined) {
-          byCode[code] = String(item?.reason || '');
+  const { run: runLoadStrongTags } = useRequest(
+    (d: string) =>
+      Helpers.Stock.LoadStrongPoolStocks(d, { autoBackup: false, allowTushareFallback: false }),
+    {
+      throwOnError: true,
+      manual: true,
+      onSuccess: (list, params) => {
+        // 训练日/日期已经切走：这一份属于上一日，丢弃
+        if (String((params as any)?.[0] || '') !== strongTagDateRef.current) {
+          return;
         }
-      });
-      setStrongTagByCode(byCode);
-    },
-    onError: () => setStrongTagByCode({}),
-  });
+        const byCode: Record<string, string> = {};
+        ((list || []) as Helpers.Stock.StrongPoolStock[]).forEach((item) => {
+          const code = codeOfListItem(item);
+          if (code && byCode[code] === undefined) {
+            byCode[code] = String(item?.reason || '');
+          }
+        });
+        setStrongTagByCode(byCode);
+      },
+      onError: () => setStrongTagByCode({}),
+    }
+  );
   /** 同一交易日只加载一次；先看强势股板块再切到普通板块、或训练日变化时重新加载 */
-  const strongTagDate = trainDay || '';
+  const strongTagDate = trainDay || dayjs().format('YYYYMMDD');
   useEffect(() => {
     if (isStrongPoolBoard || strongTagLoadedDateRef.current === strongTagDate) {
       return;
@@ -1469,10 +1473,13 @@ const STList: React.FC<STListProps> = ({
           return;
         }
         if (isStrongPoolSecid(s)) {
-          // 虚拟板块「强势股」：直接取强势股池，不请求板块成分股
-          const poolDate = date || '';
+          // 虚拟板块「强势股」：与「强势股票」tab 的默认查询同口径——
+          // 显式日期（训练日 / 今天）、不读 QSList 备份、不自动回退到前一交易日或 Tushare 重建，
+          // 否则这里会看到早上/昨天的池子，而 tab 页面刷新后是最新东财池。
+          const poolDate = date || dayjs().format('YYYYMMDD');
           strongPoolDateRef.current = poolDate;
-          runGetStrongPool(poolDate);
+          const options = { autoBackup: false, allowTushareFallback: false };
+          runGetStrongPool(poolDate, options);
         } else if (isSWIndustryCode(s)) {
           // 申万二级行业代码，使用 Tushare index_member 接口（支持按日期还原历史成分）
           runGetIndustryStocks(s, date);
@@ -2901,6 +2908,10 @@ const STList: React.FC<STListProps> = ({
      * 空数组仍留在缓存里（让 boardsReady 不为死等），只是每次勾选都重试一次。
      */
     const needFetch = (s: string) => {
+      // 强势股池盘中会进出，缓存只用于切换瞬间的兜底，每次勾选都重新取最新池子
+      if (isStrongPoolSecid(s)) {
+        return true;
+      }
       const cached = boardStocksCacheRef.current[s];
       if (!cached || !cached.length) {
         return true;

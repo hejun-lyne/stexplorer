@@ -17,6 +17,9 @@ const TABLE_MAP: Record<string, string> = {
   'store/ktrainings.json': 'ktrainings',
   'store/train_trade_records.json': 'train_trade_records',
   'store/strategy_groups.json': 'strategy_groups',
+  // 训练进度 / 归档：用户数据，走独立用户库
+  'store/train_progress.json': 'train_progress',
+  'store/train_archives.json': 'train_archives',
 };
 
 const { electron } = window.contextModules;

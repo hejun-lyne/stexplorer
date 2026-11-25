@@ -4345,9 +4345,22 @@ function IsStaleStrongPoolBackup(stocks: any[]): boolean {
   return false;
 }
 
-export async function LoadStrongPoolStocks(date?: string): Promise<StrongPoolStock[]> {
+export interface StrongPoolLoadOptions {
+  /** 是否读/写 QSList 备份；与「强势股票」tab 的默认查询保持一致时传 false */
+  autoBackup?: boolean;
+  /** 无数据时是否自动走 Tushare 重建；「强势股票」tab 的普通查询不会自动重建 */
+  allowTushareFallback?: boolean;
+}
+
+export async function LoadStrongPoolStocks(
+  date?: string,
+  options?: StrongPoolLoadOptions
+): Promise<StrongPoolStock[]> {
+  const autoBackup = options?.autoBackup ?? true;
+  const allowTushareFallback = options?.allowTushareFallback ?? true;
   const explicit = String(date || '').replace(/-/g, '');
-  // 未指定日期（非训练模式）：从今天往前找最近一个有池子的交易日（周末/节假日自动回退）
+  // 未指定日期（兼容旧调用）：从今天往前找最近一个有池子的交易日；显式日期则只查这一天，
+  // 与「强势股票」tab 的日期区间语义一致。
   const candidates = explicit
     ? [explicit]
     : [0, 1, 2, 3, 4, 5, 6].map((i) => dayjs().subtract(i, 'day').format('YYYYMMDD'));
@@ -4355,7 +4368,7 @@ export async function LoadStrongPoolStocks(date?: string): Promise<StrongPoolSto
   // 1) 本地备份 / 东财池（东财池只保留最近约 10 个交易日，更早的日期返回空）
   for (const d of candidates) {
     try {
-      const { stocks } = await LoadSingleDateQS(d, undefined, -1, true);
+      const { stocks } = await LoadSingleDateQS(d, undefined, -1, autoBackup);
       if (stocks.length && !IsStaleStrongPoolBackup(stocks)) {
         return stocks.map(NormalizeStrongPoolStock);
       }
@@ -4364,7 +4377,11 @@ export async function LoadStrongPoolStocks(date?: string): Promise<StrongPoolSto
     }
   }
 
-  // 2) 更早的日期：Tushare 精确重建（60日新高 ∪ up_stat≥N），结果写回同一份备份
+  if (!allowTushareFallback) {
+    return [];
+  }
+
+  // 2) 兼容旧行为：Tushare 精确重建（60日新高 ∪ up_stat≥N），结果写回同一份备份
   const d = candidates[0];
   try {
     const res = await TushareAPI.GetStrongPoolFromTushare(d);
@@ -4417,9 +4434,12 @@ export interface StrongPoolWithVane {
  * 风向标也按同样的回退顺序找，找不到（没重建过）就返回 null。
  * 观察名单由后端独立派生表给出，和当日强势股按代码去重后一起展示。
  */
-export async function LoadStrongPoolStocksWithVane(date?: string): Promise<StrongPoolWithVane> {
+export async function LoadStrongPoolStocksWithVane(
+  date?: string,
+  options?: StrongPoolLoadOptions
+): Promise<StrongPoolWithVane> {
   const explicit = String(date || '').replace(/-/g, '');
-  const stocks = await LoadStrongPoolStocks(explicit || undefined);
+  const stocks = await LoadStrongPoolStocks(explicit || undefined, options);
   const start = explicit || TrainFilter.GetTrainToDate()?.replace(/-/g, '') || dayjs().format('YYYYMMDD');
   let watchlist: TushareAPI.StrongWatchlistDayResult | undefined;
   try {

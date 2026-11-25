@@ -5,3 +5,4 @@ export * as Baidu from './baidu';
 export * as KimiAnalysis from './kimiAnalysis';
 export * as Tushare from './tushare';
 export * as Akshare from './akshare';
+export * as UserData from './userData';

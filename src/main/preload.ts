@@ -266,5 +266,16 @@ contextBridge.exposeInMainWorld('contextModules', {
     async listQSListBackups() {
       return ipcRenderer.invoke('qslist-backup-list');
     },
+    // 用户数据从股票库迁移到独立用户库
+    async migrateUserData() {
+      return ipcRenderer.invoke('user-data-migrate');
+    },
+    // 用户库里的 localStorage 镜像（复盘 / 盘前笔记）
+    async readUserDataMirror(key: string) {
+      return ipcRenderer.invoke('user-data-ls-read', { key });
+    },
+    async writeUserDataMirror(key: string, value: any) {
+      return ipcRenderer.invoke('user-data-ls-write', { key, value });
+    },
   },
 });

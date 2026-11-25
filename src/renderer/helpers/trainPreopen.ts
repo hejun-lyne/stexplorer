@@ -8,6 +8,7 @@
  * 内容会展示在「训练记录 · 盘前分析」页签，以及训练记录逐日明细的备注里。
  */
 import { GetStorage, SetStorage } from '@/utils';
+import * as Services from '@/services';
 
 export const PREOPEN_NOTE_KEY = 'trainPreopenNotes';
 
@@ -52,6 +53,13 @@ export function ReadPreopenNote(date: string): PreopenNote | null {
   return note && typeof note.text === 'string' ? note : null;
 }
 
+/** 用户库是权威副本；localStorage 仅作为同步读取的镜像 */
+function mirrorToUserData(all: Record<string, PreopenNote>): void {
+  Services.UserData.writeMirror(PREOPEN_NOTE_KEY, all).catch((e) =>
+    console.error('[UserData] 保存盘前分析到用户库失败', e)
+  );
+}
+
 /** 保存某个交易日的盘前分析（内容为空时删除该日记录） */
 export function WritePreopenNote(date: string, text: string): PreopenNote | null {
   const d = normalizeDate(date);
@@ -64,12 +72,14 @@ export function WritePreopenNote(date: string, text: string): PreopenNote | null
     if (all[d]) {
       delete all[d];
       SetStorage(PREOPEN_NOTE_KEY, all);
+      mirrorToUserData(all);
     }
     return null;
   }
   const note: PreopenNote = { date: d, text: content, updatedAt: new Date().toISOString() };
   all[d] = note;
   SetStorage(PREOPEN_NOTE_KEY, all);
+  mirrorToUserData(all);
   return note;
 }
 
@@ -83,6 +93,24 @@ export function RemovePreopenNote(date: string): void {
   if (all[d]) {
     delete all[d];
     SetStorage(PREOPEN_NOTE_KEY, all);
+    mirrorToUserData(all);
+  }
+}
+
+/** 启动时用用户库数据回填 localStorage 镜像（用户库为空时把现有镜像灌入用户库） */
+export async function HydratePreopenNotes(): Promise<void> {
+  try {
+    const stored = await Services.UserData.readMirror<Record<string, PreopenNote>>(PREOPEN_NOTE_KEY);
+    if (stored && typeof stored === 'object') {
+      SetStorage(PREOPEN_NOTE_KEY, stored);
+    } else {
+      const local = ReadAllPreopenNotes();
+      if (Object.keys(local).length) {
+        await Services.UserData.writeMirror(PREOPEN_NOTE_KEY, local);
+      }
+    }
+  } catch (e) {
+    console.error('[UserData] 回填盘前分析失败', e);
   }
 }
 

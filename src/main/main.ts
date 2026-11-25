@@ -31,6 +31,7 @@ import * as ts from 'typescript';
 import { PromiseWorker } from './promiseWorker';
 import * as localFileStorage from './localFileStorage';
 import * as cacheStore from './cacheStore';
+import * as userStore from './userStore';
 import { pythonService, PERSISTENT_SCRIPTS, resolvePythonScriptDir } from './pythonServer';
 import os from 'os';
 
@@ -1079,7 +1080,12 @@ async function init() {
   });
   ipcMain.handle('sqlite-read', async (event, { table, id }) => {
     try {
-      // 缓存类表走数据库（stock_db），用户数据（settings/notes/books…）仍走文件
+      // 用户数据（收藏/配置/训练/买卖记录…）走独立用户库；
+      // 股票缓存走 stock_db；其余（notes/strategies…）仍走文件。
+      if (userStore.isUserDbTable(table)) {
+        const result = await userStore.readLocalData(table, id);
+        return { success: true, data: result };
+      }
       if (cacheStore.isDbBackedTable(table)) {
         const result = await cacheStore.readLocalData(table, id);
         return { success: true, data: result };
@@ -1093,6 +1099,10 @@ async function init() {
   });
   ipcMain.handle('sqlite-write', async (event, { table, data, lastModified, id }) => {
     try {
+      if (userStore.isUserDbTable(table)) {
+        await userStore.writeLocalData(table, data, lastModified, id);
+        return { success: true };
+      }
       if (cacheStore.isDbBackedTable(table)) {
         await cacheStore.writeLocalData(table, data, lastModified, id);
         return { success: true };
@@ -1106,6 +1116,10 @@ async function init() {
   });
   ipcMain.handle('sqlite-delete', async (event, { table, id }) => {
     try {
+      if (userStore.isUserDbTable(table)) {
+        await userStore.deleteLocalData(table, id);
+        return { success: true };
+      }
       if (cacheStore.isDbBackedTable(table)) {
         await cacheStore.deleteLocalData(table, id);
         return { success: true };
@@ -1227,6 +1241,33 @@ async function init() {
       return { success: result };
     } catch (error: any) {
       console.error('[Main] Error writing QSList backup:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // 用户库里的 localStorage 镜像（复盘 / 盘前笔记等同步读数据）
+  ipcMain.handle('user-data-ls-read', async (event, { key }) => {
+    try {
+      return { success: true, data: await userStore.readLocalStorageMirror(key) };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('user-data-ls-write', async (event, { key, value }) => {
+    try {
+      return { success: true, data: await userStore.writeLocalStorageMirror(key, value) };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  // 用户数据迁移：stock_db/api_cache 的 local: 用户 key → 独立用户库
+  ipcMain.handle('user-data-migrate', async () => {
+    try {
+      const result = await userStore.migrateFromStockDb();
+      return { success: true, data: result };
+    } catch (error: any) {
+      console.error('[Main] Error migrating user data:', error);
       return { success: false, error: error.message };
     }
   });
